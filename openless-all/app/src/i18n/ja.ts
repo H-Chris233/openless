@@ -188,6 +188,7 @@ export const ja: typeof zhCN = {
     masterToggle: '全体有効化',
     currentDefault: '現在のデフォルト',
     ariaSetDefault: 'デフォルトに設定',
+    saveFailed: '保存に失敗しました: {{error}}',
     modes: {
       raw: { name: '原文', desc: '句読点と必要な区切りのみ補い、書き換えや拡張はしません。', sample: '元の話し言葉を保持。「えー」「あの」などの口癖は除去しますが、文の組み替えはしません。' },
       light: { name: '軽い整文', desc: '口癖の除去、句読点の補完、自然な送信可能テキストへの整理。', sample: '原稿読み上げのようにならないよう、語気と表現の癖を残しつつ、文章をなめらかにします。' },

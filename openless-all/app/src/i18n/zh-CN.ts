@@ -184,6 +184,7 @@ export const zhCN = {
     masterToggle: '整体启用',
     currentDefault: '当前默认',
     ariaSetDefault: '设为默认',
+    saveFailed: '保存失败：{{error}}',
     modes: {
       raw: { name: '原文', desc: '只补标点和必要分句，不改写不扩写。', sample: '保留原始口语；嗯、那个等口癖会被去除，但不会重组语句。' },
       light: { name: '轻度润色', desc: '去口癖、补标点，整理为可发送的自然文字。', sample: '让转写听起来不像念稿——保留语气和表达习惯，但行文流畅。' },

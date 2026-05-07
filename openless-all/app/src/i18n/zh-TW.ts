@@ -186,6 +186,7 @@ export const zhTW: typeof zhCN = {
     masterToggle: '整體啓用',
     currentDefault: '當前默認',
     ariaSetDefault: '設爲默認',
+    saveFailed: '保存失敗：{{error}}',
     modes: {
       raw: { name: '原文', desc: '只補標點和必要分句，不改寫不擴寫。', sample: '保留原始口語；嗯、那個等口癖會被去除，但不會重組語句。' },
       light: { name: '輕度潤色', desc: '去口癖、補標點，整理爲可發送的自然文字。', sample: '讓轉寫聽起來不像念稿——保留語氣和表達習慣，但行文流暢。' },

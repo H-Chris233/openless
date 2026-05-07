@@ -186,6 +186,7 @@ export const en: typeof zhCN = {
     masterToggle: 'Master switch',
     currentDefault: 'Current default',
     ariaSetDefault: 'Set as default',
+    saveFailed: 'Save failed: {{error}}',
     modes: {
       raw: { name: 'Raw', desc: 'Only adds punctuation and natural breaks — no rewriting or expansion.', sample: "Keeps spoken cadence; fillers like 'um' or 'you know' get dropped, but sentences stay intact." },
       light: { name: 'Light polish', desc: 'Drops fillers, adds punctuation, and produces sendable natural prose.', sample: "Makes the transcript flow well without sounding scripted — your tone and habits remain." },
