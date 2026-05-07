@@ -161,6 +161,7 @@ export function SelectionAsk() {
             <ShortcutRecorder
               value={prefs.qaHotkey}
               onSave={saveQaHotkey}
+              disabled={saving}
             />
           )}
         </Card>
