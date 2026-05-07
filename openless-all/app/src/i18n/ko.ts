@@ -188,6 +188,7 @@ export const ko: typeof zhCN = {
     masterToggle: '전체 활성화',
     currentDefault: '현재 기본',
     ariaSetDefault: '기본으로 설정',
+    saveFailed: '저장 실패: {{error}}',
     modes: {
       raw: { name: '원문', desc: '구두점과 필요한 문장 구분만 보충하고 다시 쓰거나 확장하지 않습니다.', sample: '원래 구어체 유지. "음", "그게" 같은 입버릇은 제거하지만 문장을 재구성하지 않습니다.' },
       light: { name: '가벼운 정리', desc: '입버릇 제거, 구두점 보충, 자연스럽게 보낼 수 있는 텍스트로 정리합니다.', sample: '원고를 읽는 듯한 느낌이 들지 않도록 어조와 표현 습관은 남기되, 문장이 매끄럽게 흐르도록 합니다.' },
