@@ -53,25 +53,28 @@
   <strong>Developers</strong>
 </p>
 
-<p align="center">
-  <a href="https://tripmc.top/" target="_blank" rel="noopener">
-    <img alt="TRIP" src="assets/people/tripmc.png" width="80" height="80" />
-  </a>
-  &nbsp;&nbsp;
-  <a href="https://chris233.qzz.io" target="_blank" rel="noopener">
-    <img alt="Chris233" src="assets/people/Chris233.png" width="80" height="80" />
-  </a>
-  &nbsp;&nbsp;
-  <a href="https://github.com/Cooper-X-Oak" target="_blank" rel="noopener">
-    <img alt="Cooper" src="https://github.com/Cooper-X-Oak.png?size=160" width="80" height="80" />
-  </a>
-  <br/>
-  <a href="https://tripmc.top/" target="_blank" rel="noopener">TRIP — tripmc.top</a>
-  &nbsp;·&nbsp;
-  <a href="https://chris233.qzz.io" target="_blank" rel="noopener">Chris233 — chris233.qzz.io</a>
-  &nbsp;·&nbsp;
-  <a href="https://github.com/Cooper-X-Oak" target="_blank" rel="noopener">Cooper — github.com/Cooper-X-Oak</a>
-</p>
+<table align="center">
+  <tr>
+    <td align="center" width="110">
+      <a href="https://tripmc.top/" target="_blank" rel="noopener">
+        <img alt="TRIP" src="assets/people/tripmc.png" width="56" height="56" style="border-radius: 50%;" /><br/>
+        <sub><b>TRIP</b></sub>
+      </a>
+    </td>
+    <td align="center" width="110">
+      <a href="https://chris233.qzz.io" target="_blank" rel="noopener">
+        <img alt="Chris233" src="assets/people/Chris233.png" width="56" height="56" style="border-radius: 50%;" /><br/>
+        <sub><b>Chris233</b></sub>
+      </a>
+    </td>
+    <td align="center" width="110">
+      <a href="https://github.com/Cooper-X-Oak" target="_blank" rel="noopener">
+        <img alt="Cooper" src="https://github.com/Cooper-X-Oak.png?size=112" width="56" height="56" style="border-radius: 50%;" /><br/>
+        <sub><b>Cooper</b></sub>
+      </a>
+    </td>
+  </tr>
+</table>
 
 ---
 
