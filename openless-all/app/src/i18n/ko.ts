@@ -242,6 +242,11 @@ export const ko: typeof zhCN = {
       optionDisabled: '비활성화',
       chordWarning: '',
     },
+    save: {
+      hotkeyRegisterFailed: '선택 질문 단축키 등록에 실패했습니다. 설정은 저장되지 않았습니다.',
+      hotkeySaveFailed: '선택 질문 단축키 저장에 실패했습니다. 다시 시도하세요.',
+      historySaveFailed: 'Q&A 기록 설정 저장에 실패했습니다. 다시 시도하세요.',
+    },
     history: {
       title: '기록 저장',
       desc: '체크 시 매 후속 질문의 "선택 텍스트 + 음성 질문 + AI 답변"을 로컬 보관(클라우드 비전송). 기본 OFF 일 때는 창을 닫으면 문답이 즉시 사라져 프라이버시 우선.',

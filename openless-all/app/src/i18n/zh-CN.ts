@@ -238,6 +238,11 @@ export const zhCN = {
       optionDisabled: '不启用',
       chordWarning: '',
     },
+    save: {
+      hotkeyRegisterFailed: '划词追问快捷键注册失败，未继续保存。',
+      hotkeySaveFailed: '划词追问快捷键保存失败，请重试。',
+      historySaveFailed: 'Q&A 历史保存设置保存失败，请重试。',
+    },
     history: {
       title: '保存历史',
       desc: '勾上则把每次追问的「选中文本 + 你的语音问题 + AI 答案」写入本地存档（不上云）。默认关，关闭时浮窗一关问答即遗忘，更注重隐私。',

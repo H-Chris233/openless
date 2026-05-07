@@ -8,10 +8,12 @@ export function ShortcutRecorder({
   value,
   onSave,
   alignRecordButton = false,
+  disabled = false,
 }: {
   value: ShortcutBinding;
   onSave: (binding: ShortcutBinding) => Promise<void>;
   alignRecordButton?: boolean;
+  disabled?: boolean;
 }) {
   const { t } = useTranslation();
   const [recording, setRecording] = useState(false);
@@ -39,6 +41,12 @@ export function ShortcutRecorder({
     };
   }, [recording]);
 
+  useEffect(() => {
+    if (!disabled || !recording) return;
+    setRecording(false);
+    clearPendingModifier();
+  }, [disabled, recording]);
+
   const finish = async (binding: ShortcutBinding) => {
     try {
       await validateShortcutBinding(binding);
@@ -52,7 +60,7 @@ export function ShortcutRecorder({
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
-    if (!recording) return;
+    if (!recording || disabled) return;
     e.preventDefault();
     e.stopPropagation();
     if (e.key === 'Escape') {
@@ -80,7 +88,7 @@ export function ShortcutRecorder({
   };
 
   const onKeyUp = (e: KeyboardEvent<HTMLDivElement>) => {
-    if (!recording || !isModifierKey(e.key)) return;
+    if (!recording || disabled || !isModifierKey(e.key)) return;
     e.preventDefault();
     e.stopPropagation();
     const primary = modifierPrimaryFromCode(e.code, e.key);
@@ -113,7 +121,8 @@ export function ShortcutRecorder({
     borderRadius: 6,
     fontFamily: 'inherit',
     fontWeight: 500,
-    cursor: recording ? 'default' : 'pointer',
+    cursor: recording || disabled ? 'default' : 'pointer',
+    opacity: disabled ? 0.68 : 1,
     marginLeft: alignRecordButton ? 'auto' : undefined,
   };
 
@@ -125,11 +134,12 @@ export function ShortcutRecorder({
         </span>
         <button
           onClick={() => {
+            if (disabled) return;
             setRecording(true);
             setError(null);
             clearPendingModifier();
           }}
-          disabled={recording}
+          disabled={recording || disabled}
           style={recordButtonStyle}
         >
           {recording ? t('settings.recording.comboRecordHint') : t('settings.recording.comboRecordBtn')}

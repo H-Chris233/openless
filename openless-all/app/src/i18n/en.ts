@@ -240,6 +240,11 @@ export const en: typeof zhCN = {
       optionDisabled: 'Disabled',
       chordWarning: '',
     },
+    save: {
+      hotkeyRegisterFailed: 'Failed to register the Selection Ask shortcut. The preference was not saved.',
+      hotkeySaveFailed: 'Failed to save the Selection Ask shortcut. Please try again.',
+      historySaveFailed: 'Failed to save the Q&A history setting. Please try again.',
+    },
     history: {
       title: 'Save history',
       desc: 'When on, every selection + voice question + AI answer is persisted locally (never uploaded). Off by default — closing the panel forgets the exchange entirely, more private.',
