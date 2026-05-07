@@ -5,19 +5,83 @@
 // 这一页把原本散在 Settings → 录音 里的两条配置（hotkey 预设 / 保存 Q&A 历史）
 // 集中起来 + 加完整使用指南，跟"翻译"页平级。
 
+import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Card, PageHeader } from './_atoms';
 import { useHotkeySettings } from '../state/HotkeySettingsContext';
 import { setQaHotkey } from '../lib/ipc';
 import { defaultQaShortcut, formatComboLabel } from '../lib/hotkey';
 import { ShortcutRecorder } from '../components/ShortcutRecorder';
+import type { QaHotkeyBinding, UserPreferences } from '../lib/types';
+
+type SaveState = 'idle' | 'saving' | 'saved' | 'failed';
 
 export function SelectionAsk() {
   const { t } = useTranslation();
-  const { prefs, updatePrefs: savePrefs } = useHotkeySettings();
+  const { prefs, refresh, updatePrefs: savePrefs } = useHotkeySettings();
+  const [saveState, setSaveState] = useState<SaveState>('idle');
+  const [saveMessage, setSaveMessage] = useState('');
+  const statusTimer = useRef<number | null>(null);
   const defaultQaHotkey = defaultQaShortcut();
   const defaultHotkeyLabel = formatComboLabel(defaultQaHotkey);
   const recordHotkeyLabel = prefs ? formatComboLabel(prefs.dictationHotkey) : '快捷键';
+
+  useEffect(() => () => {
+    if (statusTimer.current !== null) window.clearTimeout(statusTimer.current);
+  }, []);
+
+  const showSaveStatus = (state: SaveState, message: string, temporary = false) => {
+    if (statusTimer.current !== null) {
+      window.clearTimeout(statusTimer.current);
+      statusTimer.current = null;
+    }
+    setSaveState(state);
+    setSaveMessage(message);
+    if (temporary) {
+      statusTimer.current = window.setTimeout(() => {
+        setSaveState('idle');
+        setSaveMessage('');
+        statusTimer.current = null;
+      }, 1600);
+    }
+  };
+
+  const persistPrefs = async (
+    resolveNext: (current: UserPreferences) => UserPreferences,
+    failureMessage: string,
+  ) => {
+    try {
+      await savePrefs(resolveNext);
+      showSaveStatus('saved', t('common.saved'), true);
+      return true;
+    } catch (error) {
+      console.error('[selection-ask] failed to save preferences', error);
+      showSaveStatus('failed', failureMessage);
+      await refresh().catch(refreshError => {
+        console.warn('[selection-ask] failed to refresh preferences after save error', refreshError);
+      });
+      return false;
+    }
+  };
+
+  const saveQaHotkey = async (nextHotkey: QaHotkeyBinding | null) => {
+    showSaveStatus('saving', t('common.saving'));
+    try {
+      await setQaHotkey(nextHotkey);
+    } catch (error) {
+      console.error('[selection-ask] failed to register QA hotkey', error);
+      showSaveStatus('failed', t('selectionAsk.save.hotkeyRegisterFailed'));
+      await refresh().catch(refreshError => {
+        console.warn('[selection-ask] failed to refresh preferences after hotkey error', refreshError);
+      });
+      return;
+    }
+    await persistPrefs(
+      current => ({ ...current, qaHotkey: nextHotkey }),
+      t('selectionAsk.save.hotkeySaveFailed'),
+    );
+  };
+
   if (!prefs) {
     return (
       <>
@@ -36,11 +100,17 @@ export function SelectionAsk() {
     );
   }
 
-  const onSaveHistoryChange = (qaSaveHistory: boolean) =>
-    savePrefs({ ...prefs, qaSaveHistory });
+  const onSaveHistoryChange = (qaSaveHistory: boolean) => {
+    showSaveStatus('saving', t('common.saving'));
+    void persistPrefs(
+      current => ({ ...current, qaSaveHistory }),
+      t('selectionAsk.save.historySaveFailed'),
+    );
+  };
 
   const enabled = prefs.qaHotkey !== null;
   const currentLabel = prefs.qaHotkey ? formatComboLabel(prefs.qaHotkey) : defaultHotkeyLabel;
+  const saving = saveState === 'saving';
 
   return (
     <>
@@ -54,16 +124,34 @@ export function SelectionAsk() {
       />
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        {saveState !== 'idle' && (
+          <div
+            role={saveState === 'failed' ? 'alert' : 'status'}
+            style={{
+              padding: '8px 12px',
+              borderRadius: 10,
+              border: saveState === 'failed'
+                ? '0.5px solid rgba(239,68,68,0.22)'
+                : '0.5px solid rgba(37,99,235,0.16)',
+              background: saveState === 'failed' ? 'rgba(239,68,68,0.07)' : 'rgba(37,99,235,0.06)',
+              color: saveState === 'failed' ? 'var(--ol-red, #ef4444)' : 'var(--ol-blue)',
+              fontSize: 11.5,
+              lineHeight: 1.5,
+            }}
+          >
+            {saveMessage}
+          </div>
+        )}
 
         {/* 1. 触发快捷键 */}
         <Card>
           <CardHeaderToggle
             title={t('selectionAsk.hotkey.title')}
             checked={enabled}
-            onToggle={async () => {
+            disabled={saving}
+            onToggle={() => {
               const nextHotkey = enabled ? null : defaultQaHotkey;
-              await setQaHotkey(nextHotkey);
-              await savePrefs({ ...prefs, qaHotkey: nextHotkey });
+              void saveQaHotkey(nextHotkey);
             }}
           />
           <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', marginBottom: prefs.qaHotkey ? 12 : 0, lineHeight: 1.55 }}>
@@ -72,10 +160,7 @@ export function SelectionAsk() {
           {prefs.qaHotkey && (
             <ShortcutRecorder
               value={prefs.qaHotkey}
-              onSave={async binding => {
-                await setQaHotkey(binding);
-                await savePrefs({ ...prefs, qaHotkey: binding });
-              }}
+              onSave={saveQaHotkey}
             />
           )}
         </Card>
@@ -85,6 +170,7 @@ export function SelectionAsk() {
           <CardHeaderToggle
             title={t('selectionAsk.history.title')}
             checked={prefs.qaSaveHistory}
+            disabled={saving}
             onToggle={() => onSaveHistoryChange(!prefs.qaSaveHistory)}
           />
           <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.55 }}>
@@ -142,10 +228,12 @@ export function SelectionAsk() {
 function CardHeaderToggle({
   title,
   checked,
+  disabled = false,
   onToggle,
 }: {
   title: string;
   checked: boolean;
+  disabled?: boolean;
   onToggle: () => void;
 }) {
   return (
@@ -154,6 +242,7 @@ function CardHeaderToggle({
       <button
         onClick={onToggle}
         aria-pressed={checked}
+        disabled={disabled}
         style={{
           position: 'relative',
           width: 36,
@@ -161,7 +250,8 @@ function CardHeaderToggle({
           borderRadius: 999,
           border: 0,
           background: checked ? 'var(--ol-blue)' : 'rgba(0,0,0,0.15)',
-          cursor: 'default',
+          cursor: disabled ? 'not-allowed' : 'default',
+          opacity: disabled ? 0.68 : 1,
           transition: 'background 0.16s var(--ol-motion-quick)',
           padding: 0,
         }}

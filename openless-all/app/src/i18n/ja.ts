@@ -242,6 +242,11 @@ export const ja: typeof zhCN = {
       optionDisabled: '無効',
       chordWarning: '',
     },
+    save: {
+      hotkeyRegisterFailed: '選択追問ショートカットの登録に失敗しました。設定は保存されていません。',
+      hotkeySaveFailed: '選択追問ショートカットの保存に失敗しました。もう一度お試しください。',
+      historySaveFailed: 'Q&A 履歴設定の保存に失敗しました。もう一度お試しください。',
+    },
     history: {
       title: '履歴を保存',
       desc: 'ON にすると、各追問の「選択テキスト + あなたの音声質問 + AI 回答」をローカルに保存（クラウドへは送信しない）。デフォルト OFF では、フロートウィンドウを閉じると問答が消去されプライバシー優先。',

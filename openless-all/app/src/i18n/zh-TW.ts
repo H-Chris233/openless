@@ -240,6 +240,11 @@ export const zhTW: typeof zhCN = {
       optionDisabled: '不啓用',
       chordWarning: '',
     },
+    save: {
+      hotkeyRegisterFailed: '劃詞追問快捷鍵註冊失敗，未繼續保存。',
+      hotkeySaveFailed: '劃詞追問快捷鍵保存失敗，請重試。',
+      historySaveFailed: 'Q&A 歷史保存設置保存失敗，請重試。',
+    },
     history: {
       title: '保存歷史',
       desc: '勾上則把每次追問的「選中文本 + 你的語音問題 + AI 答案」寫入本地存檔（不上雲）。默認關，關閉時浮窗一關問答即遺忘，更注重隱私。',
