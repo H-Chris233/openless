@@ -63,7 +63,7 @@
   </a>
   &nbsp;&nbsp;
   <a href="https://github.com/Cooper-X-Oak" target="_blank" rel="noopener">
-    <img alt="Cooper" src="https://github.com/Cooper-X-Oak.png?size=160" width="80" height="80" style="border-radius: 50%;" />
+    <img alt="Cooper" src="assets/people/cooper.png" width="80" height="80" />
   </a>
   <br/>
   <a href="https://tripmc.top/" target="_blank" rel="noopener">TRIP — tripmc.top</a>
