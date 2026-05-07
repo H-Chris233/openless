@@ -1,6 +1,6 @@
 // Overview.tsx — 真实指标，从 listHistory + getCredentials 派生。
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Icon } from '../components/Icon';
 import { formatComboLabel } from '../lib/hotkey';
@@ -50,6 +50,8 @@ export function Overview({ onOpenHistory }: OverviewProps) {
   const { t } = useTranslation();
   const modeLabel = useModeLabels();
   const [history, setHistory] = useState<DictationSession[]>([]);
+  const [historyError, setHistoryError] = useState(false);
+  const [credsError, setCredsError] = useState(false);
   const [creds, setCreds] = useState<CredentialsStatus>({
     activeAsrProvider: 'volcengine',
     activeLlmProvider: 'ark',
@@ -60,10 +62,28 @@ export function Overview({ onOpenHistory }: OverviewProps) {
   });
   const { prefs } = useHotkeySettings();
 
-  useEffect(() => {
-    listHistory().then(setHistory);
-    getCredentials().then(setCreds);
+  const refreshHistory = useCallback(() => {
+    setHistoryError(false);
+    listHistory()
+      .then(setHistory)
+      .catch(error => {
+        console.error('[overview] failed to load history', error);
+        setHistoryError(true);
+      });
   }, []);
+
+  useEffect(() => {
+    refreshHistory();
+    getCredentials()
+      .then(status => {
+        setCreds(status);
+        setCredsError(false);
+      })
+      .catch(error => {
+        console.error('[overview] failed to load credentials status', error);
+        setCredsError(true);
+      });
+  }, [refreshHistory]);
 
   const metrics = useMemo(() => {
     const today = new Date();
@@ -138,21 +158,21 @@ export function Overview({ onOpenHistory }: OverviewProps) {
           kind={t('overview.asrKind')}
           name={asrProviderName}
           subname={asrProviderId}
-          configured={creds.asrConfigured}
+          status={credsError ? 'error' : creds.asrConfigured ? 'configured' : 'notConfigured'}
         />
         <ProviderCard
           kind={t('overview.llmKind')}
           name={llmProviderName}
           subname={llmProviderId}
-          configured={creds.llmConfigured}
+          status={credsError ? 'error' : creds.llmConfigured ? 'configured' : 'notConfigured'}
         />
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 18 }}>
-        <Metric icon="hash" label={t('overview.metricChars')} value={metrics.charsToday.toLocaleString()} trend={t('overview.metricSegments', { count: metrics.segmentsToday })} />
-        <Metric icon="mic" label={t('overview.metricDuration')} value={formatDuration(metrics.totalDurationMs, t)} trend="" />
-        <Metric icon="clock" label={t('overview.metricAvg')} value={formatDuration(metrics.avgLatencyMs, t)} trend={metrics.segmentsToday > 0 ? t('overview.metricAvgTrend') : t('overview.metricNoData')} />
-        <Metric icon="bolt" label={t('overview.metricTotal')} value={String(history.length)} trend={t('overview.metricTotalTrend')} accent />
+        <Metric icon="hash" label={t('overview.metricChars')} value={historyError ? '—' : metrics.charsToday.toLocaleString()} trend={historyError ? t('overview.historyLoadError') : t('overview.metricSegments', { count: metrics.segmentsToday })} />
+        <Metric icon="mic" label={t('overview.metricDuration')} value={historyError ? '—' : formatDuration(metrics.totalDurationMs, t)} trend={historyError ? t('overview.historyLoadError') : ''} />
+        <Metric icon="clock" label={t('overview.metricAvg')} value={historyError ? '—' : formatDuration(metrics.avgLatencyMs, t)} trend={historyError ? t('overview.historyLoadError') : metrics.segmentsToday > 0 ? t('overview.metricAvgTrend') : t('overview.metricNoData')} />
+        <Metric icon="bolt" label={t('overview.metricTotal')} value={historyError ? '—' : String(history.length)} trend={historyError ? t('overview.historyLoadError') : t('overview.metricTotalTrend')} accent />
       </div>
 
       {/* 底部一行 = flex:1 撑满剩余高度（父 wrapper 是 display:flex/column）。
@@ -164,7 +184,13 @@ export function Overview({ onOpenHistory }: OverviewProps) {
             <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink-2)' }}>{t('overview.weekTitle')}</span>
             <span style={{ fontSize: 11, color: 'var(--ol-ink-4)' }}>{t('overview.weekUnit')}</span>
           </div>
-          <WeekChart data={weekly} />
+          {historyError ? (
+            <div style={{ height: 100, display: 'flex', alignItems: 'center', justifyContent: 'center', textAlign: 'center', fontSize: 12, color: 'var(--ol-ink-4)' }}>
+              {t('overview.historyLoadError')}
+            </div>
+          ) : (
+            <WeekChart data={weekly} />
+          )}
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: 'var(--ol-ink-4)', marginTop: 8 }}>
             {weekDayLabels(t('overview.weekDays', { returnObjects: true }) as string[]).map((d, i) => <span key={i}>{d}</span>)}
           </div>
@@ -176,14 +202,23 @@ export function Overview({ onOpenHistory }: OverviewProps) {
             <Btn size="sm" variant="ghost" onClick={onOpenHistory}>{t('overview.recentAll')}</Btn>
           </div>
           <div className="ol-thinscroll" style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
-            {history.length === 0 && (
-              <div style={{ padding: 24, textAlign: 'center', fontSize: 12, color: 'var(--ol-ink-4)' }}>
-                {t('overview.recentEmpty', { trigger: prefs ? formatComboLabel(prefs.dictationHotkey) : '' })}
+            {historyError ? (
+              <div style={{ padding: 24, textAlign: 'center', fontSize: 12, color: 'var(--ol-ink-4)', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10 }}>
+                <span>{t('overview.recentLoadFailed')}</span>
+                <Btn size="sm" variant="ghost" onClick={refreshHistory}>{t('overview.historyRetry')}</Btn>
               </div>
+            ) : (
+              <>
+                {history.length === 0 && (
+                  <div style={{ padding: 24, textAlign: 'center', fontSize: 12, color: 'var(--ol-ink-4)' }}>
+                    {t('overview.recentEmpty', { trigger: prefs ? formatComboLabel(prefs.dictationHotkey) : '' })}
+                  </div>
+                )}
+                {history.slice(0, 5).map(s => (
+                  <RecentRow key={s.id} session={s} modeLabel={modeLabel} />
+                ))}
+              </>
             )}
-            {history.slice(0, 5).map(s => (
-              <RecentRow key={s.id} session={s} modeLabel={modeLabel} />
-            ))}
           </div>
         </Card>
       </div>
@@ -195,10 +230,10 @@ interface ProviderCardProps {
   kind: string;
   name: string;
   subname: string;
-  configured: boolean;
+  status: 'configured' | 'notConfigured' | 'error';
 }
 
-function ProviderCard({ kind, name, subname, configured }: ProviderCardProps) {
+function ProviderCard({ kind, name, subname, status }: ProviderCardProps) {
   const { t } = useTranslation();
   // ASR 卡用 mic 图标，其他用 sparkle —— 通过比较译文判断会随语言改变，故改用本地化无关的字面量比较。
   const isAsr = kind === t('overview.asrKind');
@@ -217,17 +252,23 @@ function ProviderCard({ kind, name, subname, configured }: ProviderCardProps) {
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 2 }}>
           <span style={{ fontSize: 11, color: 'var(--ol-ink-4)', fontWeight: 600, letterSpacing: '.06em', textTransform: 'uppercase' }}>{kind}</span>
-          {configured ? (
+          {status === 'configured' && (
             <Pill tone="ok" size="sm">
               <span style={{ width: 5, height: 5, borderRadius: 999, background: 'var(--ol-ok)' }} />
               {t('overview.statusConfigured')}
             </Pill>
-          ) : (
+          )}
+          {status === 'notConfigured' && (
             <Pill tone="outline" size="sm">{t('overview.statusNotConfigured')}</Pill>
+          )}
+          {status === 'error' && (
+            <Pill tone="outline" size="sm" style={{ color: 'var(--ol-red, #ef4444)', borderColor: 'rgba(239,68,68,0.24)' }}>{t('overview.statusUnknown')}</Pill>
           )}
         </div>
         <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--ol-ink)' }}>{name}</div>
-        <div style={{ fontSize: 11.5, color: 'var(--ol-ink-3)', marginTop: 1, fontFamily: 'var(--ol-font-mono)' }}>{subname}</div>
+        <div style={{ fontSize: 11.5, color: status === 'error' ? 'var(--ol-red, #ef4444)' : 'var(--ol-ink-3)', marginTop: 1, fontFamily: status === 'error' ? undefined : 'var(--ol-font-mono)' }}>
+          {status === 'error' ? t('overview.credentialsLoadError') : subname}
+        </div>
       </div>
     </Card>
   );
