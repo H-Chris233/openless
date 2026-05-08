@@ -8,6 +8,8 @@ export const zhCN = {
   },
   common: {
     loading: '加载中…',
+    retry: '重试',
+    settingsLoadFailed: '设置加载失败',
     refresh: '刷新',
     clear: '清空',
     copy: '复制',

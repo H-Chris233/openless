@@ -10,6 +10,8 @@ export const zhTW: typeof zhCN = {
   },
   common: {
     loading: '加載中…',
+    retry: '重試',
+    settingsLoadFailed: '設置加載失敗',
     refresh: '刷新',
     clear: '清空',
     copy: '複製',

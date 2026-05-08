@@ -18,7 +18,7 @@ type SaveState = 'idle' | 'saving' | 'saved' | 'failed';
 
 export function Translation() {
   const { t } = useTranslation();
-  const { prefs, refresh, updatePrefs: savePrefs } = useHotkeySettings();
+  const { prefs, loading, error, refresh, updatePrefs: savePrefs } = useHotkeySettings();
   const [saveState, setSaveState] = useState<SaveState>('idle');
   const [saveMessage, setSaveMessage] = useState('');
   const statusTimer = useRef<number | null>(null);
@@ -69,7 +69,34 @@ export function Translation() {
           desc={t('translation.desc')}
         />
         <Card>
-          <div style={{ fontSize: 12, color: 'var(--ol-ink-4)' }}>{t('common.loading')}</div>
+          {error ? (
+            <div role="alert" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <div style={{ fontSize: 12, color: 'var(--ol-red, #ef4444)', lineHeight: 1.5 }}>
+                {t('common.settingsLoadFailed')}：{error}
+              </div>
+              <button
+                type="button"
+                onClick={() => { void refresh(); }}
+                disabled={loading}
+                style={{
+                  alignSelf: 'flex-start',
+                  padding: '6px 12px',
+                  borderRadius: 999,
+                  border: 0,
+                  background: 'var(--ol-blue)',
+                  color: '#fff',
+                  fontSize: 12,
+                  fontWeight: 600,
+                  cursor: loading ? 'not-allowed' : 'default',
+                  opacity: loading ? 0.64 : 1,
+                }}
+              >
+                {loading ? t('common.loading') : t('common.retry')}
+              </button>
+            </div>
+          ) : (
+            <div style={{ fontSize: 12, color: 'var(--ol-ink-4)' }}>{t('common.loading')}</div>
+          )}
         </Card>
       </>
     );
@@ -121,6 +148,46 @@ export function Translation() {
       />
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        {error && (
+          <div
+            role="alert"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 10,
+              padding: '8px 12px',
+              borderRadius: 10,
+              border: '0.5px solid rgba(239,68,68,0.22)',
+              background: 'rgba(239,68,68,0.07)',
+              color: 'var(--ol-red, #ef4444)',
+              fontSize: 11.5,
+              lineHeight: 1.5,
+            }}
+          >
+            <span>{t('common.settingsLoadFailed')}：{error}</span>
+            <button
+              type="button"
+              onClick={() => { void refresh(); }}
+              disabled={loading}
+              style={{
+                flex: '0 0 auto',
+                border: 0,
+                borderRadius: 999,
+                background: 'rgba(239,68,68,0.12)',
+                color: 'inherit',
+                padding: '4px 10px',
+                fontSize: 11,
+                fontWeight: 600,
+                cursor: loading ? 'not-allowed' : 'default',
+                opacity: loading ? 0.64 : 1,
+              }}
+            >
+              {loading ? t('common.loading') : t('common.retry')}
+            </button>
+          </div>
+        )}
+
         {saveState !== 'idle' && (
           <div
             role={saveState === 'failed' ? 'alert' : 'status'}

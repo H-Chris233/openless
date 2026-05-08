@@ -10,6 +10,8 @@ export const en: typeof zhCN = {
   },
   common: {
     loading: 'Loading…',
+    retry: 'Retry',
+    settingsLoadFailed: 'Settings load failed',
     refresh: 'Refresh',
     clear: 'Clear',
     copy: 'Copy',

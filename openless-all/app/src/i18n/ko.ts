@@ -12,6 +12,8 @@ export const ko: typeof zhCN = {
   },
   common: {
     loading: '로딩 중…',
+    retry: '다시 시도',
+    settingsLoadFailed: '설정 로드 실패',
     refresh: '새로고침',
     clear: '지우기',
     copy: '복사',
