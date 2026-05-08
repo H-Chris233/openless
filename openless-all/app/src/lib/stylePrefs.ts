@@ -28,6 +28,13 @@ export async function persistStylePreferenceChange(
   }
 }
 
+export function applyStylePreferencesNotification(
+  _current: UserPreferences | null,
+  incoming: UserPreferences,
+): UserPreferences {
+  return incoming;
+}
+
 export function rollbackDefaultModeChange(
   previousPrefs: UserPreferences,
   nextPrefs: UserPreferences,

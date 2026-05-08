@@ -923,11 +923,18 @@ pub async fn repolish(
 #[tauri::command]
 pub fn set_default_polish_mode(
     coord: CoordinatorState<'_>,
+    app: AppHandle,
     mode: PolishMode,
 ) -> Result<(), String> {
     let mut prefs = coord.prefs().get();
     prefs.default_mode = mode;
-    coord.prefs().set(prefs).map_err(|e| e.to_string())
+    coord.prefs().set(prefs.clone()).map_err(|e| e.to_string())?;
+    if let Err(err) = crate::refresh_tray_microphone_menu(&app) {
+        log::warn!("[tray] refresh style menu after polish mode IPC change failed: {err}");
+    }
+    let _ = app.emit("prefs:changed", &prefs);
+    let _ = app.emit_to("main", "prefs:changed", &prefs);
+    Ok(())
 }
 
 #[tauri::command]
