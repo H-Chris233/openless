@@ -1,7 +1,7 @@
 // History.tsx — 接 Tauri 后端 list_history / delete_history_entry / clear_history。
 // 真实数据来自 ~/Library/Application Support/OpenLess/history.json。
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Icon } from '../components/Icon';
 import { detectOS } from '../components/WindowChrome';
@@ -41,20 +41,29 @@ export function History() {
   const [items, setItems] = useState<DictationSession[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const { prefs } = useHotkeySettings();
 
-  const refresh = async () => {
-    const data = await listHistory();
-    setItems(data);
-    setLoading(false);
-    if (data.length > 0 && !selectedId) {
-      setSelectedId(data[0].id);
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    setLoadError(null);
+    try {
+      const data = await listHistory();
+      setItems(data);
+      setActionError(null);
+      setSelectedId(prev => (prev && data.some(s => s.id === prev) ? prev : data[0]?.id ?? null));
+    } catch (error) {
+      console.error('[history] failed to load history', error);
+      setLoadError(errorMessage(error));
+    } finally {
+      setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
-    refresh();
-  }, []);
+    void refresh();
+  }, [refresh]);
 
   const filtered = useMemo(
     () => (filter === 'all' ? items : items.filter(s => s.mode === filter)),
@@ -68,15 +77,37 @@ export function History() {
   const onClear = async () => {
     if (items.length === 0) return;
     if (!confirm(t('history.confirmClear', { count: items.length }))) return;
-    await clearHistory();
-    setItems([]);
-    setSelectedId(null);
+    const previousItems = items;
+    const previousSelectedId = selectedId;
+    setActionError(null);
+    try {
+      await clearHistory();
+      setItems([]);
+      setSelectedId(null);
+    } catch (error) {
+      console.error('[history] failed to clear history', error);
+      setItems(previousItems);
+      setSelectedId(previousSelectedId);
+      setActionError(t('history.clearFailed', { err: errorMessage(error) }));
+    }
   };
 
   const onDelete = async () => {
     if (!item) return;
-    await deleteHistoryEntry(item.id);
-    setItems(prev => prev.filter(s => s.id !== item.id));
+    const previousItems = items;
+    const previousSelectedId = selectedId;
+    setActionError(null);
+    try {
+      await deleteHistoryEntry(item.id);
+      const nextItems = items.filter(s => s.id !== item.id);
+      setItems(nextItems);
+      setSelectedId(prev => (prev === item.id ? nextItems[0]?.id ?? null : prev));
+    } catch (error) {
+      console.error('[history] failed to delete history entry', error);
+      setItems(previousItems);
+      setSelectedId(previousSelectedId);
+      setActionError(t('history.deleteFailed', { err: errorMessage(error) }));
+    }
   };
 
   const onCopy = () => {
@@ -92,7 +123,7 @@ export function History() {
         desc={t('history.desc')}
         right={
           <div style={{ display: 'flex', gap: 8 }}>
-            <Btn icon="refresh" variant="ghost" size="sm" onClick={refresh}>{t('common.refresh')}</Btn>
+            <Btn icon="refresh" variant="ghost" size="sm" onClick={() => void refresh()}>{t('common.refresh')}</Btn>
             <Btn icon="trash" variant="ghost" size="sm" onClick={onClear}>{t('common.clear')}</Btn>
           </div>
         }
@@ -127,13 +158,24 @@ export function History() {
             </div>
           </div>
           <div className="ol-thinscroll" style={{ flex: 1, overflow: 'auto', padding: 6 }}>
+            {actionError && (
+              <div style={{ margin: 8, padding: '9px 10px', borderRadius: 8, background: 'rgba(239,68,68,0.08)', color: 'var(--ol-red, #ef4444)', fontSize: 12, lineHeight: 1.45 }}>
+                {actionError}
+              </div>
+            )}
             {loading && <div style={{ padding: 16, fontSize: 12, color: 'var(--ol-ink-4)' }}>{t('common.loading')}</div>}
-            {!loading && filtered.length === 0 && (
+            {!loading && loadError && (
+              <div style={{ padding: 16, fontSize: 12, color: 'var(--ol-ink-4)', display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 10 }}>
+                <span>{t('history.loadFailed', { err: loadError })}</span>
+                <Btn size="sm" variant="ghost" onClick={() => void refresh()}>{t('history.retry')}</Btn>
+              </div>
+            )}
+            {!loading && !loadError && filtered.length === 0 && (
               <div style={{ padding: 16, fontSize: 12, color: 'var(--ol-ink-4)' }}>
                 {t('history.empty', { trigger: prefs ? formatComboLabel(prefs.dictationHotkey) : '' })}
               </div>
             )}
-            {filtered.map(s => (
+            {!loadError && filtered.map(s => (
               <button
                 key={s.id}
                 onClick={() => setSelectedId(s.id)}
@@ -211,13 +253,19 @@ export function History() {
             </>
           ) : (
             <div style={{ padding: 40, textAlign: 'center', fontSize: 13, color: 'var(--ol-ink-4)' }}>
-              {loading ? t('common.loading') : t('history.selectHint')}
+              {loading ? t('common.loading') : loadError ? t('history.loadFailed', { err: loadError }) : t('history.selectHint')}
             </div>
           )}
         </Card>
       </div>
     </div>
   );
+}
+
+function errorMessage(error: unknown): string {
+  if (typeof error === 'string') return error;
+  if (error instanceof Error) return error.message;
+  return String(error);
 }
 
 function formatTime(iso: string): string {
