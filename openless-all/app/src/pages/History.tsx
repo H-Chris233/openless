@@ -77,8 +77,6 @@ export function History() {
   const onClear = async () => {
     if (items.length === 0) return;
     if (!confirm(t('history.confirmClear', { count: items.length }))) return;
-    const previousItems = items;
-    const previousSelectedId = selectedId;
     setActionError(null);
     try {
       await clearHistory();
@@ -86,26 +84,20 @@ export function History() {
       setSelectedId(null);
     } catch (error) {
       console.error('[history] failed to clear history', error);
-      setItems(previousItems);
-      setSelectedId(previousSelectedId);
       setActionError(t('history.clearFailed', { err: errorMessage(error) }));
     }
   };
 
   const onDelete = async () => {
     if (!item) return;
-    const previousItems = items;
-    const previousSelectedId = selectedId;
+    const deletedId = item.id;
     setActionError(null);
     try {
-      await deleteHistoryEntry(item.id);
-      const nextItems = items.filter(s => s.id !== item.id);
-      setItems(nextItems);
-      setSelectedId(prev => (prev === item.id ? nextItems[0]?.id ?? null : prev));
+      await deleteHistoryEntry(deletedId);
+      setItems(prev => prev.filter(s => s.id !== deletedId));
+      setSelectedId(current => (current === deletedId ? null : current));
     } catch (error) {
       console.error('[history] failed to delete history entry', error);
-      setItems(previousItems);
-      setSelectedId(previousSelectedId);
       setActionError(t('history.deleteFailed', { err: errorMessage(error) }));
     }
   };
