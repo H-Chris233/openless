@@ -17,6 +17,7 @@ interface HotkeySettingsContextValue {
   hotkey: HotkeyBinding | null;
   capability: HotkeyCapability | null;
   loading: boolean;
+  error: string | null;
   refresh: () => Promise<void>;
   updatePrefs: (
     next: UserPreferences | ((current: UserPreferences) => UserPreferences),
@@ -25,18 +26,45 @@ interface HotkeySettingsContextValue {
 
 const HotkeySettingsContext = createContext<HotkeySettingsContextValue | null>(null);
 
+const errorMessage = (error: unknown) =>
+  String(error instanceof Error ? error.message : error);
+
 export function HotkeySettingsProvider({ children }: { children: ReactNode }) {
   const [prefs, setPrefs] = useState<UserPreferences | null>(null);
   const [capability, setCapability] = useState<HotkeyCapability | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const persistQueueRef = useRef<Promise<void>>(Promise.resolve());
   const latestPrefsRef = useRef<UserPreferences | null>(null);
 
   const refresh = useCallback(async () => {
-    const [nextPrefs, nextCapability] = await Promise.all([getSettings(), getHotkeyCapability()]);
-    setPrefs(nextPrefs);
-    setCapability(nextCapability);
-    setLoading(false);
+    setLoading(true);
+    setError(null);
+    try {
+      const [prefsResult, capabilityResult] = await Promise.allSettled([
+        getSettings(),
+        getHotkeyCapability(),
+      ]);
+      let nextError: string | null = null;
+      if (prefsResult.status === 'fulfilled') {
+        setPrefs(prefsResult.value);
+      } else {
+        console.error('[hotkey-settings] failed to load preferences', prefsResult.reason);
+        nextError = errorMessage(prefsResult.reason);
+      }
+      if (capabilityResult.status === 'fulfilled') {
+        setCapability(capabilityResult.value);
+      } else {
+        console.error('[hotkey-settings] failed to load hotkey capability', capabilityResult.reason);
+        nextError = errorMessage(capabilityResult.reason);
+      }
+      setError(nextError);
+    } catch (error) {
+      console.error('[hotkey-settings] failed to refresh hotkey settings', error);
+      setError(errorMessage(error));
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
   const queueSetSettings = useCallback((resolveNext: (current: UserPreferences) => UserPreferences) => {
@@ -137,10 +165,11 @@ export function HotkeySettingsProvider({ children }: { children: ReactNode }) {
       hotkey: prefs?.hotkey ?? null,
       capability,
       loading,
+      error,
       refresh,
       updatePrefs,
     }),
-    [capability, loading, prefs, refresh, updatePrefs],
+    [capability, error, loading, prefs, refresh, updatePrefs],
   );
 
   return <HotkeySettingsContext.Provider value={value}>{children}</HotkeySettingsContext.Provider>;

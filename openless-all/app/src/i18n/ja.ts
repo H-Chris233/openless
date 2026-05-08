@@ -12,6 +12,8 @@ export const ja: typeof zhCN = {
   },
   common: {
     loading: '読み込み中…',
+    retry: '再試行',
+    settingsLoadFailed: '設定の読み込みに失敗しました',
     refresh: '更新',
     clear: 'クリア',
     copy: 'コピー',
