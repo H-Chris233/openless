@@ -439,8 +439,11 @@ mod macos {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "windows")]
     use std::sync::{Arc, Mutex};
+    #[cfg(target_os = "windows")]
     use std::thread;
+    #[cfg(target_os = "windows")]
     use std::time::Duration;
 
     #[test]
@@ -455,6 +458,14 @@ mod tests {
             "dictated text"
         ));
         assert!(!should_restore_clipboard(None, "dictated text"));
+    }
+
+    #[test]
+    fn empty_insertions_never_touch_clipboard_or_paste_path() {
+        let inserter = TextInserter::new();
+
+        assert_eq!(inserter.insert("", true), InsertStatus::CopiedFallback);
+        assert_eq!(inserter.copy_fallback(""), InsertStatus::CopiedFallback);
     }
 
     #[test]

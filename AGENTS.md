@@ -49,7 +49,7 @@ Generated artifacts:
 
 Logs: `~/Library/Logs/OpenLess/openless.log` (macOS) / `%LOCALAPPDATA%\OpenLess\Logs\openless.log` (Windows).
 
-There is no test runner wired in for the frontend. `src/lib/providerSetup.test.ts` is a hand-rolled assertion script — run with `npx tsx src/lib/providerSetup.test.ts` if you need it. Rust side has no `cargo test` targets yet; behavior is verified by running the app.
+There is no test runner wired in for the frontend. `src/lib/providerSetup.test.ts` is a hand-rolled assertion script — run with `npx tsx src/lib/providerSetup.test.ts` if you need it. Rust backend unit tests are run with `cargo test --manifest-path src-tauri/Cargo.toml --lib`; hardware / OS-integration behavior is still verified by running the app.
 
 ## Architecture
 

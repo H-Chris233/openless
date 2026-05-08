@@ -91,6 +91,9 @@ jobs:
       - name: Check Tauri backend (cargo check)
         run: cargo check --manifest-path src-tauri/Cargo.toml
 
+      - name: Run Rust backend unit tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+
       - name: Verify version sync across all 5 files
         # 两个平台都跑这个校验：Windows runner 自带 git-bash，跨 shell 表现一致。
         # 一旦版本号 drift 立刻 fail，避免发版时再发现漏改。

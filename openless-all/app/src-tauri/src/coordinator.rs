@@ -4484,6 +4484,74 @@ mod tests {
     }
 
     #[test]
+    fn startup_race_check_is_table_driven_for_begin_session_edges() {
+        let cases = [
+            (
+                SessionPhase::Starting,
+                false,
+                session_id(7),
+                StartupRaceStatus::ActiveStarting,
+            ),
+            (
+                SessionPhase::Starting,
+                true,
+                session_id(7),
+                StartupRaceStatus::CancelRaced,
+            ),
+            (
+                SessionPhase::Idle,
+                false,
+                session_id(7),
+                StartupRaceStatus::CancelRaced,
+            ),
+            (
+                SessionPhase::Listening,
+                false,
+                session_id(7),
+                StartupRaceStatus::CancelRaced,
+            ),
+            (
+                SessionPhase::Starting,
+                false,
+                session_id(8),
+                StartupRaceStatus::StaleContinuation,
+            ),
+        ];
+
+        for (phase, cancelled, actual_session_id, expected) in cases {
+            let mut state = SessionState::default();
+            state.phase = phase;
+            state.cancelled = cancelled;
+            state.session_id = actual_session_id;
+
+            assert_eq!(
+                startup_race_status(&state, session_id(7)),
+                expected,
+                "phase={phase:?} cancelled={cancelled} actual_session={actual_session_id}"
+            );
+        }
+    }
+
+    #[test]
+    fn begin_recording_abort_is_noop_after_prior_cancel_or_idle() {
+        let cases = [
+            (SessionPhase::Idle, false),
+            (SessionPhase::Processing, false),
+            (SessionPhase::Listening, true),
+        ];
+
+        for (phase, cancelled) in cases {
+            let mut state = SessionState::default();
+            state.phase = phase;
+            state.cancelled = cancelled;
+
+            assert!(begin_recording_abort_before_restore(&mut state).is_none());
+            assert_eq!(state.phase, phase);
+            assert_eq!(state.cancelled, cancelled);
+        }
+    }
+
+    #[test]
     fn stale_startup_cleanup_keeps_newer_asr_resource() {
         let coordinator = Coordinator::new();
         let newer_asr = Arc::new(WhisperBatchASR::new(

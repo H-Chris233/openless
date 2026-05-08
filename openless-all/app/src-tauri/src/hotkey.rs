@@ -36,9 +36,8 @@ mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
 
-    #[test]
-    fn reset_shared_held_state_clears_all_shortcut_latches() {
-        let shared = Shared {
+    fn shared_with_held_latches() -> Shared {
+        Shared {
             binding: RwLock::new(HotkeyBinding::default()),
             trigger_held: AtomicBool::new(true),
             qa_trigger: RwLock::new(None),
@@ -46,14 +45,57 @@ mod tests {
             translation_trigger: RwLock::new(None),
             translation_trigger_held: AtomicBool::new(true),
             translation_modifier_held: AtomicBool::new(true),
-        };
+        }
+    }
 
+    #[test]
+    fn reset_shared_held_state_clears_all_shortcut_latches() {
+        let shared = shared_with_held_latches();
         reset_shared_held_state(&shared);
 
         assert!(!shared.trigger_held.load(Ordering::SeqCst));
         assert!(!shared.qa_trigger_held.load(Ordering::SeqCst));
         assert!(!shared.translation_trigger_held.load(Ordering::SeqCst));
         assert!(!shared.translation_modifier_held.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn update_binding_resets_only_dictation_latch() {
+        let shared = shared_with_held_latches();
+        let next = HotkeyBinding {
+            trigger: HotkeyTrigger::LeftControl,
+            mode: crate::types::HotkeyMode::Hold,
+            keys: None,
+        };
+
+        update_shared_binding(&shared, next.clone());
+
+        assert_eq!(*shared.binding.read(), next);
+        assert!(!shared.trigger_held.load(Ordering::SeqCst));
+        assert!(shared.qa_trigger_held.load(Ordering::SeqCst));
+        assert!(shared.translation_trigger_held.load(Ordering::SeqCst));
+        assert!(shared.translation_modifier_held.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn update_modifier_shortcuts_resets_only_modifier_latches() {
+        let shared = shared_with_held_latches();
+
+        update_shared_modifier_shortcuts(
+            &shared,
+            Some(HotkeyTrigger::RightCommand),
+            Some(HotkeyTrigger::LeftOption),
+        );
+
+        assert_eq!(*shared.qa_trigger.read(), Some(HotkeyTrigger::RightCommand));
+        assert_eq!(
+            *shared.translation_trigger.read(),
+            Some(HotkeyTrigger::LeftOption)
+        );
+        assert!(shared.trigger_held.load(Ordering::SeqCst));
+        assert!(!shared.qa_trigger_held.load(Ordering::SeqCst));
+        assert!(!shared.translation_trigger_held.load(Ordering::SeqCst));
+        assert!(shared.translation_modifier_held.load(Ordering::SeqCst));
     }
 }
 
