@@ -78,11 +78,7 @@ impl TextInserter {
         if !copy_to_clipboard(text) {
             return InsertStatus::Failed;
         }
-        if let Err(err) = simulate_paste() {
-            log::warn!("[insertion] simulated paste failed: {}", err);
-            return InsertStatus::CopiedFallback;
-        }
-        insertion_success_status()
+        macos_insert_status_after_paste(simulate_paste())
     }
 
     /// Copy text without attempting a synthetic paste. Used when the platform cannot
@@ -95,6 +91,17 @@ impl TextInserter {
             InsertStatus::CopiedFallback
         } else {
             InsertStatus::Failed
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_insert_status_after_paste(result: Result<(), String>) -> InsertStatus {
+    match result {
+        Ok(()) => insertion_success_status(),
+        Err(err) => {
+            log::warn!("[insertion] simulated paste failed: {}", err);
+            InsertStatus::CopiedFallback
         }
     }
 }
@@ -187,22 +194,29 @@ fn insert_with_clipboard_restore(text: &str, restore_clipboard_after_paste: bool
 
 #[cfg(not(target_os = "macos"))]
 fn schedule_clipboard_restore(plan: ClipboardRestorePlan) {
+    let (restore_id, original_text) =
+        remember_pending_clipboard_restore(plan.previous_text.clone());
+    std::thread::spawn(move || {
+        restore_clipboard_after_delay(plan, original_text, restore_id, CLIPBOARD_RESTORE_DELAY)
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+fn remember_pending_clipboard_restore(previous_text: Option<String>) -> (u64, Option<String>) {
     let restore_id = NEXT_CLIPBOARD_RESTORE_ID.fetch_add(1, Ordering::SeqCst);
     let original_text = {
         let mut pending = PENDING_CLIPBOARD_RESTORE.lock();
         let original = pending
             .as_ref()
             .map(|batch| batch.original_text.clone())
-            .unwrap_or_else(|| plan.previous_text.clone());
+            .unwrap_or(previous_text);
         *pending = Some(PendingClipboardRestore {
             latest_restore_id: restore_id,
             original_text: original.clone(),
         });
         original
     };
-    std::thread::spawn(move || {
-        restore_clipboard_after_delay(plan, original_text, restore_id, CLIPBOARD_RESTORE_DELAY)
-    });
+    (restore_id, original_text)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -439,8 +453,11 @@ mod macos {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "windows")]
     use std::sync::{Arc, Mutex};
+    #[cfg(target_os = "windows")]
     use std::thread;
+    #[cfg(target_os = "windows")]
     use std::time::Duration;
 
     #[test]
@@ -455,6 +472,63 @@ mod tests {
             "dictated text"
         ));
         assert!(!should_restore_clipboard(None, "dictated text"));
+    }
+
+    #[test]
+    fn empty_insertions_never_touch_clipboard_or_paste_path() {
+        let inserter = TextInserter::new();
+
+        assert_eq!(inserter.insert("", true), InsertStatus::CopiedFallback);
+        assert_eq!(inserter.copy_fallback(""), InsertStatus::CopiedFallback);
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn pending_clipboard_restore_keeps_first_original_until_latest_restore() {
+        *PENDING_CLIPBOARD_RESTORE.lock() = None;
+
+        let (first_id, first_original) =
+            remember_pending_clipboard_restore(Some("user clipboard".to_string()));
+        let (second_id, second_original) =
+            remember_pending_clipboard_restore(Some("first dictated text".to_string()));
+
+        assert_ne!(first_id, second_id);
+        assert_eq!(first_original.as_deref(), Some("user clipboard"));
+        assert_eq!(second_original.as_deref(), Some("user clipboard"));
+        assert!(!is_latest_clipboard_restore(first_id));
+        assert!(is_latest_clipboard_restore(second_id));
+
+        clear_pending_clipboard_restore(first_id);
+        assert!(is_latest_clipboard_restore(second_id));
+        clear_pending_clipboard_restore(second_id);
+        assert!(!is_latest_clipboard_restore(second_id));
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn clipboard_restore_skips_when_clipboard_no_longer_matches_inserted_text() {
+        assert!(should_restore_clipboard(
+            Some("dictated text"),
+            "dictated text"
+        ));
+        assert!(!should_restore_clipboard(
+            Some("user edited clipboard"),
+            "dictated text"
+        ));
+        assert!(!should_restore_clipboard(None, "dictated text"));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_paste_failure_keeps_copied_fallback_available() {
+        assert_eq!(
+            macos_insert_status_after_paste(Ok(())),
+            InsertStatus::Inserted
+        );
+        assert_eq!(
+            macos_insert_status_after_paste(Err("AX write unavailable".to_string())),
+            InsertStatus::CopiedFallback
+        );
     }
 
     #[test]

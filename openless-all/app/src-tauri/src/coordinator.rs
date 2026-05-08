@@ -4047,6 +4047,9 @@ fn resolve_ark_endpoint_with_policy(
 mod tests {
     use super::*;
     use crate::types::HotkeyTrigger;
+    use once_cell::sync::Lazy;
+
+    static ENV_LOCK: Lazy<tokio::sync::Mutex<()>> = Lazy::new(|| tokio::sync::Mutex::new(()));
 
     fn session_id(n: u128) -> SessionId {
         Uuid::from_u128(n)
@@ -4058,12 +4061,59 @@ mod tests {
             .filter_level(log::LevelFilter::Info)
             .is_test(false)
             .try_init();
+        let _guard = ENV_LOCK.lock().await;
         std::env::set_var("OPENLESS_HOTKEY_INJECTION_DRY_RUN", "1");
 
         let coordinator = Coordinator::new();
         coordinator.inject_hotkey_click_for_dev().await.unwrap();
 
         assert_eq!(coordinator.inner.state.lock().phase, SessionPhase::Idle);
+        std::env::remove_var("OPENLESS_HOTKEY_INJECTION_DRY_RUN");
+    }
+
+    #[tokio::test]
+    async fn begin_session_dry_run_enters_listening_and_clears_stale_edges() {
+        let _guard = ENV_LOCK.lock().await;
+        std::env::set_var("OPENLESS_HOTKEY_INJECTION_DRY_RUN", "1");
+
+        let coordinator = Coordinator::new();
+        let old_session_id = coordinator.inner.state.lock().session_id;
+        {
+            let mut state = coordinator.inner.state.lock();
+            state.pending_stop = true;
+            state.cancelled = true;
+        }
+
+        coordinator.start_dictation().await.unwrap();
+
+        let state = coordinator.inner.state.lock();
+        assert_eq!(state.phase, SessionPhase::Listening);
+        assert!(!state.pending_stop);
+        assert!(!state.cancelled);
+        assert_ne!(state.session_id, old_session_id);
+
+        std::env::remove_var("OPENLESS_HOTKEY_INJECTION_DRY_RUN");
+    }
+
+    #[tokio::test]
+    async fn begin_session_ignores_non_idle_phase() {
+        let _guard = ENV_LOCK.lock().await;
+        std::env::set_var("OPENLESS_HOTKEY_INJECTION_DRY_RUN", "1");
+
+        let coordinator = Coordinator::new();
+        let old_session_id = {
+            let mut state = coordinator.inner.state.lock();
+            state.phase = SessionPhase::Processing;
+            state.session_id = session_id(99);
+            state.session_id
+        };
+
+        coordinator.start_dictation().await.unwrap();
+
+        let state = coordinator.inner.state.lock();
+        assert_eq!(state.phase, SessionPhase::Processing);
+        assert_eq!(state.session_id, old_session_id);
+
         std::env::remove_var("OPENLESS_HOTKEY_INJECTION_DRY_RUN");
     }
 
@@ -4243,6 +4293,50 @@ mod tests {
         let state = coordinator.inner.state.lock();
         assert_eq!(state.phase, SessionPhase::Starting);
         assert!(state.pending_stop);
+    }
+
+    #[tokio::test]
+    async fn stop_dictation_from_listening_without_asr_returns_idle() {
+        let coordinator = Coordinator::new();
+        {
+            let mut state = coordinator.inner.state.lock();
+            state.phase = SessionPhase::Listening;
+            state.session_id = session_id(123);
+        }
+
+        coordinator.stop_dictation().await.unwrap();
+
+        assert_eq!(coordinator.inner.state.lock().phase, SessionPhase::Idle);
+    }
+
+    #[test]
+    fn cancel_session_state_machine_is_table_driven() {
+        let cases = [
+            (SessionPhase::Idle, SessionPhase::Idle, false),
+            (SessionPhase::Starting, SessionPhase::Idle, true),
+            (SessionPhase::Listening, SessionPhase::Idle, true),
+            (SessionPhase::Processing, SessionPhase::Processing, true),
+            (SessionPhase::Inserting, SessionPhase::Inserting, false),
+        ];
+
+        for (initial, expected_phase, expected_cancelled) in cases {
+            let coordinator = Coordinator::new();
+            {
+                let mut state = coordinator.inner.state.lock();
+                state.phase = initial;
+                state.cancelled = false;
+                state.focus_target = Some(1);
+            }
+
+            coordinator.cancel_dictation();
+
+            let state = coordinator.inner.state.lock();
+            assert_eq!(state.phase, expected_phase, "initial={initial:?}");
+            assert_eq!(state.cancelled, expected_cancelled, "initial={initial:?}");
+            if matches!(initial, SessionPhase::Starting | SessionPhase::Listening) {
+                assert!(state.focus_target.is_none(), "initial={initial:?}");
+            }
+        }
     }
 
     #[test]
@@ -4481,6 +4575,74 @@ mod tests {
             startup_race_status(&state, session_id(1)),
             StartupRaceStatus::StaleContinuation
         );
+    }
+
+    #[test]
+    fn startup_race_check_is_table_driven_for_begin_session_edges() {
+        let cases = [
+            (
+                SessionPhase::Starting,
+                false,
+                session_id(7),
+                StartupRaceStatus::ActiveStarting,
+            ),
+            (
+                SessionPhase::Starting,
+                true,
+                session_id(7),
+                StartupRaceStatus::CancelRaced,
+            ),
+            (
+                SessionPhase::Idle,
+                false,
+                session_id(7),
+                StartupRaceStatus::CancelRaced,
+            ),
+            (
+                SessionPhase::Listening,
+                false,
+                session_id(7),
+                StartupRaceStatus::CancelRaced,
+            ),
+            (
+                SessionPhase::Starting,
+                false,
+                session_id(8),
+                StartupRaceStatus::StaleContinuation,
+            ),
+        ];
+
+        for (phase, cancelled, actual_session_id, expected) in cases {
+            let mut state = SessionState::default();
+            state.phase = phase;
+            state.cancelled = cancelled;
+            state.session_id = actual_session_id;
+
+            assert_eq!(
+                startup_race_status(&state, session_id(7)),
+                expected,
+                "phase={phase:?} cancelled={cancelled} actual_session={actual_session_id}"
+            );
+        }
+    }
+
+    #[test]
+    fn begin_recording_abort_is_noop_after_prior_cancel_or_idle() {
+        let cases = [
+            (SessionPhase::Idle, false),
+            (SessionPhase::Processing, false),
+            (SessionPhase::Listening, true),
+        ];
+
+        for (phase, cancelled) in cases {
+            let mut state = SessionState::default();
+            state.phase = phase;
+            state.cancelled = cancelled;
+
+            assert!(begin_recording_abort_before_restore(&mut state).is_none());
+            assert_eq!(state.phase, phase);
+            assert_eq!(state.cancelled, cancelled);
+        }
     }
 
     #[test]
