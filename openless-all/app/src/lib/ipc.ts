@@ -73,6 +73,8 @@ const mockSettings: UserPreferences = {
   foundryLocalRuntimeSource: 'auto',
   foundryLocalAsrLanguageHint: '',
   foundryLocalAsrKeepLoadedSecs: 300,
+  historyRetentionDays: 7,
+  polishContextWindowMinutes: 5,
 };
 
 const mockHotkeyCapability: HotkeyCapability = {
