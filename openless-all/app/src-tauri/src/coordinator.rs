@@ -16,16 +16,6 @@ use parking_lot::Mutex;
 use tauri::{async_runtime, AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
-type SessionId = Uuid;
-
-fn new_session_id() -> SessionId {
-    Uuid::new_v4()
-}
-
-fn initial_session_id() -> SessionId {
-    Uuid::nil()
-}
-
 #[cfg(target_os = "windows")]
 use crate::asr::local::{foundry, FoundryLocalRuntime, FoundryLocalWhisperAsr};
 use crate::asr::{
@@ -33,6 +23,13 @@ use crate::asr::{
     WhisperBatchASR,
 };
 use crate::combo_hotkey::{ComboHotkeyError, ComboHotkeyEvent, ComboHotkeyMonitor};
+use crate::coordinator_state::{
+    begin_cancel_session_state, begin_recording_abort_before_restore, begin_session_state,
+    finish_cancel_session_state, finish_starting_session_state, initial_session_id, new_session_id,
+    publish_abort_idle_after_restore, request_stop_during_starting_state,
+    start_processing_if_listening, startup_race_status, BeginOutcome, SessionId, SessionPhase,
+    SessionState, StartupRaceStatus,
+};
 use crate::hotkey::{HotkeyEvent, HotkeyMonitor};
 use crate::insertion::TextInserter;
 use crate::persistence::{
@@ -52,19 +49,6 @@ use crate::types::{
 use crate::windows_ime_ipc::ImeSubmitTarget;
 #[cfg(target_os = "windows")]
 use crate::windows_ime_session::{PreparedWindowsImeSession, WindowsImeSessionController};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SessionPhase {
-    Idle,
-    Starting,
-    Listening,
-    Processing,
-    /// 已经过了最后一次 cancel 检查、即将 / 正在调用 inserter.insert 的窗口。
-    /// cancel_session 在此阶段拒绝介入：Cmd+V 模拟点击已开始或已发出，
-    /// 无法撤销，硬把 cancelled=true 也救不回来，只会让 UI 出现 cancelled
-    /// 但实际还是插入了的诡异状态。详见 PR 修 Codex audit HIGH #2。
-    Inserting,
-}
 
 enum ActiveAsr {
     Volcengine(Arc<VolcengineStreamingASR>),
@@ -102,25 +86,6 @@ impl<T> SessionResource<T> {
     }
 }
 
-struct SessionState {
-    phase: SessionPhase,
-    started_at: Instant,
-    /// Starting 阶段（ASR 握手中）按下 stop 边沿（toggle 第二次按 / hold 松开）→
-    /// 等握手完成 phase=Listening 后立刻 end_session，不丢边沿。issue #51。
-    pending_stop: bool,
-    /// 用户在 Processing 阶段按 Esc 取消：end_session 在 polish/insert 检查点跳过插入 +
-    /// 跳过 history.append。issue #52。
-    cancelled: bool,
-    focus_target: Option<usize>,
-    /// 每次 begin_session 生成新的 UUID session id。
-    /// recorder error monitor 持有 captured id，处理时若与当前不等说明
-    /// 是上一 session 的迟到错误，必须 drop，不要 abort 当前 active session。
-    session_id: SessionId,
-    /// 用户开始 dictation 时所处的前台 app 标签（"Mail (com.apple.mail)" / Windows 窗口标题）。
-    /// 用作 LLM polish/translate 的上下文前提，让模型按 app 调风格。详见 issue #116。
-    front_app: Option<String>,
-}
-
 struct SharedRecordingMuteState {
     guard: Option<crate::audio_mute::AudioMuteGuard>,
     holders: u32,
@@ -131,20 +96,6 @@ impl SharedRecordingMuteState {
         Self {
             guard: None,
             holders: 0,
-        }
-    }
-}
-
-impl Default for SessionState {
-    fn default() -> Self {
-        Self {
-            phase: SessionPhase::Idle,
-            started_at: Instant::now(),
-            pending_stop: false,
-            cancelled: false,
-            focus_target: None,
-            session_id: initial_session_id(),
-            front_app: None,
         }
     }
 }
@@ -1704,10 +1655,9 @@ async fn handle_released(inner: &Arc<Inner>) {
 fn request_stop_during_starting(inner: &Arc<Inner>, reason: &str) {
     {
         let mut state = inner.state.lock();
-        if state.phase != SessionPhase::Starting {
+        if !request_stop_during_starting_state(&mut state) {
             return;
         }
-        state.pending_stop = true;
     }
     log::info!("[coord] {reason} during Starting — queued");
     stop_recorder_if_pending_start_stop(inner);
@@ -1956,23 +1906,15 @@ fn window_key_matches_trigger(trigger: crate::types::HotkeyTrigger, key: &str, c
 async fn begin_session(inner: &Arc<Inner>) -> Result<(), String> {
     let current_session_id = {
         let mut state = inner.state.lock();
-        if state.phase != SessionPhase::Idle {
+        let Some(session_id) =
+            begin_session_state(&mut state, capture_focus_target(), capture_frontmost_app())
+        else {
             return Ok(());
-        }
-        state.phase = SessionPhase::Starting;
-        state.started_at = Instant::now();
-        // 新会话清掉旧 pending_stop / cancelled，避免上一会话遗留触发奇怪行为
-        state.pending_stop = false;
-        state.cancelled = false;
-        state.focus_target = capture_focus_target();
-        // 新建 UUID session_id；spawn 出去的 recorder error monitor 会捕获这个值，
-        // 如果迟到错误到达时 id 已不匹配就 drop，不会误中止后续 session。
-        state.session_id = new_session_id();
-        state.front_app = capture_frontmost_app();
+        };
         if let Some(label) = state.front_app.as_deref() {
             log::info!("[coord] front_app captured: {label}");
         }
-        state.session_id
+        session_id
     };
     #[cfg(target_os = "windows")]
     {
@@ -2356,33 +2298,6 @@ fn abort_recording_with_error(inner: &Arc<Inner>, message: String) {
     schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
 }
 
-struct RecordingAbort {
-    elapsed: u64,
-    session_id: SessionId,
-}
-
-fn begin_recording_abort_before_restore(state: &mut SessionState) -> Option<RecordingAbort> {
-    if state.cancelled
-        || !matches!(
-            state.phase,
-            SessionPhase::Starting | SessionPhase::Listening
-        )
-    {
-        return None;
-    }
-    state.cancelled = true;
-    Some(RecordingAbort {
-        elapsed: state.started_at.elapsed().as_millis() as u64,
-        session_id: state.session_id,
-    })
-}
-
-fn publish_abort_idle_after_restore(state: &mut SessionState, session_id: SessionId) {
-    if state.session_id == session_id {
-        state.phase = SessionPhase::Idle;
-    }
-}
-
 async fn start_recorder_and_enter_listening(
     inner: &Arc<Inner>,
     session_id: SessionId,
@@ -2400,19 +2315,7 @@ async fn finish_starting_session(inner: &Arc<Inner>, session_id: SessionId) {
     // 反向覆盖回 Listening → 用户的 cancel 边沿被吞掉。
     let outcome = {
         let mut state = inner.state.lock();
-        if state.session_id != session_id {
-            BeginOutcome::StaleContinuation
-        } else if state.cancelled || state.phase != SessionPhase::Starting {
-            BeginOutcome::CancelRaced
-        } else {
-            state.phase = SessionPhase::Listening;
-            let pending = std::mem::replace(&mut state.pending_stop, false);
-            if pending {
-                BeginOutcome::PendingStop
-            } else {
-                BeginOutcome::Started
-            }
-        }
+        finish_starting_session_state(&mut state, session_id)
     };
     match outcome {
         BeginOutcome::StaleContinuation => {
@@ -2441,11 +2344,10 @@ async fn finish_starting_session(inner: &Arc<Inner>, session_id: SessionId) {
 async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
     let current_session_id = {
         let mut state = inner.state.lock();
-        if state.phase != SessionPhase::Listening {
+        let Some(session_id) = start_processing_if_listening(&mut state) else {
             return Ok(());
-        }
-        state.phase = SessionPhase::Processing;
-        state.session_id
+        };
+        session_id
     };
 
     let elapsed = inner.state.lock().started_at.elapsed().as_millis() as u64;
@@ -2946,37 +2848,29 @@ fn dictation_error_code(
 }
 
 fn cancel_session(inner: &Arc<Inner>) {
-    let (phase, session_id) = {
+    let Some(decision) = ({
         let mut state = inner.state.lock();
         let phase = state.phase;
-        if phase == SessionPhase::Idle {
-            return;
-        }
-        // Inserting 阶段已经过了最后一次 cancel 检查 + 锁内转换，inserter.insert 即将
-        // 或正在执行 → Cmd+V 已发出无法撤销。这里硬设 cancelled=true 只会让 UI 显示
-        // "已取消" 但文本仍被插入，与用户预期相反。直接拒绝，让本次 session 走完。
+        let decision = begin_cancel_session_state(&mut state);
         if phase == SessionPhase::Inserting {
             log::info!("[coord] cancel ignored — already in Inserting phase, can't undo paste");
-            return;
         }
-        // Processing 阶段 cancel 不能直接干掉 in-flight polish task（已经 await 了），
-        // 但可以打 cancelled 标记，让 end_session 在插入前检查并丢弃结果。
-        state.cancelled = true;
-        (phase, state.session_id)
+        decision
+    }) else {
+        return;
     };
 
-    stop_recorder_for_session(inner, session_id);
-    cancel_asr_for_session(inner, session_id);
-    restore_prepared_windows_ime_session(inner, session_id);
+    stop_recorder_for_session(inner, decision.session_id);
+    cancel_asr_for_session(inner, decision.session_id);
+    restore_prepared_windows_ime_session(inner, decision.session_id);
     // Processing 阶段保持 phase=Processing 让 end_session 自己走完检查 + 收尾；
     // 其他阶段直接转 Idle。
-    if phase != SessionPhase::Processing {
+    if decision.phase != SessionPhase::Processing {
         let mut state = inner.state.lock();
-        state.phase = SessionPhase::Idle;
-        state.focus_target = None;
+        finish_cancel_session_state(&mut state, decision);
     }
     emit_capsule(inner, CapsuleState::Cancelled, 0.0, 0, None, None);
-    log::info!("[coord] session cancelled (was {phase:?})");
+    log::info!("[coord] session cancelled (was {:?})", decision.phase);
     schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
 }
 
@@ -4699,36 +4593,6 @@ const COORDINATOR_GLOBAL_TIMEOUT_SECS: u64 = 15;
 #[cfg(target_os = "windows")]
 fn foundry_audio_transcribe_timeout_duration() -> std::time::Duration {
     std::time::Duration::from_secs(COORDINATOR_GLOBAL_TIMEOUT_SECS)
-}
-
-/// begin_session 中各 await 之间的 cancel race 检查结果。
-enum BeginOutcome {
-    /// 启动 continuation 属于旧 session；不能改动当前 session 状态。
-    StaleContinuation,
-    /// 正常进入 Listening。
-    Started,
-    /// Starting 阶段积累了 pending_stop 边沿，应立即 end_session（hold 快速松开 / toggle 快速双击）。
-    PendingStop,
-    /// 期间 cancel_session 触发（cancelled=true 或 phase 被外部改回 Idle）。
-    /// 必须回滚 recorder + ASR 资源，不进 Listening。
-    CancelRaced,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StartupRaceStatus {
-    ActiveStarting,
-    CancelRaced,
-    StaleContinuation,
-}
-
-fn startup_race_status(state: &SessionState, captured_session_id: SessionId) -> StartupRaceStatus {
-    if state.session_id != captured_session_id {
-        StartupRaceStatus::StaleContinuation
-    } else if state.cancelled || state.phase != SessionPhase::Starting {
-        StartupRaceStatus::CancelRaced
-    } else {
-        StartupRaceStatus::ActiveStarting
-    }
 }
 
 /// 检查 begin_session 的 await 间隙是否被 cancel_session 打断。

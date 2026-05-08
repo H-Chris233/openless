@@ -15,6 +15,7 @@ mod audio_mute;
 mod combo_hotkey;
 mod commands;
 mod coordinator;
+mod coordinator_state;
 mod global_hotkey_runtime;
 mod hotkey;
 mod insertion;
