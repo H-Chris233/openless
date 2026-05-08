@@ -16,6 +16,16 @@ use parking_lot::Mutex;
 use tauri::{async_runtime, AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
+type SessionId = Uuid;
+
+fn new_session_id() -> SessionId {
+    Uuid::new_v4()
+}
+
+fn initial_session_id() -> SessionId {
+    Uuid::nil()
+}
+
 #[cfg(target_os = "windows")]
 use crate::asr::local::{foundry, FoundryLocalRuntime, FoundryLocalWhisperAsr};
 use crate::asr::{
@@ -75,12 +85,12 @@ fn asr_transcribe_uses_global_timeout(asr: &ActiveAsr) -> bool {
 }
 
 struct SessionResource<T> {
-    session_id: u64,
+    session_id: SessionId,
     resource: T,
 }
 
 impl<T> SessionResource<T> {
-    fn new(session_id: u64, resource: T) -> Self {
+    fn new(session_id: SessionId, resource: T) -> Self {
         Self {
             session_id,
             resource,
@@ -102,10 +112,10 @@ struct SessionState {
     /// 跳过 history.append。issue #52。
     cancelled: bool,
     focus_target: Option<usize>,
-    /// 单调递增的 session id。begin_session 自增。
+    /// 每次 begin_session 生成新的 UUID session id。
     /// recorder error monitor 持有 captured id，处理时若与当前不等说明
     /// 是上一 session 的迟到错误，必须 drop，不要 abort 当前 active session。
-    session_id: u64,
+    session_id: SessionId,
     /// 用户开始 dictation 时所处的前台 app 标签（"Mail (com.apple.mail)" / Windows 窗口标题）。
     /// 用作 LLM polish/translate 的上下文前提，让模型按 app 调风格。详见 issue #116。
     front_app: Option<String>,
@@ -133,7 +143,7 @@ impl Default for SessionState {
             pending_stop: false,
             cancelled: false,
             focus_target: None,
-            session_id: 0,
+            session_id: initial_session_id(),
             front_app: None,
         }
     }
@@ -214,7 +224,7 @@ struct QaSessionState {
     selection: Option<SelectionContext>,
     front_app: Option<String>,
     /// 用于忽略迟到的 RMS / runtime error。
-    session_id: u64,
+    session_id: SessionId,
     /// QA 浮窗是否被用户钉住（pinned）。pinned=true 时不自动隐藏。
     pinned: bool,
     /// 浮窗是否对用户可见。Cmd+Shift+; 边沿 toggle 此 flag；
@@ -232,7 +242,7 @@ impl Default for QaSessionState {
             cancelled: false,
             selection: None,
             front_app: None,
-            session_id: 0,
+            session_id: initial_session_id(),
             pinned: false,
             panel_visible: false,
             messages: Vec::new(),
@@ -243,7 +253,7 @@ impl Default for QaSessionState {
 #[cfg(target_os = "windows")]
 #[derive(Debug)]
 struct PreparedWindowsImeSessionSlot {
-    session_id: u64,
+    session_id: SessionId,
     prepared: PreparedWindowsImeSession,
 }
 
@@ -1700,7 +1710,10 @@ fn request_stop_during_starting(inner: &Arc<Inner>, reason: &str) {
     stop_recorder_if_pending_start_stop(inner);
 }
 
-fn take_session_resource<T>(slot: &mut Option<SessionResource<T>>, session_id: u64) -> Option<T> {
+fn take_session_resource<T>(
+    slot: &mut Option<SessionResource<T>>,
+    session_id: SessionId,
+) -> Option<T> {
     if slot
         .as_ref()
         .map(|resource| resource.session_id == session_id)
@@ -1712,11 +1725,11 @@ fn take_session_resource<T>(slot: &mut Option<SessionResource<T>>, session_id: u
     }
 }
 
-fn store_asr_for_session(inner: &Arc<Inner>, session_id: u64, asr: ActiveAsr) {
+fn store_asr_for_session(inner: &Arc<Inner>, session_id: SessionId, asr: ActiveAsr) {
     *inner.asr.lock() = Some(SessionResource::new(session_id, asr));
 }
 
-fn take_asr_for_session(inner: &Arc<Inner>, session_id: u64) -> Option<ActiveAsr> {
+fn take_asr_for_session(inner: &Arc<Inner>, session_id: SessionId) -> Option<ActiveAsr> {
     let mut slot = inner.asr.lock();
     take_session_resource(&mut slot, session_id)
 }
@@ -1732,13 +1745,13 @@ fn cancel_active_asr(asr: ActiveAsr) {
     }
 }
 
-fn cancel_asr_for_session(inner: &Arc<Inner>, session_id: u64) {
+fn cancel_asr_for_session(inner: &Arc<Inner>, session_id: SessionId) {
     if let Some(asr) = take_asr_for_session(inner, session_id) {
         cancel_active_asr(asr);
     }
 }
 
-fn store_recorder_for_session(inner: &Arc<Inner>, session_id: u64, recorder: Recorder) {
+fn store_recorder_for_session(inner: &Arc<Inner>, session_id: SessionId, recorder: Recorder) {
     *inner.recorder.lock() = Some(SessionResource::new(session_id, recorder));
 }
 
@@ -1804,19 +1817,19 @@ fn stop_qa_recorder(inner: &Arc<Inner>) {
     }
 }
 
-fn take_recorder_for_session(inner: &Arc<Inner>, session_id: u64) -> Option<Recorder> {
+fn take_recorder_for_session(inner: &Arc<Inner>, session_id: SessionId) -> Option<Recorder> {
     let mut slot = inner.recorder.lock();
     take_session_resource(&mut slot, session_id)
 }
 
-fn stop_recorder_for_session(inner: &Arc<Inner>, session_id: u64) {
+fn stop_recorder_for_session(inner: &Arc<Inner>, session_id: SessionId) {
     if let Some(recorder) = take_recorder_for_session(inner, session_id) {
         recorder.stop();
         release_recording_mute(inner, "dictation");
     }
 }
 
-fn discard_startup_resources_for_session(inner: &Arc<Inner>, session_id: u64) {
+fn discard_startup_resources_for_session(inner: &Arc<Inner>, session_id: SessionId) {
     stop_recorder_for_session(inner, session_id);
     cancel_asr_for_session(inner, session_id);
 }
@@ -1949,9 +1962,9 @@ async fn begin_session(inner: &Arc<Inner>) -> Result<(), String> {
         state.pending_stop = false;
         state.cancelled = false;
         state.focus_target = capture_focus_target();
-        // 自增 session_id；spawn 出去的 recorder error monitor 会捕获这个值，
+        // 新建 UUID session_id；spawn 出去的 recorder error monitor 会捕获这个值，
         // 如果迟到错误到达时 id 已不匹配就 drop，不会误中止后续 session。
-        state.session_id = state.session_id.wrapping_add(1);
+        state.session_id = new_session_id();
         state.front_app = capture_frontmost_app();
         if let Some(label) = state.front_app.as_deref() {
             log::info!("[coord] front_app captured: {label}");
@@ -2168,7 +2181,7 @@ async fn begin_session(inner: &Arc<Inner>) -> Result<(), String> {
 
 fn start_recorder_for_starting(
     inner: &Arc<Inner>,
-    session_id: u64,
+    session_id: SessionId,
     active_asr: &str,
     consumer: Arc<dyn crate::recorder::AudioConsumer>,
 ) -> Result<(), String> {
@@ -2341,7 +2354,7 @@ fn abort_recording_with_error(inner: &Arc<Inner>, message: String) {
 
 struct RecordingAbort {
     elapsed: u64,
-    session_id: u64,
+    session_id: SessionId,
 }
 
 fn begin_recording_abort_before_restore(state: &mut SessionState) -> Option<RecordingAbort> {
@@ -2360,7 +2373,7 @@ fn begin_recording_abort_before_restore(state: &mut SessionState) -> Option<Reco
     })
 }
 
-fn publish_abort_idle_after_restore(state: &mut SessionState, session_id: u64) {
+fn publish_abort_idle_after_restore(state: &mut SessionState, session_id: SessionId) {
     if state.session_id == session_id {
         state.phase = SessionPhase::Idle;
     }
@@ -2368,7 +2381,7 @@ fn publish_abort_idle_after_restore(state: &mut SessionState, session_id: u64) {
 
 async fn start_recorder_and_enter_listening(
     inner: &Arc<Inner>,
-    session_id: u64,
+    session_id: SessionId,
     active_asr: &str,
     consumer: Arc<dyn crate::recorder::AudioConsumer>,
 ) -> Result<(), String> {
@@ -2377,7 +2390,7 @@ async fn start_recorder_and_enter_listening(
     Ok(())
 }
 
-async fn finish_starting_session(inner: &Arc<Inner>, session_id: u64) {
+async fn finish_starting_session(inner: &Arc<Inner>, session_id: SessionId) {
     // audit HIGH #1：转 Listening 之前在同一 lock 内检查 cancel race。
     // 之前是无条件 phase=Listening，会把 cancel_session 在 await 期间设的 Idle
     // 反向覆盖回 Listening → 用户的 cancel 边沿被吞掉。
@@ -2938,7 +2951,7 @@ fn cancel_session(inner: &Arc<Inner>) {
 #[cfg(target_os = "windows")]
 fn store_prepared_windows_ime_session(
     slots: &mut Vec<PreparedWindowsImeSessionSlot>,
-    session_id: u64,
+    session_id: SessionId,
     prepared: PreparedWindowsImeSession,
 ) {
     slots.retain(|slot| slot.session_id != session_id);
@@ -2951,7 +2964,7 @@ fn store_prepared_windows_ime_session(
 #[cfg(target_os = "windows")]
 fn take_matching_prepared_windows_ime_session(
     slots: &mut Vec<PreparedWindowsImeSessionSlot>,
-    session_id: u64,
+    session_id: SessionId,
 ) -> Option<PreparedWindowsImeSession> {
     let index = slots
         .iter()
@@ -2962,8 +2975,8 @@ fn take_matching_prepared_windows_ime_session(
 #[cfg(target_os = "windows")]
 fn take_current_prepared_windows_ime_session_for_restore(
     slots: &mut Vec<PreparedWindowsImeSessionSlot>,
-    session_id: u64,
-    current_session_id: u64,
+    session_id: SessionId,
+    current_session_id: SessionId,
 ) -> Option<PreparedWindowsImeSession> {
     let prepared = take_matching_prepared_windows_ime_session(slots, session_id)?;
     if current_session_id == session_id {
@@ -2974,7 +2987,7 @@ fn take_current_prepared_windows_ime_session_for_restore(
 }
 
 #[cfg(target_os = "windows")]
-fn restore_prepared_windows_ime_session(inner: &Arc<Inner>, session_id: u64) {
+fn restore_prepared_windows_ime_session(inner: &Arc<Inner>, session_id: SessionId) {
     let state = inner.state.lock();
     let prepared = {
         let mut slot = inner.prepared_windows_ime_session.lock();
@@ -2990,12 +3003,12 @@ fn restore_prepared_windows_ime_session(inner: &Arc<Inner>, session_id: u64) {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn restore_prepared_windows_ime_session(_inner: &Arc<Inner>, _session_id: u64) {}
+fn restore_prepared_windows_ime_session(_inner: &Arc<Inner>, _session_id: SessionId) {}
 
 #[cfg(target_os = "windows")]
 async fn insert_with_windows_ime_first(
     inner: &Arc<Inner>,
-    session_id: u64,
+    session_id: SessionId,
     polished: &str,
     restore_clipboard: bool,
     allow_non_tsf_insertion_fallback: bool,
@@ -3219,12 +3232,12 @@ fn foundry_local_asr_release_keep_secs(inner: &Arc<Inner>) -> u32 {
 }
 
 #[cfg(target_os = "windows")]
-fn foundry_release_session_is_current(inner: &Arc<Inner>, session_id: u64) -> bool {
+fn foundry_release_session_is_current(inner: &Arc<Inner>, session_id: SessionId) -> bool {
     inner.state.lock().session_id == session_id
 }
 
 #[cfg(target_os = "windows")]
-fn schedule_foundry_local_asr_release(inner: &Arc<Inner>, session_id: u64) {
+fn schedule_foundry_local_asr_release(inner: &Arc<Inner>, session_id: SessionId) {
     let keep_secs = foundry_local_asr_release_keep_secs(inner);
     let runtime = Arc::clone(&inner.foundry_local_runtime);
     let inner = Arc::clone(inner);
@@ -3507,7 +3520,7 @@ async fn begin_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
         }
         state.phase = QaPhase::Recording;
         state.cancelled = false;
-        state.session_id = state.session_id.wrapping_add(1);
+        state.session_id = new_session_id();
         state.front_app = capture_frontmost_app();
         state.selection = None;
     }
@@ -3999,6 +4012,10 @@ mod tests {
     use super::*;
     use crate::types::HotkeyTrigger;
 
+    fn session_id(n: u128) -> SessionId {
+        Uuid::from_u128(n)
+    }
+
     #[tokio::test]
     async fn hotkey_injection_gate_logs_pressed_and_cancels() {
         let _ = env_logger::builder()
@@ -4122,7 +4139,7 @@ mod tests {
             old_session_id
         ));
 
-        coordinator.inner.state.lock().session_id = old_session_id.wrapping_add(1);
+        coordinator.inner.state.lock().session_id = new_session_id();
 
         assert!(!foundry_release_session_is_current(
             &coordinator.inner,
@@ -4214,11 +4231,11 @@ mod tests {
         let mut state = SessionState::default();
         state.phase = SessionPhase::Listening;
         state.cancelled = false;
-        state.session_id = 7;
+        state.session_id = session_id(7);
 
         let abort = begin_recording_abort_before_restore(&mut state).unwrap();
 
-        assert_eq!(abort.session_id, 7);
+        assert_eq!(abort.session_id, session_id(7));
         assert!(state.cancelled);
         assert_eq!(state.phase, SessionPhase::Listening);
 
@@ -4233,14 +4250,14 @@ mod tests {
         {
             let mut state = coordinator.inner.state.lock();
             state.phase = SessionPhase::Inserting;
-            state.session_id = 41;
+            state.session_id = session_id(41);
         }
 
         handle_pressed_edge(&coordinator.inner).await;
 
         let state = coordinator.inner.state.lock();
         assert_eq!(state.phase, SessionPhase::Inserting);
-        assert_eq!(state.session_id, 41);
+        assert_eq!(state.session_id, session_id(41));
     }
 
     #[tokio::test]
@@ -4298,17 +4315,17 @@ mod tests {
     #[cfg(target_os = "windows")]
     fn prepared_windows_ime_slot_is_taken_only_for_matching_session() {
         let mut slots = vec![PreparedWindowsImeSessionSlot {
-            session_id: 2,
+            session_id: session_id(2),
             prepared: PreparedWindowsImeSession::unavailable(),
         }];
 
-        assert!(take_matching_prepared_windows_ime_session(&mut slots, 1).is_none());
+        assert!(take_matching_prepared_windows_ime_session(&mut slots, session_id(1)).is_none());
         assert_eq!(
             slots.iter().map(|slot| slot.session_id).collect::<Vec<_>>(),
-            vec![2]
+            vec![session_id(2)]
         );
 
-        assert!(take_matching_prepared_windows_ime_session(&mut slots, 2).is_some());
+        assert!(take_matching_prepared_windows_ime_session(&mut slots, session_id(2)).is_some());
         assert!(slots.is_empty());
     }
 
@@ -4316,18 +4333,26 @@ mod tests {
     #[cfg(target_os = "windows")]
     fn prepared_windows_ime_sessions_keep_overlapping_snapshots() {
         let mut slots = Vec::new();
-        store_prepared_windows_ime_session(&mut slots, 1, PreparedWindowsImeSession::unavailable());
-        store_prepared_windows_ime_session(&mut slots, 2, PreparedWindowsImeSession::unavailable());
-
-        assert_eq!(
-            slots.iter().map(|slot| slot.session_id).collect::<Vec<_>>(),
-            vec![1, 2]
+        store_prepared_windows_ime_session(
+            &mut slots,
+            session_id(1),
+            PreparedWindowsImeSession::unavailable(),
+        );
+        store_prepared_windows_ime_session(
+            &mut slots,
+            session_id(2),
+            PreparedWindowsImeSession::unavailable(),
         );
 
-        assert!(take_matching_prepared_windows_ime_session(&mut slots, 1).is_some());
         assert_eq!(
             slots.iter().map(|slot| slot.session_id).collect::<Vec<_>>(),
-            vec![2]
+            vec![session_id(1), session_id(2)]
+        );
+
+        assert!(take_matching_prepared_windows_ime_session(&mut slots, session_id(1)).is_some());
+        assert_eq!(
+            slots.iter().map(|slot| slot.session_id).collect::<Vec<_>>(),
+            vec![session_id(2)]
         );
     }
 
@@ -4335,13 +4360,26 @@ mod tests {
     #[cfg(target_os = "windows")]
     fn stale_prepared_windows_ime_restore_discards_old_snapshot_without_restoring() {
         let mut slots = Vec::new();
-        store_prepared_windows_ime_session(&mut slots, 1, PreparedWindowsImeSession::unavailable());
-        store_prepared_windows_ime_session(&mut slots, 2, PreparedWindowsImeSession::unavailable());
+        store_prepared_windows_ime_session(
+            &mut slots,
+            session_id(1),
+            PreparedWindowsImeSession::unavailable(),
+        );
+        store_prepared_windows_ime_session(
+            &mut slots,
+            session_id(2),
+            PreparedWindowsImeSession::unavailable(),
+        );
 
-        assert!(take_current_prepared_windows_ime_session_for_restore(&mut slots, 1, 2).is_none());
+        assert!(take_current_prepared_windows_ime_session_for_restore(
+            &mut slots,
+            session_id(1),
+            session_id(2)
+        )
+        .is_none());
         assert_eq!(
             slots.iter().map(|slot| slot.session_id).collect::<Vec<_>>(),
-            vec![2]
+            vec![session_id(2)]
         );
     }
 
@@ -4400,10 +4438,10 @@ mod tests {
         let mut state = SessionState::default();
         state.phase = SessionPhase::Starting;
         state.cancelled = false;
-        state.session_id = 2;
+        state.session_id = session_id(2);
 
         assert_eq!(
-            startup_race_status(&state, 1),
+            startup_race_status(&state, session_id(1)),
             StartupRaceStatus::StaleContinuation
         );
     }
@@ -4417,11 +4455,11 @@ mod tests {
             "model".to_string(),
         ));
         *coordinator.inner.asr.lock() = Some(SessionResource::new(
-            2,
+            session_id(2),
             ActiveAsr::Whisper(Arc::clone(&newer_asr)),
         ));
 
-        discard_startup_resources_for_session(&coordinator.inner, 1);
+        discard_startup_resources_for_session(&coordinator.inner, session_id(1));
 
         assert_eq!(
             coordinator
@@ -4430,10 +4468,10 @@ mod tests {
                 .lock()
                 .as_ref()
                 .map(|resource| resource.session_id),
-            Some(2)
+            Some(session_id(2))
         );
 
-        discard_startup_resources_for_session(&coordinator.inner, 2);
+        discard_startup_resources_for_session(&coordinator.inner, session_id(2));
 
         assert!(coordinator.inner.asr.lock().is_none());
     }
@@ -4484,7 +4522,7 @@ enum StartupRaceStatus {
     StaleContinuation,
 }
 
-fn startup_race_status(state: &SessionState, captured_session_id: u64) -> StartupRaceStatus {
+fn startup_race_status(state: &SessionState, captured_session_id: SessionId) -> StartupRaceStatus {
     if state.session_id != captured_session_id {
         StartupRaceStatus::StaleContinuation
     } else if state.cancelled || state.phase != SessionPhase::Starting {
@@ -4499,13 +4537,13 @@ fn startup_race_status(state: &SessionState, captured_session_id: u64) -> Startu
 /// 「准备做下一步副作用前」用。
 fn startup_race_status_for_starting(
     inner: &Arc<Inner>,
-    captured_session_id: u64,
+    captured_session_id: SessionId,
 ) -> StartupRaceStatus {
     let state = inner.state.lock();
     startup_race_status(&state, captured_session_id)
 }
 
-fn set_phase_idle_if_session_matches(inner: &Arc<Inner>, session_id: u64) {
+fn set_phase_idle_if_session_matches(inner: &Arc<Inner>, session_id: SessionId) {
     let mut state = inner.state.lock();
     if state.session_id == session_id {
         state.phase = SessionPhase::Idle;
