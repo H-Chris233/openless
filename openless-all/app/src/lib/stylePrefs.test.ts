@@ -1,4 +1,5 @@
 import {
+  applyStylePreferencesNotification,
   persistStylePreferenceChange,
   rollbackStyleEnabledChange,
   rollbackWholeStylePreferences,
@@ -105,3 +106,11 @@ assert(
   currentPrefs?.enabledModes.includes('structured') === false,
   'failed light toggle should preserve newer structured edit',
 );
+
+const notifiedPrefs: UserPreferences = {
+  ...previousPrefs,
+  defaultMode: 'formal',
+  enabledModes: ['raw', 'formal'],
+};
+const syncedPrefs = applyStylePreferencesNotification(previousPrefs, notifiedPrefs);
+assert(syncedPrefs === notifiedPrefs, 'prefs notification should replace stale style page prefs');

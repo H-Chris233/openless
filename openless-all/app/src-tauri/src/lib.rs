@@ -49,6 +49,8 @@ use tauri::menu::{
 use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, RunEvent, Runtime};
 
+use crate::types::PolishMode;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let foundry_local_runtime = Arc::new(asr::local::FoundryLocalRuntime::new());
@@ -192,7 +194,12 @@ pub fn run() {
                     .on_menu_event(move |app, event| match event.id.as_ref() {
                         "toggle" => show_main_window(app),
                         "quit" => app.exit(0),
-                        id => handle_microphone_tray_menu_event(app, id),
+                        id => {
+                            if handle_style_tray_menu_event(app, id) {
+                                return;
+                            }
+                            handle_microphone_tray_menu_event(app, id);
+                        }
                     })
                     .on_tray_icon_event(move |tray, event| match event {
                         TrayIconEvent::Enter { .. } => {
@@ -355,9 +362,52 @@ struct MicrophoneTrayMenu {
     items: Vec<commands::TrayMicrophoneMenuItem>,
 }
 
+struct StyleTrayMenu {
+    submenu: Submenu<tauri::Wry>,
+}
+
 struct TrayMenu {
     menu: Menu<tauri::Wry>,
     microphone_items: Vec<commands::TrayMicrophoneMenuItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TrayPolishModeMenuEntry {
+    id: String,
+    label: &'static str,
+    mode: PolishMode,
+    checked: bool,
+}
+
+fn tray_style_menu_enabled() -> bool {
+    cfg!(target_os = "windows")
+}
+
+fn tray_polish_mode_menu_entries(selected: PolishMode) -> Vec<TrayPolishModeMenuEntry> {
+    [
+        (PolishMode::Raw, "style-raw"),
+        (PolishMode::Light, "style-light"),
+        (PolishMode::Structured, "style-structured"),
+        (PolishMode::Formal, "style-formal"),
+    ]
+    .into_iter()
+    .map(|(mode, id)| TrayPolishModeMenuEntry {
+        id: id.to_string(),
+        label: mode.display_name(),
+        mode,
+        checked: mode == selected,
+    })
+    .collect()
+}
+
+fn parse_tray_polish_mode_id(id: &str) -> Option<PolishMode> {
+    match id {
+        "style-raw" => Some(PolishMode::Raw),
+        "style-light" => Some(PolishMode::Light),
+        "style-structured" => Some(PolishMode::Structured),
+        "style-formal" => Some(PolishMode::Formal),
+        _ => None,
+    }
 }
 
 fn build_tray_menu<M: Manager<tauri::Wry>>(
@@ -367,12 +417,38 @@ fn build_tray_menu<M: Manager<tauri::Wry>>(
     let toggle = MenuItemBuilder::with_id("toggle", "显示主窗口").build(app)?;
     let microphone_menu = build_microphone_tray_menu(app, coordinator)?;
     let quit = MenuItemBuilder::with_id("quit", "退出 OpenLess").build(app)?;
-    let menu = MenuBuilder::new(app)
+    let mut builder = MenuBuilder::new(app);
+    let style_menu = if tray_style_menu_enabled() {
+        Some(build_style_tray_menu(app, coordinator)?)
+    } else {
+        None
+    };
+    if let Some(style_menu) = &style_menu {
+        builder = builder.item(&style_menu.submenu);
+    }
+    let menu = builder
         .items(&[&toggle, &microphone_menu.submenu, &quit])
         .build()?;
     Ok(TrayMenu {
         menu,
         microphone_items: microphone_menu.items,
+    })
+}
+
+fn build_style_tray_menu<M: Manager<tauri::Wry>>(
+    app: &M,
+    coordinator: &Arc<coordinator::Coordinator>,
+) -> tauri::Result<StyleTrayMenu> {
+    let selected = coordinator.prefs().get().default_mode;
+    let mut submenu = SubmenuBuilder::with_id(app, "style", "输出风格");
+    for entry in tray_polish_mode_menu_entries(selected) {
+        let item = CheckMenuItemBuilder::with_id(&entry.id, entry.label)
+            .checked(entry.checked)
+            .build(app)?;
+        submenu = submenu.item(&item);
+    }
+    Ok(StyleTrayMenu {
+        submenu: submenu.build()?,
     })
 }
 
@@ -510,6 +586,25 @@ fn handle_microphone_tray_menu_event(app: &AppHandle, id: &str) {
     let _ = app.emit("prefs:changed", &prefs);
 
     commands::sync_tray_microphone_selection(&items, &selected.device_name);
+}
+
+fn handle_style_tray_menu_event(app: &AppHandle, id: &str) -> bool {
+    let Some(mode) = parse_tray_polish_mode_id(id) else {
+        return false;
+    };
+    let coord = app.state::<Arc<coordinator::Coordinator>>();
+    let mut prefs = coord.prefs().get();
+    prefs.default_mode = mode;
+    if let Err(err) = coord.prefs().set(prefs.clone()) {
+        log::warn!("[tray] save polish mode preference failed: {err}");
+        return true;
+    }
+    let _ = app.emit("prefs:changed", &prefs);
+    let _ = app.emit_to("main", "prefs:changed", &prefs);
+    if let Err(err) = refresh_tray_microphone_menu(app) {
+        log::warn!("[tray] refresh style menu after polish mode change failed: {err}");
+    }
+    true
 }
 
 #[cfg(target_os = "windows")]
@@ -1066,9 +1161,54 @@ fn capsule_height_for_qa() -> f64 {
 mod tests {
     use super::{
         capsule_height_for_qa, capsule_visual_height, capsule_window_bounds,
-        rotate_log_if_too_large, LOG_ROTATE_LIMIT_BYTES,
+        parse_tray_polish_mode_id, rotate_log_if_too_large, tray_polish_mode_menu_entries,
+        tray_style_menu_enabled, LOG_ROTATE_LIMIT_BYTES,
     };
+    use crate::types::PolishMode;
     use std::io::Write;
+
+    #[test]
+    fn tray_style_menu_is_windows_only() {
+        #[cfg(target_os = "windows")]
+        assert!(tray_style_menu_enabled());
+
+        #[cfg(not(target_os = "windows"))]
+        assert!(!tray_style_menu_enabled());
+    }
+
+    #[test]
+    fn tray_style_menu_lists_builtin_modes_in_expected_order() {
+        let entries = tray_polish_mode_menu_entries(PolishMode::Structured);
+
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| (entry.id.as_str(), entry.label, entry.mode, entry.checked))
+                .collect::<Vec<_>>(),
+            vec![
+                ("style-raw", "原文", PolishMode::Raw, false),
+                ("style-light", "轻度润色", PolishMode::Light, false),
+                ("style-structured", "清晰结构", PolishMode::Structured, true),
+                ("style-formal", "正式表达", PolishMode::Formal, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn tray_style_menu_id_parsing_accepts_only_style_items() {
+        assert_eq!(parse_tray_polish_mode_id("style-raw"), Some(PolishMode::Raw));
+        assert_eq!(parse_tray_polish_mode_id("style-light"), Some(PolishMode::Light));
+        assert_eq!(
+            parse_tray_polish_mode_id("style-structured"),
+            Some(PolishMode::Structured)
+        );
+        assert_eq!(
+            parse_tray_polish_mode_id("style-formal"),
+            Some(PolishMode::Formal)
+        );
+        assert_eq!(parse_tray_polish_mode_id("toggle"), None);
+        assert_eq!(parse_tray_polish_mode_id("mic-default"), None);
+    }
 
     #[test]
     fn capsule_window_bounds_leave_room_for_windows_shadow() {

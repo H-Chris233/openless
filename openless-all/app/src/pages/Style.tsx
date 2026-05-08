@@ -6,12 +6,14 @@ import { useTranslation } from 'react-i18next';
 import { getSettings, setDefaultPolishMode, setStyleEnabled, setSettings } from '../lib/ipc';
 import type { PolishMode, UserPreferences } from '../lib/types';
 import {
+  applyStylePreferencesNotification,
   persistStylePreferenceChange,
   rollbackDefaultModeChange,
   rollbackStyleEnabledChange,
   rollbackWholeStylePreferences,
 } from '../lib/stylePrefs';
 import { PageHeader, Pill } from './_atoms';
+import { useHotkeySettings } from '../state/HotkeySettingsContext';
 
 interface StyleDef {
   id: PolishMode;
@@ -25,6 +27,7 @@ type StyleSaveErrorTarget = PolishMode | 'master';
 
 export function Style() {
   const { t } = useTranslation();
+  const { prefs: sharedPrefs } = useHotkeySettings();
   const STYLES: StyleDef[] = STYLE_IDS.map(id => ({
     id,
     name: t(`style.modes.${id}.name`),
@@ -36,6 +39,33 @@ export function Style() {
 
   useEffect(() => {
     getSettings().then(setPrefs);
+  }, []);
+
+  useEffect(() => {
+    if (!sharedPrefs) return;
+    setPrefs(current => applyStylePreferencesNotification(current, sharedPrefs));
+    setSaveError(null);
+  }, [sharedPrefs]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { listen } = await import('@tauri-apps/api/event');
+        unlisten = await listen<UserPreferences>('prefs:changed', event => {
+          setPrefs(current => applyStylePreferencesNotification(current, event.payload));
+          setSaveError(null);
+        });
+        if (cancelled && unlisten) unlisten();
+      } catch (error) {
+        console.warn('[style] prefs:changed listener setup failed', error);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
   }, []);
 
   const showSaveError = (target: StyleSaveErrorTarget, error: string) => {
