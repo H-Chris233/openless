@@ -216,12 +216,15 @@ impl BailianRealtimeASR {
     }
 
     pub async fn send_last_frame(&self) -> Result<(), BailianASRError> {
-        let started = {
+        let started = self.task_started.notified();
+        tokio::pin!(started);
+        started.as_mut().enable();
+        let ready = {
             let st = self.state.lock();
             st.task_started || st.task_finished
         };
-        if !started {
-            tokio::time::timeout(Duration::from_secs(5), self.task_started.notified())
+        if !ready {
+            tokio::time::timeout(Duration::from_secs(5), started)
                 .await
                 .map_err(|_| BailianASRError::FinalResultTimeout)?;
         }
