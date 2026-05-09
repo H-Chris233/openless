@@ -12,8 +12,14 @@ pub(super) async fn handle_pressed_edge(inner: &Arc<Inner>) {
     let was_held = inner.hotkey_trigger_held.swap(true, Ordering::SeqCst);
     if !was_held {
         // 路由：QA 浮窗可见时，rightOption 边沿走 QA；否则走主听写。详见 issue #118 v2。
+        // 例外：dictation session 已经在跑（Starting / Listening / Processing / Inserting），
+        // 即使 QA 浮窗被打开了，这条边沿也必须先走 dictation。否则 begin_qa_session 会
+        // 第二次抢同一个麦克风 device —— 在 Linux/PipeWire 上甚至会成功打开两路捕获，
+        // dictation 的 recorder 没人停；在 macOS/Windows 上 cpal 会拒绝第二次 build_input_stream
+        // 但 dictation session 仍在跑、用户找不到从 QA 面板停掉它的入口。审计 3.3.1。
+        let dictation_active = !matches!(inner.state.lock().phase, SessionPhase::Idle);
         let panel_visible = inner.qa_state.lock().panel_visible;
-        if panel_visible {
+        if panel_visible && !dictation_active {
             handle_qa_option_edge(inner).await;
         } else {
             handle_pressed(inner).await;
@@ -48,8 +54,12 @@ pub(super) async fn handle_released_edge(inner: &Arc<Inner>) {
     let was_held = inner.hotkey_trigger_held.swap(false, Ordering::SeqCst);
     if was_held {
         // QA 浮窗可见时，Option 行为是 press-toggle（不分 hold/release），release 边沿忽略。
+        // 与 handle_pressed_edge 的路由对称：dictation session 在跑时 Pressed 已经被路由到
+        // dictation，那 Released 必须也路由到 dictation —— 否则 Hold 模式松开热键时
+        // end_session 不会触发，dictation 永远停不下来。审计 3.3.1。
+        let dictation_active = !matches!(inner.state.lock().phase, SessionPhase::Idle);
         let panel_visible = inner.qa_state.lock().panel_visible;
-        if panel_visible {
+        if panel_visible && !dictation_active {
             return;
         }
         handle_released(inner).await;
