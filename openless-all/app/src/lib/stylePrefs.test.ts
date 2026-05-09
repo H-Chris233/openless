@@ -48,6 +48,7 @@ const previousPrefs: UserPreferences = {
   historyRetentionDays: 7,
   polishContextWindowMinutes: 5,
   startMinimized: false,
+  updateChannel: 'stable',
 };
 
 const nextPrefs: UserPreferences = {
