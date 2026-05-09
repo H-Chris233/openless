@@ -6,6 +6,7 @@
 //! and one dispatcher instead of racing on `GlobalHotKeyEvent::receiver()`.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,6 +21,10 @@ static RUNTIME: OnceCell<Arc<GlobalHotkeyRuntime>> = OnceCell::new();
 pub struct GlobalHotkeyRuntime {
     manager: GlobalHotKeyManager,
     routes: Mutex<HashMap<u32, Sender<GlobalHotKeyEvent>>>,
+    /// 用于 dispatcher loop 的退出信号。process-singleton 在生产路径里不会被
+    /// drop，但 integration test / future RunEvent::Exit 钩子可以调用
+    /// `request_shutdown` 让 dispatcher 退出。审计 3.4.4。
+    shutdown: AtomicBool,
 }
 
 // global-hotkey 0.6 does not mark its manager Send/Sync on all platforms even
@@ -41,11 +46,20 @@ impl GlobalHotkeyRuntime {
                 let runtime = Arc::new(Self {
                     manager,
                     routes: Mutex::new(HashMap::new()),
+                    shutdown: AtomicBool::new(false),
                 });
                 start_dispatcher(Arc::clone(&runtime));
                 Ok(runtime)
             })
             .cloned()
+    }
+
+    /// Signal the dispatcher loop to exit at its next 250 ms tick. Idempotent.
+    /// Currently called only from tests; production app shutdown lets the OS
+    /// reap the process. Audit 3.4.4.
+    #[allow(dead_code)]
+    pub fn request_shutdown(&self) {
+        self.shutdown.store(true, Ordering::SeqCst);
     }
 
     pub fn register(
@@ -97,6 +111,9 @@ fn start_dispatcher(runtime: Arc<GlobalHotkeyRuntime>) {
         .spawn(move || {
             let receiver = GlobalHotKeyEvent::receiver();
             loop {
+                if runtime.shutdown.load(Ordering::SeqCst) {
+                    return;
+                }
                 match receiver.recv_timeout(Duration::from_millis(250)) {
                     Ok(event) => runtime.dispatch(event),
                     Err(_) => continue,

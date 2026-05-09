@@ -139,6 +139,11 @@ struct Inner {
     /// polish::chat_completion_history_streaming 的 loop 每帧检查，true 时 break loop
     /// 避免取消后 LLM 仍 drain HTTP body 烧 token。详见 issue #161。
     qa_stream_cancelled: Arc<AtomicBool>,
+    /// Coordinator 退出信号。各 hotkey supervisor loop 在每轮重试 sleep 之前会检查
+    /// 此 flag；为 true 时 loop 立刻 return。生产场景里 process exit 一并 reap 所有
+    /// supervisor 线程，但 integration test 和未来 RunEvent::Exit 钩子需要这条
+    /// 显式退出路径。审计 3.1.2。
+    shutdown: AtomicBool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -197,6 +202,7 @@ impl Coordinator {
                     qa_recorder: Mutex::new(None),
                     qa_stream_cancelled: Arc::new(AtomicBool::new(false)),
                     local_asr_cache: Arc::new(crate::asr::local::LocalAsrCache::new()),
+                    shutdown: AtomicBool::new(false),
                 }),
             }
         }
@@ -241,6 +247,7 @@ impl Coordinator {
                 qa_stream_cancelled: Arc::new(AtomicBool::new(false)),
                 local_asr_cache: Arc::new(crate::asr::local::LocalAsrCache::new()),
                 foundry_local_runtime,
+                shutdown: AtomicBool::new(false),
             }),
         }
     }
@@ -297,6 +304,15 @@ impl Coordinator {
 
     pub fn bind_app(&self, handle: AppHandle) {
         *self.inner.app.lock() = Some(handle);
+    }
+
+    /// 让所有 hotkey supervisor loop（dictation / qa / combo / translation /
+    /// switch_style / open_app）在下一轮 sleep / poll 后退出。生产场景下进程退出
+    /// 一并 reap 所有线程，但 integration test 和未来 RunEvent::Exit 钩子需要
+    /// 显式退出路径。审计 3.1.2。
+    #[allow(dead_code)]
+    pub fn request_shutdown(&self) {
+        self.inner.shutdown.store(true, Ordering::SeqCst);
     }
 
     pub fn start_hotkey_listener(&self) {
@@ -768,6 +784,9 @@ fn hotkey_supervisor_loop(inner: Arc<Inner>) {
     let mut attempts: u32 = 0;
     let capability = HotkeyMonitor::capability();
     loop {
+        if inner.shutdown.load(Ordering::SeqCst) {
+            return;
+        }
         let prefs = inner.prefs.get();
 
         if inner.hotkey.lock().is_some() {
@@ -838,6 +857,9 @@ fn hotkey_supervisor_loop(inner: Arc<Inner>) {
 fn qa_hotkey_supervisor_loop(inner: Arc<Inner>) {
     let mut attempts: u32 = 0;
     loop {
+        if inner.shutdown.load(Ordering::SeqCst) {
+            return;
+        }
         // 用户已经把 QA 关掉就睡着等 prefs 改动；改动通过 update_qa_hotkey_binding 唤醒。
         let binding = match inner.prefs.get().qa_hotkey.clone() {
             Some(b) => b,
@@ -945,6 +967,9 @@ fn qa_hotkey_bridge_loop(inner: Arc<Inner>, rx: mpsc::Receiver<QaHotkeyEvent>) {
 fn combo_hotkey_supervisor_loop(inner: Arc<Inner>) {
     let mut attempts: u32 = 0;
     loop {
+        if inner.shutdown.load(Ordering::SeqCst) {
+            return;
+        }
         // 读当前 prefs
         let prefs = inner.prefs.get();
         if crate::shortcut_binding::legacy_modifier_trigger(&prefs.dictation_hotkey).is_some() {
@@ -1043,6 +1068,9 @@ fn combo_hotkey_bridge_loop(inner: Arc<Inner>, rx: mpsc::Receiver<ComboHotkeyEve
 fn translation_hotkey_supervisor_loop(inner: Arc<Inner>) {
     let mut attempts: u32 = 0;
     loop {
+        if inner.shutdown.load(Ordering::SeqCst) {
+            return;
+        }
         let binding = inner.prefs.get().translation_hotkey;
         if is_builtin_translation_shift(&binding)
             || crate::shortcut_binding::legacy_modifier_trigger(&binding).is_some()
@@ -1142,6 +1170,9 @@ fn translation_hotkey_bridge_loop(inner: Arc<Inner>, rx: mpsc::Receiver<ComboHot
 fn action_hotkey_supervisor_loop(inner: Arc<Inner>, kind: ActionHotkeyKind) {
     let mut attempts: u32 = 0;
     loop {
+        if inner.shutdown.load(Ordering::SeqCst) {
+            return;
+        }
         let binding = action_hotkey_binding(&inner, kind);
         if is_modifier_only_shortcut(&binding) {
             take_action_hotkey_on_main_thread(&inner, kind);
