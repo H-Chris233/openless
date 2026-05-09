@@ -204,6 +204,9 @@ mod tests {
             modifiers: vec!["cmd".into(), "shift".into()],
         };
         let parsed = parse_global_hotkey(&combo).expect("combo parses");
+        #[cfg(target_os = "windows")]
+        assert!(parsed.mods.contains(Modifiers::CONTROL));
+        #[cfg(not(target_os = "windows"))]
         assert!(parsed.mods.contains(Modifiers::SUPER));
         assert!(parsed.mods.contains(Modifiers::SHIFT));
         assert_eq!(parsed.key, Code::KeyD);
