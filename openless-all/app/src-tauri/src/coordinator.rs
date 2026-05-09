@@ -3656,37 +3656,48 @@ fn emit_capsule(
 ) {
     let app_opt = inner.app.lock().clone();
     let Some(app) = app_opt else { return };
+    let translation = inner.translation_modifier_seen.load(Ordering::SeqCst);
     let payload = CapsulePayload {
         state,
         level,
         elapsed_ms,
         message,
         inserted_chars,
-        translation: inner.translation_modifier_seen.load(Ordering::SeqCst),
+        translation,
     };
 
     let show_capsule = inner.prefs.get().show_capsule;
-    if let Some(window) = app.get_webview_window("capsule") {
+    let visible = !matches!(state, CapsuleState::Idle);
+
+    // emit_capsule 会被 cpal process_callback（音频回调线程）调用 ~30 Hz —— 在该
+    // 线程上调用 NSWindow / HWND API 会撞 macOS dispatch_assert_queue_fail SIGTRAP
+    // 或者 Win32 SendMessage 死锁。把 window.show/hide + 位置调整 marshal 到主线程；
+    // app.emit_to 走 Tauri 内部事件总线，本身线程安全，保留同步调用。详见 audit 3.2.2。
+    let inner_for_main = Arc::clone(inner);
+    let app_for_main = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let Some(window) = app_for_main.get_webview_window("capsule") else {
+            return;
+        };
         // 三平台统一：Done / Cancelled / Error 状态保留 ~1.5s toast
         // （schedule_capsule_idle 之后会回 Idle 隐藏）。
         // Windows 上 linger 的真实问题（截图选中 / 死区 / 拖拽卡顿）由 #140 加的
         // `hide_capsule_window_if_present()` Win32 hard-hide 在 visible=false 分支
         // 处理，不依赖把 Done/Cancelled/Error 打成 invisible。详见 PR #140 评论。
-        let visible = !matches!(state, CapsuleState::Idle);
-        maybe_position_capsule_bottom_center(inner, &window, payload.translation);
+        maybe_position_capsule_bottom_center(&inner_for_main, &window, translation);
         if show_capsule && visible {
-            if !show_capsule_window_no_activate(&app, &window) {
+            if !show_capsule_window_no_activate(&app_for_main, &window) {
                 let _ = window.show();
             }
             // macOS/Windows 优先走 no-activate show，避免录音胶囊抢走主窗口点击焦点。
             // 若 fallback 到 show()，OpenLess 已是前台 app 时再把 key window 还给 main。
             #[cfg(target_os = "macos")]
-            crate::restore_main_window_key_if_active(&app);
+            crate::restore_main_window_key_if_active(&app_for_main);
         } else {
             hide_capsule_window_if_present();
             let _ = window.hide();
         }
-    }
+    });
 
     let _ = app.emit_to("capsule", "capsule:state", payload);
 }
