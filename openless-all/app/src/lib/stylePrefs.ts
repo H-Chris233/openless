@@ -47,6 +47,11 @@ export function styleMasterOffPreferences(prefs: UserPreferences): UserPreferenc
   return { ...prefs, enabledModes: styleMasterFallbackModes(prefs.defaultMode) };
 }
 
+export function styleDefaultModePreferences(prefs: UserPreferences, mode: PolishMode): UserPreferences {
+  const nextPrefs = { ...prefs, defaultMode: mode };
+  return isStyleMasterEnabled(prefs) ? nextPrefs : styleMasterOffPreferences(nextPrefs);
+}
+
 export function rollbackDefaultModeChange(
   previousPrefs: UserPreferences,
   nextPrefs: UserPreferences,
@@ -80,6 +85,26 @@ export function rollbackWholeStylePreferences(
   return current => {
     if (!current || !sameModes(current.enabledModes, nextPrefs.enabledModes)) return current;
     return { ...current, enabledModes: previousPrefs.enabledModes };
+  };
+}
+
+export function rollbackDefaultAndEnabledChange(
+  previousPrefs: UserPreferences,
+  nextPrefs: UserPreferences,
+): StylePrefsRollback {
+  return current => {
+    if (
+      !current ||
+      current.defaultMode !== nextPrefs.defaultMode ||
+      !sameModes(current.enabledModes, nextPrefs.enabledModes)
+    ) {
+      return current;
+    }
+    return {
+      ...current,
+      defaultMode: previousPrefs.defaultMode,
+      enabledModes: previousPrefs.enabledModes,
+    };
   };
 }
 

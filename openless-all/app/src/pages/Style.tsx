@@ -9,9 +9,11 @@ import {
   applyStylePreferencesNotification,
   isStyleMasterEnabled,
   persistStylePreferenceChange,
+  rollbackDefaultAndEnabledChange,
   rollbackDefaultModeChange,
   rollbackStyleEnabledChange,
   rollbackWholeStylePreferences,
+  styleDefaultModePreferences,
   styleMasterOffPreferences,
 } from '../lib/stylePrefs';
 import { PageHeader, Pill } from './_atoms';
@@ -76,13 +78,16 @@ export function Style() {
 
   const onPickDefault = async (mode: PolishMode) => {
     if (!prefs) return;
-    const next = { ...prefs, defaultMode: mode };
+    const masterWasEnabled = isStyleMasterEnabled(prefs);
+    const next = styleDefaultModePreferences(prefs, mode);
     const saved = await persistStylePreferenceChange(
       next,
-      () => setDefaultPolishMode(mode),
+      () => (masterWasEnabled ? setDefaultPolishMode(mode) : setSettings(next)),
       setPrefs,
       error => showSaveError(mode, error),
-      rollbackDefaultModeChange(prefs, next),
+      masterWasEnabled
+        ? rollbackDefaultModeChange(prefs, next)
+        : rollbackDefaultAndEnabledChange(prefs, next),
     );
     if (saved) setSaveError(null);
   };

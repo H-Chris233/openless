@@ -1,9 +1,11 @@
 import {
   applyStylePreferencesNotification,
   isStyleMasterEnabled,
+  rollbackDefaultAndEnabledChange,
   persistStylePreferenceChange,
   rollbackStyleEnabledChange,
   rollbackWholeStylePreferences,
+  styleDefaultModePreferences,
   styleMasterFallbackModes,
   styleMasterOffPreferences,
 } from './stylePrefs';
@@ -141,4 +143,29 @@ const rawFallback = styleMasterFallbackModes('raw');
 assert(
   rawFallback.join(',') === 'raw',
   `raw default fallback should not duplicate raw, got ${rawFallback.join(',')}`,
+);
+
+
+const defaultAfterMasterOff = styleDefaultModePreferences(
+  { ...previousPrefs, enabledModes: ['raw', 'light'] },
+  'formal',
+);
+assert(
+  defaultAfterMasterOff.defaultMode === 'formal' && defaultAfterMasterOff.enabledModes.join(',') === 'raw,formal',
+  `default change while master is off should refresh fallback modes, got ${defaultAfterMasterOff.defaultMode}/${defaultAfterMasterOff.enabledModes.join(',')}`,
+);
+assert(
+  isStyleMasterEnabled(defaultAfterMasterOff) === false,
+  'master toggle should stay off after changing default while off',
+);
+
+let rolledBackDefaultAndEnabled: UserPreferences | null = defaultAfterMasterOff;
+const rollbackDefaultAndEnabled = rollbackDefaultAndEnabledChange(
+  { ...previousPrefs, enabledModes: ['raw', 'light'] },
+  defaultAfterMasterOff,
+);
+rolledBackDefaultAndEnabled = rollbackDefaultAndEnabled(rolledBackDefaultAndEnabled);
+assert(
+  rolledBackDefaultAndEnabled?.defaultMode === 'light' && rolledBackDefaultAndEnabled.enabledModes.join(',') === 'raw,light',
+  'failed off-state default save should roll back both default mode and enabled modes',
 );
