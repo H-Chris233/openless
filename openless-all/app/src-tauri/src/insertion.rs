@@ -339,32 +339,39 @@ fn simulate_paste(shortcut: PasteShortcut) -> Result<(), String> {
     let (modifiers, primary) = paste_keys(shortcut);
     let mut enigo = Enigo::new(&Settings::default()).map_err(|e| e.to_string())?;
 
-    // 按下顺序：所有 modifier → 主键点击；
-    // 释放顺序：modifier 反向释放，确保即使中途出错也尽量把按键状态还原回来。
+    // 跟原版 simulate_paste 保持同一行为：按下 modifier → 点击主键 → 反向释放 modifier。
+    // 任何中途失败都尽量把已经按下的 modifier 反向释放回来，避免卡键。`pressed`
+    // 记录已经成功按下的 modifier 数；用切片 `modifiers[..pressed]` 控制释放范围
+    // —— 切片自带 DoubleEndedIterator，可以放心 `.rev()`。
+    let mut pressed = 0usize;
+    let mut first_err: Option<String> = None;
+
     for modifier in &modifiers {
         if let Err(e) = enigo.key(*modifier, Direction::Press) {
-            // 按下失败时反向释放已经按下的 modifier，避免卡键。
-            for already_pressed in modifiers.iter().take_while(|m| *m != modifier).rev() {
-                let _ = enigo.key(*already_pressed, Direction::Release);
-            }
-            return Err(e.to_string());
+            first_err = Some(e.to_string());
+            break;
+        }
+        pressed += 1;
+    }
+
+    if first_err.is_none() {
+        if let Err(e) = enigo.key(primary, Direction::Click) {
+            first_err = Some(e.to_string());
         }
     }
 
-    let click_result = enigo.key(primary, Direction::Click);
-
-    let mut release_err: Option<String> = None;
-    for modifier in modifiers.iter().rev() {
+    for modifier in modifiers[..pressed].iter().rev() {
         if let Err(e) = enigo.key(*modifier, Direction::Release) {
-            release_err.get_or_insert_with(|| e.to_string());
+            if first_err.is_none() {
+                first_err = Some(e.to_string());
+            }
         }
     }
 
-    click_result.map_err(|e| e.to_string())?;
-    if let Some(err) = release_err {
-        return Err(err);
+    match first_err {
+        Some(err) => Err(err),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 #[cfg(target_os = "macos")]
