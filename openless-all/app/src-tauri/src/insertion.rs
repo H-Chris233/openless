@@ -20,7 +20,7 @@ use once_cell::sync::Lazy;
 #[cfg(not(target_os = "macos"))]
 use parking_lot::Mutex;
 
-use crate::types::InsertStatus;
+use crate::types::{InsertStatus, PasteShortcut};
 
 #[cfg(target_os = "windows")]
 const CLIPBOARD_RESTORE_DELAY: Duration = Duration::from_millis(750);
@@ -38,12 +38,19 @@ impl TextInserter {
     /// Insert `text` at the current cursor position.
     /// `restore_clipboard_after_paste` 仅在 Windows/Linux 路径下决定 paste 之后是否恢复
     /// 用户原剪贴板。macOS 走 AX 直写，参数被忽略。详见 issue #111。
+    /// `paste_shortcut` 决定 Windows/Linux 上模拟按下的粘贴快捷键。详见 issue #360：
+    /// kitty/alacritty 等终端只接受 Ctrl+Shift+V，硬编码 Ctrl+V 会被吞掉。
     #[cfg(not(target_os = "macos"))]
-    pub fn insert(&self, text: &str, restore_clipboard_after_paste: bool) -> InsertStatus {
+    pub fn insert(
+        &self,
+        text: &str,
+        restore_clipboard_after_paste: bool,
+        paste_shortcut: PasteShortcut,
+    ) -> InsertStatus {
         if text.is_empty() {
             return InsertStatus::CopiedFallback;
         }
-        insert_with_clipboard_restore(text, restore_clipboard_after_paste)
+        insert_with_clipboard_restore(text, restore_clipboard_after_paste, paste_shortcut)
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -51,8 +58,9 @@ impl TextInserter {
         &self,
         text: &str,
         restore_clipboard_after_paste: bool,
+        paste_shortcut: PasteShortcut,
     ) -> InsertStatus {
-        self.insert(text, restore_clipboard_after_paste)
+        self.insert(text, restore_clipboard_after_paste, paste_shortcut)
     }
 
     #[cfg(target_os = "windows")]
@@ -70,8 +78,15 @@ impl TextInserter {
     }
 
     /// Insert `text` at the current cursor position.
+    /// macOS 走 AX 直写 / Cmd+V：`_restore_clipboard_after_paste` 与 `_paste_shortcut`
+    /// 仅为跨平台调用方对齐签名而存在，本路径不读它们。
     #[cfg(target_os = "macos")]
-    pub fn insert(&self, text: &str, _restore_clipboard_after_paste: bool) -> InsertStatus {
+    pub fn insert(
+        &self,
+        text: &str,
+        _restore_clipboard_after_paste: bool,
+        _paste_shortcut: PasteShortcut,
+    ) -> InsertStatus {
         if text.is_empty() {
             return InsertStatus::CopiedFallback;
         }
@@ -171,7 +186,11 @@ fn copy_to_clipboard_with_restore_plan(text: &str) -> Result<ClipboardRestorePla
 }
 
 #[cfg(not(target_os = "macos"))]
-fn insert_with_clipboard_restore(text: &str, restore_clipboard_after_paste: bool) -> InsertStatus {
+fn insert_with_clipboard_restore(
+    text: &str,
+    restore_clipboard_after_paste: bool,
+    paste_shortcut: PasteShortcut,
+) -> InsertStatus {
     let restore_plan = match copy_to_clipboard_with_restore_plan(text) {
         Ok(plan) => plan,
         Err(err) => {
@@ -180,7 +199,7 @@ fn insert_with_clipboard_restore(text: &str, restore_clipboard_after_paste: bool
         }
     };
 
-    if let Err(err) = simulate_paste() {
+    if let Err(err) = simulate_paste(paste_shortcut) {
         log::warn!("[insertion] simulated paste failed: {}", err);
         return InsertStatus::CopiedFallback;
     }
@@ -302,20 +321,49 @@ fn simulate_paste() -> Result<(), String> {
     macos::post_cmd_v()
 }
 
+/// 把用户配置的 PasteShortcut 拆成 `(modifiers, primary)`。modifier 顺序决定 enigo
+/// 按下/释放顺序，跟物理键盘一致：先 Ctrl 再 Shift 再主键，释放反向。
 #[cfg(not(target_os = "macos"))]
-fn simulate_paste() -> Result<(), String> {
-    use enigo::{Direction, Enigo, Key, Keyboard, Settings};
-    let mut enigo = Enigo::new(&Settings::default()).map_err(|e| e.to_string())?;
-    let modifier = Key::Control;
-    enigo
-        .key(modifier, Direction::Press)
-        .map_err(|e| e.to_string())?;
-    let press_v = enigo.key(Key::Unicode('v'), Direction::Click);
-    let release_modifier = enigo.key(modifier, Direction::Release);
-    if let Err(e) = release_modifier {
-        return Err(e.to_string());
+fn paste_keys(shortcut: PasteShortcut) -> (Vec<enigo::Key>, enigo::Key) {
+    use enigo::Key;
+    match shortcut {
+        PasteShortcut::CtrlV => (vec![Key::Control], Key::Unicode('v')),
+        PasteShortcut::CtrlShiftV => (vec![Key::Control, Key::Shift], Key::Unicode('v')),
+        PasteShortcut::ShiftInsert => (vec![Key::Shift], Key::Insert),
     }
-    press_v.map_err(|e| e.to_string())?;
+}
+
+#[cfg(not(target_os = "macos"))]
+fn simulate_paste(shortcut: PasteShortcut) -> Result<(), String> {
+    use enigo::{Direction, Enigo, Keyboard, Settings};
+    let (modifiers, primary) = paste_keys(shortcut);
+    let mut enigo = Enigo::new(&Settings::default()).map_err(|e| e.to_string())?;
+
+    // 按下顺序：所有 modifier → 主键点击；
+    // 释放顺序：modifier 反向释放，确保即使中途出错也尽量把按键状态还原回来。
+    for modifier in &modifiers {
+        if let Err(e) = enigo.key(*modifier, Direction::Press) {
+            // 按下失败时反向释放已经按下的 modifier，避免卡键。
+            for already_pressed in modifiers.iter().take_while(|m| *m != modifier).rev() {
+                let _ = enigo.key(*already_pressed, Direction::Release);
+            }
+            return Err(e.to_string());
+        }
+    }
+
+    let click_result = enigo.key(primary, Direction::Click);
+
+    let mut release_err: Option<String> = None;
+    for modifier in modifiers.iter().rev() {
+        if let Err(e) = enigo.key(*modifier, Direction::Release) {
+            release_err.get_or_insert_with(|| e.to_string());
+        }
+    }
+
+    click_result.map_err(|e| e.to_string())?;
+    if let Some(err) = release_err {
+        return Err(err);
+    }
     Ok(())
 }
 
@@ -474,15 +522,42 @@ mod tests {
         assert!(!should_restore_clipboard(None, "dictated text"));
     }
 
+    /// issue #360: 用户配置的快捷键必须真的映射到对应按键，否则 Settings UI
+    /// 改了也没用。这里只检查 modifier 数量 + 主键，不依赖 enigo 内部 PartialEq。
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn paste_keys_match_configured_shortcut() {
+        use enigo::Key;
+
+        let (mods, primary) = paste_keys(PasteShortcut::CtrlV);
+        assert_eq!(mods.len(), 1);
+        assert!(matches!(mods[0], Key::Control));
+        assert!(matches!(primary, Key::Unicode('v')));
+
+        let (mods, primary) = paste_keys(PasteShortcut::CtrlShiftV);
+        assert_eq!(mods.len(), 2);
+        assert!(matches!(mods[0], Key::Control));
+        assert!(matches!(mods[1], Key::Shift));
+        assert!(matches!(primary, Key::Unicode('v')));
+
+        let (mods, primary) = paste_keys(PasteShortcut::ShiftInsert);
+        assert_eq!(mods.len(), 1);
+        assert!(matches!(mods[0], Key::Shift));
+        assert!(matches!(primary, Key::Insert));
+    }
+
     #[test]
     fn empty_insertions_never_touch_clipboard_or_paste_path() {
         let inserter = TextInserter::new();
 
-        assert_eq!(inserter.insert("", true), InsertStatus::CopiedFallback);
+        assert_eq!(
+            inserter.insert("", true, PasteShortcut::CtrlV),
+            InsertStatus::CopiedFallback
+        );
         #[cfg(not(target_os = "macos"))]
         {
             assert_eq!(
-                inserter.insert_via_clipboard_fallback("", true),
+                inserter.insert_via_clipboard_fallback("", true, PasteShortcut::CtrlV),
                 InsertStatus::CopiedFallback
             );
         }

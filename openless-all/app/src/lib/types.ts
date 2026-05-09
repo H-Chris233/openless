@@ -102,6 +102,13 @@ export type QaHotkeyBinding = ShortcutBinding;
 /** 自定义录音组合键绑定。当 hotkey.trigger == 'custom' 时使用。 */
 export type ComboBinding = ShortcutBinding;
 
+/** 模拟粘贴时按下的快捷键。仅 Windows/Linux 生效；macOS 走 AX 直写。
+ *  - ctrlV       : 标准粘贴（默认；大多数编辑器、浏览器、IDE）
+ *  - ctrlShiftV  : kitty / alacritty / wezterm / gnome-terminal / foot 等终端
+ *  - shiftInsert : xterm / urxvt 等老派 X11 终端
+ *  详见 issue #360。 */
+export type PasteShortcut = 'ctrlV' | 'ctrlShiftV' | 'shiftInsert';
+
 export type WindowsImeInstallState =
   | 'installed'
   | 'notInstalled'
@@ -130,6 +137,10 @@ export interface UserPreferences {
   activeLlmProvider: string;
   /** 仅 Windows/Linux：粘贴成功后是否恢复用户原剪贴板。默认 true。详见 issue #111。 */
   restoreClipboardAfterPaste: boolean;
+  /** 仅 Windows/Linux：模拟粘贴时按下的快捷键。详见 issue #360：kitty/alacritty
+   *  等终端只接受 Ctrl+Shift+V，硬编码 Ctrl+V 会被吞掉，听写文本只剩在剪贴板里。
+   *  macOS 走 AX 直写不受影响。默认 'ctrlV' 与历史行为一致。 */
+  pasteShortcut: PasteShortcut;
   /** Windows：TSF 失败后是否允许 SendInput / 粘贴类非 TSF 兜底。关闭后可验证是否真实 TSF 上屏。 */
   allowNonTsfInsertionFallback: boolean;
   /** 用户的工作语言（多选，原生名）；作为前提注入 LLM polish/translate prompt 头部。 */

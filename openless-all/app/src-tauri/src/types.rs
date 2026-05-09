@@ -45,6 +45,21 @@ pub enum OutputLanguagePreference {
     Ko,
 }
 
+/// 模拟粘贴时实际按下的快捷键。macOS 走 AX 直写 / Cmd+V，本枚举只在
+/// Windows / Linux 的 simulate_paste 路径生效。详见 issue #360：kitty 等
+/// Linux 终端只接受 Ctrl+Shift+V，硬编码 Ctrl+V 会被吞掉，听写文本只剩
+/// 在剪贴板里。默认 `CtrlV` 与历史行为一致；用户在 Settings 里改成
+/// `CtrlShiftV`（kitty/alacritty/wezterm/gnome-terminal/foot/...）或
+/// `ShiftInsert`（xterm/urxvt）后，simulate_paste 用对应组合。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum PasteShortcut {
+    #[default]
+    CtrlV,
+    CtrlShiftV,
+    ShiftInsert,
+}
+
 /// Auto-update 渠道。决定 Settings → 关于 里展示哪一类版本信息。
 /// `Stable` 沿用 `tauri-plugin-updater` 的默认 endpoints（即 `tauri.conf.json`
 /// 里的 `latest-{{target}}-{{arch}}.json`），与发版 pipeline 对齐。
@@ -145,6 +160,11 @@ pub struct UserPreferences {
     /// 关掉就把听写文本留在剪贴板，让 simulate_paste 实际没生效时用户能 Ctrl+V 找回。
     /// macOS 走 AX 直写，不受这个开关影响。详见 issue #111。
     pub restore_clipboard_after_paste: bool,
+    /// Windows / Linux 的模拟粘贴键。macOS 走 AX 直写不受影响。详见 issue #360：
+    /// kitty 等 Linux 终端不接受 Ctrl+V，只能配 Ctrl+Shift+V。默认 CtrlV 与历史
+    /// 行为一致，不破坏既有用户。
+    #[serde(default)]
+    pub paste_shortcut: PasteShortcut,
     /// Windows: 是否允许 TSF 失败后继续使用 SendInput / 粘贴类非 TSF 兜底。
     /// 默认开启以保持可用性；关闭后可验证文本是否真正由 TSF 上屏。
     #[serde(default = "default_true")]
@@ -288,6 +308,8 @@ struct UserPreferencesWire {
     active_asr_provider: String,
     active_llm_provider: String,
     restore_clipboard_after_paste: bool,
+    #[serde(default)]
+    paste_shortcut: PasteShortcut,
     allow_non_tsf_insertion_fallback: bool,
     working_languages: Vec<String>,
     translation_target_language: String,
@@ -339,6 +361,7 @@ impl Default for UserPreferencesWire {
             active_asr_provider: prefs.active_asr_provider,
             active_llm_provider: prefs.active_llm_provider,
             restore_clipboard_after_paste: prefs.restore_clipboard_after_paste,
+            paste_shortcut: prefs.paste_shortcut,
             allow_non_tsf_insertion_fallback: prefs.allow_non_tsf_insertion_fallback,
             working_languages: prefs.working_languages,
             translation_target_language: prefs.translation_target_language,
@@ -388,6 +411,7 @@ impl<'de> Deserialize<'de> for UserPreferences {
             active_asr_provider: wire.active_asr_provider,
             active_llm_provider: wire.active_llm_provider,
             restore_clipboard_after_paste: wire.restore_clipboard_after_paste,
+            paste_shortcut: wire.paste_shortcut,
             allow_non_tsf_insertion_fallback: wire.allow_non_tsf_insertion_fallback,
             working_languages: wire.working_languages,
             translation_target_language: wire.translation_target_language,
@@ -504,6 +528,7 @@ impl Default for UserPreferences {
             active_asr_provider: default_active_asr_provider(),
             active_llm_provider: "ark".into(),
             restore_clipboard_after_paste: true,
+            paste_shortcut: PasteShortcut::default(),
             allow_non_tsf_insertion_fallback: true,
             working_languages: default_working_languages(),
             translation_target_language: String::new(),
@@ -1125,6 +1150,31 @@ mod tests {
         let prefs: UserPreferences = serde_json::from_str("{}").unwrap();
 
         assert!(prefs.allow_non_tsf_insertion_fallback);
+    }
+
+    /// issue #360: 默认值必须是 CtrlV，跟历史行为一致；老配置文件没有
+    /// pasteShortcut 字段时反序列化也得回到 CtrlV，否则会把现有用户的粘贴
+    /// 行为静默改掉。
+    #[test]
+    fn paste_shortcut_defaults_to_ctrl_v() {
+        let prefs = UserPreferences::default();
+        assert_eq!(prefs.paste_shortcut, PasteShortcut::CtrlV);
+
+        let from_empty: UserPreferences = serde_json::from_str("{}").unwrap();
+        assert_eq!(from_empty.paste_shortcut, PasteShortcut::CtrlV);
+    }
+
+    #[test]
+    fn paste_shortcut_round_trips_explicit_values() {
+        for (raw, expected) in [
+            ("ctrlV", PasteShortcut::CtrlV),
+            ("ctrlShiftV", PasteShortcut::CtrlShiftV),
+            ("shiftInsert", PasteShortcut::ShiftInsert),
+        ] {
+            let json = format!(r#"{{ "pasteShortcut": "{raw}" }}"#);
+            let prefs: UserPreferences = serde_json::from_str(&json).unwrap();
+            assert_eq!(prefs.paste_shortcut, expected, "raw={raw}");
+        }
     }
 
     #[test]
