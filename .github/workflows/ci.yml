@@ -98,9 +98,15 @@ jobs:
       - name: Compile Rust backend unit tests (Windows)
         # Windows runner 能链接 lib test binary，但干净镜像缺少可选 native runtime
         # DLL entrypoint 时，进程会在 test harness 启动前退出。这里保留 cfg/link
-        # 覆盖；共享单测在 macOS / Linux 上实际执行。
+        # 覆盖；Rust-only 后端单测由下一步实际执行。
         if: runner.os == 'Windows'
         run: cargo test --manifest-path src-tauri/Cargo.toml --lib --no-run
+
+      - name: Run Rust-only backend unit tests (Windows)
+        # 只把纯 Rust 后端模块编进独立 test crate，不链接完整 Tauri app lib。
+        # 这样 Windows CI 能实际执行 coordinator/hotkey/recorder/insertion 逻辑单测。
+        if: runner.os == 'Windows'
+        run: cargo test --manifest-path src-tauri/backend-tests/Cargo.toml
 
       - name: Verify version sync across all 5 files
         # 两个平台都跑这个校验：Windows runner 自带 git-bash，跨 shell 表现一致。

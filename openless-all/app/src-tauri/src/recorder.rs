@@ -619,6 +619,13 @@ mod tests {
         }
     }
 
+    fn decode_i16_le(bytes: &[u8]) -> Vec<i16> {
+        bytes
+            .chunks_exact(2)
+            .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+            .collect()
+    }
+
     #[test]
     fn downmix_to_mono_averages_complete_interleaved_frames() {
         let mono = downmix_to_mono(&[1.0, -1.0, 0.5, 0.25, 0.0], 2);
@@ -656,6 +663,63 @@ mod tests {
     }
 
     #[test]
+    fn resample_upsamples_with_linear_interpolation_and_tail_state() {
+        let state = StreamState::new();
+
+        let out = resample_to_target(&[0.0, 1.0], 8_000, TARGET_SAMPLE_RATE, &state);
+
+        assert_eq!(out, vec![0.0, 0.5, 1.0]);
+        assert_eq!(*state.last_sample.lock(), 1.0);
+        assert_eq!(*state.resample_phase.lock(), 0.0);
+    }
+
+    #[test]
+    fn process_callback_resamples_non_target_input_before_emitting_pcm() {
+        let consumer = RecordingConsumer::default();
+        let levels = Arc::new(StdMutex::new(Vec::new()));
+        let levels_for_handler = Arc::clone(&levels);
+        let state = StreamState::new();
+
+        process_callback(
+            &[0.0, 1.0],
+            1,
+            8_000,
+            &consumer,
+            &move |level| levels_for_handler.lock().unwrap().push(level),
+            &state,
+        );
+
+        let chunks = consumer.chunks.lock().unwrap();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(decode_i16_le(&chunks[0]), vec![0, 16383, 32767]);
+        assert_eq!(*levels.lock().unwrap(), vec![1.0]);
+        assert_eq!(state.callback_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn process_callback_reports_scaled_rms_level_and_peaks() {
+        let consumer = RecordingConsumer::default();
+        let levels = Arc::new(StdMutex::new(Vec::new()));
+        let levels_for_handler = Arc::clone(&levels);
+        let state = StreamState::new();
+
+        process_callback(
+            &[0.125, -0.125],
+            1,
+            TARGET_SAMPLE_RATE,
+            &consumer,
+            &move |level| levels_for_handler.lock().unwrap().push(level),
+            &state,
+        );
+
+        let levels = levels.lock().unwrap();
+        assert_eq!(levels.len(), 1);
+        assert!((levels[0] - 0.5).abs() < 0.0001);
+        assert_eq!(state.peak_input_rms_milli.load(Ordering::Relaxed), 125);
+        assert_eq!(state.peak_output_rms_milli.load(Ordering::Relaxed), 125);
+    }
+
+    #[test]
     fn process_callback_emits_pcm_level_and_liveness_marker() {
         let consumer = RecordingConsumer::default();
         let levels = Arc::new(StdMutex::new(Vec::new()));
@@ -677,5 +741,34 @@ mod tests {
         assert_eq!(*levels.lock().unwrap(), vec![1.0]);
         assert!(state.last_callback_time.lock().is_some());
         assert_eq!(state.callback_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn process_callback_ignores_empty_or_zero_channel_input_without_liveness_marker() {
+        let consumer = RecordingConsumer::default();
+        let levels = Arc::new(StdMutex::new(Vec::new()));
+        let levels_for_handler = Arc::clone(&levels);
+        let state = StreamState::new();
+
+        process_callback(
+            &[],
+            1,
+            TARGET_SAMPLE_RATE,
+            &consumer,
+            &move |level| levels_for_handler.lock().unwrap().push(level),
+            &state,
+        );
+        process_callback(
+            &[0.25, -0.25],
+            0,
+            TARGET_SAMPLE_RATE,
+            &consumer,
+            &move |level| levels.lock().unwrap().push(level),
+            &state,
+        );
+
+        assert!(consumer.chunks.lock().unwrap().is_empty());
+        assert!(state.last_callback_time.lock().is_none());
+        assert_eq!(state.callback_count.load(Ordering::Relaxed), 0);
     }
 }
