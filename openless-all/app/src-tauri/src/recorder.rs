@@ -678,4 +678,33 @@ mod tests {
         assert!(state.last_callback_time.lock().is_some());
         assert_eq!(state.callback_count.load(Ordering::Relaxed), 1);
     }
+
+    #[test]
+    fn process_callback_ignores_empty_or_zero_channel_input_without_liveness_marker() {
+        let consumer = RecordingConsumer::default();
+        let levels = Arc::new(StdMutex::new(Vec::new()));
+        let levels_for_handler = Arc::clone(&levels);
+        let state = StreamState::new();
+
+        process_callback(
+            &[],
+            1,
+            TARGET_SAMPLE_RATE,
+            &consumer,
+            &move |level| levels_for_handler.lock().unwrap().push(level),
+            &state,
+        );
+        process_callback(
+            &[0.25, -0.25],
+            0,
+            TARGET_SAMPLE_RATE,
+            &consumer,
+            &move |level| levels.lock().unwrap().push(level),
+            &state,
+        );
+
+        assert!(consumer.chunks.lock().unwrap().is_empty());
+        assert!(state.last_callback_time.lock().is_none());
+        assert_eq!(state.callback_count.load(Ordering::Relaxed), 0);
+    }
 }

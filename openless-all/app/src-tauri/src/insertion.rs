@@ -479,6 +479,13 @@ mod tests {
         let inserter = TextInserter::new();
 
         assert_eq!(inserter.insert("", true), InsertStatus::CopiedFallback);
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert_eq!(
+                inserter.insert_via_clipboard_fallback("", true),
+                InsertStatus::CopiedFallback
+            );
+        }
         assert_eq!(inserter.copy_fallback(""), InsertStatus::CopiedFallback);
     }
 
@@ -520,13 +527,13 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "macos")]
-    fn macos_paste_failure_keeps_copied_fallback_available() {
+    fn macos_direct_write_or_paste_failure_keeps_copied_fallback_available() {
         assert_eq!(
             macos_insert_status_after_paste(Ok(())),
             InsertStatus::Inserted
         );
         assert_eq!(
-            macos_insert_status_after_paste(Err("AX write unavailable".to_string())),
+            macos_insert_status_after_paste(Err("AX direct write unavailable".to_string())),
             InsertStatus::CopiedFallback
         );
     }

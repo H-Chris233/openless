@@ -1043,6 +1043,27 @@ mod platform {
         }
 
         #[test]
+        fn windows_modifier_edges_ignore_unrelated_keys_and_reemit_after_release() {
+            let shared = shared(HotkeyTrigger::RightControl);
+            let (ctx, rx) = callback_context(shared);
+
+            assert!(!dispatch_keyboard_event(&ctx, VK_LCONTROL, WM_KEYDOWN));
+            assert!(dispatch_keyboard_event(&ctx, VK_RCONTROL, WM_KEYUP));
+            assert!(dispatch_keyboard_event(&ctx, VK_RCONTROL, WM_KEYDOWN));
+            assert!(dispatch_keyboard_event(&ctx, VK_RCONTROL, WM_KEYUP));
+            assert!(dispatch_keyboard_event(&ctx, VK_RCONTROL, WM_KEYDOWN));
+
+            assert_eq!(
+                drain(&rx),
+                vec![
+                    HotkeyEvent::Pressed,
+                    HotkeyEvent::Released,
+                    HotkeyEvent::Pressed
+                ]
+            );
+        }
+
+        #[test]
         fn windows_optional_modifier_shortcuts_use_independent_latches() {
             let shared = shared(HotkeyTrigger::RightControl);
             *shared.qa_trigger.write() = Some(HotkeyTrigger::RightCommand);
@@ -1349,6 +1370,47 @@ mod platform {
             assert_eq!(
                 drain(&rx),
                 vec![HotkeyEvent::Pressed, HotkeyEvent::Released]
+            );
+        }
+
+        #[test]
+        fn rdev_modifier_edges_ignore_unrelated_keys_and_reemit_after_release() {
+            let shared = shared(HotkeyTrigger::RightControl);
+            let (tx, rx) = mpsc::channel();
+
+            dispatch_event(
+                &shared,
+                &tx,
+                key_event(EventType::KeyPress(Key::ControlLeft)),
+            );
+            dispatch_event(
+                &shared,
+                &tx,
+                key_event(EventType::KeyRelease(Key::ControlRight)),
+            );
+            dispatch_event(
+                &shared,
+                &tx,
+                key_event(EventType::KeyPress(Key::ControlRight)),
+            );
+            dispatch_event(
+                &shared,
+                &tx,
+                key_event(EventType::KeyRelease(Key::ControlRight)),
+            );
+            dispatch_event(
+                &shared,
+                &tx,
+                key_event(EventType::KeyPress(Key::ControlRight)),
+            );
+
+            assert_eq!(
+                drain(&rx),
+                vec![
+                    HotkeyEvent::Pressed,
+                    HotkeyEvent::Released,
+                    HotkeyEvent::Pressed
+                ]
             );
         }
 
