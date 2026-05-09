@@ -1182,13 +1182,15 @@ type LlmPresetId = typeof LLM_PRESETS[number]['id'];
 
 const ASR_DEFAULT_RESOURCE_ID = 'volc.seedasr.sauc.duration';
 
-// `volcengine` 走自建流式客户端；其余走 OpenAI 兼容 `/audio/transcriptions`
-// （`coordinator.rs::is_whisper_compatible_provider`）。新增兼容厂商：
+// `volcengine` / `bailian` 走自建流式客户端；其余走 OpenAI 兼容
+// `/audio/transcriptions`（`coordinator.rs::is_whisper_compatible_provider`）。
+// 新增兼容厂商：
 //   1. 在这里加一项 `{ id, nameKey, baseUrl, model }`；
 //   2. `coordinator.rs::is_whisper_compatible_provider` 加同名 id；
 //   3. 在 i18n 的 `settings.providers.presets.<nameKey>` 加文案。
 const ASR_PRESETS = [
   { id: 'volcengine',   nameKey: 'asrVolcengine',   baseUrl: '',                                              model: ''                              },
+  { id: 'bailian',      nameKey: 'asrBailian',     baseUrl: 'wss://dashscope.aliyuncs.com/api-ws/v1/inference/', model: 'fun-asr-realtime'             },
   { id: 'siliconflow',  nameKey: 'asrSiliconflow',  baseUrl: 'https://api.siliconflow.cn/v1',                  model: 'FunAudioLLM/SenseVoiceSmall' },
   { id: 'zhipu',        nameKey: 'asrZhipu',        baseUrl: 'https://open.bigmodel.cn/api/paas/v4',           model: 'glm-asr-2512'                },
   { id: 'groq',         nameKey: 'asrGroq',         baseUrl: 'https://api.groq.com/openai/v1',                 model: 'whisper-large-v3-turbo'      },
@@ -1393,6 +1395,20 @@ function ProvidersSection() {
               defaultValue={asrPreset?.baseUrl || undefined} />
             <CredentialField key={`${committedAsrProvider}:model:${asrModelRevision}`} label={t('settings.providers.modelLabel')} account="asr.model"
               placeholder={asrPreset?.model || 'whisper-1'} />
+            {committedAsrProvider === 'bailian' && (
+              <>
+                <CredentialField
+                  key={`${committedAsrProvider}:vocabulary_id`}
+                  label={t('settings.providers.bailianVocabularyIdLabel')}
+                  account="asr.vocabulary_id"
+                  mono
+                  placeholder="vocab-..."
+                />
+                <div style={{ marginTop: 2, fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.6 }}>
+                  {t('settings.providers.bailianVocabularyIdNote')}
+                </div>
+              </>
+            )}
             <ProviderTools kind="asr" modelAccount="asr.model" onModelSelected={() => setAsrModelRevision(v => v + 1)} />
           </>
         )}

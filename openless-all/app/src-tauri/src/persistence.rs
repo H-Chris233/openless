@@ -166,7 +166,7 @@ fn read_or_default<T: for<'de> Deserialize<'de> + Default>(path: &Path) -> Resul
 //     "version": 1,
 //     "active": { "asr": "<id>", "llm": "<id>" },
 //     "providers": {
-//       "asr": { "<id>": { "appKey", "accessKey", "resourceId", "apiKey", "baseURL", "model" } },
+//       "asr": { "<id>": { "appKey", "accessKey", "resourceId", "apiKey", "baseURL", "model", "vocabularyId" } },
 //       "llm": { "<id>": { "displayName", "apiKey", "baseURL", "model", "temperature", "extraHeaders" } }
 //     }
 //   }
@@ -244,6 +244,8 @@ struct CredsAsrEntry {
     accessKey: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     resourceId: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vocabularyId: Option<String>,
 }
 
 impl CredsAsrEntry {
@@ -254,6 +256,7 @@ impl CredsAsrEntry {
             && self.appKey.as_deref().unwrap_or("").is_empty()
             && self.accessKey.as_deref().unwrap_or("").is_empty()
             && self.resourceId.as_deref().unwrap_or("").is_empty()
+            && self.vocabularyId.as_deref().unwrap_or("").is_empty()
     }
 }
 
@@ -532,7 +535,7 @@ fn migrate_legacy_sources_for_update() -> Result<CredsRoot> {
 fn load_credentials() -> CredsRoot {
     match load_keyring_credentials() {
         Ok(Some(root)) => {
-            // 不在这里调 remove_legacy_keyring_credentials() —— 它内部对 9 个
+            // 不在这里调 remove_legacy_keyring_credentials() —— 它内部对每个
             // 旧 account 各做一次 keyring delete，每次 delete 在 macOS Keychain
             // 上仍要触发 ACL 检查。第一次成功 load 时 legacy entries 通常已经
             // 被 migrate_legacy_sources_for_update 清理过了；这里若再无脑跑，
@@ -632,6 +635,7 @@ fn lookup_account(root: &CredsRoot, account: CredentialAccount) -> Option<String
         CredentialAccount::AsrApiKey => asr.and_then(|e| pick(&e.apiKey)),
         CredentialAccount::AsrEndpoint => asr.and_then(|e| pick(&e.baseURL)),
         CredentialAccount::AsrModel => asr.and_then(|e| pick(&e.model)),
+        CredentialAccount::AsrVocabularyId => asr.and_then(|e| pick(&e.vocabularyId)),
     }
 }
 
@@ -675,6 +679,10 @@ fn write_account(root: &mut CredsRoot, account: CredentialAccount, value: Option
         CredentialAccount::AsrModel => {
             let entry = root.providers.asr.entry(asr_id).or_default();
             entry.model = normalized;
+        }
+        CredentialAccount::AsrVocabularyId => {
+            let entry = root.providers.asr.entry(asr_id).or_default();
+            entry.vocabularyId = normalized;
         }
     }
 }
@@ -983,6 +991,8 @@ pub enum CredentialAccount {
     AsrEndpoint,
     /// Active ASR provider's model name.
     AsrModel,
+    /// Active ASR provider's optional hotword vocabulary ID.
+    AsrVocabularyId,
 }
 
 impl CredentialAccount {
@@ -1000,6 +1010,7 @@ impl CredentialAccount {
             CredentialAccount::AsrApiKey => "asr.api_key",
             CredentialAccount::AsrEndpoint => "asr.endpoint",
             CredentialAccount::AsrModel => "asr.model",
+            CredentialAccount::AsrVocabularyId => "asr.vocabulary_id",
         }
     }
 
@@ -1014,6 +1025,7 @@ impl CredentialAccount {
             CredentialAccount::AsrApiKey,
             CredentialAccount::AsrEndpoint,
             CredentialAccount::AsrModel,
+            CredentialAccount::AsrVocabularyId,
         ]
     }
 }

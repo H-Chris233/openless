@@ -19,8 +19,8 @@ use uuid::Uuid;
 #[cfg(target_os = "windows")]
 use crate::asr::local::{foundry, FoundryLocalRuntime, FoundryLocalWhisperAsr};
 use crate::asr::{
-    DictionaryHotword, RawTranscript, VolcengineCredentials, VolcengineStreamingASR,
-    WhisperBatchASR,
+    BailianCredentials, BailianRealtimeASR, DictionaryHotword, RawTranscript,
+    VolcengineCredentials, VolcengineStreamingASR, WhisperBatchASR,
 };
 use crate::combo_hotkey::{ComboHotkeyError, ComboHotkeyEvent, ComboHotkeyMonitor};
 use crate::coordinator_state::{
@@ -69,6 +69,7 @@ use resources::{
 enum ActiveAsr {
     Volcengine(Arc<VolcengineStreamingASR>),
     Whisper(Arc<WhisperBatchASR>),
+    Bailian(Arc<BailianRealtimeASR>),
     #[cfg(target_os = "windows")]
     FoundryLocalWhisper(Arc<FoundryLocalWhisperAsr>),
     /// 本地 Qwen3-ASR；只在 macOS + 模型已下载时可达。
@@ -1785,7 +1786,7 @@ fn ensure_asr_credentials() -> Result<(), String> {
         return Ok(());
     }
 
-    if is_whisper_compatible_provider(&active_asr) {
+    if is_whisper_compatible_provider(&active_asr) || is_bailian_provider(&active_asr) {
         let api_key = CredentialsVault::get(CredentialAccount::AsrApiKey)
             .ok()
             .flatten()
@@ -1916,6 +1917,10 @@ async fn build_local_qwen3(
 /// 单独 ASR 客户端，留给 V2。
 fn is_whisper_compatible_provider(id: &str) -> bool {
     matches!(id, "whisper" | "siliconflow" | "zhipu" | "groq")
+}
+
+fn is_bailian_provider(id: &str) -> bool {
+    id == crate::asr::bailian::PROVIDER_ID
 }
 
 fn apply_chinese_script_preference(text: &str, pref: ChineseScriptPreference) -> String {
@@ -2098,6 +2103,33 @@ fn read_whisper_credentials() -> (String, String, String) {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "whisper-1".to_string());
     (api_key, base_url, model)
+}
+
+fn read_bailian_credentials() -> BailianCredentials {
+    let api_key = CredentialsVault::get(CredentialAccount::AsrApiKey)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let endpoint = CredentialsVault::get(CredentialAccount::AsrEndpoint)
+        .ok()
+        .flatten()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| crate::asr::bailian::DEFAULT_ENDPOINT.to_string());
+    let model = CredentialsVault::get(CredentialAccount::AsrModel)
+        .ok()
+        .flatten()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| crate::asr::bailian::DEFAULT_MODEL.to_string());
+    let vocabulary_id = CredentialsVault::get(CredentialAccount::AsrVocabularyId)
+        .ok()
+        .flatten()
+        .filter(|s| !s.trim().is_empty());
+    BailianCredentials {
+        api_key,
+        endpoint,
+        model,
+        vocabulary_id,
+    }
 }
 
 fn read_volc_credentials() -> VolcengineCredentials {

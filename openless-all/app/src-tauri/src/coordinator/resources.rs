@@ -67,6 +67,7 @@ pub(super) fn cancel_active_asr(asr: ActiveAsr) {
     match asr {
         ActiveAsr::Volcengine(v) => v.cancel(),
         ActiveAsr::Whisper(w) => w.cancel(),
+        ActiveAsr::Bailian(b) => b.cancel(),
         #[cfg(target_os = "windows")]
         ActiveAsr::FoundryLocalWhisper(local) => local.cancel(),
         #[cfg(target_os = "macos")]

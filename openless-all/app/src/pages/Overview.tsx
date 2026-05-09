@@ -25,6 +25,7 @@ interface OverviewProps {
 
 const ASR_NAME_KEY_BY_ID: Record<string, string> = {
   volcengine: 'asrVolcengine',
+  bailian: 'asrBailian',
   siliconflow: 'asrSiliconflow',
   zhipu: 'asrZhipu',
   groq: 'asrGroq',

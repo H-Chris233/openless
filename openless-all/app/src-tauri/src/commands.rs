@@ -381,6 +381,9 @@ fn asr_configured_for_provider(provider: &str, snap: &CredentialsSnapshot) -> bo
         // 本地 ASR 不依赖云端凭据。
         return true;
     }
+    if provider == crate::asr::bailian::PROVIDER_ID {
+        return configured(&snap.asr_api_key);
+    }
     configured(&snap.asr_endpoint) && configured(&snap.asr_model)
 }
 
@@ -539,6 +542,11 @@ pub async fn validate_provider_credentials(kind: String) -> Result<ProviderCheck
 
 #[tauri::command]
 pub async fn list_provider_models(kind: String) -> Result<ProviderModelsResult, String> {
+    if kind == "asr" && CredentialsVault::get_active_asr() == crate::asr::bailian::PROVIDER_ID {
+        return Ok(ProviderModelsResult {
+            models: vec![crate::asr::bailian::DEFAULT_MODEL.to_string()],
+        });
+    }
     let config = read_openai_provider_config(&kind)?;
     fetch_provider_models(&config)
         .await
@@ -619,12 +627,54 @@ async fn validate_asr_provider() -> Result<(), String> {
         return Ok(());
     }
 
+    if active_asr == crate::asr::bailian::PROVIDER_ID {
+        return validate_bailian_asr_provider().await;
+    }
+
     let config = read_openai_provider_config("asr")?;
     let model = CredentialsVault::get(CredentialAccount::AsrModel)
         .map_err(|e| e.to_string())?
         .filter(|s| !s.trim().is_empty())
         .ok_or_else(|| "asrModelMissing".to_string())?;
     validate_asr_transcription(&config, model.trim()).await
+}
+
+async fn validate_bailian_asr_provider() -> Result<(), String> {
+    let api_key = CredentialsVault::get(CredentialAccount::AsrApiKey)
+        .map_err(|e| e.to_string())?
+        .unwrap_or_default();
+    if api_key.trim().is_empty() {
+        return Err("API Key 为空".to_string());
+    }
+    let endpoint = CredentialsVault::get(CredentialAccount::AsrEndpoint)
+        .map_err(|e| e.to_string())?
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| crate::asr::bailian::DEFAULT_ENDPOINT.to_string());
+    let model = CredentialsVault::get(CredentialAccount::AsrModel)
+        .map_err(|e| e.to_string())?
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| crate::asr::bailian::DEFAULT_MODEL.to_string());
+    let vocabulary_id = CredentialsVault::get(CredentialAccount::AsrVocabularyId)
+        .map_err(|e| e.to_string())?
+        .filter(|s| !s.trim().is_empty());
+    let asr = std::sync::Arc::new(crate::asr::BailianRealtimeASR::new(
+        crate::asr::BailianCredentials {
+            api_key,
+            endpoint,
+            model,
+            vocabulary_id,
+        },
+    ));
+    asr.open_session().await.map_err(|e| e.to_string())?;
+    crate::asr::AudioConsumer::consume_pcm_chunk(
+        &*asr,
+        &vec![0u8; crate::asr::bailian::TARGET_AUDIO_CHUNK_BYTES],
+    );
+    asr.send_last_frame().await.map_err(|e| e.to_string())?;
+    asr.await_final_result()
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 fn active_asr_is_keyless_for_validation(provider: &str) -> bool {
@@ -821,6 +871,7 @@ fn parse_account(s: &str) -> Result<CredentialAccount, String> {
         "asr.api_key" => Ok(CredentialAccount::AsrApiKey),
         "asr.endpoint" => Ok(CredentialAccount::AsrEndpoint),
         "asr.model" => Ok(CredentialAccount::AsrModel),
+        "asr.vocabulary_id" => Ok(CredentialAccount::AsrVocabularyId),
         _ => Err(format!("unknown account: {s}")),
     }
 }
@@ -1784,6 +1835,10 @@ mod tests {
             ..snapshot()
         };
         assert!(!asr_configured_for_provider("whisper", &whisper_key_only));
+        assert!(asr_configured_for_provider(
+            crate::asr::bailian::PROVIDER_ID,
+            &whisper_key_only
+        ));
 
         let whisper_keyless_ready = CredentialsSnapshot {
             asr_endpoint: Some("https://api.openai.com/v1".into()),
@@ -1792,6 +1847,10 @@ mod tests {
         };
         assert!(asr_configured_for_provider(
             "whisper",
+            &whisper_keyless_ready
+        ));
+        assert!(!asr_configured_for_provider(
+            crate::asr::bailian::PROVIDER_ID,
             &whisper_keyless_ready
         ));
 
