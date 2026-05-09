@@ -1541,7 +1541,7 @@ fn window_key_matches_trigger(trigger: crate::types::HotkeyTrigger, key: &str, c
         HotkeyTrigger::RightOption | HotkeyTrigger::RightAlt => {
             (key == "Alt" || key == "AltGraph") && code == "AltRight"
         }
-        HotkeyTrigger::LeftOption => (key == "Alt" || key == "AltGraph") && code == "AltRight",
+        HotkeyTrigger::LeftOption => (key == "Alt" || key == "AltGraph") && code == "AltLeft",
         HotkeyTrigger::RightCommand => key == "Meta" && code == "MetaRight",
         HotkeyTrigger::Fn => key == "Control" && code == "ControlRight",
         // Custom 走 global-hotkey crate，不走 window hotkey fallback
@@ -2727,8 +2727,8 @@ mod tests {
             (HotkeyTrigger::RightOption, "Alt", "AltRight"),
             (HotkeyTrigger::RightAlt, "AltGraph", "AltRight"),
             (HotkeyTrigger::RightCommand, "Meta", "MetaRight"),
+            (HotkeyTrigger::LeftOption, "Alt", "AltLeft"),
             // Mirrors Windows trigger_to_vk_code aliases.
-            (HotkeyTrigger::LeftOption, "Alt", "AltRight"),
             (HotkeyTrigger::Fn, "Control", "ControlRight"),
         ];
         for (trigger, key, code) in cases {
@@ -2746,7 +2746,7 @@ mod tests {
         assert!(!window_key_matches_trigger(
             HotkeyTrigger::LeftOption,
             "Alt",
-            "AltLeft"
+            "AltRight"
         ));
         assert!(!window_key_matches_trigger(HotkeyTrigger::Fn, "Fn", "Fn"));
     }
