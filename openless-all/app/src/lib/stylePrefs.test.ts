@@ -1,8 +1,11 @@
 import {
   applyStylePreferencesNotification,
+  isStyleMasterEnabled,
   persistStylePreferenceChange,
   rollbackStyleEnabledChange,
   rollbackWholeStylePreferences,
+  styleMasterFallbackModes,
+  styleMasterOffPreferences,
 } from './stylePrefs';
 import type { UserPreferences } from './types';
 
@@ -114,3 +117,28 @@ const notifiedPrefs: UserPreferences = {
 };
 const syncedPrefs = applyStylePreferencesNotification(previousPrefs, notifiedPrefs);
 assert(syncedPrefs === notifiedPrefs, 'prefs notification should replace stale style page prefs');
+
+const masterOffPrefs = styleMasterOffPreferences(previousPrefs);
+assert(
+  masterOffPrefs.enabledModes.join(',') === 'raw,light',
+  `master toggle off should persist raw and current default, got ${masterOffPrefs.enabledModes.join(',')}`,
+);
+
+const masterFallback = styleMasterFallbackModes('light');
+assert(
+  masterFallback.join(',') === 'raw,light',
+  `master toggle off should preserve raw and current default, got ${masterFallback.join(',')}`,
+);
+assert(
+  isStyleMasterEnabled({ ...previousPrefs, enabledModes: masterFallback }) === false,
+  'master toggle should render off when only raw and default remain enabled',
+);
+assert(
+  isStyleMasterEnabled(previousPrefs) === true,
+  'master toggle should render on when extra styles remain enabled',
+);
+const rawFallback = styleMasterFallbackModes('raw');
+assert(
+  rawFallback.join(',') === 'raw',
+  `raw default fallback should not duplicate raw, got ${rawFallback.join(',')}`,
+);

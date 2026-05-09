@@ -7,10 +7,12 @@ import { getSettings, setDefaultPolishMode, setStyleEnabled, setSettings } from 
 import type { PolishMode, UserPreferences } from '../lib/types';
 import {
   applyStylePreferencesNotification,
+  isStyleMasterEnabled,
   persistStylePreferenceChange,
   rollbackDefaultModeChange,
   rollbackStyleEnabledChange,
   rollbackWholeStylePreferences,
+  styleMasterOffPreferences,
 } from '../lib/stylePrefs';
 import { PageHeader, Pill } from './_atoms';
 import { useHotkeySettings } from '../state/HotkeySettingsContext';
@@ -112,13 +114,13 @@ export function Style() {
     );
   }
 
-  const masterEnabled = prefs.enabledModes.length > 0;
+  const masterEnabled = isStyleMasterEnabled(prefs);
 
   const onMasterToggle = async () => {
     if (!prefs) return;
     if (masterEnabled) {
-      // 全部关闭 → 留 raw 和当前 default 兜底
-      const next = { ...prefs, enabledModes: [] as PolishMode[] };
+      // 全部关闭 → 留 raw 和当前 default 兜底，避免持久化空集合。
+      const next = styleMasterOffPreferences(prefs);
       const saved = await persistStylePreferenceChange(
         next,
         () => setSettings(next),

@@ -35,6 +35,18 @@ export function applyStylePreferencesNotification(
   return incoming;
 }
 
+export function styleMasterFallbackModes(defaultMode: PolishMode): PolishMode[] {
+  return defaultMode === 'raw' ? ['raw'] : ['raw', defaultMode];
+}
+
+export function isStyleMasterEnabled(prefs: UserPreferences): boolean {
+  return !sameModeSet(prefs.enabledModes, styleMasterFallbackModes(prefs.defaultMode));
+}
+
+export function styleMasterOffPreferences(prefs: UserPreferences): UserPreferences {
+  return { ...prefs, enabledModes: styleMasterFallbackModes(prefs.defaultMode) };
+}
+
 export function rollbackDefaultModeChange(
   previousPrefs: UserPreferences,
   nextPrefs: UserPreferences,
@@ -69,6 +81,12 @@ export function rollbackWholeStylePreferences(
     if (!current || !sameModes(current.enabledModes, nextPrefs.enabledModes)) return current;
     return { ...current, enabledModes: previousPrefs.enabledModes };
   };
+}
+
+function sameModeSet(left: PolishMode[], right: PolishMode[]): boolean {
+  if (left.length !== right.length) return false;
+  const rightSet = new Set(right);
+  return left.every(mode => rightSet.has(mode));
 }
 
 function sameModes(left: PolishMode[], right: PolishMode[]): boolean {
