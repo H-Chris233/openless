@@ -3,8 +3,8 @@ name: CI
 # 多平台跨语言质量门禁。release-tauri.yml 是发版流水线（仅打包构建），这里负责
 # 在合并前快速验证两件事：
 #   1. 前端 typecheck + vite bundle 通过（tsc + vite build，捕获跨 locale 类型 drift）
-#   2. Rust 后端在 macOS / Windows 都能 cargo check 过（捕获 cfg 漏分支 / 平台 API 误用）
-# 跑 build-mac.sh / windows-package-msvc.ps1 太重；只跑轻量 cargo check + vite build。
+#   2. Rust 后端在 macOS / Windows / Linux 都能 cargo check 过（捕获 cfg 漏分支 / 平台 API 误用）
+# 跑 build-mac.sh / windows-package-msvc.ps1 / Tauri bundle 太重；只跑轻量 cargo check + vite build。
 
 on:
   push:
@@ -26,6 +26,9 @@ jobs:
           - os: windows-latest
             label: Windows
             preflight: true
+          - os: ubuntu-latest
+            label: Linux
+            preflight: false
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -44,6 +47,22 @@ jobs:
           cache-dependency-path: openless-all/app/package-lock.json
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux check dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            file \
+            libasound2-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            wget
 
       - name: Install frontend dependencies
         run: npm ci
@@ -71,6 +90,23 @@ jobs:
 
       - name: Check Tauri backend (cargo check)
         run: cargo check --manifest-path src-tauri/Cargo.toml
+
+      - name: Run Rust backend unit tests
+        if: runner.os != 'Windows'
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+
+      - name: Compile Rust backend unit tests (Windows)
+        # Windows runner 能链接 lib test binary，但干净镜像缺少可选 native runtime
+        # DLL entrypoint 时，进程会在 test harness 启动前退出。这里保留 cfg/link
+        # 覆盖；Rust-only 后端单测由下一步实际执行。
+        if: runner.os == 'Windows'
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib --no-run
+
+      - name: Run Rust-only backend unit tests (Windows)
+        # 只把纯 Rust 后端模块编进独立 test crate，不链接完整 Tauri app lib。
+        # 这样 Windows CI 能实际执行 coordinator/hotkey/recorder/insertion 逻辑单测。
+        if: runner.os == 'Windows'
+        run: cargo test --manifest-path src-tauri/backend-tests/Cargo.toml
 
       - name: Verify version sync across all 5 files
         # 两个平台都跑这个校验：Windows runner 自带 git-bash，跨 shell 表现一致。

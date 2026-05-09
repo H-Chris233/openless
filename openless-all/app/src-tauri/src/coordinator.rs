@@ -23,6 +23,12 @@ use crate::asr::{
     WhisperBatchASR,
 };
 use crate::combo_hotkey::{ComboHotkeyError, ComboHotkeyEvent, ComboHotkeyMonitor};
+use crate::coordinator_state::{
+    begin_cancel_session_state, begin_recording_abort_before_restore, begin_session_state,
+    finish_cancel_session_state, finish_starting_session_state, new_session_id,
+    publish_abort_idle_after_restore, start_processing_if_listening, startup_race_status,
+    BeginOutcome, SessionId, SessionPhase, SessionState, StartupRaceStatus,
+};
 use crate::hotkey::{HotkeyEvent, HotkeyMonitor};
 use crate::insertion::TextInserter;
 use crate::persistence::{
@@ -32,29 +38,33 @@ use crate::persistence::{
 use crate::polish::{OpenAICompatibleConfig, OpenAICompatibleLLMProvider};
 use crate::qa_hotkey::{QaHotkeyError, QaHotkeyEvent, QaHotkeyMonitor};
 use crate::recorder::{Recorder, RecorderError};
-use crate::selection::{capture_selection, SelectionContext};
+use crate::selection::capture_selection;
 use crate::types::{
     CapsulePayload, CapsuleState, ChineseScriptPreference, DictationSession, HotkeyCapability,
-    HotkeyMode, HotkeyStatus, HotkeyStatusState, InsertStatus, OutputLanguagePreference,
-    PolishMode,
+    HotkeyStatus, HotkeyStatusState, InsertStatus, OutputLanguagePreference, PolishMode,
 };
 #[cfg(target_os = "windows")]
 use crate::windows_ime_ipc::ImeSubmitTarget;
 #[cfg(target_os = "windows")]
 use crate::windows_ime_session::{PreparedWindowsImeSession, WindowsImeSessionController};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SessionPhase {
-    Idle,
-    Starting,
-    Listening,
-    Processing,
-    /// 已经过了最后一次 cancel 检查、即将 / 正在调用 inserter.insert 的窗口。
-    /// cancel_session 在此阶段拒绝介入：Cmd+V 模拟点击已开始或已发出，
-    /// 无法撤销，硬把 cancelled=true 也救不回来，只会让 UI 出现 cancelled
-    /// 但实际还是插入了的诡异状态。详见 PR 修 Codex audit HIGH #2。
-    Inserting,
-}
+mod dictation;
+mod qa;
+mod resources;
+
+#[cfg(test)]
+use dictation::dictation_error_code;
+use dictation::{
+    begin_session, cancel_session, end_session, handle_pressed, handle_pressed_edge,
+    handle_released, handle_released_edge, request_stop_during_starting,
+};
+use qa::{close_qa_panel, handle_qa_hotkey_pressed, QaPhase, QaSessionState};
+#[cfg(test)]
+use resources::discard_startup_resources_for_session;
+use resources::{
+    acquire_recording_mute, release_recording_mute, selected_microphone_device_name,
+    stop_microphone_preview_monitor, stop_qa_recorder, SessionResource, SharedRecordingMuteState,
+};
 
 enum ActiveAsr {
     Volcengine(Arc<VolcengineStreamingASR>),
@@ -71,71 +81,6 @@ fn asr_transcribe_uses_global_timeout(asr: &ActiveAsr) -> bool {
         #[cfg(target_os = "windows")]
         ActiveAsr::FoundryLocalWhisper(_) => false,
         _ => true,
-    }
-}
-
-struct SessionResource<T> {
-    session_id: u64,
-    resource: T,
-}
-
-impl<T> SessionResource<T> {
-    fn new(session_id: u64, resource: T) -> Self {
-        Self {
-            session_id,
-            resource,
-        }
-    }
-
-    fn into_inner(self) -> T {
-        self.resource
-    }
-}
-
-struct SessionState {
-    phase: SessionPhase,
-    started_at: Instant,
-    /// Starting 阶段（ASR 握手中）按下 stop 边沿（toggle 第二次按 / hold 松开）→
-    /// 等握手完成 phase=Listening 后立刻 end_session，不丢边沿。issue #51。
-    pending_stop: bool,
-    /// 用户在 Processing 阶段按 Esc 取消：end_session 在 polish/insert 检查点跳过插入 +
-    /// 跳过 history.append。issue #52。
-    cancelled: bool,
-    focus_target: Option<usize>,
-    /// 单调递增的 session id。begin_session 自增。
-    /// recorder error monitor 持有 captured id，处理时若与当前不等说明
-    /// 是上一 session 的迟到错误，必须 drop，不要 abort 当前 active session。
-    session_id: u64,
-    /// 用户开始 dictation 时所处的前台 app 标签（"Mail (com.apple.mail)" / Windows 窗口标题）。
-    /// 用作 LLM polish/translate 的上下文前提，让模型按 app 调风格。详见 issue #116。
-    front_app: Option<String>,
-}
-
-struct SharedRecordingMuteState {
-    guard: Option<crate::audio_mute::AudioMuteGuard>,
-    holders: u32,
-}
-
-impl SharedRecordingMuteState {
-    fn new() -> Self {
-        Self {
-            guard: None,
-            holders: 0,
-        }
-    }
-}
-
-impl Default for SessionState {
-    fn default() -> Self {
-        Self {
-            phase: SessionPhase::Idle,
-            started_at: Instant::now(),
-            pending_stop: false,
-            cancelled: false,
-            focus_target: None,
-            session_id: 0,
-            front_app: None,
-        }
     }
 }
 
@@ -196,54 +141,15 @@ struct Inner {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum QaPhase {
-    Idle,
-    Recording,
-    Processing,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ActionHotkeyKind {
     SwitchStyle,
     OpenApp,
 }
 
-struct QaSessionState {
-    phase: QaPhase,
-    cancelled: bool,
-    selection: Option<SelectionContext>,
-    front_app: Option<String>,
-    /// 用于忽略迟到的 RMS / runtime error。
-    session_id: u64,
-    /// QA 浮窗是否被用户钉住（pinned）。pinned=true 时不自动隐藏。
-    pinned: bool,
-    /// 浮窗是否对用户可见。Cmd+Shift+; 边沿 toggle 此 flag；
-    /// 主听写 hotkey（rightOption）边沿来时，看这个 flag 决定是走 QA 还是走 dictation。
-    /// 详见 issue #118 v2。
-    panel_visible: bool,
-    /// 多轮对话累积。每轮 user→assistant 加两条；关浮窗清空。
-    messages: Vec<crate::types::QaChatMessage>,
-}
-
-impl Default for QaSessionState {
-    fn default() -> Self {
-        Self {
-            phase: QaPhase::Idle,
-            cancelled: false,
-            selection: None,
-            front_app: None,
-            session_id: 0,
-            pinned: false,
-            panel_visible: false,
-            messages: Vec::new(),
-        }
-    }
-}
-
 #[cfg(target_os = "windows")]
 #[derive(Debug)]
 struct PreparedWindowsImeSessionSlot {
-    session_id: u64,
+    session_id: SessionId,
     prepared: PreparedWindowsImeSession,
 }
 
@@ -838,6 +744,8 @@ impl Coordinator {
         // repolish 是历史记录里手动重新润色，不再绑定原 session 的前台 app；
         // 当下用户调起的 app 才是相关上下文（如果可拿）。
         let front_app = capture_frontmost_app();
+        // repolish 是用户主动对单条历史"重新润色"，不应该被对话感知上下文影响——
+        // 用户改的就是这一条本身，不要把别的会话拿进来。所以始终走单轮路径。
         polish_text(
             &raw_text,
             mode,
@@ -846,6 +754,7 @@ impl Coordinator {
             chinese_script_preference,
             output_language_preference,
             front_app.as_deref(),
+            &[],
         )
         .await
         .map_err(|e| e.to_string())
@@ -1474,82 +1383,6 @@ fn mark_translation_modifier_seen(inner: &Arc<Inner>) {
     }
 }
 
-async fn handle_qa_hotkey_pressed(inner: &Arc<Inner>) {
-    // QA hotkey（默认 Cmd+Shift+;）现在只 toggle 浮窗可见性。
-    // 浮窗内的录音 / 提问由 Option 边沿驱动（handle_pressed_edge → handle_qa_option_edge）。
-    let visible = inner.qa_state.lock().panel_visible;
-    log::info!("[coord] QA hotkey edge (panel_visible={visible})");
-    if visible {
-        close_qa_panel(inner);
-    } else {
-        open_qa_panel(inner);
-    }
-}
-
-/// 浮窗可见时，主听写 hotkey（rightOption）边沿改打到这里：
-/// Idle → 录音 / Recording → 停录音并提问。
-async fn handle_qa_option_edge(inner: &Arc<Inner>) {
-    let phase = inner.qa_state.lock().phase;
-    log::info!("[coord] QA option edge (phase={phase:?})");
-    match phase {
-        QaPhase::Idle => {
-            let _ = begin_qa_session(inner).await;
-        }
-        QaPhase::Recording => {
-            let _ = end_qa_session(inner).await;
-        }
-        // Processing 阶段再次按键忽略（避免与正在跑的 LLM 冲突）。
-        QaPhase::Processing => {}
-    }
-}
-
-fn open_qa_panel(inner: &Arc<Inner>) {
-    {
-        let mut state = inner.qa_state.lock();
-        state.panel_visible = true;
-        state.phase = QaPhase::Idle;
-        state.cancelled = false;
-        state.messages.clear();
-        state.selection = None;
-        state.front_app = capture_frontmost_app();
-    }
-    // 先把胶囊清干净，避免主听写上一次 Done 状态残留的 message/insertedChars
-    // 在 QA Done 阶段被 capsule UI 错误复用（"已之一粘贴这个 0" 那种）。
-    emit_capsule(inner, CapsuleState::Idle, 0.0, 0, None, None);
-    if let Some(app) = inner.app.lock().clone() {
-        crate::show_qa_window(&app, "idle");
-        let _ = app.emit_to(
-            "qa",
-            "qa:state",
-            serde_json::json!({
-                "kind": "idle",
-                "messages": Vec::<crate::types::QaChatMessage>::new(),
-            }),
-        );
-    }
-    log::info!("[coord] QA panel opened (awaiting Option to record)");
-}
-
-fn close_qa_panel(inner: &Arc<Inner>) {
-    cancel_qa_session(inner);
-    {
-        let mut state = inner.qa_state.lock();
-        state.panel_visible = false;
-        state.pinned = false;
-        state.messages.clear();
-        state.selection = None;
-        state.front_app = None;
-        state.phase = QaPhase::Idle;
-        state.cancelled = false;
-    }
-    if let Some(app) = inner.app.lock().clone() {
-        crate::hide_qa_window(&app);
-    }
-    // 胶囊一同收掉，避免浮窗关了胶囊还在显示。
-    emit_capsule(inner, CapsuleState::Idle, 0.0, 0, None, None);
-    log::info!("[coord] QA panel closed, history cleared");
-}
-
 fn hotkey_bridge_loop(inner: Arc<Inner>, rx: mpsc::Receiver<HotkeyEvent>) {
     while let Ok(evt) = rx.recv() {
         if inner.shortcut_recording_active.load(Ordering::SeqCst) {
@@ -1619,225 +1452,6 @@ fn reset_shortcut_held_state(inner: &Arc<Inner>) {
                 log::warn!("[coord] reset open-app hotkey latch failed: {e}");
             }
         }
-    }
-}
-
-async fn handle_pressed_edge(inner: &Arc<Inner>) {
-    let was_held = inner.hotkey_trigger_held.swap(true, Ordering::SeqCst);
-    if !was_held {
-        // 路由：QA 浮窗可见时，rightOption 边沿走 QA；否则走主听写。详见 issue #118 v2。
-        let panel_visible = inner.qa_state.lock().panel_visible;
-        if panel_visible {
-            handle_qa_option_edge(inner).await;
-        } else {
-            handle_pressed(inner).await;
-        }
-    }
-}
-
-async fn handle_pressed(inner: &Arc<Inner>) {
-    let mode = inner.prefs.get().hotkey.mode;
-    let phase = inner.state.lock().phase;
-    log::info!("[coord] hotkey pressed (mode={mode:?}, phase={phase:?})");
-    match (mode, phase) {
-        (HotkeyMode::Toggle, SessionPhase::Idle) => {
-            let _ = begin_session(inner).await;
-        }
-        (HotkeyMode::Toggle, SessionPhase::Listening) => {
-            let _ = end_session(inner).await;
-        }
-        (HotkeyMode::Hold, SessionPhase::Idle) => {
-            let _ = begin_session(inner).await;
-        }
-        // Toggle 模式 Starting 阶段第二次按 → 用户想停。
-        // 不能直接 end_session（ASR session 还没建好），存边沿，握手完成后立即触发。
-        (HotkeyMode::Toggle, SessionPhase::Starting) => {
-            request_stop_during_starting(inner, "toggle stop edge");
-        }
-        _ => {}
-    }
-}
-
-async fn handle_released_edge(inner: &Arc<Inner>) {
-    let was_held = inner.hotkey_trigger_held.swap(false, Ordering::SeqCst);
-    if was_held {
-        // QA 浮窗可见时，Option 行为是 press-toggle（不分 hold/release），release 边沿忽略。
-        let panel_visible = inner.qa_state.lock().panel_visible;
-        if panel_visible {
-            return;
-        }
-        handle_released(inner).await;
-    }
-}
-
-async fn handle_released(inner: &Arc<Inner>) {
-    let mode = inner.prefs.get().hotkey.mode;
-    let phase = inner.state.lock().phase;
-    log::info!("[coord] hotkey released (mode={mode:?}, phase={phase:?})");
-    if mode == HotkeyMode::Hold {
-        match phase {
-            SessionPhase::Listening => {
-                let _ = end_session(inner).await;
-            }
-            // Hold 模式 Starting 阶段松开 → 用户想停。同上：握手完成后再 end。
-            SessionPhase::Starting => {
-                request_stop_during_starting(inner, "hold release edge");
-            }
-            _ => {}
-        }
-    }
-}
-
-fn request_stop_during_starting(inner: &Arc<Inner>, reason: &str) {
-    {
-        let mut state = inner.state.lock();
-        if state.phase != SessionPhase::Starting {
-            return;
-        }
-        state.pending_stop = true;
-    }
-    log::info!("[coord] {reason} during Starting — queued");
-    stop_recorder_if_pending_start_stop(inner);
-}
-
-fn take_session_resource<T>(slot: &mut Option<SessionResource<T>>, session_id: u64) -> Option<T> {
-    if slot
-        .as_ref()
-        .map(|resource| resource.session_id == session_id)
-        .unwrap_or(false)
-    {
-        slot.take().map(SessionResource::into_inner)
-    } else {
-        None
-    }
-}
-
-fn store_asr_for_session(inner: &Arc<Inner>, session_id: u64, asr: ActiveAsr) {
-    *inner.asr.lock() = Some(SessionResource::new(session_id, asr));
-}
-
-fn take_asr_for_session(inner: &Arc<Inner>, session_id: u64) -> Option<ActiveAsr> {
-    let mut slot = inner.asr.lock();
-    take_session_resource(&mut slot, session_id)
-}
-
-fn cancel_active_asr(asr: ActiveAsr) {
-    match asr {
-        ActiveAsr::Volcengine(v) => v.cancel(),
-        ActiveAsr::Whisper(w) => w.cancel(),
-        #[cfg(target_os = "windows")]
-        ActiveAsr::FoundryLocalWhisper(local) => local.cancel(),
-        #[cfg(target_os = "macos")]
-        ActiveAsr::Local(local) => local.cancel(),
-    }
-}
-
-fn cancel_asr_for_session(inner: &Arc<Inner>, session_id: u64) {
-    if let Some(asr) = take_asr_for_session(inner, session_id) {
-        cancel_active_asr(asr);
-    }
-}
-
-fn store_recorder_for_session(inner: &Arc<Inner>, session_id: u64, recorder: Recorder) {
-    *inner.recorder.lock() = Some(SessionResource::new(session_id, recorder));
-}
-
-fn selected_microphone_device_name(inner: &Arc<Inner>) -> Option<String> {
-    let name = inner.prefs.get().microphone_device_name.trim().to_string();
-    if name.is_empty() {
-        None
-    } else {
-        Some(name)
-    }
-}
-
-fn stop_microphone_preview_monitor(inner: &Arc<Inner>, owner: &str) {
-    let Some(app) = inner.app.lock().as_ref().cloned() else {
-        return;
-    };
-    let state = app.state::<crate::commands::MicrophoneMonitorState>();
-    let recorder = state.lock().take();
-    if let Some(recorder) = recorder {
-        log::info!("[recorder] stopping microphone preview monitor before {owner}");
-        recorder.stop();
-    }
-}
-
-fn acquire_recording_mute(inner: &Arc<Inner>, owner: &str) {
-    if !inner.prefs.get().mute_during_recording {
-        return;
-    }
-    let mut mute = inner.recording_mute.lock();
-    if mute.holders == 0 {
-        match crate::audio_mute::AudioMuteGuard::activate() {
-            Ok(guard) => {
-                mute.guard = Some(guard);
-                log::info!("[audio-mute] system output muted for recording");
-            }
-            Err(err) => {
-                log::warn!("[audio-mute] failed to mute output for {owner}: {err}");
-                return;
-            }
-        }
-    }
-    mute.holders = mute.holders.saturating_add(1);
-    log::info!("[audio-mute] acquired by {owner}; holders={}", mute.holders);
-}
-
-fn release_recording_mute(inner: &Arc<Inner>, owner: &str) {
-    let mut mute = inner.recording_mute.lock();
-    if mute.holders == 0 {
-        return;
-    }
-    mute.holders -= 1;
-    log::info!("[audio-mute] released by {owner}; holders={}", mute.holders);
-    if mute.holders == 0 {
-        mute.guard.take();
-        log::info!("[audio-mute] system output mute restored after recording");
-    }
-}
-
-fn stop_qa_recorder(inner: &Arc<Inner>) {
-    if let Some(rec) = inner.qa_recorder.lock().take() {
-        rec.stop();
-        release_recording_mute(inner, "qa");
-    }
-}
-
-fn take_recorder_for_session(inner: &Arc<Inner>, session_id: u64) -> Option<Recorder> {
-    let mut slot = inner.recorder.lock();
-    take_session_resource(&mut slot, session_id)
-}
-
-fn stop_recorder_for_session(inner: &Arc<Inner>, session_id: u64) {
-    if let Some(recorder) = take_recorder_for_session(inner, session_id) {
-        recorder.stop();
-        release_recording_mute(inner, "dictation");
-    }
-}
-
-fn discard_startup_resources_for_session(inner: &Arc<Inner>, session_id: u64) {
-    stop_recorder_for_session(inner, session_id);
-    cancel_asr_for_session(inner, session_id);
-}
-
-fn stop_recorder_if_pending_start_stop(inner: &Arc<Inner>) {
-    let (should_stop, session_id) = {
-        let state = inner.state.lock();
-        (
-            state.phase == SessionPhase::Starting && state.pending_stop,
-            state.session_id,
-        )
-    };
-    if !should_stop {
-        return;
-    }
-    if let Some(rec) = take_recorder_for_session(inner, session_id) {
-        rec.stop();
-        release_recording_mute(inner, "dictation");
-        let elapsed = inner.state.lock().started_at.elapsed().as_millis() as u64;
-        emit_capsule(inner, CapsuleState::Transcribing, 0.0, elapsed, None, None);
-        log::info!("[coord] stopped recorder while ASR is still connecting");
     }
 }
 
@@ -1937,355 +1551,6 @@ fn window_key_matches_trigger(trigger: crate::types::HotkeyTrigger, key: &str, c
 
 // ─────────────────────────── session lifecycle ───────────────────────────
 
-async fn begin_session(inner: &Arc<Inner>) -> Result<(), String> {
-    let current_session_id = {
-        let mut state = inner.state.lock();
-        if state.phase != SessionPhase::Idle {
-            return Ok(());
-        }
-        state.phase = SessionPhase::Starting;
-        state.started_at = Instant::now();
-        // 新会话清掉旧 pending_stop / cancelled，避免上一会话遗留触发奇怪行为
-        state.pending_stop = false;
-        state.cancelled = false;
-        state.focus_target = capture_focus_target();
-        // 自增 session_id；spawn 出去的 recorder error monitor 会捕获这个值，
-        // 如果迟到错误到达时 id 已不匹配就 drop，不会误中止后续 session。
-        state.session_id = state.session_id.wrapping_add(1);
-        state.front_app = capture_frontmost_app();
-        if let Some(label) = state.front_app.as_deref() {
-            log::info!("[coord] front_app captured: {label}");
-        }
-        state.session_id
-    };
-    #[cfg(target_os = "windows")]
-    {
-        let prepared = inner.windows_ime.prepare_session();
-        let mut slots = inner.prepared_windows_ime_session.lock();
-        store_prepared_windows_ime_session(&mut slots, current_session_id, prepared);
-    }
-    // 翻译模式标志重置；hotkey 监听器在 Shift down 时再 set true。
-    inner
-        .translation_modifier_seen
-        .store(false, Ordering::SeqCst);
-
-    #[cfg(any(debug_assertions, test))]
-    if hotkey_injection_dry_run_enabled() {
-        emit_capsule(inner, CapsuleState::Recording, 0.0, 0, None, None);
-        inner.state.lock().phase = SessionPhase::Listening;
-        log::info!("[coord] session started (hotkey-injection dry-run)");
-        return Ok(());
-    }
-
-    if let Err(message) = ensure_asr_credentials() {
-        log::warn!("[coord] ASR credential gate failed: {message}");
-        emit_capsule(
-            inner,
-            CapsuleState::Error,
-            0.0,
-            0,
-            Some(message.clone()),
-            None,
-        );
-        restore_prepared_windows_ime_session(inner, current_session_id);
-        inner.state.lock().phase = SessionPhase::Idle;
-        return Err(message);
-    }
-
-    let active_asr = CredentialsVault::get_active_asr();
-
-    if let Err(message) = ensure_microphone_permission(inner) {
-        log::warn!("[coord] microphone permission gate failed: {message}");
-        emit_capsule(
-            inner,
-            CapsuleState::Error,
-            0.0,
-            0,
-            Some(message.clone()),
-            None,
-        );
-        restore_prepared_windows_ime_session(inner, current_session_id);
-        inner.state.lock().phase = SessionPhase::Idle;
-        schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-        return Err(message);
-    }
-
-    // 不在这里 emit Recording capsule —— 让 start_recorder_for_starting 在
-    // Recorder::start 成功后再发，确保「用户看到录音条」时 mic 已经在 capture。
-    // 之前在这一行就 emit 会让用户看到录音条后立刻开口，但 mic 还在 cpal init
-    // 窗口（50-200ms）内 → 开头几个字物理上录不到。详见 issue 备注。
-    #[cfg(target_os = "windows")]
-    if foundry::is_foundry_local_whisper(&active_asr) {
-        let prefs = inner.prefs.get();
-        let model_alias = if foundry::model_alias_is_known(&prefs.foundry_local_asr_model) {
-            prefs.foundry_local_asr_model.clone()
-        } else {
-            foundry::DEFAULT_MODEL_ALIAS.to_string()
-        };
-        let language_hint = prefs.foundry_local_asr_language_hint.trim().to_string();
-        let language_hint = if language_hint.is_empty() {
-            None
-        } else {
-            Some(language_hint)
-        };
-        let local = Arc::new(FoundryLocalWhisperAsr::new(
-            Arc::clone(&inner.foundry_local_runtime),
-            model_alias,
-            language_hint,
-        ));
-        store_asr_for_session(
-            inner,
-            current_session_id,
-            ActiveAsr::FoundryLocalWhisper(Arc::clone(&local)),
-        );
-        let consumer: Arc<dyn crate::recorder::AudioConsumer> = local;
-        start_recorder_and_enter_listening(inner, current_session_id, &active_asr, consumer)
-            .await?;
-        return Ok(());
-    }
-
-    #[cfg(target_os = "macos")]
-    if crate::asr::local::is_local_qwen3(&active_asr) {
-        let local = match build_local_qwen3(inner).await {
-            Ok(l) => l,
-            Err(e) => {
-                log::error!("[coord] 本地 Qwen3-ASR 初始化失败: {e:#}");
-                emit_capsule(
-                    inner,
-                    CapsuleState::Error,
-                    0.0,
-                    0,
-                    Some(format!("本地模型初始化失败: {e}")),
-                    None,
-                );
-                restore_prepared_windows_ime_session(inner, current_session_id);
-                inner.state.lock().phase = SessionPhase::Idle;
-                schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-                return Err(format!("local ASR init failed: {e}"));
-            }
-        };
-        store_asr_for_session(
-            inner,
-            current_session_id,
-            ActiveAsr::Local(Arc::clone(&local)),
-        );
-        let consumer: Arc<dyn crate::recorder::AudioConsumer> = local;
-        start_recorder_and_enter_listening(inner, current_session_id, &active_asr, consumer)
-            .await?;
-        return Ok(());
-    }
-
-    if is_whisper_compatible_provider(&active_asr) {
-        let (api_key, base_url, model) = read_whisper_credentials();
-        let whisper = Arc::new(WhisperBatchASR::new(api_key, base_url, model));
-        store_asr_for_session(
-            inner,
-            current_session_id,
-            ActiveAsr::Whisper(Arc::clone(&whisper)),
-        );
-        let consumer: Arc<dyn crate::recorder::AudioConsumer> = whisper;
-        start_recorder_and_enter_listening(inner, current_session_id, &active_asr, consumer)
-            .await?;
-    } else {
-        let hotwords = enabled_hotwords(inner);
-        let creds = read_volc_credentials();
-        let asr = Arc::new(VolcengineStreamingASR::new(creds, hotwords));
-        let bridge = Arc::new(DeferredAsrBridge::new());
-        let consumer: Arc<dyn crate::recorder::AudioConsumer> = bridge.clone();
-        store_asr_for_session(
-            inner,
-            current_session_id,
-            ActiveAsr::Volcengine(Arc::clone(&asr)),
-        );
-        start_recorder_for_starting(inner, current_session_id, &active_asr, consumer)?;
-
-        if let Err(e) = asr.open_session().await {
-            log::error!("[coord] open ASR session failed: {e}");
-            match startup_race_status_for_starting(inner, current_session_id) {
-                StartupRaceStatus::StaleContinuation => {
-                    log::info!(
-                        "[coord] stale ASR open_session error from session {current_session_id} — ignoring"
-                    );
-                    asr.cancel();
-                    discard_startup_resources_for_session(inner, current_session_id);
-                    restore_prepared_windows_ime_session(inner, current_session_id);
-                    return Ok(());
-                }
-                StartupRaceStatus::CancelRaced => {
-                    asr.cancel();
-                    discard_startup_resources_for_session(inner, current_session_id);
-                    restore_prepared_windows_ime_session(inner, current_session_id);
-                    set_phase_idle_if_session_matches(inner, current_session_id);
-                    return Ok(());
-                }
-                StartupRaceStatus::ActiveStarting => {}
-            }
-            discard_startup_resources_for_session(inner, current_session_id);
-            emit_capsule(
-                inner,
-                CapsuleState::Error,
-                0.0,
-                0,
-                Some(format!("ASR 连接失败: {e}")),
-                None,
-            );
-            restore_prepared_windows_ime_session(inner, current_session_id);
-            set_phase_idle_if_session_matches(inner, current_session_id);
-            schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-            return Err(e.to_string());
-        }
-        // open_session.await 期间用户可能按了 Esc / 改变心意。如果 cancel_session
-        // 已触发（cancelled=true 或 phase 被改回 Idle），别再装 ASR，直接善后。
-        // audit HIGH #1。
-        match startup_race_status_for_starting(inner, current_session_id) {
-            StartupRaceStatus::ActiveStarting => {}
-            StartupRaceStatus::CancelRaced => {
-                log::info!("[coord] cancel raced during ASR open_session — aborting begin");
-                asr.cancel();
-                discard_startup_resources_for_session(inner, current_session_id);
-                restore_prepared_windows_ime_session(inner, current_session_id);
-                set_phase_idle_if_session_matches(inner, current_session_id);
-                return Ok(());
-            }
-            StartupRaceStatus::StaleContinuation => {
-                log::info!(
-                    "[coord] stale ASR open_session continuation from session {current_session_id} — ignoring"
-                );
-                asr.cancel();
-                discard_startup_resources_for_session(inner, current_session_id);
-                restore_prepared_windows_ime_session(inner, current_session_id);
-                return Ok(());
-            }
-        }
-        let target: Arc<dyn crate::asr::AudioConsumer> = asr;
-        let flushed_bytes = bridge.attach(target);
-        log::info!("[coord] ASR connected; flushed {flushed_bytes} deferred audio bytes");
-        finish_starting_session(inner, current_session_id).await;
-    }
-
-    Ok(())
-}
-
-fn start_recorder_for_starting(
-    inner: &Arc<Inner>,
-    session_id: u64,
-    active_asr: &str,
-    consumer: Arc<dyn crate::recorder::AudioConsumer>,
-) -> Result<(), String> {
-    let inner_for_level = Arc::clone(inner);
-    // 节流：电平回调本身约 185 Hz（cpal 默认音频块），全部转发到前端会让 CSS
-    // transition 互相覆盖、视觉上"被平均"成静止。限制为 ~30 Hz（33ms 最少间隔），
-    // 配合 CSS 短 transition 让每次 emit 完整可见。
-    let last_emit_at = Arc::new(Mutex::new(None::<Instant>));
-    const LEVEL_EMIT_MIN_INTERVAL_MS: u64 = 33;
-    let level_handler: Arc<dyn Fn(f32) + Send + Sync> = Arc::new(move |level| {
-        let phase = inner_for_level.state.lock().phase;
-        if phase != SessionPhase::Listening && phase != SessionPhase::Starting {
-            return;
-        }
-        let now = Instant::now();
-        {
-            let mut last = last_emit_at.lock();
-            if let Some(prev) = *last {
-                if now.duration_since(prev).as_millis() < LEVEL_EMIT_MIN_INTERVAL_MS as u128 {
-                    return;
-                }
-            }
-            *last = Some(now);
-        }
-        let elapsed = inner_for_level
-            .state
-            .lock()
-            .started_at
-            .elapsed()
-            .as_millis() as u64;
-        emit_capsule(
-            &inner_for_level,
-            CapsuleState::Recording,
-            level,
-            elapsed,
-            None,
-            None,
-        );
-    });
-
-    let microphone_device_name = selected_microphone_device_name(inner);
-    stop_microphone_preview_monitor(inner, "dictation recorder");
-    acquire_recording_mute(inner, "dictation");
-    match Recorder::start(microphone_device_name, consumer, level_handler) {
-        Ok((rec, runtime_errors)) => {
-            store_recorder_for_session(inner, session_id, rec);
-            spawn_recorder_error_monitor(inner, runtime_errors);
-            // 不在这里 emit Recording capsule。
-            // Recorder::start Ok 仅代表 cpal Stream::play 完成，不代表 audio
-            // 线程已经在向 consumer 推 PCM —— macOS CoreAudio AudioUnit 启动到
-            // 第一帧 process_callback 中间有 50–200 ms 间隙（Windows 类似）。
-            // 之前在这里立即 emit Recording 会让用户「看到录音条」就开口，但前几个
-            // 字落在 cpal init 窗口里被吞，反映为短录音漏首字（用户报告）。
-            //
-            // 现改为：level_handler 第一次被触发时才 emit Recording capsule。
-            // recorder.rs::process_callback 的顺序是 consume_pcm_chunk → level_handler，
-            // 所以 level_handler 第一次执行 == PCM 已经真实流到 consumer。从这一刻
-            // 起用户说什么都被录到。capsule 自然就晚 50–200 ms 出现，但出现 ==
-            // mic 真的在录，匹配「麦先录、UI 再弹」的预期。
-            //
-            // 原本的竞态保护交还给两条已有路径：
-            //   - stop_recorder_if_pending_start_stop：短按时把 capsule 切到
-            //     Transcribing；recorder 已 stop，level_handler 不会再发火。
-            //   - level_handler 内部 phase 检查：cancel / 错误使 phase 不在
-            //     {Starting, Listening} 时直接 return，不会在错误状态上盖
-            //     Recording。
-            stop_recorder_if_pending_start_stop(inner);
-            log::info!("[coord] recorder started (asr={active_asr}, phase=Starting)");
-        }
-        Err(e) => {
-            log::error!("[coord] recorder start failed: {e}");
-            cancel_asr_for_session(inner, session_id);
-            emit_capsule(
-                inner,
-                CapsuleState::Error,
-                0.0,
-                0,
-                Some(format!("录音启动失败: {e}")),
-                None,
-            );
-            restore_prepared_windows_ime_session(inner, session_id);
-            release_recording_mute(inner, "dictation");
-            inner.state.lock().phase = SessionPhase::Idle;
-            schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-            return Err(e.to_string());
-        }
-    }
-
-    Ok(())
-}
-
-fn spawn_recorder_error_monitor(inner: &Arc<Inner>, rx: mpsc::Receiver<RecorderError>) {
-    // 捕获当前 session_id：err 来时若 id 已经不一致说明是上一 session 的迟到事件，
-    // 不能去 abort 当前 active 的新 session（它录得好好的）。
-    let captured_session_id = inner.state.lock().session_id;
-    let inner = Arc::clone(inner);
-    std::thread::Builder::new()
-        .name("openless-recorder-error-monitor".into())
-        .spawn(move || {
-            if let Ok(err) = rx.recv() {
-                let current_session_id = inner.state.lock().session_id;
-                if captured_session_id != current_session_id {
-                    log::warn!(
-                        "[coord] recorder error from stale session {} dropped (current={}, err={})",
-                        captured_session_id,
-                        current_session_id,
-                        err
-                    );
-                    return;
-                }
-                log::error!("[coord] recorder runtime error: {err}");
-                abort_recording_with_error(&inner, format!("录音中断: {err}"));
-            }
-        })
-        .ok();
-}
-
 /// QA 录音 runtime error 监听器。镜像 `spawn_recorder_error_monitor` 的语义但走 QA
 /// 收尾路径（`finish_qa_with_error` 替代 `abort_recording_with_error`）。
 /// 用 qa_state.session_id 守卫 stale 事件。详见 issue #168。
@@ -2313,632 +1578,10 @@ fn spawn_qa_recorder_error_monitor(inner: &Arc<Inner>, rx: mpsc::Receiver<Record
         .ok();
 }
 
-fn abort_recording_with_error(inner: &Arc<Inner>, message: String) {
-    let Some(abort) = ({
-        let mut state = inner.state.lock();
-        begin_recording_abort_before_restore(&mut state)
-    }) else {
-        return;
-    };
-
-    discard_startup_resources_for_session(inner, abort.session_id);
-    restore_prepared_windows_ime_session(inner, abort.session_id);
-    {
-        let mut state = inner.state.lock();
-        publish_abort_idle_after_restore(&mut state, abort.session_id);
-    }
-
-    emit_capsule(
-        inner,
-        CapsuleState::Error,
-        0.0,
-        abort.elapsed,
-        Some(message),
-        None,
-    );
-    schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-}
-
-struct RecordingAbort {
-    elapsed: u64,
-    session_id: u64,
-}
-
-fn begin_recording_abort_before_restore(state: &mut SessionState) -> Option<RecordingAbort> {
-    if state.cancelled
-        || !matches!(
-            state.phase,
-            SessionPhase::Starting | SessionPhase::Listening
-        )
-    {
-        return None;
-    }
-    state.cancelled = true;
-    Some(RecordingAbort {
-        elapsed: state.started_at.elapsed().as_millis() as u64,
-        session_id: state.session_id,
-    })
-}
-
-fn publish_abort_idle_after_restore(state: &mut SessionState, session_id: u64) {
-    if state.session_id == session_id {
-        state.phase = SessionPhase::Idle;
-    }
-}
-
-async fn start_recorder_and_enter_listening(
-    inner: &Arc<Inner>,
-    session_id: u64,
-    active_asr: &str,
-    consumer: Arc<dyn crate::recorder::AudioConsumer>,
-) -> Result<(), String> {
-    start_recorder_for_starting(inner, session_id, active_asr, consumer)?;
-    finish_starting_session(inner, session_id).await;
-    Ok(())
-}
-
-async fn finish_starting_session(inner: &Arc<Inner>, session_id: u64) {
-    // audit HIGH #1：转 Listening 之前在同一 lock 内检查 cancel race。
-    // 之前是无条件 phase=Listening，会把 cancel_session 在 await 期间设的 Idle
-    // 反向覆盖回 Listening → 用户的 cancel 边沿被吞掉。
-    let outcome = {
-        let mut state = inner.state.lock();
-        if state.session_id != session_id {
-            BeginOutcome::StaleContinuation
-        } else if state.cancelled || state.phase != SessionPhase::Starting {
-            BeginOutcome::CancelRaced
-        } else {
-            state.phase = SessionPhase::Listening;
-            let pending = std::mem::replace(&mut state.pending_stop, false);
-            if pending {
-                BeginOutcome::PendingStop
-            } else {
-                BeginOutcome::Started
-            }
-        }
-    };
-    match outcome {
-        BeginOutcome::StaleContinuation => {
-            log::info!(
-                "[coord] stale recorder/ASR startup continuation from session {session_id} — ignoring"
-            );
-            discard_startup_resources_for_session(inner, session_id);
-            restore_prepared_windows_ime_session(inner, session_id);
-        }
-        BeginOutcome::CancelRaced => {
-            log::info!("[coord] cancel raced during recorder/ASR startup — aborting begin");
-            discard_startup_resources_for_session(inner, session_id);
-            restore_prepared_windows_ime_session(inner, session_id);
-            set_phase_idle_if_session_matches(inner, session_id);
-        }
-        BeginOutcome::Started | BeginOutcome::PendingStop => {
-            log::info!("[coord] session started");
-            if matches!(outcome, BeginOutcome::PendingStop) {
-                log::info!("[coord] applying pending_stop edge → end_session immediately");
-                let _ = end_session(inner).await;
-            }
-        }
-    }
-}
-
-async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
-    let current_session_id = {
-        let mut state = inner.state.lock();
-        if state.phase != SessionPhase::Listening {
-            return Ok(());
-        }
-        state.phase = SessionPhase::Processing;
-        state.session_id
-    };
-
-    let elapsed = inner.state.lock().started_at.elapsed().as_millis() as u64;
-    emit_capsule(inner, CapsuleState::Transcribing, 0.0, elapsed, None, None);
-
-    if let Some(rec) = take_recorder_for_session(inner, current_session_id) {
-        rec.stop();
-        release_recording_mute(inner, "dictation");
-    }
-
-    let asr_opt = take_asr_for_session(inner, current_session_id);
-    let asr = match asr_opt {
-        Some(a) => a,
-        None => {
-            restore_prepared_windows_ime_session(inner, current_session_id);
-            inner.state.lock().phase = SessionPhase::Idle;
-            return Ok(());
-        }
-    };
-
-    let uses_global_timeout = asr_transcribe_uses_global_timeout(&asr);
-    let raw = match asr {
-        ActiveAsr::Volcengine(asr) => {
-            debug_assert!(uses_global_timeout);
-            if let Err(e) = asr.send_last_frame().await {
-                log::error!("[coord] send last frame failed: {e}");
-            }
-            // 添加全局超时保护：防止 await_final_result() 永远挂起
-            let timeout_duration = std::time::Duration::from_secs(COORDINATOR_GLOBAL_TIMEOUT_SECS);
-            match tokio::time::timeout(timeout_duration, asr.await_final_result()).await {
-                Ok(Ok(r)) => r,
-                Ok(Err(e)) => {
-                    log::error!("[coord] await final failed: {e}");
-                    emit_capsule(
-                        inner,
-                        CapsuleState::Error,
-                        0.0,
-                        elapsed,
-                        Some(format!("识别失败: {e}")),
-                        None,
-                    );
-                    restore_prepared_windows_ime_session(inner, current_session_id);
-                    inner.state.lock().phase = SessionPhase::Idle;
-                    schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-                    return Err(e.to_string());
-                }
-                Err(_) => {
-                    // 全局超时：最后的防线
-                    log::error!(
-                        "[coord] 全局超时 {} 秒 - 强制恢复",
-                        COORDINATOR_GLOBAL_TIMEOUT_SECS
-                    );
-                    // 清理 ASR session，避免资源泄漏
-                    asr.cancel();
-                    emit_capsule(
-                        inner,
-                        CapsuleState::Error,
-                        0.0,
-                        elapsed,
-                        Some("识别超时".to_string()),
-                        None,
-                    );
-                    restore_prepared_windows_ime_session(inner, current_session_id);
-                    inner.state.lock().phase = SessionPhase::Idle;
-                    schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-                    return Err("global timeout".to_string());
-                }
-            }
-        }
-        ActiveAsr::Whisper(w) => {
-            debug_assert!(uses_global_timeout);
-            // Whisper 也添加类似的超时保护
-            let timeout_duration = std::time::Duration::from_secs(COORDINATOR_GLOBAL_TIMEOUT_SECS);
-            match tokio::time::timeout(timeout_duration, w.transcribe()).await {
-                Ok(Ok(r)) => r,
-                Ok(Err(e)) => {
-                    log::error!("[coord] whisper transcribe failed: {e}");
-                    emit_capsule(
-                        inner,
-                        CapsuleState::Error,
-                        0.0,
-                        elapsed,
-                        Some(format!("识别失败: {e}")),
-                        None,
-                    );
-                    restore_prepared_windows_ime_session(inner, current_session_id);
-                    inner.state.lock().phase = SessionPhase::Idle;
-                    schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-                    return Err(e.to_string());
-                }
-                Err(_) => {
-                    log::error!(
-                        "[coord] whisper 全局超时 {} 秒",
-                        COORDINATOR_GLOBAL_TIMEOUT_SECS
-                    );
-                    emit_capsule(
-                        inner,
-                        CapsuleState::Error,
-                        0.0,
-                        elapsed,
-                        Some("识别超时".to_string()),
-                        None,
-                    );
-                    restore_prepared_windows_ime_session(inner, current_session_id);
-                    inner.state.lock().phase = SessionPhase::Idle;
-                    schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-                    return Err("whisper global timeout".to_string());
-                }
-            }
-        }
-        #[cfg(target_os = "windows")]
-        ActiveAsr::FoundryLocalWhisper(local) => {
-            debug_assert!(!uses_global_timeout);
-            match local
-                .transcribe(foundry_audio_transcribe_timeout_duration())
-                .await
-            {
-                Ok(r) => {
-                    schedule_foundry_local_asr_release(inner, current_session_id);
-                    r
-                }
-                Err(e) => {
-                    if inner.state.lock().cancelled {
-                        log::info!(
-                            "[coord] Foundry Local Whisper transcribe cancelled — discarding transcript"
-                        );
-                        schedule_foundry_local_asr_release(inner, current_session_id);
-                        restore_prepared_windows_ime_session(inner, current_session_id);
-                        set_phase_idle_if_session_matches(inner, current_session_id);
-                        return Ok(());
-                    }
-                    log::error!("[coord] Foundry Local Whisper transcribe failed: {e:#}");
-                    schedule_foundry_local_asr_release(inner, current_session_id);
-                    emit_capsule(
-                        inner,
-                        CapsuleState::Error,
-                        0.0,
-                        elapsed,
-                        Some(format!("本地识别失败: {e}")),
-                        None,
-                    );
-                    restore_prepared_windows_ime_session(inner, current_session_id);
-                    inner.state.lock().phase = SessionPhase::Idle;
-                    schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-                    return Err(e.to_string());
-                }
-            }
-        }
-        #[cfg(target_os = "macos")]
-        ActiveAsr::Local(local) => {
-            debug_assert!(uses_global_timeout);
-            // 与 Volcengine/Whisper 一致包一层 global timeout（来自 origin/main）。
-            // 注：缓存命中时 transcribe 不含 load 时间；冷启动 load 已在 build_local_qwen3
-            // 提前完成，所以 15s 给 transcribe 本身足够。
-            let timeout_duration = std::time::Duration::from_secs(COORDINATOR_GLOBAL_TIMEOUT_SECS);
-            let result = tokio::time::timeout(timeout_duration, local.transcribe()).await;
-            inner.local_asr_cache.touch();
-            schedule_local_asr_release(inner);
-            match result {
-                Ok(Ok(r)) => r,
-                Ok(Err(e)) => {
-                    log::error!("[coord] local Qwen3-ASR transcribe failed: {e:#}");
-                    emit_capsule(
-                        inner,
-                        CapsuleState::Error,
-                        0.0,
-                        elapsed,
-                        Some(format!("本地识别失败: {e}")),
-                        None,
-                    );
-                    restore_prepared_windows_ime_session(inner, current_session_id);
-                    inner.state.lock().phase = SessionPhase::Idle;
-                    schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-                    return Err(e.to_string());
-                }
-                Err(_) => {
-                    log::error!(
-                        "[coord] local Qwen3-ASR 全局超时 {} 秒",
-                        COORDINATOR_GLOBAL_TIMEOUT_SECS
-                    );
-                    emit_capsule(
-                        inner,
-                        CapsuleState::Error,
-                        0.0,
-                        elapsed,
-                        Some("识别超时".to_string()),
-                        None,
-                    );
-                    restore_prepared_windows_ime_session(inner, current_session_id);
-                    inner.state.lock().phase = SessionPhase::Idle;
-                    schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-                    return Err("local global timeout".to_string());
-                }
-            }
-        }
-    };
-
-    // ASR 完成后 cancel 检查：用户在 transcribe 进行中按 Esc 时，这里就会命中。
-    // 优先级高于 empty 检查 — 用户取消 → 静默丢弃，不写失败历史也不弹错误胶囊。
-    if inner.state.lock().cancelled {
-        log::info!("[coord] cancel detected after ASR — discarding transcript");
-        restore_prepared_windows_ime_session(inner, current_session_id);
-        inner.state.lock().phase = SessionPhase::Idle;
-        return Ok(());
-    }
-
-    // ASR 返回空转写护栏（来自 PR #66）：写一条 emptyTranscript 失败历史 + 错误胶囊，
-    // 与 main 上其它 error 路径保持一致（带 schedule_capsule_idle 让胶囊自动消失）。
-    let mut raw = raw;
-
-    #[cfg(any(debug_assertions, test))]
-    if raw.text.trim().is_empty() {
-        if let Some(debug_text) = debug_transcript_override_text() {
-            log::info!(
-                "[coord] using debug transcript override (chars={})",
-                debug_text.chars().count()
-            );
-            raw.text = debug_text;
-        }
-    }
-
-    if raw.text.trim().is_empty() {
-        let session = DictationSession {
-            id: Uuid::new_v4().to_string(),
-            created_at: Utc::now().to_rfc3339(),
-            raw_transcript: raw.text.clone(),
-            final_text: String::new(),
-            mode: inner.prefs.get().default_mode,
-            app_bundle_id: None,
-            app_name: None,
-            insert_status: InsertStatus::Failed,
-            error_code: Some("emptyTranscript".to_string()),
-            duration_ms: Some(raw.duration_ms),
-            dictionary_entry_count: Some(enabled_phrases(inner).len() as u32),
-        };
-        if let Err(e) = inner.history.append(session) {
-            log::error!("[coord] history append failed: {e}");
-        }
-        emit_capsule(
-            inner,
-            CapsuleState::Error,
-            0.0,
-            elapsed,
-            Some("ASR returned empty transcript".to_string()),
-            None,
-        );
-        restore_prepared_windows_ime_session(inner, current_session_id);
-        inner.state.lock().phase = SessionPhase::Idle;
-        schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-        return Err("ASR returned empty transcript".to_string());
-    }
-
-    emit_capsule(inner, CapsuleState::Polishing, 0.0, elapsed, None, None);
-
-    let prefs = inner.prefs.get();
-    let mode = prefs.default_mode;
-    let hotword_strs = enabled_phrases(inner);
-    let working_languages = prefs.working_languages.clone();
-    let chinese_script_preference = prefs.chinese_script_preference;
-    let output_language_preference = prefs.output_language_preference;
-    let front_app = inner.state.lock().front_app.clone();
-    let translation_target = prefs.translation_target_language.trim().to_string();
-    let translation_active =
-        inner.translation_modifier_seen.load(Ordering::SeqCst) && !translation_target.is_empty();
-    let (polished, polish_error) = if translation_active {
-        log::info!(
-            "[coord] translation mode → target=\u{300C}{}\u{300D} working={:?} front_app={:?}",
-            translation_target,
-            working_languages,
-            front_app
-        );
-        translate_or_passthrough(
-            &raw,
-            &translation_target,
-            &working_languages,
-            chinese_script_preference,
-            output_language_preference,
-            front_app.as_deref(),
-        )
-        .await
-    } else {
-        polish_or_passthrough(
-            &raw,
-            mode,
-            &hotword_strs,
-            &working_languages,
-            chinese_script_preference,
-            output_language_preference,
-            front_app.as_deref(),
-        )
-        .await
-    };
-
-    // 仅在“ASR 直出文本”场景做强制简繁收敛，避免误伤成功的翻译/常规 LLM 输出：
-    // - 非翻译模式：mode=Raw（本来就不走润色）或润色失败回退 raw
-    // - 翻译模式：仅翻译失败回退 raw 时才收敛
-    let should_force_script = if translation_active {
-        polish_error.is_some()
-    } else {
-        mode == PolishMode::Raw || polish_error.is_some()
-    };
-    let polished = if should_force_script {
-        apply_chinese_script_preference(&polished, chinese_script_preference)
-    } else {
-        polished
-    };
-
-    // 原子化最后一次 cancel 检查 + 转 Inserting：
-    // 在同一 lock 内决定「丢弃」还是「进入 Inserting」。一旦设到 Inserting，
-    // cancel_session 就拒绝介入（Cmd+V 已发出，撤销不掉）。这是 audit HIGH #2 的修复，
-    // 之前 check 与 inserter.insert 之间有窗口期。
-    let proceed_to_insert = {
-        let mut state = inner.state.lock();
-        if state.cancelled {
-            state.phase = SessionPhase::Idle;
-            false
-        } else {
-            state.phase = SessionPhase::Inserting;
-            true
-        }
-    };
-    if !proceed_to_insert {
-        log::info!(
-            "[coord] cancel detected before insert — discarding output (chars={})",
-            polished.chars().count()
-        );
-        restore_prepared_windows_ime_session(inner, current_session_id);
-        return Ok(());
-    }
-
-    let focus_target = inner.state.lock().focus_target;
-    let focus_ready_for_paste = restore_focus_target_if_possible(focus_target);
-    let prefs = inner.prefs.get();
-    let restore_clipboard = prefs.restore_clipboard_after_paste;
-    let allow_non_tsf_insertion_fallback = prefs.allow_non_tsf_insertion_fallback;
-    let status = if focus_ready_for_paste {
-        #[cfg(target_os = "windows")]
-        {
-            let ime_target = capture_ime_submit_target();
-            insert_with_windows_ime_first(
-                inner,
-                current_session_id,
-                &polished,
-                restore_clipboard,
-                allow_non_tsf_insertion_fallback,
-                ime_target,
-            )
-            .await
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            inner.inserter.insert(&polished, restore_clipboard)
-        }
-    } else {
-        log::warn!(
-            "[coord] original insertion target is not foreground; copied output without paste"
-        );
-        if allow_non_tsf_insertion_fallback {
-            inner.inserter.copy_fallback(&polished)
-        } else {
-            InsertStatus::Failed
-        }
-    };
-    restore_prepared_windows_ime_session(inner, current_session_id);
-    let inserted_chars = polished.chars().count() as u32;
-
-    // 累计每条 enabled 词条在最终文本中的命中次数。
-    // 用 polished（最终插入的文本）扫描，与用户实际看到的输出一致。
-    let total_hits: u64 = match inner.vocab.record_hits(&polished) {
-        Ok(n) => n,
-        Err(e) => {
-            log::error!("[coord] record_hits failed: {e}");
-            0
-        }
-    };
-    // 词汇本页面在打开时通常需要立即看到 hits 增长，否则用户得手动切走再切回来才刷新。
-    // 命中数 > 0 时通知前端：Vocab 页面订阅 vocab:updated 即时 listVocab() 重新加载。
-    if total_hits > 0 {
-        if let Some(app) = inner.app.lock().clone() {
-            let _ = app.emit("vocab:updated", total_hits);
-        }
-    }
-
-    // polish 失败时在 history 里标记 polishFailed，让用户能在历史详情看到为什么这次输出
-    // 不是预期的 mode 风格。即使失败也不丢词 — final_text 仍是原文（保留"用户的话不丢"语义）。
-    let error_code = dictation_error_code(
-        status,
-        polish_error.is_some(),
-        focus_ready_for_paste,
-        allow_non_tsf_insertion_fallback,
-    )
-    .map(str::to_string);
-    let tsf_required_insert_failed = error_code.as_deref() == Some("windowsImeTsfRequired");
-
-    let session = DictationSession {
-        id: Uuid::new_v4().to_string(),
-        created_at: Utc::now().to_rfc3339(),
-        raw_transcript: raw.text.clone(),
-        final_text: polished.clone(),
-        mode,
-        app_bundle_id: None,
-        app_name: None,
-        insert_status: status,
-        error_code,
-        duration_ms: Some(raw.duration_ms),
-        // 历史详情页的"X 个热词"显示：用本次实际命中次数（每个匹配实例算一次），
-        // 比"启用词条总数"更能反映本段口述命中了多少。u64 → u32 截断对单段听写足够。
-        dictionary_entry_count: Some(total_hits.min(u32::MAX as u64) as u32),
-    };
-    if let Err(e) = inner.history.append(session) {
-        log::error!("[coord] history append failed: {e}");
-    }
-
-    let done_message = if tsf_required_insert_failed {
-        Some("TSF 未上屏，已禁止非 TSF 兜底".to_string())
-    } else if polish_error.is_some() {
-        // polish 失败优先告知用户，即使 insert 成功也要让用户知道这版是原文
-        Some("润色失败，已插入原文".to_string())
-    } else {
-        match status {
-            InsertStatus::Inserted => None,
-            InsertStatus::PasteSent => Some("已尝试粘贴".to_string()),
-            InsertStatus::CopiedFallback => Some(if cfg!(target_os = "windows") {
-                "已复制，请 Ctrl+V".to_string()
-            } else {
-                "已复制，请粘贴".to_string()
-            }),
-            InsertStatus::Failed => Some("插入失败".to_string()),
-        }
-    };
-
-    emit_capsule(
-        inner,
-        CapsuleState::Done,
-        0.0,
-        elapsed,
-        done_message,
-        Some(inserted_chars),
-    );
-
-    {
-        let mut state = inner.state.lock();
-        state.phase = SessionPhase::Idle;
-        state.focus_target = None;
-    }
-    schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-
-    Ok(())
-}
-
-fn dictation_error_code(
-    status: InsertStatus,
-    polish_failed: bool,
-    focus_ready_for_paste: bool,
-    allow_non_tsf_insertion_fallback: bool,
-) -> Option<&'static str> {
-    if !focus_ready_for_paste && status == InsertStatus::Failed {
-        Some("focusRestoreFailed")
-    } else if cfg!(target_os = "windows")
-        && focus_ready_for_paste
-        && !allow_non_tsf_insertion_fallback
-        && status == InsertStatus::Failed
-    {
-        Some("windowsImeTsfRequired")
-    } else if polish_failed {
-        Some("polishFailed")
-    } else {
-        None
-    }
-}
-
-fn cancel_session(inner: &Arc<Inner>) {
-    let (phase, session_id) = {
-        let mut state = inner.state.lock();
-        let phase = state.phase;
-        if phase == SessionPhase::Idle {
-            return;
-        }
-        // Inserting 阶段已经过了最后一次 cancel 检查 + 锁内转换，inserter.insert 即将
-        // 或正在执行 → Cmd+V 已发出无法撤销。这里硬设 cancelled=true 只会让 UI 显示
-        // "已取消" 但文本仍被插入，与用户预期相反。直接拒绝，让本次 session 走完。
-        if phase == SessionPhase::Inserting {
-            log::info!("[coord] cancel ignored — already in Inserting phase, can't undo paste");
-            return;
-        }
-        // Processing 阶段 cancel 不能直接干掉 in-flight polish task（已经 await 了），
-        // 但可以打 cancelled 标记，让 end_session 在插入前检查并丢弃结果。
-        state.cancelled = true;
-        (phase, state.session_id)
-    };
-
-    stop_recorder_for_session(inner, session_id);
-    cancel_asr_for_session(inner, session_id);
-    restore_prepared_windows_ime_session(inner, session_id);
-    // Processing 阶段保持 phase=Processing 让 end_session 自己走完检查 + 收尾；
-    // 其他阶段直接转 Idle。
-    if phase != SessionPhase::Processing {
-        let mut state = inner.state.lock();
-        state.phase = SessionPhase::Idle;
-        state.focus_target = None;
-    }
-    emit_capsule(inner, CapsuleState::Cancelled, 0.0, 0, None, None);
-    log::info!("[coord] session cancelled (was {phase:?})");
-    schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-}
-
 #[cfg(target_os = "windows")]
 fn store_prepared_windows_ime_session(
     slots: &mut Vec<PreparedWindowsImeSessionSlot>,
-    session_id: u64,
+    session_id: SessionId,
     prepared: PreparedWindowsImeSession,
 ) {
     slots.retain(|slot| slot.session_id != session_id);
@@ -2951,7 +1594,7 @@ fn store_prepared_windows_ime_session(
 #[cfg(target_os = "windows")]
 fn take_matching_prepared_windows_ime_session(
     slots: &mut Vec<PreparedWindowsImeSessionSlot>,
-    session_id: u64,
+    session_id: SessionId,
 ) -> Option<PreparedWindowsImeSession> {
     let index = slots
         .iter()
@@ -2962,8 +1605,8 @@ fn take_matching_prepared_windows_ime_session(
 #[cfg(target_os = "windows")]
 fn take_current_prepared_windows_ime_session_for_restore(
     slots: &mut Vec<PreparedWindowsImeSessionSlot>,
-    session_id: u64,
-    current_session_id: u64,
+    session_id: SessionId,
+    current_session_id: SessionId,
 ) -> Option<PreparedWindowsImeSession> {
     let prepared = take_matching_prepared_windows_ime_session(slots, session_id)?;
     if current_session_id == session_id {
@@ -2974,7 +1617,7 @@ fn take_current_prepared_windows_ime_session_for_restore(
 }
 
 #[cfg(target_os = "windows")]
-fn restore_prepared_windows_ime_session(inner: &Arc<Inner>, session_id: u64) {
+fn restore_prepared_windows_ime_session(inner: &Arc<Inner>, session_id: SessionId) {
     let state = inner.state.lock();
     let prepared = {
         let mut slot = inner.prepared_windows_ime_session.lock();
@@ -2990,12 +1633,12 @@ fn restore_prepared_windows_ime_session(inner: &Arc<Inner>, session_id: u64) {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn restore_prepared_windows_ime_session(_inner: &Arc<Inner>, _session_id: u64) {}
+fn restore_prepared_windows_ime_session(_inner: &Arc<Inner>, _session_id: SessionId) {}
 
 #[cfg(target_os = "windows")]
 async fn insert_with_windows_ime_first(
     inner: &Arc<Inner>,
-    session_id: u64,
+    session_id: SessionId,
     polished: &str,
     restore_clipboard: bool,
     allow_non_tsf_insertion_fallback: bool,
@@ -3219,12 +1862,12 @@ fn foundry_local_asr_release_keep_secs(inner: &Arc<Inner>) -> u32 {
 }
 
 #[cfg(target_os = "windows")]
-fn foundry_release_session_is_current(inner: &Arc<Inner>, session_id: u64) -> bool {
+fn foundry_release_session_is_current(inner: &Arc<Inner>, session_id: SessionId) -> bool {
     inner.state.lock().session_id == session_id
 }
 
 #[cfg(target_os = "windows")]
-fn schedule_foundry_local_asr_release(inner: &Arc<Inner>, session_id: u64) {
+fn schedule_foundry_local_asr_release(inner: &Arc<Inner>, session_id: SessionId) {
     let keep_secs = foundry_local_asr_release_keep_secs(inner);
     let runtime = Arc::clone(&inner.foundry_local_runtime);
     let inner = Arc::clone(inner);
@@ -3318,6 +1961,7 @@ async fn polish_or_passthrough(
     chinese_script_preference: ChineseScriptPreference,
     output_language_preference: OutputLanguagePreference,
     front_app: Option<&str>,
+    prior_turns: &[(String, String)],
 ) -> (String, Option<String>) {
     if mode == PolishMode::Raw {
         return (raw.text.clone(), None);
@@ -3330,6 +1974,7 @@ async fn polish_or_passthrough(
         chinese_script_preference,
         output_language_preference,
         front_app,
+        prior_turns,
     )
     .await
     {
@@ -3350,6 +1995,7 @@ async fn polish_text(
     chinese_script_preference: ChineseScriptPreference,
     output_language_preference: OutputLanguagePreference,
     front_app: Option<&str>,
+    prior_turns: &[(String, String)],
 ) -> anyhow::Result<String> {
     let api_key = CredentialsVault::get(CredentialAccount::ArkApiKey)?.unwrap_or_default();
     let model = CredentialsVault::get(CredentialAccount::ArkModelId)?
@@ -3372,6 +2018,7 @@ async fn polish_text(
             chinese_script_preference,
             output_language_preference,
             front_app,
+            prior_turns,
         )
         .await?)
 }
@@ -3507,7 +2154,7 @@ async fn begin_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
         }
         state.phase = QaPhase::Recording;
         state.cancelled = false;
-        state.session_id = state.session_id.wrapping_add(1);
+        state.session_id = new_session_id();
         state.front_app = capture_frontmost_app();
         state.selection = None;
     }
@@ -3865,7 +2512,10 @@ async fn end_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
             duration_ms: Some(raw.duration_ms),
             dictionary_entry_count: None,
         };
-        if let Err(e) = inner.history.append(session) {
+        if let Err(e) = inner
+            .history
+            .append_with_retention(session, inner.prefs.get().history_retention_days)
+        {
             log::error!("[coord] QA history append failed: {e}");
         }
     }
@@ -3996,8 +2646,16 @@ fn resolve_ark_endpoint_with_policy(
 
 #[cfg(test)]
 mod tests {
+    use super::dictation::abort_recording_with_error;
     use super::*;
-    use crate::types::HotkeyTrigger;
+    use crate::types::{HotkeyMode, HotkeyTrigger};
+    use once_cell::sync::Lazy;
+
+    static ENV_LOCK: Lazy<tokio::sync::Mutex<()>> = Lazy::new(|| tokio::sync::Mutex::new(()));
+
+    fn session_id(n: u128) -> SessionId {
+        Uuid::from_u128(n)
+    }
 
     #[tokio::test]
     async fn hotkey_injection_gate_logs_pressed_and_cancels() {
@@ -4005,12 +2663,59 @@ mod tests {
             .filter_level(log::LevelFilter::Info)
             .is_test(false)
             .try_init();
+        let _guard = ENV_LOCK.lock().await;
         std::env::set_var("OPENLESS_HOTKEY_INJECTION_DRY_RUN", "1");
 
         let coordinator = Coordinator::new();
         coordinator.inject_hotkey_click_for_dev().await.unwrap();
 
         assert_eq!(coordinator.inner.state.lock().phase, SessionPhase::Idle);
+        std::env::remove_var("OPENLESS_HOTKEY_INJECTION_DRY_RUN");
+    }
+
+    #[tokio::test]
+    async fn begin_session_dry_run_enters_listening_and_clears_stale_edges() {
+        let _guard = ENV_LOCK.lock().await;
+        std::env::set_var("OPENLESS_HOTKEY_INJECTION_DRY_RUN", "1");
+
+        let coordinator = Coordinator::new();
+        let old_session_id = coordinator.inner.state.lock().session_id;
+        {
+            let mut state = coordinator.inner.state.lock();
+            state.pending_stop = true;
+            state.cancelled = true;
+        }
+
+        coordinator.start_dictation().await.unwrap();
+
+        let state = coordinator.inner.state.lock();
+        assert_eq!(state.phase, SessionPhase::Listening);
+        assert!(!state.pending_stop);
+        assert!(!state.cancelled);
+        assert_ne!(state.session_id, old_session_id);
+
+        std::env::remove_var("OPENLESS_HOTKEY_INJECTION_DRY_RUN");
+    }
+
+    #[tokio::test]
+    async fn begin_session_ignores_non_idle_phase() {
+        let _guard = ENV_LOCK.lock().await;
+        std::env::set_var("OPENLESS_HOTKEY_INJECTION_DRY_RUN", "1");
+
+        let coordinator = Coordinator::new();
+        let old_session_id = {
+            let mut state = coordinator.inner.state.lock();
+            state.phase = SessionPhase::Processing;
+            state.session_id = session_id(99);
+            state.session_id
+        };
+
+        coordinator.start_dictation().await.unwrap();
+
+        let state = coordinator.inner.state.lock();
+        assert_eq!(state.phase, SessionPhase::Processing);
+        assert_eq!(state.session_id, old_session_id);
+
         std::env::remove_var("OPENLESS_HOTKEY_INJECTION_DRY_RUN");
     }
 
@@ -4079,6 +2784,7 @@ mod tests {
         let provider = Arc::new(crate::asr::local::FoundryLocalWhisperAsr::new(
             Arc::new(crate::asr::local::FoundryLocalRuntime::new()),
             crate::asr::local::foundry::DEFAULT_MODEL_ALIAS.to_string(),
+            "auto".to_string(),
             None,
         ));
         let active_asr = ActiveAsr::FoundryLocalWhisper(provider);
@@ -4122,7 +2828,7 @@ mod tests {
             old_session_id
         ));
 
-        coordinator.inner.state.lock().session_id = old_session_id.wrapping_add(1);
+        coordinator.inner.state.lock().session_id = new_session_id();
 
         assert!(!foundry_release_session_is_current(
             &coordinator.inner,
@@ -4191,6 +2897,50 @@ mod tests {
         assert!(state.pending_stop);
     }
 
+    #[tokio::test]
+    async fn stop_dictation_from_listening_without_asr_returns_idle() {
+        let coordinator = Coordinator::new();
+        {
+            let mut state = coordinator.inner.state.lock();
+            state.phase = SessionPhase::Listening;
+            state.session_id = session_id(123);
+        }
+
+        coordinator.stop_dictation().await.unwrap();
+
+        assert_eq!(coordinator.inner.state.lock().phase, SessionPhase::Idle);
+    }
+
+    #[test]
+    fn cancel_session_state_machine_is_table_driven() {
+        let cases = [
+            (SessionPhase::Idle, SessionPhase::Idle, false),
+            (SessionPhase::Starting, SessionPhase::Idle, true),
+            (SessionPhase::Listening, SessionPhase::Idle, true),
+            (SessionPhase::Processing, SessionPhase::Processing, true),
+            (SessionPhase::Inserting, SessionPhase::Inserting, false),
+        ];
+
+        for (initial, expected_phase, expected_cancelled) in cases {
+            let coordinator = Coordinator::new();
+            {
+                let mut state = coordinator.inner.state.lock();
+                state.phase = initial;
+                state.cancelled = false;
+                state.focus_target = Some(1);
+            }
+
+            coordinator.cancel_dictation();
+
+            let state = coordinator.inner.state.lock();
+            assert_eq!(state.phase, expected_phase, "initial={initial:?}");
+            assert_eq!(state.cancelled, expected_cancelled, "initial={initial:?}");
+            if matches!(initial, SessionPhase::Starting | SessionPhase::Listening) {
+                assert!(state.focus_target.is_none(), "initial={initial:?}");
+            }
+        }
+    }
+
     #[test]
     fn recorder_runtime_error_aborts_active_session() {
         let coordinator = Coordinator::new();
@@ -4214,11 +2964,11 @@ mod tests {
         let mut state = SessionState::default();
         state.phase = SessionPhase::Listening;
         state.cancelled = false;
-        state.session_id = 7;
+        state.session_id = session_id(7);
 
         let abort = begin_recording_abort_before_restore(&mut state).unwrap();
 
-        assert_eq!(abort.session_id, 7);
+        assert_eq!(abort.session_id, session_id(7));
         assert!(state.cancelled);
         assert_eq!(state.phase, SessionPhase::Listening);
 
@@ -4233,14 +2983,14 @@ mod tests {
         {
             let mut state = coordinator.inner.state.lock();
             state.phase = SessionPhase::Inserting;
-            state.session_id = 41;
+            state.session_id = session_id(41);
         }
 
         handle_pressed_edge(&coordinator.inner).await;
 
         let state = coordinator.inner.state.lock();
         assert_eq!(state.phase, SessionPhase::Inserting);
-        assert_eq!(state.session_id, 41);
+        assert_eq!(state.session_id, session_id(41));
     }
 
     #[tokio::test]
@@ -4298,17 +3048,17 @@ mod tests {
     #[cfg(target_os = "windows")]
     fn prepared_windows_ime_slot_is_taken_only_for_matching_session() {
         let mut slots = vec![PreparedWindowsImeSessionSlot {
-            session_id: 2,
+            session_id: session_id(2),
             prepared: PreparedWindowsImeSession::unavailable(),
         }];
 
-        assert!(take_matching_prepared_windows_ime_session(&mut slots, 1).is_none());
+        assert!(take_matching_prepared_windows_ime_session(&mut slots, session_id(1)).is_none());
         assert_eq!(
             slots.iter().map(|slot| slot.session_id).collect::<Vec<_>>(),
-            vec![2]
+            vec![session_id(2)]
         );
 
-        assert!(take_matching_prepared_windows_ime_session(&mut slots, 2).is_some());
+        assert!(take_matching_prepared_windows_ime_session(&mut slots, session_id(2)).is_some());
         assert!(slots.is_empty());
     }
 
@@ -4316,18 +3066,26 @@ mod tests {
     #[cfg(target_os = "windows")]
     fn prepared_windows_ime_sessions_keep_overlapping_snapshots() {
         let mut slots = Vec::new();
-        store_prepared_windows_ime_session(&mut slots, 1, PreparedWindowsImeSession::unavailable());
-        store_prepared_windows_ime_session(&mut slots, 2, PreparedWindowsImeSession::unavailable());
-
-        assert_eq!(
-            slots.iter().map(|slot| slot.session_id).collect::<Vec<_>>(),
-            vec![1, 2]
+        store_prepared_windows_ime_session(
+            &mut slots,
+            session_id(1),
+            PreparedWindowsImeSession::unavailable(),
+        );
+        store_prepared_windows_ime_session(
+            &mut slots,
+            session_id(2),
+            PreparedWindowsImeSession::unavailable(),
         );
 
-        assert!(take_matching_prepared_windows_ime_session(&mut slots, 1).is_some());
         assert_eq!(
             slots.iter().map(|slot| slot.session_id).collect::<Vec<_>>(),
-            vec![2]
+            vec![session_id(1), session_id(2)]
+        );
+
+        assert!(take_matching_prepared_windows_ime_session(&mut slots, session_id(1)).is_some());
+        assert_eq!(
+            slots.iter().map(|slot| slot.session_id).collect::<Vec<_>>(),
+            vec![session_id(2)]
         );
     }
 
@@ -4335,13 +3093,26 @@ mod tests {
     #[cfg(target_os = "windows")]
     fn stale_prepared_windows_ime_restore_discards_old_snapshot_without_restoring() {
         let mut slots = Vec::new();
-        store_prepared_windows_ime_session(&mut slots, 1, PreparedWindowsImeSession::unavailable());
-        store_prepared_windows_ime_session(&mut slots, 2, PreparedWindowsImeSession::unavailable());
+        store_prepared_windows_ime_session(
+            &mut slots,
+            session_id(1),
+            PreparedWindowsImeSession::unavailable(),
+        );
+        store_prepared_windows_ime_session(
+            &mut slots,
+            session_id(2),
+            PreparedWindowsImeSession::unavailable(),
+        );
 
-        assert!(take_current_prepared_windows_ime_session_for_restore(&mut slots, 1, 2).is_none());
+        assert!(take_current_prepared_windows_ime_session_for_restore(
+            &mut slots,
+            session_id(1),
+            session_id(2)
+        )
+        .is_none());
         assert_eq!(
             slots.iter().map(|slot| slot.session_id).collect::<Vec<_>>(),
-            vec![2]
+            vec![session_id(2)]
         );
     }
 
@@ -4400,12 +3171,80 @@ mod tests {
         let mut state = SessionState::default();
         state.phase = SessionPhase::Starting;
         state.cancelled = false;
-        state.session_id = 2;
+        state.session_id = session_id(2);
 
         assert_eq!(
-            startup_race_status(&state, 1),
+            startup_race_status(&state, session_id(1)),
             StartupRaceStatus::StaleContinuation
         );
+    }
+
+    #[test]
+    fn startup_race_check_is_table_driven_for_begin_session_edges() {
+        let cases = [
+            (
+                SessionPhase::Starting,
+                false,
+                session_id(7),
+                StartupRaceStatus::ActiveStarting,
+            ),
+            (
+                SessionPhase::Starting,
+                true,
+                session_id(7),
+                StartupRaceStatus::CancelRaced,
+            ),
+            (
+                SessionPhase::Idle,
+                false,
+                session_id(7),
+                StartupRaceStatus::CancelRaced,
+            ),
+            (
+                SessionPhase::Listening,
+                false,
+                session_id(7),
+                StartupRaceStatus::CancelRaced,
+            ),
+            (
+                SessionPhase::Starting,
+                false,
+                session_id(8),
+                StartupRaceStatus::StaleContinuation,
+            ),
+        ];
+
+        for (phase, cancelled, actual_session_id, expected) in cases {
+            let mut state = SessionState::default();
+            state.phase = phase;
+            state.cancelled = cancelled;
+            state.session_id = actual_session_id;
+
+            assert_eq!(
+                startup_race_status(&state, session_id(7)),
+                expected,
+                "phase={phase:?} cancelled={cancelled} actual_session={actual_session_id}"
+            );
+        }
+    }
+
+    #[test]
+    fn begin_recording_abort_is_noop_after_prior_cancel_or_idle() {
+        let cases = [
+            (SessionPhase::Idle, false),
+            (SessionPhase::Processing, false),
+            (SessionPhase::Listening, true),
+        ];
+
+        for (phase, cancelled) in cases {
+            let mut state = SessionState::default();
+            state.phase = phase;
+            state.cancelled = cancelled;
+
+            assert!(begin_recording_abort_before_restore(&mut state).is_none());
+            assert_eq!(state.phase, phase);
+            assert_eq!(state.cancelled, cancelled);
+        }
     }
 
     #[test]
@@ -4415,13 +3254,14 @@ mod tests {
             "key".to_string(),
             "http://localhost".to_string(),
             "model".to_string(),
+            None,
         ));
         *coordinator.inner.asr.lock() = Some(SessionResource::new(
-            2,
+            session_id(2),
             ActiveAsr::Whisper(Arc::clone(&newer_asr)),
         ));
 
-        discard_startup_resources_for_session(&coordinator.inner, 1);
+        discard_startup_resources_for_session(&coordinator.inner, session_id(1));
 
         assert_eq!(
             coordinator
@@ -4430,10 +3270,10 @@ mod tests {
                 .lock()
                 .as_ref()
                 .map(|resource| resource.session_id),
-            Some(2)
+            Some(session_id(2))
         );
 
-        discard_startup_resources_for_session(&coordinator.inner, 2);
+        discard_startup_resources_for_session(&coordinator.inner, session_id(2));
 
         assert!(coordinator.inner.asr.lock().is_none());
     }
@@ -4464,48 +3304,18 @@ fn foundry_audio_transcribe_timeout_duration() -> std::time::Duration {
     std::time::Duration::from_secs(COORDINATOR_GLOBAL_TIMEOUT_SECS)
 }
 
-/// begin_session 中各 await 之间的 cancel race 检查结果。
-enum BeginOutcome {
-    /// 启动 continuation 属于旧 session；不能改动当前 session 状态。
-    StaleContinuation,
-    /// 正常进入 Listening。
-    Started,
-    /// Starting 阶段积累了 pending_stop 边沿，应立即 end_session（hold 快速松开 / toggle 快速双击）。
-    PendingStop,
-    /// 期间 cancel_session 触发（cancelled=true 或 phase 被外部改回 Idle）。
-    /// 必须回滚 recorder + ASR 资源，不进 Listening。
-    CancelRaced,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StartupRaceStatus {
-    ActiveStarting,
-    CancelRaced,
-    StaleContinuation,
-}
-
-fn startup_race_status(state: &SessionState, captured_session_id: u64) -> StartupRaceStatus {
-    if state.session_id != captured_session_id {
-        StartupRaceStatus::StaleContinuation
-    } else if state.cancelled || state.phase != SessionPhase::Starting {
-        StartupRaceStatus::CancelRaced
-    } else {
-        StartupRaceStatus::ActiveStarting
-    }
-}
-
 /// 检查 begin_session 的 await 间隙是否被 cancel_session 打断。
 /// 必须在持有 state lock 的瞬间读，结果一拿就过期，所以用 helper 名字提醒只在
 /// 「准备做下一步副作用前」用。
 fn startup_race_status_for_starting(
     inner: &Arc<Inner>,
-    captured_session_id: u64,
+    captured_session_id: SessionId,
 ) -> StartupRaceStatus {
     let state = inner.state.lock();
     startup_race_status(&state, captured_session_id)
 }
 
-fn set_phase_idle_if_session_matches(inner: &Arc<Inner>, session_id: u64) {
+fn set_phase_idle_if_session_matches(inner: &Arc<Inner>, session_id: SessionId) {
     let mut state = inner.state.lock();
     if state.session_id == session_id {
         state.phase = SessionPhase::Idle;

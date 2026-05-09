@@ -15,6 +15,7 @@ mod audio_mute;
 mod combo_hotkey;
 mod commands;
 mod coordinator;
+mod coordinator_state;
 mod global_hotkey_runtime;
 mod hotkey;
 mod insertion;
@@ -48,6 +49,8 @@ use tauri::menu::{
 };
 use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, RunEvent, Runtime};
+
+use crate::types::PolishMode;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -149,7 +152,17 @@ pub fn run() {
                     }
                     apply_windows_rounded_frame(&main);
                 }
-                if let Err(e) = main.show() {
+                // 静默启动开关：prefs.start_minimized = true → 不弹主窗口，
+                // 用户从菜单栏 / 托盘点击访问。开机自启时尤其有用，避免每次
+                // 登录都被主窗口打扰。OPENLESS_SHOW_MAIN_ON_START=1 仍保留
+                // 老的强制 show 路径（手动 dispatch 测试 / dev 用），优先级高
+                // 于 prefs。
+                let force_show = std::env::var("OPENLESS_SHOW_MAIN_ON_START").ok().as_deref()
+                    == Some("1");
+                let suppress_show = !force_show && coordinator.prefs().get().start_minimized;
+                if suppress_show {
+                    log::info!("[main] start_minimized=true → 跳过初始 show，等用户点托盘");
+                } else if let Err(e) = main.show() {
                     log::warn!("[main] initial show failed: {e}");
                 }
             }
@@ -182,24 +195,24 @@ pub fn run() {
                     .on_menu_event(move |app, event| match event.id.as_ref() {
                         "toggle" => show_main_window(app),
                         "quit" => app.exit(0),
-                        id => handle_microphone_tray_menu_event(
-                            app,
-                            id,
-                        ),
-                    })
-                    .on_tray_icon_event(move |tray, event| {
-                        match event {
-                            TrayIconEvent::Enter { .. } => {
-                                if let Err(err) = refresh_tray_microphone_menu(tray.app_handle()) {
-                                    log::warn!("[tray] refresh microphone menu on hover failed: {err}");
-                                }
+                        id => {
+                            if handle_style_tray_menu_event(app, id) {
+                                return;
                             }
-                            TrayIconEvent::Click {
-                                button: MouseButton::Left,
-                                ..
-                            } => show_main_window(tray.app_handle()),
-                            _ => {}
+                            handle_microphone_tray_menu_event(app, id);
                         }
+                    })
+                    .on_tray_icon_event(move |tray, event| match event {
+                        TrayIconEvent::Enter { .. } => {
+                            if let Err(err) = refresh_tray_microphone_menu(tray.app_handle()) {
+                                log::warn!("[tray] refresh microphone menu on hover failed: {err}");
+                            }
+                        }
+                        TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            ..
+                        } => show_main_window(tray.app_handle()),
+                        _ => {}
                     })
                     .build(app)?;
                 start_tray_microphone_watcher(app.handle().clone());
@@ -291,6 +304,7 @@ pub fn run() {
             commands::foundry_local_asr_catalog,
             commands::foundry_local_asr_set_model,
             commands::foundry_local_asr_set_language_hint,
+            commands::foundry_local_asr_set_runtime_source,
             commands::foundry_local_asr_prepare,
             commands::foundry_local_asr_cancel_prepare,
             commands::foundry_local_asr_release,
@@ -349,9 +363,52 @@ struct MicrophoneTrayMenu {
     items: Vec<commands::TrayMicrophoneMenuItem>,
 }
 
+struct StyleTrayMenu {
+    submenu: Submenu<tauri::Wry>,
+}
+
 struct TrayMenu {
     menu: Menu<tauri::Wry>,
     microphone_items: Vec<commands::TrayMicrophoneMenuItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TrayPolishModeMenuEntry {
+    id: String,
+    label: &'static str,
+    mode: PolishMode,
+    checked: bool,
+}
+
+fn tray_style_menu_enabled() -> bool {
+    cfg!(target_os = "windows")
+}
+
+fn tray_polish_mode_menu_entries(selected: PolishMode) -> Vec<TrayPolishModeMenuEntry> {
+    [
+        (PolishMode::Raw, "style-raw"),
+        (PolishMode::Light, "style-light"),
+        (PolishMode::Structured, "style-structured"),
+        (PolishMode::Formal, "style-formal"),
+    ]
+    .into_iter()
+    .map(|(mode, id)| TrayPolishModeMenuEntry {
+        id: id.to_string(),
+        label: mode.display_name(),
+        mode,
+        checked: mode == selected,
+    })
+    .collect()
+}
+
+fn parse_tray_polish_mode_id(id: &str) -> Option<PolishMode> {
+    match id {
+        "style-raw" => Some(PolishMode::Raw),
+        "style-light" => Some(PolishMode::Light),
+        "style-structured" => Some(PolishMode::Structured),
+        "style-formal" => Some(PolishMode::Formal),
+        _ => None,
+    }
 }
 
 fn build_tray_menu<M: Manager<tauri::Wry>>(
@@ -361,12 +418,38 @@ fn build_tray_menu<M: Manager<tauri::Wry>>(
     let toggle = MenuItemBuilder::with_id("toggle", "显示主窗口").build(app)?;
     let microphone_menu = build_microphone_tray_menu(app, coordinator)?;
     let quit = MenuItemBuilder::with_id("quit", "退出 OpenLess").build(app)?;
-    let menu = MenuBuilder::new(app)
+    let mut builder = MenuBuilder::new(app);
+    let style_menu = if tray_style_menu_enabled() {
+        Some(build_style_tray_menu(app, coordinator)?)
+    } else {
+        None
+    };
+    if let Some(style_menu) = &style_menu {
+        builder = builder.item(&style_menu.submenu);
+    }
+    let menu = builder
         .items(&[&toggle, &microphone_menu.submenu, &quit])
         .build()?;
     Ok(TrayMenu {
         menu,
         microphone_items: microphone_menu.items,
+    })
+}
+
+fn build_style_tray_menu<M: Manager<tauri::Wry>>(
+    app: &M,
+    coordinator: &Arc<coordinator::Coordinator>,
+) -> tauri::Result<StyleTrayMenu> {
+    let selected = coordinator.prefs().get().default_mode;
+    let mut submenu = SubmenuBuilder::with_id(app, "style", "输出风格");
+    for entry in tray_polish_mode_menu_entries(selected) {
+        let item = CheckMenuItemBuilder::with_id(&entry.id, entry.label)
+            .checked(entry.checked)
+            .build(app)?;
+        submenu = submenu.item(&item);
+    }
+    Ok(StyleTrayMenu {
+        submenu: submenu.build()?,
     })
 }
 
@@ -384,8 +467,8 @@ fn build_microphone_tray_menu<M: Manager<tauri::Wry>>(
             Vec::new()
         }
     };
-    let selected_available = selected.trim().is_empty()
-        || devices.iter().any(|device| device.name == selected);
+    let selected_available =
+        selected.trim().is_empty() || devices.iter().any(|device| device.name == selected);
 
     let default_item = CheckMenuItemBuilder::with_id("mic-default", "系统默认麦克风")
         .checked(selected.trim().is_empty() || !selected_available)
@@ -403,23 +486,23 @@ fn build_microphone_tray_menu<M: Manager<tauri::Wry>>(
             .build(app)?;
         submenu = submenu.item(&empty);
     } else {
-            for (index, device) in devices.into_iter().enumerate() {
-                let id = format!("mic-device-{index}");
-                let label = if device.is_default {
-                    format!("{}（系统默认）", device.name)
-                } else {
-                    device.name.clone()
-                };
-                let item = CheckMenuItemBuilder::with_id(&id, label)
-                    .checked(selected == device.name)
-                    .build(app)?;
-                submenu = submenu.item(&item);
-                items.push(commands::TrayMicrophoneMenuItem {
-                    id,
-                    device_name: device.name,
-                    item,
-                });
-            }
+        for (index, device) in devices.into_iter().enumerate() {
+            let id = format!("mic-device-{index}");
+            let label = if device.is_default {
+                format!("{}（系统默认）", device.name)
+            } else {
+                device.name.clone()
+            };
+            let item = CheckMenuItemBuilder::with_id(&id, label)
+                .checked(selected == device.name)
+                .build(app)?;
+            submenu = submenu.item(&item);
+            items.push(commands::TrayMicrophoneMenuItem {
+                id,
+                device_name: device.name,
+                item,
+            });
+        }
     }
 
     Ok(MicrophoneTrayMenu {
@@ -474,20 +557,20 @@ fn start_tray_microphone_watcher(app: AppHandle) {
                 let refresh_app = app.clone();
                 let _ = app.run_on_main_thread(move || {
                     if let Err(err) = refresh_tray_microphone_menu(&refresh_app) {
-                        log::warn!("[tray] refresh microphone menu after device change failed: {err}");
+                        log::warn!(
+                            "[tray] refresh microphone menu after device change failed: {err}"
+                        );
                     }
                     let _ = refresh_app.emit("microphone:devices-changed", serde_json::json!({}));
                 });
             }
-        }) {
+        })
+    {
         log::warn!("[tray] start microphone watcher failed: {err}");
     }
 }
 
-fn handle_microphone_tray_menu_event(
-    app: &AppHandle,
-    id: &str,
-) {
+fn handle_microphone_tray_menu_event(app: &AppHandle, id: &str) {
     let tray_items = app.state::<commands::TrayMicrophoneMenuState>();
     let items = tray_items.lock();
     let Some(selected) = items.iter().find(|item| item.id == id) else {
@@ -504,6 +587,25 @@ fn handle_microphone_tray_menu_event(
     let _ = app.emit("prefs:changed", &prefs);
 
     commands::sync_tray_microphone_selection(&items, &selected.device_name);
+}
+
+fn handle_style_tray_menu_event(app: &AppHandle, id: &str) -> bool {
+    let Some(mode) = parse_tray_polish_mode_id(id) else {
+        return false;
+    };
+    let coord = app.state::<Arc<coordinator::Coordinator>>();
+    let mut prefs = coord.prefs().get();
+    prefs.default_mode = mode;
+    if let Err(err) = coord.prefs().set(prefs.clone()) {
+        log::warn!("[tray] save polish mode preference failed: {err}");
+        return true;
+    }
+    let _ = app.emit("prefs:changed", &prefs);
+    let _ = app.emit_to("main", "prefs:changed", &prefs);
+    if let Err(err) = refresh_tray_microphone_menu(app) {
+        log::warn!("[tray] refresh style menu after polish mode change failed: {err}");
+    }
+    true
 }
 
 #[cfg(target_os = "windows")]
@@ -1060,9 +1162,54 @@ fn capsule_height_for_qa() -> f64 {
 mod tests {
     use super::{
         capsule_height_for_qa, capsule_visual_height, capsule_window_bounds,
-        rotate_log_if_too_large, LOG_ROTATE_LIMIT_BYTES,
+        parse_tray_polish_mode_id, rotate_log_if_too_large, tray_polish_mode_menu_entries,
+        tray_style_menu_enabled, LOG_ROTATE_LIMIT_BYTES,
     };
+    use crate::types::PolishMode;
     use std::io::Write;
+
+    #[test]
+    fn tray_style_menu_is_windows_only() {
+        #[cfg(target_os = "windows")]
+        assert!(tray_style_menu_enabled());
+
+        #[cfg(not(target_os = "windows"))]
+        assert!(!tray_style_menu_enabled());
+    }
+
+    #[test]
+    fn tray_style_menu_lists_builtin_modes_in_expected_order() {
+        let entries = tray_polish_mode_menu_entries(PolishMode::Structured);
+
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| (entry.id.as_str(), entry.label, entry.mode, entry.checked))
+                .collect::<Vec<_>>(),
+            vec![
+                ("style-raw", "原文", PolishMode::Raw, false),
+                ("style-light", "轻度润色", PolishMode::Light, false),
+                ("style-structured", "清晰结构", PolishMode::Structured, true),
+                ("style-formal", "正式表达", PolishMode::Formal, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn tray_style_menu_id_parsing_accepts_only_style_items() {
+        assert_eq!(parse_tray_polish_mode_id("style-raw"), Some(PolishMode::Raw));
+        assert_eq!(parse_tray_polish_mode_id("style-light"), Some(PolishMode::Light));
+        assert_eq!(
+            parse_tray_polish_mode_id("style-structured"),
+            Some(PolishMode::Structured)
+        );
+        assert_eq!(
+            parse_tray_polish_mode_id("style-formal"),
+            Some(PolishMode::Formal)
+        );
+        assert_eq!(parse_tray_polish_mode_id("toggle"), None);
+        assert_eq!(parse_tray_polish_mode_id("mic-default"), None);
+    }
 
     #[test]
     fn capsule_window_bounds_leave_room_for_windows_shadow() {

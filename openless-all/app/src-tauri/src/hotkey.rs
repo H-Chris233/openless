@@ -20,7 +20,7 @@ use parking_lot::RwLock;
 use crate::types::HotkeyTrigger;
 use crate::types::{HotkeyAdapterKind, HotkeyBinding, HotkeyCapability, HotkeyInstallError};
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HotkeyEvent {
     Pressed,
     Released,
@@ -36,9 +36,8 @@ mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
 
-    #[test]
-    fn reset_shared_held_state_clears_all_shortcut_latches() {
-        let shared = Shared {
+    fn shared_with_held_latches() -> Shared {
+        Shared {
             binding: RwLock::new(HotkeyBinding::default()),
             trigger_held: AtomicBool::new(true),
             qa_trigger: RwLock::new(None),
@@ -46,14 +45,57 @@ mod tests {
             translation_trigger: RwLock::new(None),
             translation_trigger_held: AtomicBool::new(true),
             translation_modifier_held: AtomicBool::new(true),
-        };
+        }
+    }
 
+    #[test]
+    fn reset_shared_held_state_clears_all_shortcut_latches() {
+        let shared = shared_with_held_latches();
         reset_shared_held_state(&shared);
 
         assert!(!shared.trigger_held.load(Ordering::SeqCst));
         assert!(!shared.qa_trigger_held.load(Ordering::SeqCst));
         assert!(!shared.translation_trigger_held.load(Ordering::SeqCst));
         assert!(!shared.translation_modifier_held.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn update_binding_resets_only_dictation_latch() {
+        let shared = shared_with_held_latches();
+        let next = HotkeyBinding {
+            trigger: HotkeyTrigger::LeftControl,
+            mode: crate::types::HotkeyMode::Hold,
+            keys: None,
+        };
+
+        update_shared_binding(&shared, next.clone());
+
+        assert_eq!(*shared.binding.read(), next);
+        assert!(!shared.trigger_held.load(Ordering::SeqCst));
+        assert!(shared.qa_trigger_held.load(Ordering::SeqCst));
+        assert!(shared.translation_trigger_held.load(Ordering::SeqCst));
+        assert!(shared.translation_modifier_held.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn update_modifier_shortcuts_resets_only_modifier_latches() {
+        let shared = shared_with_held_latches();
+
+        update_shared_modifier_shortcuts(
+            &shared,
+            Some(HotkeyTrigger::RightCommand),
+            Some(HotkeyTrigger::LeftOption),
+        );
+
+        assert_eq!(*shared.qa_trigger.read(), Some(HotkeyTrigger::RightCommand));
+        assert_eq!(
+            *shared.translation_trigger.read(),
+            Some(HotkeyTrigger::LeftOption)
+        );
+        assert!(shared.trigger_held.load(Ordering::SeqCst));
+        assert!(!shared.qa_trigger_held.load(Ordering::SeqCst));
+        assert!(!shared.translation_trigger_held.load(Ordering::SeqCst));
+        assert!(shared.translation_modifier_held.load(Ordering::SeqCst));
     }
 }
 
@@ -550,6 +592,93 @@ mod platform {
             HotkeyTrigger::Custom => unreachable!("custom combo hotkeys use ComboHotkeyMonitor"),
         }
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use parking_lot::RwLock;
+        use std::sync::atomic::AtomicBool;
+        use std::sync::mpsc;
+
+        fn shared(trigger: HotkeyTrigger) -> Arc<Shared> {
+            Arc::new(Shared {
+                binding: RwLock::new(HotkeyBinding {
+                    trigger,
+                    mode: crate::types::HotkeyMode::Toggle,
+                    keys: None,
+                }),
+                trigger_held: AtomicBool::new(false),
+                qa_trigger: RwLock::new(None),
+                qa_trigger_held: AtomicBool::new(false),
+                translation_trigger: RwLock::new(None),
+                translation_trigger_held: AtomicBool::new(false),
+                translation_modifier_held: AtomicBool::new(false),
+            })
+        }
+
+        fn callback_context(shared: Arc<Shared>) -> (CallbackContext, mpsc::Receiver<HotkeyEvent>) {
+            let (tx, rx) = mpsc::channel();
+            (
+                CallbackContext {
+                    shared,
+                    tx,
+                    tap: std::sync::Mutex::new(None),
+                },
+                rx,
+            )
+        }
+
+        fn drain(rx: &mpsc::Receiver<HotkeyEvent>) -> Vec<HotkeyEvent> {
+            rx.try_iter().collect()
+        }
+
+        #[test]
+        fn mac_optional_modifier_edges_are_deduped_from_mock_flags() {
+            let shared = shared(HotkeyTrigger::RightControl);
+            let (ctx, rx) = callback_context(Arc::clone(&shared));
+
+            handle_optional_modifier_trigger(
+                &ctx,
+                trigger_to_keycode(HotkeyTrigger::RightCommand),
+                trigger_to_flag_mask(HotkeyTrigger::RightCommand),
+                Some(HotkeyTrigger::RightCommand),
+                &shared.qa_trigger_held,
+                HotkeyEvent::QaShortcutPressed,
+            );
+            handle_optional_modifier_trigger(
+                &ctx,
+                trigger_to_keycode(HotkeyTrigger::RightCommand),
+                trigger_to_flag_mask(HotkeyTrigger::RightCommand),
+                Some(HotkeyTrigger::RightCommand),
+                &shared.qa_trigger_held,
+                HotkeyEvent::QaShortcutPressed,
+            );
+            handle_optional_modifier_trigger(
+                &ctx,
+                trigger_to_keycode(HotkeyTrigger::RightCommand),
+                0,
+                Some(HotkeyTrigger::RightCommand),
+                &shared.qa_trigger_held,
+                HotkeyEvent::QaShortcutPressed,
+            );
+            handle_optional_modifier_trigger(
+                &ctx,
+                trigger_to_keycode(HotkeyTrigger::RightCommand),
+                trigger_to_flag_mask(HotkeyTrigger::RightCommand),
+                Some(HotkeyTrigger::RightCommand),
+                &shared.qa_trigger_held,
+                HotkeyEvent::QaShortcutPressed,
+            );
+
+            assert_eq!(
+                drain(&rx),
+                vec![
+                    HotkeyEvent::QaShortcutPressed,
+                    HotkeyEvent::QaShortcutPressed,
+                ]
+            );
+        }
+    }
 }
 
 // ─────────────────────────── Windows implementation ───────────────────────────
@@ -857,6 +986,109 @@ mod platform {
     fn accept_injected_events() -> bool {
         std::env::var(ACCEPT_INJECTED_ENV).ok().as_deref() == Some("1")
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use parking_lot::RwLock;
+        use std::sync::atomic::AtomicBool;
+        use std::sync::mpsc;
+
+        fn shared(trigger: HotkeyTrigger) -> Arc<Shared> {
+            Arc::new(Shared {
+                binding: RwLock::new(HotkeyBinding {
+                    trigger,
+                    mode: crate::types::HotkeyMode::Toggle,
+                    keys: None,
+                }),
+                trigger_held: AtomicBool::new(false),
+                qa_trigger: RwLock::new(None),
+                qa_trigger_held: AtomicBool::new(false),
+                translation_trigger: RwLock::new(None),
+                translation_trigger_held: AtomicBool::new(false),
+                translation_modifier_held: AtomicBool::new(false),
+            })
+        }
+
+        fn callback_context(shared: Arc<Shared>) -> (CallbackContext, mpsc::Receiver<HotkeyEvent>) {
+            let (tx, rx) = mpsc::channel();
+            (
+                CallbackContext {
+                    shared,
+                    tx,
+                    hook: std::sync::Mutex::new(None),
+                },
+                rx,
+            )
+        }
+
+        fn drain(rx: &mpsc::Receiver<HotkeyEvent>) -> Vec<HotkeyEvent> {
+            rx.try_iter().collect()
+        }
+
+        #[test]
+        fn windows_modifier_edges_are_deduped_from_mock_hook_events() {
+            let shared = shared(HotkeyTrigger::RightControl);
+            let (ctx, rx) = callback_context(shared);
+
+            assert!(dispatch_keyboard_event(&ctx, VK_RCONTROL, WM_KEYDOWN));
+            assert!(dispatch_keyboard_event(&ctx, VK_RCONTROL, WM_KEYDOWN));
+            assert!(dispatch_keyboard_event(&ctx, VK_RCONTROL, WM_KEYUP));
+            assert!(dispatch_keyboard_event(&ctx, VK_RCONTROL, WM_KEYUP));
+
+            assert_eq!(
+                drain(&rx),
+                vec![HotkeyEvent::Pressed, HotkeyEvent::Released]
+            );
+        }
+
+        #[test]
+        fn windows_modifier_edges_ignore_unrelated_keys_and_reemit_after_release() {
+            let shared = shared(HotkeyTrigger::RightControl);
+            let (ctx, rx) = callback_context(shared);
+
+            assert!(!dispatch_keyboard_event(&ctx, VK_LCONTROL, WM_KEYDOWN));
+            assert!(dispatch_keyboard_event(&ctx, VK_RCONTROL, WM_KEYUP));
+            assert!(dispatch_keyboard_event(&ctx, VK_RCONTROL, WM_KEYDOWN));
+            assert!(dispatch_keyboard_event(&ctx, VK_RCONTROL, WM_KEYUP));
+            assert!(dispatch_keyboard_event(&ctx, VK_RCONTROL, WM_KEYDOWN));
+
+            assert_eq!(
+                drain(&rx),
+                vec![
+                    HotkeyEvent::Pressed,
+                    HotkeyEvent::Released,
+                    HotkeyEvent::Pressed
+                ]
+            );
+        }
+
+        #[test]
+        fn windows_optional_modifier_shortcuts_use_independent_latches() {
+            let shared = shared(HotkeyTrigger::RightControl);
+            *shared.qa_trigger.write() = Some(HotkeyTrigger::RightCommand);
+            *shared.translation_trigger.write() = Some(HotkeyTrigger::LeftOption);
+            let (ctx, rx) = callback_context(shared);
+
+            dispatch_keyboard_event(&ctx, VK_RWIN, WM_KEYDOWN);
+            dispatch_keyboard_event(&ctx, VK_RWIN, WM_KEYDOWN);
+            dispatch_keyboard_event(&ctx, VK_RMENU, WM_KEYDOWN);
+            dispatch_keyboard_event(&ctx, VK_LSHIFT, WM_KEYDOWN);
+            dispatch_keyboard_event(&ctx, VK_LSHIFT, WM_KEYDOWN);
+            dispatch_keyboard_event(&ctx, VK_RWIN, WM_KEYUP);
+            dispatch_keyboard_event(&ctx, VK_RWIN, WM_KEYDOWN);
+
+            assert_eq!(
+                drain(&rx),
+                vec![
+                    HotkeyEvent::QaShortcutPressed,
+                    HotkeyEvent::TranslationModifierPressed,
+                    HotkeyEvent::TranslationModifierPressed,
+                    HotkeyEvent::QaShortcutPressed,
+                ]
+            );
+        }
+    }
 }
 
 // ─────────────────────────── Linux / other implementation ───────────────────────────
@@ -1070,6 +1302,146 @@ mod platform {
             HotkeyTrigger::RightCommand => Key::MetaRight,
             HotkeyTrigger::Fn => Key::Function,
             HotkeyTrigger::Custom => unreachable!("custom combo hotkeys use ComboHotkeyMonitor"),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use parking_lot::RwLock;
+        use std::sync::atomic::AtomicBool;
+        use std::sync::mpsc;
+        use std::time::SystemTime;
+
+        fn shared(trigger: HotkeyTrigger) -> Shared {
+            Shared {
+                binding: RwLock::new(HotkeyBinding {
+                    trigger,
+                    mode: crate::types::HotkeyMode::Toggle,
+                    keys: None,
+                }),
+                trigger_held: AtomicBool::new(false),
+                qa_trigger: RwLock::new(None),
+                qa_trigger_held: AtomicBool::new(false),
+                translation_trigger: RwLock::new(None),
+                translation_trigger_held: AtomicBool::new(false),
+                translation_modifier_held: AtomicBool::new(false),
+            }
+        }
+
+        fn key_event(event_type: EventType) -> Event {
+            Event {
+                time: SystemTime::UNIX_EPOCH,
+                name: None,
+                event_type,
+            }
+        }
+
+        fn drain(rx: &mpsc::Receiver<HotkeyEvent>) -> Vec<HotkeyEvent> {
+            rx.try_iter().collect()
+        }
+
+        #[test]
+        fn rdev_modifier_edges_are_deduped_from_mock_events() {
+            let shared = shared(HotkeyTrigger::RightControl);
+            let (tx, rx) = mpsc::channel();
+
+            dispatch_event(
+                &shared,
+                &tx,
+                key_event(EventType::KeyPress(Key::ControlRight)),
+            );
+            dispatch_event(
+                &shared,
+                &tx,
+                key_event(EventType::KeyPress(Key::ControlRight)),
+            );
+            dispatch_event(
+                &shared,
+                &tx,
+                key_event(EventType::KeyRelease(Key::ControlRight)),
+            );
+            dispatch_event(
+                &shared,
+                &tx,
+                key_event(EventType::KeyRelease(Key::ControlRight)),
+            );
+
+            assert_eq!(
+                drain(&rx),
+                vec![HotkeyEvent::Pressed, HotkeyEvent::Released]
+            );
+        }
+
+        #[test]
+        fn rdev_modifier_edges_ignore_unrelated_keys_and_reemit_after_release() {
+            let shared = shared(HotkeyTrigger::RightControl);
+            let (tx, rx) = mpsc::channel();
+
+            dispatch_event(
+                &shared,
+                &tx,
+                key_event(EventType::KeyPress(Key::ControlLeft)),
+            );
+            dispatch_event(
+                &shared,
+                &tx,
+                key_event(EventType::KeyRelease(Key::ControlRight)),
+            );
+            dispatch_event(
+                &shared,
+                &tx,
+                key_event(EventType::KeyPress(Key::ControlRight)),
+            );
+            dispatch_event(
+                &shared,
+                &tx,
+                key_event(EventType::KeyRelease(Key::ControlRight)),
+            );
+            dispatch_event(
+                &shared,
+                &tx,
+                key_event(EventType::KeyPress(Key::ControlRight)),
+            );
+
+            assert_eq!(
+                drain(&rx),
+                vec![
+                    HotkeyEvent::Pressed,
+                    HotkeyEvent::Released,
+                    HotkeyEvent::Pressed
+                ]
+            );
+        }
+
+        #[test]
+        fn rdev_optional_modifier_shortcuts_use_independent_latches() {
+            let shared = shared(HotkeyTrigger::RightControl);
+            *shared.qa_trigger.write() = Some(HotkeyTrigger::RightCommand);
+            *shared.translation_trigger.write() = Some(HotkeyTrigger::LeftOption);
+            let (tx, rx) = mpsc::channel();
+
+            dispatch_event(&shared, &tx, key_event(EventType::KeyPress(Key::MetaRight)));
+            dispatch_event(&shared, &tx, key_event(EventType::KeyPress(Key::MetaRight)));
+            dispatch_event(&shared, &tx, key_event(EventType::KeyPress(Key::Alt)));
+            dispatch_event(&shared, &tx, key_event(EventType::KeyPress(Key::ShiftLeft)));
+            dispatch_event(&shared, &tx, key_event(EventType::KeyPress(Key::ShiftLeft)));
+            dispatch_event(
+                &shared,
+                &tx,
+                key_event(EventType::KeyRelease(Key::MetaRight)),
+            );
+            dispatch_event(&shared, &tx, key_event(EventType::KeyPress(Key::MetaRight)));
+
+            assert_eq!(
+                drain(&rx),
+                vec![
+                    HotkeyEvent::QaShortcutPressed,
+                    HotkeyEvent::TranslationModifierPressed,
+                    HotkeyEvent::TranslationModifierPressed,
+                    HotkeyEvent::QaShortcutPressed,
+                ]
+            );
         }
     }
 }

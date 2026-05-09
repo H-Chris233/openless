@@ -5,7 +5,15 @@ import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { getSettings, setDefaultPolishMode, setStyleEnabled, setSettings } from '../lib/ipc';
 import type { PolishMode, UserPreferences } from '../lib/types';
+import {
+  applyStylePreferencesNotification,
+  persistStylePreferenceChange,
+  rollbackDefaultModeChange,
+  rollbackStyleEnabledChange,
+  rollbackWholeStylePreferences,
+} from '../lib/stylePrefs';
 import { PageHeader, Pill } from './_atoms';
+import { useHotkeySettings } from '../state/HotkeySettingsContext';
 
 interface StyleDef {
   id: PolishMode;
@@ -15,9 +23,11 @@ interface StyleDef {
 }
 
 const STYLE_IDS: PolishMode[] = ['raw', 'light', 'structured', 'formal'];
+type StyleSaveErrorTarget = PolishMode | 'master';
 
 export function Style() {
   const { t } = useTranslation();
+  const { prefs: sharedPrefs } = useHotkeySettings();
   const STYLES: StyleDef[] = STYLE_IDS.map(id => ({
     id,
     name: t(`style.modes.${id}.name`),
@@ -25,15 +35,54 @@ export function Style() {
     sample: t(`style.modes.${id}.sample`),
   }));
   const [prefs, setPrefs] = useState<UserPreferences | null>(null);
+  const [saveError, setSaveError] = useState<{ target: StyleSaveErrorTarget; message: string } | null>(null);
 
   useEffect(() => {
     getSettings().then(setPrefs);
   }, []);
 
+  useEffect(() => {
+    if (!sharedPrefs) return;
+    setPrefs(current => applyStylePreferencesNotification(current, sharedPrefs));
+    setSaveError(null);
+  }, [sharedPrefs]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { listen } = await import('@tauri-apps/api/event');
+        unlisten = await listen<UserPreferences>('prefs:changed', event => {
+          setPrefs(current => applyStylePreferencesNotification(current, event.payload));
+          setSaveError(null);
+        });
+        if (cancelled && unlisten) unlisten();
+      } catch (error) {
+        console.warn('[style] prefs:changed listener setup failed', error);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  }, []);
+
+  const showSaveError = (target: StyleSaveErrorTarget, error: string) => {
+    setSaveError({ target, message: t('style.saveFailed', { error }) });
+  };
+
   const onPickDefault = async (mode: PolishMode) => {
     if (!prefs) return;
-    setPrefs({ ...prefs, defaultMode: mode });
-    await setDefaultPolishMode(mode);
+    const next = { ...prefs, defaultMode: mode };
+    const saved = await persistStylePreferenceChange(
+      next,
+      () => setDefaultPolishMode(mode),
+      setPrefs,
+      error => showSaveError(mode, error),
+      rollbackDefaultModeChange(prefs, next),
+    );
+    if (saved) setSaveError(null);
   };
 
   const onToggleEnabled = async (mode: PolishMode) => {
@@ -42,8 +91,15 @@ export function Style() {
     const nextEnabled = enabled
       ? [...prefs.enabledModes, mode]
       : prefs.enabledModes.filter(m => m !== mode);
-    setPrefs({ ...prefs, enabledModes: nextEnabled });
-    await setStyleEnabled(mode, enabled);
+    const next = { ...prefs, enabledModes: nextEnabled };
+    const saved = await persistStylePreferenceChange(
+      next,
+      () => setStyleEnabled(mode, enabled),
+      setPrefs,
+      error => showSaveError(mode, error),
+      rollbackStyleEnabledChange(mode, prefs, next),
+    );
+    if (saved) setSaveError(null);
   };
 
   if (!prefs) {
@@ -63,12 +119,24 @@ export function Style() {
     if (masterEnabled) {
       // 全部关闭 → 留 raw 和当前 default 兜底
       const next = { ...prefs, enabledModes: [] as PolishMode[] };
-      setPrefs(next);
-      await setSettings(next);
+      const saved = await persistStylePreferenceChange(
+        next,
+        () => setSettings(next),
+        setPrefs,
+        error => showSaveError('master', error),
+        rollbackWholeStylePreferences(prefs, next),
+      );
+      if (saved) setSaveError(null);
     } else {
       const next = { ...prefs, enabledModes: ['raw', 'light', 'structured', 'formal'] as PolishMode[] };
-      setPrefs(next);
-      await setSettings(next);
+      const saved = await persistStylePreferenceChange(
+        next,
+        () => setSettings(next),
+        setPrefs,
+        error => showSaveError('master', error),
+        rollbackWholeStylePreferences(prefs, next),
+      );
+      if (saved) setSaveError(null);
     }
   };
 
@@ -97,6 +165,14 @@ export function Style() {
                 }}
               />
             </button>
+            {saveError?.target === 'master' && (
+              <span
+                role="alert"
+                style={{ fontSize: 11.5, color: 'var(--ol-red, #ef4444)', maxWidth: 220, lineHeight: 1.45 }}
+              >
+                {saveError.message}
+              </span>
+            )}
           </div>
         }
       />
@@ -176,6 +252,14 @@ export function Style() {
               >
                 {s.sample}
               </div>
+              {saveError?.target === s.id && (
+                <div
+                  role="alert"
+                  style={{ marginTop: 10, fontSize: 11.5, color: 'var(--ol-red, #ef4444)', lineHeight: 1.45 }}
+                >
+                  {saveError.message}
+                </div>
+              )}
             </div>
           );
         })}

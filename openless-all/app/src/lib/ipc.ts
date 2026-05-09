@@ -70,8 +70,12 @@ const mockSettings: UserPreferences = {
   localAsrMirror: 'huggingface',
   localAsrKeepLoadedSecs: 300,
   foundryLocalAsrModel: 'whisper-small',
+  foundryLocalRuntimeSource: 'auto',
   foundryLocalAsrLanguageHint: '',
   foundryLocalAsrKeepLoadedSecs: 300,
+  historyRetentionDays: 7,
+  polishContextWindowMinutes: 5,
+  startMinimized: false,
 };
 
 const mockHotkeyCapability: HotkeyCapability = {

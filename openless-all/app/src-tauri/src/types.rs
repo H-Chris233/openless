@@ -204,6 +204,9 @@ pub struct UserPreferences {
     /// Windows Foundry Local Whisper 当前激活的模型 alias。
     #[serde(default = "default_foundry_local_asr_model")]
     pub foundry_local_asr_model: String,
+    /// Windows Foundry Local native runtime 下载源："auto" / "nuget" / "ort-nightly"。
+    #[serde(default = "default_foundry_local_runtime_source")]
+    pub foundry_local_runtime_source: String,
     /// Windows Foundry Local Whisper 语言 hint。空字符串 = 自动检测。
     #[serde(default)]
     pub foundry_local_asr_language_hint: String,
@@ -214,10 +217,32 @@ pub struct UserPreferences {
     /// 一个手动下载 Beta 的入口。不影响 plugin-updater 的自动检查路径。
     #[serde(default)]
     pub update_channel: UpdateChannel,
+    /// 历史记录保留天数。0 = 不按时间清理（仅受 200 条上限）。默认 7 天。
+    /// 写入新条目时执行清理，避免后台轮询。
+    #[serde(default = "default_history_retention_days")]
+    pub history_retention_days: u32,
+    /// 对话感知 polish 的上下文窗口（分钟）：把最近 N 分钟的转写 + 已润色文本
+    /// 作为多轮上下文喂给 LLM，让代词 / 不完整句子能被正确解析。
+    /// 0 = 关闭（每次润色独立单轮，跟历史行为一致）。默认 5 分钟。
+    #[serde(default = "default_polish_context_window_minutes")]
+    pub polish_context_window_minutes: u32,
+    /// 启动时静默运行（不弹主窗口）。开机自启用户用得多——本来想看托盘
+    /// 而不是被主窗口打扰。开关一开后所有启动路径都不弹窗（包括手动点击），
+    /// 用户改用托盘菜单访问主窗口。默认 false 跟历史行为一致。
+    #[serde(default)]
+    pub start_minimized: bool,
 }
 
 fn default_local_asr_model() -> String {
     "qwen3-asr-0.6b".into()
+}
+
+fn default_history_retention_days() -> u32 {
+    7
+}
+
+fn default_polish_context_window_minutes() -> u32 {
+    5
 }
 
 fn default_local_asr_mirror() -> String {
@@ -230,6 +255,10 @@ fn default_local_asr_keep_loaded_secs() -> u32 {
 
 fn default_foundry_local_asr_model() -> String {
     crate::asr::local::foundry::DEFAULT_MODEL_ALIAS.into()
+}
+
+fn default_foundry_local_runtime_source() -> String {
+    "auto".into()
 }
 
 fn default_active_asr_provider() -> String {
@@ -279,12 +308,20 @@ struct UserPreferencesWire {
     local_asr_keep_loaded_secs: u32,
     #[serde(default = "default_foundry_local_asr_model")]
     foundry_local_asr_model: String,
+    #[serde(default = "default_foundry_local_runtime_source")]
+    foundry_local_runtime_source: String,
     #[serde(default)]
     foundry_local_asr_language_hint: String,
     #[serde(default = "default_local_asr_keep_loaded_secs")]
     foundry_local_asr_keep_loaded_secs: u32,
     #[serde(default)]
     update_channel: UpdateChannel,
+    #[serde(default = "default_history_retention_days")]
+    history_retention_days: u32,
+    #[serde(default = "default_polish_context_window_minutes")]
+    polish_context_window_minutes: u32,
+    #[serde(default)]
+    start_minimized: bool,
 }
 
 impl Default for UserPreferencesWire {
@@ -317,9 +354,13 @@ impl Default for UserPreferencesWire {
             local_asr_mirror: prefs.local_asr_mirror,
             local_asr_keep_loaded_secs: prefs.local_asr_keep_loaded_secs,
             foundry_local_asr_model: prefs.foundry_local_asr_model,
+            foundry_local_runtime_source: prefs.foundry_local_runtime_source,
             foundry_local_asr_language_hint: prefs.foundry_local_asr_language_hint,
             foundry_local_asr_keep_loaded_secs: prefs.foundry_local_asr_keep_loaded_secs,
             update_channel: prefs.update_channel,
+            history_retention_days: prefs.history_retention_days,
+            polish_context_window_minutes: prefs.polish_context_window_minutes,
+            start_minimized: prefs.start_minimized,
         }
     }
 }
@@ -366,9 +407,16 @@ impl<'de> Deserialize<'de> for UserPreferences {
             local_asr_mirror: wire.local_asr_mirror,
             local_asr_keep_loaded_secs: wire.local_asr_keep_loaded_secs,
             foundry_local_asr_model: wire.foundry_local_asr_model,
+            foundry_local_runtime_source:
+                crate::asr::local::foundry_native::normalize_runtime_source_str(
+                    &wire.foundry_local_runtime_source,
+                ),
             foundry_local_asr_language_hint: wire.foundry_local_asr_language_hint,
             foundry_local_asr_keep_loaded_secs: wire.foundry_local_asr_keep_loaded_secs,
             update_channel: wire.update_channel,
+            history_retention_days: wire.history_retention_days,
+            polish_context_window_minutes: wire.polish_context_window_minutes,
+            start_minimized: wire.start_minimized,
         })
     }
 }
@@ -471,9 +519,13 @@ impl Default for UserPreferences {
             local_asr_mirror: default_local_asr_mirror(),
             local_asr_keep_loaded_secs: default_local_asr_keep_loaded_secs(),
             foundry_local_asr_model: default_foundry_local_asr_model(),
+            foundry_local_runtime_source: default_foundry_local_runtime_source(),
             foundry_local_asr_language_hint: String::new(),
             foundry_local_asr_keep_loaded_secs: default_local_asr_keep_loaded_secs(),
             update_channel: UpdateChannel::default(),
+            history_retention_days: default_history_retention_days(),
+            polish_context_window_minutes: default_polish_context_window_minutes(),
+            start_minimized: false,
         }
     }
 }
@@ -968,12 +1020,22 @@ impl Default for HotkeyStatus {
 
 impl Default for HotkeyBinding {
     fn default() -> Self {
+        // 注意：keys 必须是 None，不能预填具体 code。
+        //
+        // 原因：HotkeyBinding 用 `#[serde(default)]` **结构级 default**——反序列化时
+        // 整个 struct 先按 Default 填充再让 JSON 字段覆盖。如果这里 keys 预填了
+        // Some([...])，那么旧 prefs 里只写 `{"trigger":"rightControl","mode":"toggle"}`
+        // （不带 keys 字段）会被反序列化成 `{trigger=RightControl, keys=Some([默认值])}`
+        // 即 trigger 跟 keys 完全不一致——effective_codes() 直接信任 keys，导致
+        // 实际生效的快捷键跟用户当年选的 trigger 对不上。
+        // 现在 keys=None 时 effective_codes() 走 legacy_trigger_code(trigger) 路径，
+        // 跟 trigger 自动同步。
         #[cfg(target_os = "windows")]
         {
             Self {
                 trigger: HotkeyTrigger::RightControl,
                 mode: HotkeyMode::Toggle,
-                keys: Some(vec![HotkeyKey::new("ControlRight")]),
+                keys: None,
             }
         }
 
@@ -982,7 +1044,7 @@ impl Default for HotkeyBinding {
             Self {
                 trigger: HotkeyTrigger::RightOption,
                 mode: HotkeyMode::Toggle,
-                keys: Some(vec![HotkeyKey::new("AltRight")]),
+                keys: None,
             }
         }
     }

@@ -10,9 +10,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use thiserror::Error;
 
-use crate::types::{
-    ChineseScriptPreference, OutputLanguagePreference, PolishMode, QaChatMessage,
-};
+use crate::types::{ChineseScriptPreference, OutputLanguagePreference, PolishMode, QaChatMessage};
 
 const DEFAULT_TEMPERATURE: f32 = 0.3;
 const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
@@ -95,20 +93,33 @@ impl OpenAICompatibleLLMProvider {
         chinese_script_preference: ChineseScriptPreference,
         output_language_preference: OutputLanguagePreference,
         front_app: Option<&str>,
+        prior_turns: &[(String, String)],
     ) -> Result<String, LLMError> {
         let mut system_prompt = compose_system_prompt(mode, hotwords);
-        if let Some(premise) =
-            context_premise(
-                working_languages,
-                chinese_script_preference,
-                output_language_preference,
-                front_app,
-            )
-        {
+        if let Some(premise) = context_premise(
+            working_languages,
+            chinese_script_preference,
+            output_language_preference,
+            front_app,
+        ) {
             system_prompt = format!("{}\n\n{}", premise, system_prompt);
         }
+        // 多轮上下文模式：把"上一轮的指令是什么、不要复读上一轮答案"明确写进
+        // system prompt，配合 chat structure 让 LLM 自然不重复历史输出。
+        if !prior_turns.is_empty() {
+            system_prompt = format!(
+                "{}\n\n{}",
+                system_prompt,
+                prompts::polish_context_instruction()
+            );
+        }
         let user_prompt = prompts::user_prompt(raw_text);
-        self.chat_completion(&system_prompt, &user_prompt).await
+        if prior_turns.is_empty() {
+            self.chat_completion(&system_prompt, &user_prompt).await
+        } else {
+            self.chat_completion_with_polish_history(&system_prompt, prior_turns, &user_prompt)
+                .await
+        }
     }
 
     /// 多轮划词追问，**流式**返回。`messages` 包含历史对话（user/assistant 交替），
@@ -130,14 +141,12 @@ impl OpenAICompatibleLLMProvider {
         C: Fn() -> bool + Send + Sync,
     {
         let mut system_prompt = prompts::qa_system_prompt();
-        if let Some(premise) =
-            context_premise(
-                working_languages,
-                chinese_script_preference,
-                output_language_preference,
-                front_app,
-            )
-        {
+        if let Some(premise) = context_premise(
+            working_languages,
+            chinese_script_preference,
+            output_language_preference,
+            front_app,
+        ) {
             system_prompt = format!("{}\n\n{}", premise, system_prompt);
         }
         self.chat_completion_history_streaming(&system_prompt, messages, on_delta, should_cancel)
@@ -158,18 +167,49 @@ impl OpenAICompatibleLLMProvider {
         let mut system_prompt = prompts::translate_system_prompt(target_language);
         // 翻译模式必须以 target_language 为唯一输出语言约束，避免和 UI 驱动的
         // output_language_preference 发生冲突（例如 UI=ja, target=en）。
-        if let Some(premise) =
-            context_premise(
-                working_languages,
-                chinese_script_preference,
-                OutputLanguagePreference::Auto,
-                front_app,
-            )
-        {
+        if let Some(premise) = context_premise(
+            working_languages,
+            chinese_script_preference,
+            OutputLanguagePreference::Auto,
+            front_app,
+        ) {
             system_prompt = format!("{}\n\n{}", premise, system_prompt);
         }
         let user_prompt = prompts::user_prompt(raw_text);
         self.chat_completion(&system_prompt, &user_prompt).await
+    }
+
+    /// 多轮对话感知的 polish 路径。`prior_turns` 是按时间倒序（最新在前）的
+    /// `(raw_transcript, polished_text)` 序列；这里反转成时间正序、然后展开
+    /// 成 OpenAI chat completions 的多轮 `user` / `assistant` messages，最后一条
+    /// 是当前 user prompt。LLM 会自然把 prior assistant 输出当成"我已说过、
+    /// 不复读"。配合 system prompt 里的显式指令（prompts::polish_context_instruction）
+    /// 共同保证不复读上文，仅把上文当语义上下文。
+    async fn chat_completion_with_polish_history(
+        &self,
+        system_prompt: &str,
+        prior_turns: &[(String, String)],
+        user_prompt: &str,
+    ) -> Result<String, LLMError> {
+        let url = chat_completions_url(&self.config.base_url);
+        let messages = build_polish_history_messages(system_prompt, prior_turns, user_prompt);
+        let body = json!({
+            "model": self.config.model,
+            "stream": false,
+            "temperature": self.config.temperature,
+            "messages": messages,
+        });
+
+        log::info!(
+            "[llm] POST {} provider={} model={} prior_turns={}",
+            url,
+            self.config.provider_id,
+            self.config.model,
+            prior_turns.len()
+        );
+
+        // 复用 send_and_extract 把 chat_completion 与本函数共享 HTTP / 解析路径。
+        self.send_chat_request(&url, &body).await
     }
 
     async fn chat_completion(
@@ -195,9 +235,19 @@ impl OpenAICompatibleLLMProvider {
             self.config.model
         );
 
+        self.send_chat_request(&url, &body).await
+    }
+
+    /// 共用的 HTTP send + body 解析。chat_completion / chat_completion_with_polish_history
+    /// 各自构造好 body 后都调到这里，避免 30 行 send/parse 重复。
+    async fn send_chat_request(
+        &self,
+        url: &str,
+        body: &serde_json::Value,
+    ) -> Result<String, LLMError> {
         let mut request = self
             .client
-            .post(&url)
+            .post(url)
             .header("Content-Type", "application/json");
         if !self.config.api_key.trim().is_empty() {
             request = request.header("Authorization", format!("Bearer {}", self.config.api_key));
@@ -205,7 +255,7 @@ impl OpenAICompatibleLLMProvider {
         for (k, v) in &self.config.extra_headers {
             request = request.header(k.as_str(), v.as_str());
         }
-        let request = request.json(&body);
+        let request = request.json(body);
 
         let response = match request.send().await {
             Ok(r) => r,
@@ -394,6 +444,35 @@ fn safe_str_slice(s: &str, end: usize) -> &str {
     &s[..cut]
 }
 
+/// 构造对话感知 polish 的 chat completions 消息数组。
+///
+/// 不变量：
+/// 1. **第 0 条**永远是 `system`（含 \[system_prompt\] 整段，含 polish_context_instruction
+///    "不要复读"指令——由调用方拼好传入）。
+/// 2. **prior_turns 按时间倒序**（最新在前）作为入参——这里反转成时间正序喂给 chat：
+///    最老的 prior 在前、最新的 prior 在后、当前要润色的 user_prompt 在最末。
+/// 3. **每对 prior 展开成 (role=user, role=assistant)**：raw 走 user_prompt 包装、
+///    polished 直接当 assistant 输出。LLM 据此把 polished 当成"我已经回答过的内容"，
+///    自然不会复读。
+/// 4. **最后一条** 永远是 role=user（当前要润色的 raw_text 包装后的 user_prompt）。
+///
+/// 抽出独立函数纯粹是为了可单测——见 polish::tests::build_polish_history_messages_*。
+fn build_polish_history_messages(
+    system_prompt: &str,
+    prior_turns: &[(String, String)],
+    user_prompt: &str,
+) -> Vec<serde_json::Value> {
+    let mut messages: Vec<serde_json::Value> = Vec::with_capacity(prior_turns.len() * 2 + 2);
+    messages.push(json!({ "role": "system", "content": system_prompt }));
+    // prior_turns 按时间倒序（newest-first），反转成正序喂给 chat。
+    for (raw, polished) in prior_turns.iter().rev() {
+        messages.push(json!({ "role": "user", "content": prompts::user_prompt(raw) }));
+        messages.push(json!({ "role": "assistant", "content": polished }));
+    }
+    messages.push(json!({ "role": "user", "content": user_prompt }));
+    messages
+}
+
 fn chat_completions_url(base_url: &str) -> String {
     let trimmed = base_url.trim();
     if trimmed.ends_with("/chat/completions") {
@@ -441,12 +520,14 @@ fn context_premise(
         OutputLanguagePreference::ZhTw => {
             Some("最終輸出語言偏好：繁體中文。若回答可用中文表達，請優先使用繁體中文。".to_string())
         }
-        OutputLanguagePreference::En => {
-            Some("Output language preference: English. Prefer English when producing the final answer.".to_string())
-        }
-        OutputLanguagePreference::Ja => {
-            Some("出力言語の優先設定：日本語。最終回答は可能な限り日本語で出力してください。".to_string())
-        }
+        OutputLanguagePreference::En => Some(
+            "Output language preference: English. Prefer English when producing the final answer."
+                .to_string(),
+        ),
+        OutputLanguagePreference::Ja => Some(
+            "出力言語の優先設定：日本語。最終回答は可能な限り日本語で出力してください。"
+                .to_string(),
+        ),
         OutputLanguagePreference::Ko => {
             Some("출력 언어 선호: 한국어. 최종 답변은 가능하면 한국어로 작성해 주세요.".to_string())
         }
@@ -871,6 +952,19 @@ pub mod prompts {
         )
     }
 
+    /// 对话感知 polish 模式下追加到 system prompt 末尾的指令——告诉 LLM 看到的
+    /// 历史 user / assistant turns 是为了**理解上下文**（代词、不完整句子的指代），
+    /// 而**不是**让它把上文复读出来。每次只输出当前 user message 的整理结果。
+    /// 详见 PR-A 的「对话感知润色」需求。
+    pub fn polish_context_instruction() -> &'static str {
+        "# 多轮上下文使用规则\n\
+         上面的对话历史是给你提供前文语境（代词指代、未完整句子等），\u{4EE5}\u{4FBF}\u{6B63}\u{786E}\u{7406}\u{89E3}\u{6700}\u{65B0}\
+         一条用户消息要表达的意思。\n\
+         **不要复读、改写或合并历史中已经整理过的内容**——历史里的 assistant 输出已经被插入到\
+         用户的文档里了，再次出现就是重复。每次只输出**当前最新一条** user message 的整理结果，\
+         不要把上文带进来。"
+    }
+
     /// 划词语音问答 system prompt — 用户选中一段文字后口头提问，要求基于选区给出简短答案。
     /// 详见 issue #118。
     pub fn qa_system_prompt() -> String {
@@ -937,6 +1031,106 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
+
+    // ──────────────── 对话感知 polish 的 chat 消息构造 ────────────────
+    // 用户的核心顾虑：让 LLM 拿到上下文但**不要把上下文吐出来**。
+    // 这里的不变量保证「不复读」靠两层防御：
+    //   1. role=assistant 标记历史的 polished 输出，LLM 自然把它当成"已说过的"
+    //   2. system prompt 末尾追加 polish_context_instruction 显式禁止复读
+    // 下面 3 个 test 把构造路径锁死，未来回归就能立刻暴露。
+
+    #[test]
+    fn build_polish_history_messages_empty_prior_falls_back_to_two_messages() {
+        // prior_turns 空时只剩 system + user，跟单轮 chat_completion 同构。
+        let msgs = build_polish_history_messages("SYS", &[], "USER_NOW");
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0]["role"], "system");
+        assert_eq!(msgs[0]["content"], "SYS");
+        assert_eq!(msgs[1]["role"], "user");
+        assert_eq!(msgs[1]["content"], "USER_NOW");
+    }
+
+    #[test]
+    fn build_polish_history_messages_orders_prior_oldest_to_newest_then_current() {
+        // 入参约定 prior_turns 是 newest-first（match HistoryStore::recent_within_minutes
+        // 的返回顺序）。chat 需要 oldest-first 的时间序，build_* 必须 reverse。
+        // 顺序错了 LLM 会看到「未来→过去→当前」错乱时间轴。
+        let prior = vec![
+            ("raw-newest".to_string(), "polish-newest".to_string()),
+            ("raw-mid".to_string(), "polish-mid".to_string()),
+            ("raw-oldest".to_string(), "polish-oldest".to_string()),
+        ];
+        let msgs = build_polish_history_messages("SYS", &prior, "USER_NOW");
+
+        // 1 system + 3 turns × 2 + 1 current = 8 条
+        assert_eq!(msgs.len(), 8, "应该是 system + 3×(user/assistant) + 当前 user");
+
+        // [0] system
+        assert_eq!(msgs[0]["role"], "system");
+        // [1,2] = oldest 那一对
+        assert_eq!(msgs[1]["role"], "user");
+        assert!(
+            msgs[1]["content"].as_str().unwrap().contains("raw-oldest"),
+            "第一条 user 应当是最老的 raw，包装在 user_prompt 里"
+        );
+        assert_eq!(msgs[2]["role"], "assistant");
+        assert_eq!(msgs[2]["content"], "polish-oldest");
+        // [3,4] = mid
+        assert_eq!(msgs[3]["role"], "user");
+        assert!(msgs[3]["content"].as_str().unwrap().contains("raw-mid"));
+        assert_eq!(msgs[4]["role"], "assistant");
+        assert_eq!(msgs[4]["content"], "polish-mid");
+        // [5,6] = newest 那一对
+        assert_eq!(msgs[5]["role"], "user");
+        assert!(msgs[5]["content"].as_str().unwrap().contains("raw-newest"));
+        assert_eq!(msgs[6]["role"], "assistant");
+        assert_eq!(msgs[6]["content"], "polish-newest");
+        // [7] = 当前要润色的 user
+        assert_eq!(msgs[7]["role"], "user");
+        assert_eq!(msgs[7]["content"], "USER_NOW");
+    }
+
+    #[test]
+    fn build_polish_history_messages_keeps_polished_text_at_assistant_role() {
+        // 关键不变量：历史 polish 必须在 assistant role 上，**不**能跟当前 user 混淆。
+        // 一旦把 polish 放进 user role（比如重构时 typo），LLM 会以为这是
+        // 用户新说的话，可能再润色一遍 → 输出复读上文，违反"不复读"目标。
+        let prior = vec![("我说点什么".into(), "我说点什么。".into())];
+        let msgs = build_polish_history_messages("SYS", &prior, "现在说的话");
+
+        // 第二条（idx=2）必须是 assistant + polished_text
+        assert_eq!(
+            msgs[2]["role"], "assistant",
+            "polished_text 必须挂在 assistant role；放到 user 会让 LLM 当成新输入再润色"
+        );
+        assert_eq!(msgs[2]["content"], "我说点什么。");
+
+        // 检查最末条仍然是当前 user prompt，没被混进 assistant
+        let last = msgs.last().expect("non-empty");
+        assert_eq!(last["role"], "user");
+        assert_eq!(last["content"], "现在说的话");
+    }
+
+    #[test]
+    fn polish_context_instruction_explicitly_forbids_repeating_prior_assistant_output() {
+        // 第二层防御：system prompt 必须含明确的「不要复读历史 assistant」指令。
+        // 仅靠 chat structure 不够——一些模型在长上下文里仍可能 echo prior turns。
+        // 文案可以改、但下面这些关键词不能丢。
+        let s = prompts::polish_context_instruction();
+        assert!(s.contains("不要"), "需要中文显式禁止指令");
+        assert!(
+            s.contains("复读") || s.contains("重复") || s.contains("不要把上文带进来"),
+            "需要明确禁止复读语义"
+        );
+        assert!(
+            s.contains("assistant") || s.contains("已经整理"),
+            "需要点名是 assistant role 的历史输出 / 整理后内容"
+        );
+        assert!(
+            s.contains("当前") && s.contains("最新"),
+            "需要明确：只输出当前最新一条"
+        );
+    }
 
     #[test]
     fn clean_polish_output_strips_think_tag_block() {
@@ -1147,6 +1341,7 @@ mod tests {
                 ChineseScriptPreference::Auto,
                 OutputLanguagePreference::Auto,
                 None,
+                &[],
             )
             .await
             .unwrap();

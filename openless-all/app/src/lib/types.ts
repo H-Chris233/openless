@@ -161,10 +161,19 @@ export interface UserPreferences {
   localAsrKeepLoadedSecs: number;
   /** Windows Foundry Local Whisper 当前激活的模型 alias。 */
   foundryLocalAsrModel: string;
+  /** Windows Foundry Local native runtime 下载源。 */
+  foundryLocalRuntimeSource: string;
   /** Windows Foundry Local Whisper 语言 hint。空字符串表示自动检测。 */
   foundryLocalAsrLanguageHint: string;
   /** Windows Foundry Local Whisper 模型在 runtime 中保持加载的秒数。 */
   foundryLocalAsrKeepLoadedSecs: number;
+  /** 历史记录保留天数。0 = 不按时间清理（仍受 200 条上限）。默认 7。 */
+  historyRetentionDays: number;
+  /** 对话感知 polish 上下文窗口（分钟）。0 = 关闭。默认 5。详见 PR-A。 */
+  polishContextWindowMinutes: number;
+  /** 启动时静默运行（不弹主窗口）。Windows 开机自启场景常用——只想要后台 + 托盘，
+   *  不想被主窗口打扰。开后所有启动路径都不弹窗，从菜单栏 / 托盘进入主窗口。默认 false。 */
+  startMinimized: boolean;
 }
 
 export interface MicrophoneDevice {
