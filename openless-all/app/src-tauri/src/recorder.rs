@@ -192,6 +192,23 @@ fn run_audio_thread(
             while !stop_flag_for_watchdog.load(Ordering::SeqCst) {
                 thread::sleep(std::time::Duration::from_millis(WATCHDOG_CHECK_INTERVAL_MS));
 
+                // 关键：sleep 醒来后必须重新检查 stop_flag，再去看 elapsed。
+                //
+                // 否则会与 hotkey-release 停采路径产生竞态：
+                //   1. 用户松开 hotkey → end_session 调 rec.stop() → 设置 stop_flag
+                //      → audio 线程 pause 了 cpal Stream → 回调真的静默
+                //   2. 但 watchdog 此时正卡在上面的 1 秒 sleep 里
+                //   3. sleep 结束后，若不重新检查 stop_flag，
+                //      就会读到 last_callback_time 已经"老 4 秒"，
+                //      把"我们主动停掉的录音"错报成 EngineFailed("录音回调静默停止 N 秒")，
+                //      coordinator 收到错误后会终止 session、胶囊弹错。
+                //
+                // 修复方式是 sleep 后立即再 load 一次：进入 stop 流程后 watchdog 静默退出，
+                // 不影响 watchdog 在真正活动期捕获 CoreAudio 设备掉线等真故障。
+                if stop_flag_for_watchdog.load(Ordering::SeqCst) {
+                    break;
+                }
+
                 let last_callback = *state_for_watchdog.last_callback_time.lock();
                 match last_callback {
                     Some(last_time) => {
