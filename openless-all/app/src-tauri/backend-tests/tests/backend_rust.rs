@@ -2,6 +2,8 @@
 //!
 //! 这个测试 crate 只把纯 Rust 后端模块按源码路径编进来，不链接完整 Tauri
 //! `openless_lib`，避免 Windows CI 在 test harness 启动前被桌面运行时 DLL 拦截。
+//! Cargo 以 `cfg(test)` 编译这些 path-included 模块，所以各模块自己的
+//! `#[cfg(test)]` 单测会在这里实际执行（见 hotkey / recorder / insertion）。
 
 #![allow(dead_code, unused_variables)]
 

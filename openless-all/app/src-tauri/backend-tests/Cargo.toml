@@ -5,6 +5,10 @@ edition = "2021"
 rust-version = "1.77"
 publish = false
 
+[[test]]
+name = "backend_rust"
+path = "tests/backend_rust.rs"
+
 [dependencies]
 arboard = "3"
 cpal = "0.15"
