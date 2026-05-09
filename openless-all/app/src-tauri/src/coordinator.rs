@@ -2094,7 +2094,21 @@ async fn begin_session(inner: &Arc<Inner>) -> Result<(), String> {
 
     if is_whisper_compatible_provider(&active_asr) {
         let (api_key, base_url, model) = read_whisper_credentials();
-        let whisper = Arc::new(WhisperBatchASR::new(api_key, base_url, model));
+        // 用户辞書の有効フレーズを Whisper の `prompt` に流し込む。固有名詞や
+        // 専門用語の同音・近形誤認識を ASR 段階で抑える。Polish LLM 側には
+        // 既に system prompt として注入済みだが、Whisper 出力が大きく崩れる
+        // と Polish でも救えない（特に CJK で顕著）。Volcengine ASR は元々
+        // hotword を受け取っており、UI 説明文も「ASR ホットワードと後処理
+        // モデルのコンテキスト両方に渡される」と明示しているので、Whisper
+        // 互換プロバイダにも揃えるのが筋。
+        let whisper_prompt =
+            crate::asr::whisper::build_prompt_from_phrases(&enabled_phrases(inner));
+        let whisper = Arc::new(WhisperBatchASR::new(
+            api_key,
+            base_url,
+            model,
+            whisper_prompt,
+        ));
         store_asr_for_session(
             inner,
             current_session_id,
@@ -4652,6 +4666,7 @@ mod tests {
             "key".to_string(),
             "http://localhost".to_string(),
             "model".to_string(),
+            None,
         ));
         *coordinator.inner.asr.lock() = Some(SessionResource::new(
             session_id(2),
