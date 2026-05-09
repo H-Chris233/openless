@@ -164,11 +164,14 @@ pub(crate) fn begin_cancel_session_state(state: &mut SessionState) -> Option<Can
     })
 }
 
-/// cancel_session 外部资源清理后的锁内收尾。Processing 交给 end_session 自己收尾。
+/// cancel_session 外部资源清理后的锁内收尾。Processing 阶段把 phase 留给 end_session
+/// 自己收尾（防止与 polish/insert 路径竞争），但 focus_target 是当前 session 的窗口
+/// 资源句柄，cancel 之后无论处于哪个 phase 都应当释放，避免下一个 session 之前的
+/// 空档期被旧值污染。详见 audit 3.3.5。
 pub(crate) fn finish_cancel_session_state(state: &mut SessionState, decision: CancelDecision) {
+    state.focus_target = None;
     if decision.phase != SessionPhase::Processing {
         state.phase = SessionPhase::Idle;
-        state.focus_target = None;
     }
 }
 
@@ -367,8 +370,19 @@ mod tests {
 
             assert_eq!(state.phase, expected_phase, "initial={initial:?}");
             assert_eq!(state.cancelled, expected_cancelled, "initial={initial:?}");
-            if matches!(initial, SessionPhase::Starting | SessionPhase::Listening) {
-                assert!(state.focus_target.is_none(), "initial={initial:?}");
+            // 任何被 begin_cancel_session_state 接受的 phase（即非 Idle/Inserting）
+            // 都应当清掉 focus_target，包括 Processing —— 这是 audit 3.3.5 的回归卡。
+            if expected_cancelled {
+                assert!(
+                    state.focus_target.is_none(),
+                    "focus_target should clear after cancel, initial={initial:?}"
+                );
+            } else {
+                assert_eq!(
+                    state.focus_target,
+                    Some(1),
+                    "rejected cancel must not touch focus_target, initial={initial:?}"
+                );
             }
         }
     }
