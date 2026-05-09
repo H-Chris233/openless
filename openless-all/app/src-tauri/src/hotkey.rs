@@ -716,6 +716,7 @@ mod platform {
     const VK_RSHIFT: u32 = 0xA1;
     const VK_LCONTROL: u32 = 0xA2;
     const VK_RCONTROL: u32 = 0xA3;
+    const VK_LMENU: u32 = 0xA4;
     const VK_RMENU: u32 = 0xA5;
     const VK_RWIN: u32 = 0x5C;
     const LLKHF_INJECTED: u32 = 0x0000_0010;
@@ -966,18 +967,15 @@ mod platform {
     }
 
     fn trigger_to_vk_code(trigger: HotkeyTrigger) -> u32 {
-        // Windows only gives us a small set of modifier virtual keys that can be
-        // used as reliable modifier-only global triggers, so the cross-platform
-        // trigger list intentionally collapses a few aliases onto the same
-        // physical Windows key:
-        // - LeftOption reuses RightAlt / VK_RMENU
-        // - Fn reuses RightControl / VK_RCONTROL
+        // Windows 低层 hook 能区分左右 Alt，LeftOption / RightOption 必须保留物理侧。
+        // 其他少量跨平台别名仍按 Windows 可用物理键折叠：
+        // - Fn 复用 RightControl / VK_RCONTROL
         match trigger {
             HotkeyTrigger::RightControl => VK_RCONTROL,
             HotkeyTrigger::LeftControl => VK_LCONTROL,
             HotkeyTrigger::RightOption | HotkeyTrigger::RightAlt => VK_RMENU,
             HotkeyTrigger::RightCommand => VK_RWIN,
-            HotkeyTrigger::LeftOption => VK_RMENU,
+            HotkeyTrigger::LeftOption => VK_LMENU,
             HotkeyTrigger::Fn => VK_RCONTROL,
             HotkeyTrigger::Custom => unreachable!("custom combo hotkeys use ComboHotkeyMonitor"),
         }
@@ -1072,7 +1070,7 @@ mod platform {
 
             dispatch_keyboard_event(&ctx, VK_RWIN, WM_KEYDOWN);
             dispatch_keyboard_event(&ctx, VK_RWIN, WM_KEYDOWN);
-            dispatch_keyboard_event(&ctx, VK_RMENU, WM_KEYDOWN);
+            dispatch_keyboard_event(&ctx, VK_LMENU, WM_KEYDOWN);
             dispatch_keyboard_event(&ctx, VK_LSHIFT, WM_KEYDOWN);
             dispatch_keyboard_event(&ctx, VK_LSHIFT, WM_KEYDOWN);
             dispatch_keyboard_event(&ctx, VK_RWIN, WM_KEYUP);
@@ -1087,6 +1085,48 @@ mod platform {
                     HotkeyEvent::QaShortcutPressed,
                 ]
             );
+        }
+
+        #[test]
+        fn windows_option_triggers_keep_left_and_right_alt_separate() {
+            let left_shared = shared(HotkeyTrigger::LeftOption);
+            let (left_ctx, left_rx) = callback_context(left_shared);
+
+            assert!(!dispatch_keyboard_event(&left_ctx, VK_RMENU, WM_KEYDOWN));
+            assert!(dispatch_keyboard_event(&left_ctx, VK_LMENU, WM_KEYDOWN));
+            assert!(dispatch_keyboard_event(&left_ctx, VK_LMENU, WM_KEYUP));
+            assert_eq!(
+                drain(&left_rx),
+                vec![HotkeyEvent::Pressed, HotkeyEvent::Released]
+            );
+
+            let right_option_shared = shared(HotkeyTrigger::RightOption);
+            let (right_option_ctx, right_option_rx) = callback_context(right_option_shared);
+            assert!(!dispatch_keyboard_event(
+                &right_option_ctx,
+                VK_LMENU,
+                WM_KEYDOWN
+            ));
+            assert!(dispatch_keyboard_event(
+                &right_option_ctx,
+                VK_RMENU,
+                WM_KEYDOWN
+            ));
+            assert_eq!(drain(&right_option_rx), vec![HotkeyEvent::Pressed]);
+
+            let right_alt_shared = shared(HotkeyTrigger::RightAlt);
+            let (right_alt_ctx, right_alt_rx) = callback_context(right_alt_shared);
+            assert!(!dispatch_keyboard_event(
+                &right_alt_ctx,
+                VK_LMENU,
+                WM_KEYDOWN
+            ));
+            assert!(dispatch_keyboard_event(
+                &right_alt_ctx,
+                VK_RMENU,
+                WM_KEYDOWN
+            ));
+            assert_eq!(drain(&right_alt_rx), vec![HotkeyEvent::Pressed]);
         }
     }
 }
