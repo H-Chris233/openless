@@ -406,6 +406,7 @@ impl BailianRealtimeASR {
             !st.last_result_text.trim().is_empty() || !st.final_segments.is_empty()
         };
         if has_partial {
+            // 与 Volcengine 保持一致：连接异常但已有 partial 时优先兜底返回，避免丢失用户已识别出的内容。
             self.finish_success();
         } else {
             self.finish_error(error);

@@ -246,7 +246,9 @@ pub(super) async fn begin_session(inner: &Arc<Inner>) -> Result<(), String> {
                     set_phase_idle_if_session_matches(inner, current_session_id);
                     return Ok(());
                 }
-                StartupRaceStatus::ActiveStarting => {}
+                StartupRaceStatus::ActiveStarting => {
+                    asr.cancel();
+                }
             }
             discard_startup_resources_for_session(inner, current_session_id);
             emit_capsule(
