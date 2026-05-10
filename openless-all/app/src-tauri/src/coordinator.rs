@@ -3666,19 +3666,26 @@ fn emit_capsule(
         translation,
     };
 
-    let show_capsule = inner.prefs.get().show_capsule;
+    // visible / translation 是「这一帧 capsule:state event 的 payload」内容 ——
+    // 必须在 call-site（即音频线程触发 emit_capsule 时）就算定，否则 main thread
+    // 闭包里读到的将是「下一帧」的 state，跟实际下发给 JS 的 payload 不一致。
     let visible = !matches!(state, CapsuleState::Idle);
 
     // emit_capsule 会被 cpal process_callback（音频回调线程）调用 ~30 Hz —— 在该
     // 线程上调用 NSWindow / HWND API 会撞 macOS dispatch_assert_queue_fail SIGTRAP
     // 或者 Win32 SendMessage 死锁。把 window.show/hide + 位置调整 marshal 到主线程；
     // app.emit_to 走 Tauri 内部事件总线，本身线程安全，保留同步调用。详见 audit 3.2.2。
+    //
+    // show_capsule（用户偏好）在主线程执行时再读 —— 用户可以在录音过程中改设置，
+    // 闭包入队到真正跑之间窗口上限是一两帧（~16-33ms），用最新值消除 stale-pref
+    // 闪烁。pr_agent 关注点 — 见 audit follow-up。
     let inner_for_main = Arc::clone(inner);
     let app_for_main = app.clone();
     let _ = app.run_on_main_thread(move || {
         let Some(window) = app_for_main.get_webview_window("capsule") else {
             return;
         };
+        let show_capsule = inner_for_main.prefs.get().show_capsule;
         // 三平台统一：Done / Cancelled / Error 状态保留 ~1.5s toast
         // （schedule_capsule_idle 之后会回 Idle 隐藏）。
         // Windows 上 linger 的真实问题（截图选中 / 死区 / 拖拽卡顿）由 #140 加的
