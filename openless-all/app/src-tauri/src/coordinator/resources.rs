@@ -124,7 +124,7 @@ pub(super) async fn acquire_recording_mute(inner: &Arc<Inner>, owner: &'static s
         return;
     }
     let inner = Arc::clone(inner);
-    let _ = tokio::task::spawn_blocking(move || {
+    let join_result = tokio::task::spawn_blocking(move || {
         let mut mute = inner.recording_mute.lock();
         if mute.holders == 0 {
             match crate::audio_mute::AudioMuteGuard::activate() {
@@ -142,6 +142,16 @@ pub(super) async fn acquire_recording_mute(inner: &Arc<Inner>, owner: &'static s
         log::info!("[audio-mute] acquired by {owner}; holders={}", mute.holders);
     })
     .await;
+    // 显式记录 spawn_blocking 任务的 panic（之前是 `let _ = .await` 静默吞掉）。
+    // holders/guard 状态本身在 panic 路径下仍然一致 —— 因为 panic 只能发生在
+    // activate() 抛 / lock 抛，前者会让 holders 不增 + guard 仍 None，后者根本
+    // 进不到 mutate 阶段；但用户碰到 system audio 在录音时漏出系统声却找不到
+    // 任何 [audio-mute] 日志，没法 debug。pr_agent feedback on PR #391。
+    if let Err(join_err) = join_result {
+        log::error!(
+            "[audio-mute] acquire task panicked for {owner}: {join_err}; mute did not activate"
+        );
+    }
 }
 
 /// Release the recording-mute guard. The Drop impl on `AudioMuteGuard` shells
