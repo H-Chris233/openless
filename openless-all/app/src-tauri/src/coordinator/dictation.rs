@@ -845,7 +845,15 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
     if inner.state.lock().cancelled {
         log::info!("[coord] cancel detected after ASR — discarding transcript");
         restore_prepared_windows_ime_session(inner, current_session_id);
-        inner.state.lock().phase = SessionPhase::Idle;
+        // PR #387 的「cancel 后清 focus_target」契约要在 Processing 路径上也成立。
+        // cancel_session 在 Processing 阶段故意跳过 finish_cancel_session_state（让
+        // 这里收尾），但此前的 end_session 没把 focus_target 清掉。logic-review
+        // 2026-05-10 P3 (🚩) 把这条补完。
+        {
+            let mut state = inner.state.lock();
+            state.phase = SessionPhase::Idle;
+            state.focus_target = None;
+        }
         return Ok(());
     }
 
