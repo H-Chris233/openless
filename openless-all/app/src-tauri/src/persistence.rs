@@ -47,6 +47,41 @@ fn credentials_lock() -> &'static Mutex<()> {
     CREDENTIALS_LOCK.get_or_init(|| Mutex::new(()))
 }
 
+/// Process-wide credentials cache.
+///
+/// Without this cache every `CredentialsVault::get_*` / `snapshot` call hits
+/// `load_credentials()` → `load_keyring_credentials()` which reads the
+/// manifest entry plus every chunk entry from the OS keyring. On macOS each
+/// distinct keychain entry has its own ACL — so an ad-hoc-signed binary (or
+/// any binary whose ACL grants haven't been set up yet) prompts on every read
+/// of every entry. A single dictation cycle reads credentials 5–10 times,
+/// times (1 manifest + N chunks) entries → tens of "OpenLess wants to use
+/// the keychain" prompts per recording.
+///
+/// With this cache the first read populates `Some(CredsRoot)` and every
+/// subsequent read in the same process is silent. `save_credentials` keeps
+/// the cache in sync after writes so Settings → Recording credential edits
+/// take effect immediately.
+///
+/// Cross-process changes (e.g. user edits via `security` CLI, or another
+/// instance of the app — single-instance is enforced but defense in depth)
+/// will be invisible until the next process launch. Acceptable trade-off
+/// per the credential vault contract: the keyring is owned by this app.
+static CREDENTIALS_CACHE: OnceLock<Mutex<Option<CredsRoot>>> = OnceLock::new();
+
+fn credentials_cache() -> &'static Mutex<Option<CredsRoot>> {
+    CREDENTIALS_CACHE.get_or_init(|| Mutex::new(None))
+}
+
+fn store_credentials_cache(root: &CredsRoot) {
+    *credentials_cache().lock() = Some(root.clone());
+}
+
+#[cfg(test)]
+fn reset_credentials_cache_for_tests() {
+    *credentials_cache().lock() = None;
+}
+
 // ───────────────────────── path helpers ─────────────────────────
 
 fn data_dir() -> Result<PathBuf> {
@@ -533,7 +568,10 @@ fn migrate_legacy_sources_for_update() -> Result<CredsRoot> {
 }
 
 fn load_credentials() -> CredsRoot {
-    match load_keyring_credentials() {
+    if let Some(cached) = credentials_cache().lock().as_ref().cloned() {
+        return cached;
+    }
+    let root = match load_keyring_credentials() {
         Ok(Some(root)) => {
             // 不在这里调 remove_legacy_keyring_credentials() —— 它内部对每个
             // 旧 account 各做一次 keyring delete，每次 delete 在 macOS Keychain
@@ -549,20 +587,27 @@ fn load_credentials() -> CredsRoot {
             log::warn!("[vault] system credential read failed: {e}");
             load_legacy_sources_without_migration()
         }
-    }
+    };
+    store_credentials_cache(&root);
+    root
 }
 
 fn load_credentials_for_update() -> Result<CredsRoot> {
-    match load_keyring_credentials() {
+    if let Some(cached) = credentials_cache().lock().as_ref().cloned() {
+        return Ok(cached);
+    }
+    let root = match load_keyring_credentials() {
         Ok(Some(root)) => {
             // 同 load_credentials：不再每次 update 都尝试 delete legacy keyring
             // entries，避免反复触发 macOS Keychain ACL 弹窗。
             remove_legacy_credentials_file_best_effort();
-            Ok(root)
+            root
         }
-        Ok(None) => migrate_legacy_sources_for_update(),
-        Err(e) => Err(e),
-    }
+        Ok(None) => migrate_legacy_sources_for_update()?,
+        Err(e) => return Err(e),
+    };
+    store_credentials_cache(&root);
+    Ok(root)
 }
 
 fn save_credentials(root: &CredsRoot) -> Result<()> {
@@ -616,6 +661,9 @@ fn save_credentials(root: &CredsRoot) -> Result<()> {
     }
 
     remove_legacy_credentials_file_best_effort();
+    // 写完成功后立刻刷新 process cache —— 同进程后续读不再回 Keychain。
+    // 见 CREDENTIALS_CACHE 的 doc。
+    store_credentials_cache(&cleaned);
     Ok(())
 }
 
