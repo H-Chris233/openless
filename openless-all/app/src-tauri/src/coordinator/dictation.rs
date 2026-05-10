@@ -235,7 +235,7 @@ pub(super) async fn begin_session(inner: &Arc<Inner>) -> Result<(), String> {
             current_session_id,
             ActiveAsr::Bailian(Arc::clone(&asr)),
         );
-        start_recorder_for_starting(inner, current_session_id, &active_asr, consumer)?;
+        start_recorder_for_starting(inner, current_session_id, &active_asr, consumer).await?;
 
         if let Err(e) = asr.open_session().await {
             log::error!("[coord] open Bailian ASR session failed: {e}");
@@ -334,7 +334,7 @@ pub(super) async fn begin_session(inner: &Arc<Inner>) -> Result<(), String> {
             current_session_id,
             ActiveAsr::Volcengine(Arc::clone(&asr)),
         );
-        start_recorder_for_starting(inner, current_session_id, &active_asr, consumer)?;
+        start_recorder_for_starting(inner, current_session_id, &active_asr, consumer).await?;
 
         if let Err(e) = asr.open_session().await {
             log::error!("[coord] open ASR session failed: {e}");
@@ -403,7 +403,7 @@ pub(super) async fn begin_session(inner: &Arc<Inner>) -> Result<(), String> {
     Ok(())
 }
 
-pub(super) fn start_recorder_for_starting(
+pub(super) async fn start_recorder_for_starting(
     inner: &Arc<Inner>,
     session_id: SessionId,
     active_asr: &str,
@@ -448,7 +448,7 @@ pub(super) fn start_recorder_for_starting(
 
     let microphone_device_name = selected_microphone_device_name(inner);
     stop_microphone_preview_monitor(inner, "dictation recorder");
-    acquire_recording_mute(inner, "dictation");
+    acquire_recording_mute(inner, "dictation").await;
     match Recorder::start(microphone_device_name, consumer, level_handler) {
         Ok((rec, runtime_errors)) => {
             store_recorder_for_session(inner, session_id, rec);
@@ -555,7 +555,7 @@ pub(super) async fn start_recorder_and_enter_listening(
     active_asr: &str,
     consumer: Arc<dyn crate::recorder::AudioConsumer>,
 ) -> Result<(), String> {
-    start_recorder_for_starting(inner, session_id, active_asr, consumer)?;
+    start_recorder_for_starting(inner, session_id, active_asr, consumer).await?;
     finish_starting_session(inner, session_id).await;
     Ok(())
 }

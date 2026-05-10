@@ -110,37 +110,81 @@ pub(super) fn stop_microphone_preview_monitor(inner: &Arc<Inner>, owner: &str) {
     }
 }
 
-pub(super) fn acquire_recording_mute(inner: &Arc<Inner>, owner: &str) {
+/// Acquire system-output mute for the duration of a recording session.
+///
+/// `AudioMuteGuard::activate()` on macOS shells out to `osascript` (~100–300 ms)
+/// and on Linux to `wpctl`/`pactl` (similar). When called from the async
+/// `begin_session` path that blocks the tokio worker thread for the entire
+/// duration, delaying the recorder start by exactly that much. Wrap the
+/// activate + bookkeeping in `spawn_blocking` so the tokio worker is freed
+/// while the shell-out runs. Parking-lot `Mutex` guards never cross an await
+/// (they live entirely inside the blocking task). Audit 3.2.4.
+pub(super) async fn acquire_recording_mute(inner: &Arc<Inner>, owner: &'static str) {
     if !inner.prefs.get().mute_during_recording {
         return;
     }
-    let mut mute = inner.recording_mute.lock();
-    if mute.holders == 0 {
-        match crate::audio_mute::AudioMuteGuard::activate() {
-            Ok(guard) => {
-                mute.guard = Some(guard);
-                log::info!("[audio-mute] system output muted for recording");
-            }
-            Err(err) => {
-                log::warn!("[audio-mute] failed to mute output for {owner}: {err}");
-                return;
+    let inner = Arc::clone(inner);
+    let join_result = tokio::task::spawn_blocking(move || {
+        let mut mute = inner.recording_mute.lock();
+        if mute.holders == 0 {
+            match crate::audio_mute::AudioMuteGuard::activate() {
+                Ok(guard) => {
+                    mute.guard = Some(guard);
+                    log::info!("[audio-mute] system output muted for recording");
+                }
+                Err(err) => {
+                    log::warn!("[audio-mute] failed to mute output for {owner}: {err}");
+                    return;
+                }
             }
         }
+        mute.holders = mute.holders.saturating_add(1);
+        log::info!("[audio-mute] acquired by {owner}; holders={}", mute.holders);
+    })
+    .await;
+    // 显式记录 spawn_blocking 任务的 panic（之前是 `let _ = .await` 静默吞掉）。
+    // holders/guard 状态本身在 panic 路径下仍然一致 —— 因为 panic 只能发生在
+    // activate() 抛 / lock 抛，前者会让 holders 不增 + guard 仍 None，后者根本
+    // 进不到 mutate 阶段；但用户碰到 system audio 在录音时漏出系统声却找不到
+    // 任何 [audio-mute] 日志，没法 debug。pr_agent feedback on PR #391。
+    if let Err(join_err) = join_result {
+        log::error!(
+            "[audio-mute] acquire task panicked for {owner}: {join_err}; mute did not activate"
+        );
     }
-    mute.holders = mute.holders.saturating_add(1);
-    log::info!("[audio-mute] acquired by {owner}; holders={}", mute.holders);
 }
 
-pub(super) fn release_recording_mute(inner: &Arc<Inner>, owner: &str) {
-    let mut mute = inner.recording_mute.lock();
-    if mute.holders == 0 {
-        return;
-    }
-    mute.holders -= 1;
-    log::info!("[audio-mute] released by {owner}; holders={}", mute.holders);
-    if mute.holders == 0 {
-        mute.guard.take();
-        log::info!("[audio-mute] system output mute restored after recording");
+/// Release the recording-mute guard. The Drop impl on `AudioMuteGuard` shells
+/// out to `osascript` / `wpctl` again, so when holders reaches 0 we hand the
+/// drop off to a blocking task to keep the tokio worker free. Audit 3.2.4.
+///
+/// Fire-and-forget (no await): callers — `cancel_session`, `end_session`,
+/// recorder error monitor — don't need the mute restoration to complete
+/// before they continue. The user has already stopped recording; system audio
+/// recovery happening 100 ms later is fine.
+///
+/// `release_recording_mute` is also called from non-tokio threads (the recorder
+/// error monitor uses `std::thread::spawn`), so fall back to a synchronous
+/// run when there's no current tokio handle — running synchronously on a std
+/// thread blocks nothing.
+pub(super) fn release_recording_mute(inner: &Arc<Inner>, owner: &'static str) {
+    let inner = Arc::clone(inner);
+    let work = move || {
+        let mut mute = inner.recording_mute.lock();
+        if mute.holders == 0 {
+            return;
+        }
+        mute.holders -= 1;
+        log::info!("[audio-mute] released by {owner}; holders={}", mute.holders);
+        if mute.holders == 0 {
+            mute.guard.take();
+            log::info!("[audio-mute] system output mute restored after recording");
+        }
+    };
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn_blocking(work);
+    } else {
+        work();
     }
 }
 
