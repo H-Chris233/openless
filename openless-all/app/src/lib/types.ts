@@ -29,6 +29,14 @@ export interface DictionaryEntry {
   createdAt: string;
 }
 
+export interface CorrectionRule {
+  id: string;
+  pattern: string;
+  replacement: string;
+  enabled: boolean;
+  createdAt: string;
+}
+
 export interface VocabPreset {
   id: string;
   name: string;

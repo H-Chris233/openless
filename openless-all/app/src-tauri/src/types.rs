@@ -121,6 +121,18 @@ pub struct DictionaryEntry {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CorrectionRule {
+    pub id: String,
+    pub pattern: String,
+    pub replacement: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct VocabPreset {
     pub id: String,
     pub name: String,

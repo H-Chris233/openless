@@ -180,6 +180,17 @@ export const ko: typeof zhCN = {
     tipDisabled: '클릭하여 비활성화',
     tipEnabled: '클릭하여 활성화',
     removeAria: '삭제',
+    corrections: {
+      title: '교정 규칙',
+      tip: '핫워드와 별도로 ASR의 흔한 오인식을 문자 그대로 교정합니다. {num}은 숫자와 일치합니다. 예: {num}粒 → {num}例.',
+      patternPlaceholder: '오인식 표현, 예: {num}粒',
+      replacementPlaceholder: '대상 표현, 예: {num}例',
+      empty: '아직 교정 규칙이 없습니다.',
+      invalid: '문자 그대로 바꾸기 또는 {num} 숫자 와일드카드 1개가 포함된 규칙만 지원합니다. 예: {num}粒 → {num}例.',
+      tipDisabled: '이 규칙 비활성화',
+      tipEnabled: '이 규칙 활성화',
+      removeAria: '교정 규칙 삭제',
+    },
     presets: {
       title: '시나리오 프리셋',
       tip: '여러 개 선택 후 일괄 활성화 가능. 편집과 새로 만들기 지원, 향후 가져오기/내보내기를 위한 로컬 구조가 예약되어 있습니다.',

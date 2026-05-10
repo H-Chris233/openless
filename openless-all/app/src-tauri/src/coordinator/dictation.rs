@@ -2,6 +2,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use crate::coordinator_state::request_stop_during_starting_state;
+use crate::correction::apply_correction_rules;
 use crate::types::HotkeyMode;
 
 use super::qa::handle_qa_option_edge;
@@ -906,6 +907,25 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         return Err("ASR returned empty transcript".to_string());
     }
 
+    let correction_rules = match inner.correction_rules.list() {
+        Ok(rules) => rules,
+        Err(e) => {
+            log::warn!("[coord] load correction rules failed: {e}; continue without correction");
+            Vec::new()
+        }
+    };
+    if !correction_rules.is_empty() {
+        let corrected = apply_correction_rules(&raw.text, &correction_rules);
+        if corrected != raw.text {
+            log::info!(
+                "[coord] correction rules adjusted raw transcript ({} → {} chars)",
+                raw.text.chars().count(),
+                corrected.chars().count()
+            );
+            raw.text = corrected;
+        }
+    }
+
     emit_capsule(inner, CapsuleState::Polishing, 0.0, elapsed, None, None);
 
     let prefs = inner.prefs.get();
@@ -988,6 +1008,19 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
     } else {
         polished
     };
+    let polished = if correction_rules.is_empty() {
+        polished
+    } else {
+        let corrected = apply_correction_rules(&polished, &correction_rules);
+        if corrected != polished {
+            log::info!(
+                "[coord] correction rules adjusted final text ({} → {} chars)",
+                polished.chars().count(),
+                corrected.chars().count()
+            );
+        }
+        corrected
+    };
 
     // 原子化最后一次 cancel 检查 + 转 Inserting：
     // 在同一 lock 内决定「丢弃」还是「进入 Inserting」。一旦设到 Inserting，
@@ -1035,7 +1068,9 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         }
         #[cfg(not(target_os = "windows"))]
         {
-            inner.inserter.insert(&polished, restore_clipboard, paste_shortcut)
+            inner
+                .inserter
+                .insert(&polished, restore_clipboard, paste_shortcut)
         }
     } else {
         log::warn!(
