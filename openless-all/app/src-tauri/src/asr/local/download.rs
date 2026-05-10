@@ -508,7 +508,9 @@ pub fn partial_actual_size(partial: &Path) -> u64 {
     let mut seen: HashSet<usize> = HashSet::new();
     let mut total: u64 = 0;
     for line in content.lines() {
-        let Ok(idx) = line.trim().parse::<usize>() else { continue };
+        let Ok(idx) = line.trim().parse::<usize>() else {
+            continue;
+        };
         if !seen.insert(idx) {
             continue;
         }

@@ -1178,6 +1178,12 @@ const LLM_PRESETS = [
     modelPlaceholder: 'gemini-2.5-flash',
   },
   {
+    id: 'codex_oauth',
+    nameKey: 'codexOAuth',
+    baseUrl: '',
+    modelPlaceholder: 'gpt-5.3-codex-spark',
+  },
+  {
     id: 'mimo',
     nameKey: 'mimo',
     baseUrl: 'https://api.xiaomimimo.com/v1',
@@ -1217,7 +1223,7 @@ const LLM_PRESETS = [
 
 type LlmPresetId = typeof LLM_PRESETS[number]['id'];
 
-const ASR_DEFAULT_RESOURCE_ID = 'volc.seedasr.sauc.duration';
+const ASR_DEFAULT_RESOURCE_ID = 'volc.bigasr.sauc.duration';
 
 // `volcengine` / `bailian` 走自建流式客户端；其余走 OpenAI 兼容
 // `/audio/transcriptions`（`coordinator.rs::is_whisper_compatible_provider`）。
@@ -1374,6 +1380,7 @@ function ProvidersSection() {
   // 否则受控 <select> 立刻切到新厂商，但凭据字段还在显示旧 entry，placeholder
   // 会先于实际数据切换、视觉上对不上。
   const preset = LLM_PRESETS.find(p => p.id === committedLlmProvider) ?? LLM_PRESETS[LLM_PRESETS.length - 1];
+  const codexOAuthSelected = committedLlmProvider === 'codex_oauth';
   const asrPreset = visibleAsrPresets.find(p => p.id === committedAsrProvider);
 
   return (
@@ -1401,9 +1408,17 @@ function ProvidersSection() {
             ))}
           </select>
         </SettingRow>
-        <CredentialField key={`${committedLlmProvider}:api_key`} label={t('settings.providers.apiKeyLabel')} account="ark.api_key" mono mask />
-        <CredentialField key={`${committedLlmProvider}:endpoint`} label={t('settings.providers.baseUrlLabel')} account="ark.endpoint"
-          placeholder={preset.baseUrl || 'https://your-endpoint/v1'} />
+        {codexOAuthSelected ? (
+          <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.6, margin: '2px 0 10px' }}>
+            {t('settings.providers.codexOAuthNotice')}
+          </div>
+        ) : (
+          <>
+            <CredentialField key={`${committedLlmProvider}:api_key`} label={t('settings.providers.apiKeyLabel')} account="ark.api_key" mono mask />
+            <CredentialField key={`${committedLlmProvider}:endpoint`} label={t('settings.providers.baseUrlLabel')} account="ark.endpoint"
+              placeholder={preset.baseUrl || 'https://your-endpoint/v1'} />
+          </>
+        )}
         <CredentialField key={`${committedLlmProvider}:model:${llmModelRevision}`} label={t('settings.providers.modelLabel')} account="ark.model_id"
           placeholder={preset.modelPlaceholder || 'model-name'} mono />
         <ProviderTools key={committedLlmProvider} kind="llm" modelAccount="ark.model_id" onModelSelected={() => setLlmModelRevision(v => v + 1)} />

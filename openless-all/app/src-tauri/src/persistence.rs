@@ -796,8 +796,7 @@ impl HistoryStore {
         // Prepend so the newest session is at index 0, matching the Swift impl.
         sessions.insert(0, session);
         if retention_days > 0 {
-            let cutoff =
-                chrono::Utc::now() - chrono::Duration::days(i64::from(retention_days));
+            let cutoff = chrono::Utc::now() - chrono::Duration::days(i64::from(retention_days));
             sessions.retain(|s| {
                 chrono::DateTime::parse_from_rfc3339(&s.created_at)
                     .map(|t| t.with_timezone(&chrono::Utc) >= cutoff)
