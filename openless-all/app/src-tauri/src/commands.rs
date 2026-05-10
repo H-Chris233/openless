@@ -150,10 +150,22 @@ pub fn set_settings(
     // 没有 HotkeySettingsContext，必须靠事件感知录音键变化，否则面板可见时
     // 用户改键会让浮窗里的 "{recordHotkey}" 文案一直停留在旧值。
     persist_settings(&*coord, prefs.clone())?;
-    if let Err(err) = crate::refresh_tray_microphone_menu(&app) {
-        log::warn!("[tray] refresh microphone menu after settings save failed: {err}");
-        sync_tray_microphone_selection(&tray_microphones.lock(), &prefs.microphone_device_name);
-    }
+    // refresh_tray_microphone_menu 内部会调用 NSStatusItem.set_menu，必须在主线程上跑。
+    // set_settings 本身是同步 Tauri command，在 IPC handler 线程上执行；从这里直接调
+    // 会触发 macOS 主线程断言或在 dispatch 队列上死锁，导致整个 UI 无响应（用户改
+    // 偏好后所有按键都没反应即此根因）。dispatch 到主线程后立即返回，IPC 线程不阻塞。
+    let app_for_main = app.clone();
+    let prefs_for_main = prefs.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Err(err) = crate::refresh_tray_microphone_menu(&app_for_main) {
+            log::warn!("[tray] refresh microphone menu after settings save failed: {err}");
+            let tray_state = app_for_main.state::<TrayMicrophoneMenuState>();
+            sync_tray_microphone_selection(&tray_state.lock(), &prefs_for_main.microphone_device_name);
+        }
+    });
+    // 抑制 unused 警告：tray_microphones 现在改在闭包里通过 app.state 取，
+    // 但函数签名保留 State 入参，以便 Tauri 在调用前注入。
+    let _ = tray_microphones;
     let _ = app.emit("prefs:changed", &prefs);
     Ok(())
 }
@@ -369,6 +381,9 @@ fn asr_configured_for_provider(provider: &str, snap: &CredentialsSnapshot) -> bo
         // 本地 ASR 不依赖云端凭据。
         return true;
     }
+    if provider == crate::asr::bailian::PROVIDER_ID {
+        return configured(&snap.asr_api_key);
+    }
     configured(&snap.asr_endpoint) && configured(&snap.asr_model)
 }
 
@@ -527,6 +542,11 @@ pub async fn validate_provider_credentials(kind: String) -> Result<ProviderCheck
 
 #[tauri::command]
 pub async fn list_provider_models(kind: String) -> Result<ProviderModelsResult, String> {
+    if kind == "asr" && CredentialsVault::get_active_asr() == crate::asr::bailian::PROVIDER_ID {
+        return Ok(ProviderModelsResult {
+            models: vec![crate::asr::bailian::DEFAULT_MODEL.to_string()],
+        });
+    }
     let config = read_openai_provider_config(&kind)?;
     fetch_provider_models(&config)
         .await
@@ -607,12 +627,54 @@ async fn validate_asr_provider() -> Result<(), String> {
         return Ok(());
     }
 
+    if active_asr == crate::asr::bailian::PROVIDER_ID {
+        return validate_bailian_asr_provider().await;
+    }
+
     let config = read_openai_provider_config("asr")?;
     let model = CredentialsVault::get(CredentialAccount::AsrModel)
         .map_err(|e| e.to_string())?
         .filter(|s| !s.trim().is_empty())
         .ok_or_else(|| "asrModelMissing".to_string())?;
     validate_asr_transcription(&config, model.trim()).await
+}
+
+async fn validate_bailian_asr_provider() -> Result<(), String> {
+    let api_key = CredentialsVault::get(CredentialAccount::AsrApiKey)
+        .map_err(|e| e.to_string())?
+        .unwrap_or_default();
+    if api_key.trim().is_empty() {
+        return Err("API Key 为空".to_string());
+    }
+    let endpoint = CredentialsVault::get(CredentialAccount::AsrEndpoint)
+        .map_err(|e| e.to_string())?
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| crate::asr::bailian::DEFAULT_ENDPOINT.to_string());
+    let model = CredentialsVault::get(CredentialAccount::AsrModel)
+        .map_err(|e| e.to_string())?
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| crate::asr::bailian::DEFAULT_MODEL.to_string());
+    let vocabulary_id = CredentialsVault::get(CredentialAccount::AsrVocabularyId)
+        .map_err(|e| e.to_string())?
+        .filter(|s| !s.trim().is_empty());
+    let asr = std::sync::Arc::new(crate::asr::BailianRealtimeASR::new(
+        crate::asr::BailianCredentials {
+            api_key,
+            endpoint,
+            model,
+            vocabulary_id,
+        },
+    ));
+    asr.open_session().await.map_err(|e| e.to_string())?;
+    crate::asr::AudioConsumer::consume_pcm_chunk(
+        &*asr,
+        &vec![0u8; crate::asr::bailian::TARGET_AUDIO_CHUNK_BYTES],
+    );
+    asr.send_last_frame().await.map_err(|e| e.to_string())?;
+    asr.await_final_result()
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 fn active_asr_is_keyless_for_validation(provider: &str) -> bool {
@@ -809,6 +871,7 @@ fn parse_account(s: &str) -> Result<CredentialAccount, String> {
         "asr.api_key" => Ok(CredentialAccount::AsrApiKey),
         "asr.endpoint" => Ok(CredentialAccount::AsrEndpoint),
         "asr.model" => Ok(CredentialAccount::AsrModel),
+        "asr.vocabulary_id" => Ok(CredentialAccount::AsrVocabularyId),
         _ => Err(format!("unknown account: {s}")),
     }
 }
@@ -929,9 +992,14 @@ pub fn set_default_polish_mode(
     let mut prefs = coord.prefs().get();
     prefs.default_mode = mode;
     coord.prefs().set(prefs.clone()).map_err(|e| e.to_string())?;
-    if let Err(err) = crate::refresh_tray_microphone_menu(&app) {
-        log::warn!("[tray] refresh style menu after polish mode IPC change failed: {err}");
-    }
+    // 跟 set_settings 同样：refresh_tray_microphone_menu 里 tray.set_menu 改 NSStatusItem，
+    // 必须主线程；这里是同步 Tauri command 跑在 IPC 线程，直调会让 macOS 死锁。
+    let app_for_main = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Err(err) = crate::refresh_tray_microphone_menu(&app_for_main) {
+            log::warn!("[tray] refresh style menu after polish mode IPC change failed: {err}");
+        }
+    });
     let _ = app.emit("prefs:changed", &prefs);
     let _ = app.emit_to("main", "prefs:changed", &prefs);
     Ok(())
@@ -1767,6 +1835,10 @@ mod tests {
             ..snapshot()
         };
         assert!(!asr_configured_for_provider("whisper", &whisper_key_only));
+        assert!(asr_configured_for_provider(
+            crate::asr::bailian::PROVIDER_ID,
+            &whisper_key_only
+        ));
 
         let whisper_keyless_ready = CredentialsSnapshot {
             asr_endpoint: Some("https://api.openai.com/v1".into()),
@@ -1775,6 +1847,10 @@ mod tests {
         };
         assert!(asr_configured_for_provider(
             "whisper",
+            &whisper_keyless_ready
+        ));
+        assert!(!asr_configured_for_provider(
+            crate::asr::bailian::PROVIDER_ID,
             &whisper_keyless_ready
         ));
 

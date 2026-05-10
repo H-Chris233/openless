@@ -5,12 +5,14 @@
 //! `frame.rs` (binary frame codec) and the session lifecycle in
 //! `volcengine.rs`.
 
+pub mod bailian;
 mod frame;
 pub mod local;
 pub mod volcengine;
 pub mod wav;
 pub mod whisper;
 
+pub use bailian::{BailianCredentials, BailianRealtimeASR};
 pub use volcengine::{VolcengineCredentials, VolcengineStreamingASR};
 pub use whisper::WhisperBatchASR;
 

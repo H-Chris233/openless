@@ -292,14 +292,32 @@ mod platform {
             "hotkey hook 启动超时",
             run_listen_loop,
         )?;
-        listener.startup;
         Ok(Box::new(MacHotkeyAdapter {
             shared: listener.shared,
+            handles: listener.startup,
         }))
     }
 
+    /// Refs needed to stop the Mac CFRunLoop / CGEventTap from outside the listener
+    /// thread. Filled in by `run_listen_loop` once the tap is created and the runloop
+    /// reference is captured; consumed by `MacHotkeyAdapter::shutdown` when the
+    /// monitor is dropped (so a binding swap or app shutdown doesn't leak the
+    /// listener thread + tap). Cf. audit 3.1.1.
+    struct MacShutdownHandles {
+        tap: std::sync::Mutex<Option<CfMachPortRef>>,
+        runloop: std::sync::Mutex<Option<CfRunLoopRef>>,
+    }
+
+    // SAFETY: CfMachPortRef / CfRunLoopRef are CoreFoundation handles; the only
+    // operations we perform on them across threads are CGEventTapEnable and
+    // CFRunLoopStop, both of which Apple documents as safe to call from any
+    // thread.
+    unsafe impl Send for MacShutdownHandles {}
+    unsafe impl Sync for MacShutdownHandles {}
+
     struct MacHotkeyAdapter {
         shared: Arc<Shared>,
+        handles: Arc<MacShutdownHandles>,
     }
 
     impl HotkeyAdapter for MacHotkeyAdapter {
@@ -321,6 +339,19 @@ mod platform {
 
         fn reset_held_state(&self) {
             reset_shared_held_state(&self.shared);
+        }
+
+        fn shutdown(&self) {
+            // 顺序：先 disable tap 让 OS 不再向我们派发事件，然后 stop runloop
+            // 让 listener 线程从 CFRunLoopRun() 返回退出。take() 保证幂等。
+            let tap = self.handles.tap.lock().ok().and_then(|mut g| g.take());
+            if let Some(tap) = tap {
+                unsafe { CGEventTapEnable(tap, false) };
+            }
+            let runloop = self.handles.runloop.lock().ok().and_then(|mut g| g.take());
+            if let Some(rl) = runloop {
+                unsafe { CFRunLoopStop(rl) };
+            }
         }
     }
 
@@ -404,24 +435,35 @@ mod platform {
         fn CFRunLoopGetCurrent() -> CfRunLoopRef;
         fn CFRunLoopAddSource(rl: CfRunLoopRef, source: CfRunLoopSourceRef, mode: CfStringRef);
         fn CFRunLoopRun();
+        fn CFRunLoopStop(rl: CfRunLoopRef);
         static kCFRunLoopCommonModes: CfStringRef;
     }
 
     struct CallbackContext {
         shared: Arc<Shared>,
         tx: Sender<HotkeyEvent>,
-        tap: std::sync::Mutex<Option<CfMachPortRef>>,
+        /// 与 MacHotkeyAdapter 共享的 (tap, runloop) refs。tap re-enable on
+        /// TAP_DISABLED_BY_TIMEOUT 走 handles.tap；adapter shutdown 也走这两个 lock。
+        handles: Arc<MacShutdownHandles>,
     }
 
     unsafe impl Send for CallbackContext {}
     unsafe impl Sync for CallbackContext {}
 
-    fn run_listen_loop(shared: Arc<Shared>, tx: Sender<HotkeyEvent>, status_tx: StartupTx<()>) {
+    fn run_listen_loop(
+        shared: Arc<Shared>,
+        tx: Sender<HotkeyEvent>,
+        status_tx: StartupTx<Arc<MacShutdownHandles>>,
+    ) {
         let mask: CgEventMask = (1u64 << FLAGS_CHANGED) | (1u64 << KEY_DOWN);
+        let handles = Arc::new(MacShutdownHandles {
+            tap: std::sync::Mutex::new(None),
+            runloop: std::sync::Mutex::new(None),
+        });
         let context = Box::into_raw(Box::new(CallbackContext {
             shared,
             tx,
-            tap: std::sync::Mutex::new(None),
+            handles: Arc::clone(&handles),
         }));
 
         unsafe {
@@ -444,16 +486,20 @@ mod platform {
                 )));
                 return;
             }
-            *(*context).tap.lock().unwrap() = Some(tap);
+            *handles.tap.lock().unwrap() = Some(tap);
 
             let source = CFMachPortCreateRunLoopSource(std::ptr::null(), tap, 0);
             let runloop = CFRunLoopGetCurrent();
+            *handles.runloop.lock().unwrap() = Some(runloop);
             CFRunLoopAddSource(runloop, source, kCFRunLoopCommonModes);
             CGEventTapEnable(tap, true);
 
             log::info!("[hotkey] CGEventTap 已启动");
-            let _ = status_tx.send(Ok(()));
+            let _ = status_tx.send(Ok(handles));
+            // CFRunLoopRun 阻塞直到 CFRunLoopStop 被调用（由 MacHotkeyAdapter::shutdown
+            // 触发）。返回后 listener 线程清理 context 并自然退出。
             CFRunLoopRun();
+            let _ = Box::from_raw(context);
         }
     }
 
@@ -470,7 +516,7 @@ mod platform {
 
         match event_type {
             TAP_DISABLED_BY_TIMEOUT | TAP_DISABLED_BY_USER_INPUT => {
-                if let Some(tap) = *ctx.tap.lock().unwrap() {
+                if let Some(tap) = *ctx.handles.tap.lock().unwrap() {
                     unsafe { CGEventTapEnable(tap, true) };
                 }
                 return event;
@@ -622,7 +668,10 @@ mod platform {
                 CallbackContext {
                     shared,
                     tx,
-                    tap: std::sync::Mutex::new(None),
+                    handles: Arc::new(MacShutdownHandles {
+                        tap: std::sync::Mutex::new(None),
+                        runloop: std::sync::Mutex::new(None),
+                    }),
                 },
                 rx,
             )
@@ -716,6 +765,7 @@ mod platform {
     const VK_RSHIFT: u32 = 0xA1;
     const VK_LCONTROL: u32 = 0xA2;
     const VK_RCONTROL: u32 = 0xA3;
+    const VK_LMENU: u32 = 0xA4;
     const VK_RMENU: u32 = 0xA5;
     const VK_RWIN: u32 = 0x5C;
     const LLKHF_INJECTED: u32 = 0x0000_0010;
@@ -966,18 +1016,15 @@ mod platform {
     }
 
     fn trigger_to_vk_code(trigger: HotkeyTrigger) -> u32 {
-        // Windows only gives us a small set of modifier virtual keys that can be
-        // used as reliable modifier-only global triggers, so the cross-platform
-        // trigger list intentionally collapses a few aliases onto the same
-        // physical Windows key:
-        // - LeftOption reuses RightAlt / VK_RMENU
-        // - Fn reuses RightControl / VK_RCONTROL
+        // Windows 低层 hook 能区分左右 Alt，LeftOption / RightOption 必须保留物理侧。
+        // 其他少量跨平台别名仍按 Windows 可用物理键折叠：
+        // - Fn 复用 RightControl / VK_RCONTROL
         match trigger {
             HotkeyTrigger::RightControl => VK_RCONTROL,
             HotkeyTrigger::LeftControl => VK_LCONTROL,
             HotkeyTrigger::RightOption | HotkeyTrigger::RightAlt => VK_RMENU,
             HotkeyTrigger::RightCommand => VK_RWIN,
-            HotkeyTrigger::LeftOption => VK_RMENU,
+            HotkeyTrigger::LeftOption => VK_LMENU,
             HotkeyTrigger::Fn => VK_RCONTROL,
             HotkeyTrigger::Custom => unreachable!("custom combo hotkeys use ComboHotkeyMonitor"),
         }
@@ -1072,7 +1119,7 @@ mod platform {
 
             dispatch_keyboard_event(&ctx, VK_RWIN, WM_KEYDOWN);
             dispatch_keyboard_event(&ctx, VK_RWIN, WM_KEYDOWN);
-            dispatch_keyboard_event(&ctx, VK_RMENU, WM_KEYDOWN);
+            dispatch_keyboard_event(&ctx, VK_LMENU, WM_KEYDOWN);
             dispatch_keyboard_event(&ctx, VK_LSHIFT, WM_KEYDOWN);
             dispatch_keyboard_event(&ctx, VK_LSHIFT, WM_KEYDOWN);
             dispatch_keyboard_event(&ctx, VK_RWIN, WM_KEYUP);
@@ -1087,6 +1134,48 @@ mod platform {
                     HotkeyEvent::QaShortcutPressed,
                 ]
             );
+        }
+
+        #[test]
+        fn windows_option_triggers_keep_left_and_right_alt_separate() {
+            let left_shared = shared(HotkeyTrigger::LeftOption);
+            let (left_ctx, left_rx) = callback_context(left_shared);
+
+            assert!(!dispatch_keyboard_event(&left_ctx, VK_RMENU, WM_KEYDOWN));
+            assert!(dispatch_keyboard_event(&left_ctx, VK_LMENU, WM_KEYDOWN));
+            assert!(dispatch_keyboard_event(&left_ctx, VK_LMENU, WM_KEYUP));
+            assert_eq!(
+                drain(&left_rx),
+                vec![HotkeyEvent::Pressed, HotkeyEvent::Released]
+            );
+
+            let right_option_shared = shared(HotkeyTrigger::RightOption);
+            let (right_option_ctx, right_option_rx) = callback_context(right_option_shared);
+            assert!(!dispatch_keyboard_event(
+                &right_option_ctx,
+                VK_LMENU,
+                WM_KEYDOWN
+            ));
+            assert!(dispatch_keyboard_event(
+                &right_option_ctx,
+                VK_RMENU,
+                WM_KEYDOWN
+            ));
+            assert_eq!(drain(&right_option_rx), vec![HotkeyEvent::Pressed]);
+
+            let right_alt_shared = shared(HotkeyTrigger::RightAlt);
+            let (right_alt_ctx, right_alt_rx) = callback_context(right_alt_shared);
+            assert!(!dispatch_keyboard_event(
+                &right_alt_ctx,
+                VK_LMENU,
+                WM_KEYDOWN
+            ));
+            assert!(dispatch_keyboard_event(
+                &right_alt_ctx,
+                VK_RMENU,
+                WM_KEYDOWN
+            ));
+            assert_eq!(drain(&right_alt_rx), vec![HotkeyEvent::Pressed]);
         }
     }
 }

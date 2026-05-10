@@ -2,7 +2,7 @@
 // Internal sub-sections (Recording / Providers / Shortcuts / Permissions / Language / About)
 // keep their inline-style literals 1:1 with the source JSX.
 
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Icon } from '../components/Icon';
 import { ShortcutRecorder } from '../components/ShortcutRecorder';
@@ -53,6 +53,7 @@ import type {
   PermissionStatus,
   WindowsImeStatus,
 } from '../lib/types';
+import { emitSaved } from '../lib/savedEvent';
 import { useHotkeySettings } from '../state/HotkeySettingsContext';
 import i18n, {
   FOLLOW_SYSTEM,
@@ -106,6 +107,17 @@ export function Settings({ embedded = false, initialSection = 'recording' }: Set
     setSection(initialSection);
   }, [initialSection]);
 
+  // 跟 sidebar / SettingsModal 同款滑动 pill：测当前 active section 的 offsetTop/height
+  // → 用 absolute pill 平滑滑过去；--ol-motion-spring 是项目里的 Apple 风格 ease-out-quint。
+  const sectionRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const [pillRect, setPillRect] = useState<{ top: number; height: number } | null>(null);
+  useLayoutEffect(() => {
+    const idx = SECTION_ORDER.indexOf(section);
+    const el = sectionRefs.current[idx];
+    if (!el) return;
+    setPillRect({ top: el.offsetTop, height: el.offsetHeight });
+  }, [section]);
+
   return (
     <>
       {!embedded && (
@@ -127,23 +139,47 @@ export function Settings({ embedded = false, initialSection = 'recording' }: Set
           ...(embedded ? { flex: 1, minHeight: 0, gridTemplateRows: 'minmax(0, 1fr)' } : {}),
         }}
       >
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-          {SECTION_ORDER.map(s => (
-            <button
-              key={s}
-              onClick={() => setSection(s)}
+        <div style={{ position: 'relative', display: 'flex', flexDirection: 'column', gap: 2 }}>
+          {pillRect && (
+            <div
+              aria-hidden
               style={{
-                padding: '8px 12px', textAlign: 'left',
-                fontSize: 13, color: section === s ? 'var(--ol-ink)' : 'var(--ol-ink-3)',
-                background: section === s ? 'rgba(0,0,0,0.04)' : 'transparent',
-                border: 0, borderRadius: 8, fontFamily: 'inherit', fontWeight: section === s ? 600 : 500,
-                cursor: 'default',
-                transition: 'background 0.16s var(--ol-motion-quick), color 0.16s var(--ol-motion-quick)',
+                position: 'absolute',
+                left: 0,
+                right: 0,
+                top: pillRect.top,
+                height: pillRect.height,
+                background: 'rgba(0,0,0,0.04)',
+                borderRadius: 8,
+                transition: 'top 0.36s var(--ol-motion-spring), height 0.36s var(--ol-motion-spring)',
+                pointerEvents: 'none',
+                zIndex: 0,
               }}
-            >
-              {t(`settings.sections.${s}`)}
-            </button>
-          ))}
+            />
+          )}
+          {SECTION_ORDER.map((s, i) => {
+            const active = section === s;
+            return (
+              <button
+                key={s}
+                ref={el => { sectionRefs.current[i] = el; }}
+                onClick={() => setSection(s)}
+                className={active ? 'ol-nav-btn ol-nav-btn-active' : 'ol-nav-btn'}
+                style={{
+                  padding: '8px 12px', textAlign: 'left',
+                  fontSize: 13,
+                  background: 'transparent',
+                  border: 0, borderRadius: 8, fontFamily: 'inherit',
+                  cursor: 'default',
+                  position: 'relative',
+                  zIndex: 1,
+                  transition: 'color 0.16s var(--ol-motion-quick), background 0.16s var(--ol-motion-quick)',
+                }}
+              >
+                {t(`settings.sections.${s}`)}
+              </button>
+            );
+          })}
         </div>
         <div
           className={embedded ? 'ol-thinscroll' : undefined}
@@ -1165,13 +1201,15 @@ type LlmPresetId = typeof LLM_PRESETS[number]['id'];
 
 const ASR_DEFAULT_RESOURCE_ID = 'volc.seedasr.sauc.duration';
 
-// `volcengine` 走自建流式客户端；其余走 OpenAI 兼容 `/audio/transcriptions`
-// （`coordinator.rs::is_whisper_compatible_provider`）。新增兼容厂商：
+// `volcengine` / `bailian` 走自建流式客户端；其余走 OpenAI 兼容
+// `/audio/transcriptions`（`coordinator.rs::is_whisper_compatible_provider`）。
+// 新增兼容厂商：
 //   1. 在这里加一项 `{ id, nameKey, baseUrl, model }`；
 //   2. `coordinator.rs::is_whisper_compatible_provider` 加同名 id；
 //   3. 在 i18n 的 `settings.providers.presets.<nameKey>` 加文案。
 const ASR_PRESETS = [
   { id: 'volcengine',   nameKey: 'asrVolcengine',   baseUrl: '',                                              model: ''                              },
+  { id: 'bailian',      nameKey: 'asrBailian',     baseUrl: 'wss://dashscope.aliyuncs.com/api-ws/v1/inference/', model: 'fun-asr-realtime'             },
   { id: 'siliconflow',  nameKey: 'asrSiliconflow',  baseUrl: 'https://api.siliconflow.cn/v1',                  model: 'FunAudioLLM/SenseVoiceSmall' },
   { id: 'zhipu',        nameKey: 'asrZhipu',        baseUrl: 'https://open.bigmodel.cn/api/paas/v4',           model: 'glm-asr-2512'                },
   { id: 'groq',         nameKey: 'asrGroq',         baseUrl: 'https://api.groq.com/openai/v1',                 model: 'whisper-large-v3-turbo'      },
@@ -1376,6 +1414,20 @@ function ProvidersSection() {
               defaultValue={asrPreset?.baseUrl || undefined} />
             <CredentialField key={`${committedAsrProvider}:model:${asrModelRevision}`} label={t('settings.providers.modelLabel')} account="asr.model"
               placeholder={asrPreset?.model || 'whisper-1'} />
+            {committedAsrProvider === 'bailian' && (
+              <>
+                <CredentialField
+                  key={`${committedAsrProvider}:vocabulary_id`}
+                  label={t('settings.providers.bailianVocabularyIdLabel')}
+                  account="asr.vocabulary_id"
+                  mono
+                  placeholder="vocab-..."
+                />
+                <div style={{ marginTop: 2, fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.6 }}>
+                  {t('settings.providers.bailianVocabularyIdNote')}
+                </div>
+              </>
+            )}
             <ProviderTools kind="asr" modelAccount="asr.model" onModelSelected={() => setAsrModelRevision(v => v + 1)} />
           </>
         )}
@@ -1551,7 +1603,21 @@ function CredentialField({ label, account, placeholder, mono, mask, defaultValue
     };
   }, []);
 
+  // 改造：除 readError（持续错误，留在输入旁标识字段不可用）外，所有 saving / saved /
+  //   saveError / copied / copyError 一律发到右上角 SavedToast。原内联文案太挤、跟其它
+  //   页面 toast 风格不统一。
   const showTemporaryStatus = (next: CredentialFieldStatus) => {
+    if (next === 'saving') {
+      emitSaved('saving', t('common.saving'));
+    } else if (next === 'saved') {
+      emitSaved('saved', t('common.saved'));
+    } else if (next === 'saveError') {
+      emitSaved('failed', t('common.operationFailed'));
+    } else if (next === 'copied') {
+      emitSaved('saved', t('common.copied'));
+    } else if (next === 'copyError') {
+      emitSaved('failed', t('common.operationFailed'));
+    }
     setStatus(next);
     if (statusRef.current) clearTimeout(statusRef.current);
     statusRef.current = window.setTimeout(() => setStatus('idle'), 1600);
@@ -1560,6 +1626,7 @@ function CredentialField({ label, account, placeholder, mono, mask, defaultValue
   const save = async (v: string, force = false) => {
     if (!loaded || (!dirty && !force)) return;
     setStatus('saving');
+    emitSaved('saving', t('common.saving'));
     try {
       await setCredential(account, v);
       setDirty(false);
@@ -1647,23 +1714,18 @@ function CredentialField({ label, account, placeholder, mono, mask, defaultValue
         >
           <Icon name="copy" size={14} />
         </button>
-        {status !== 'idle' && (
+        {/* readError 是字段无法读取的持续错误，留在原位提示用户该字段不可用；
+            其它瞬态状态（saving / saved / saveError / copied / copyError）都通过
+            emitSaved 发到右上角统一 toast，不再内联占位。 */}
+        {status === 'readError' && (
           <span
             style={{
               fontSize: 11,
-              color: status.endsWith('Error') ? 'var(--ol-warn)' : 'var(--ol-ok)',
+              color: 'var(--ol-warn)',
               whiteSpace: 'nowrap',
             }}
           >
-            {status === 'saving'
-              ? t('common.saving')
-              : status === 'saved'
-                ? t('common.saved')
-                : status === 'copied'
-                  ? t('common.copied')
-                  : status === 'readError'
-                    ? t('settings.providers.readFailed')
-                    : t('common.operationFailed')}
+            {t('settings.providers.readFailed')}
           </span>
         )}
       </div>
