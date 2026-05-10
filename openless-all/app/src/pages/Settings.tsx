@@ -1165,6 +1165,19 @@ const LLM_PRESETS = [
     modelPlaceholder: 'gpt-4o',
   },
   {
+    // 谷歌官方 Gemini API（原生 generateContent，不走 OpenAI 兼容 shim）。
+    // baseUrl 末尾 /v1beta 是当前 Generally Available 的 path（ai.google.dev/api）。
+    // 后端 llm_gemini.rs 会拼成 `{baseUrl}/models/{model}:generateContent`，
+    // 并按模型 family 注入 thinkingConfig 强制关思考（2.5 flash 系列 thinkingBudget=0；
+    // 3.x pro 走 thinkingLevel="low"；3.x flash 走 thinkingLevel="minimal"；
+    // 2.5 pro 官方明示无法关闭思考）。模型列表用 ProviderTools「拉取模型」按钮取，
+    // 由 commands.rs::fetch_provider_models 识别 generativelanguage 域名后按 Gemini shape 解析。
+    id: 'gemini',
+    nameKey: 'gemini',
+    baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
+    modelPlaceholder: 'gemini-2.5-flash',
+  },
+  {
     id: 'mimo',
     nameKey: 'mimo',
     baseUrl: 'https://api.xiaomimimo.com/v1',
@@ -1283,18 +1296,17 @@ function ProvidersSection() {
       if (seq !== llmSwitchSeqRef.current) return;
     }
     const preset = LLM_PRESETS.find(p => p.id === id);
-    if (preset?.baseUrl) {
-      const existing = await readCredential('ark.endpoint');
-      if (seq !== llmSwitchSeqRef.current) return;
-      if (!existing) {
+    // 修 bug：所有 LLM provider 共用 `ark.endpoint` / `ark.model_id` 一对凭据槽
+    // （persistence.rs 没做 per-provider 隔离）。旧逻辑只在槽空时填默认值，
+    // 老用户切换 preset 时槽里早有旧值——dropdown 看着切了，polish 实际还是
+    // 打老 endpoint。改成：切到任何非 custom 预设都强制覆盖 endpoint 与 model
+    // 到该预设的默认值，让"切换"真切到位。custom 预设没有默认值，跳过。
+    if (preset && preset.id !== 'custom') {
+      if (preset.baseUrl) {
         await setCredential('ark.endpoint', preset.baseUrl);
         if (seq !== llmSwitchSeqRef.current) return;
       }
-    }
-    if (preset?.modelPlaceholder) {
-      const existing = await readCredential('ark.model_id');
-      if (seq !== llmSwitchSeqRef.current) return;
-      if (!existing) {
+      if (preset.modelPlaceholder) {
         await setCredential('ark.model_id', preset.modelPlaceholder);
         if (seq !== llmSwitchSeqRef.current) return;
       }

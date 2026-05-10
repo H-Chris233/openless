@@ -95,25 +95,16 @@ impl OpenAICompatibleLLMProvider {
         front_app: Option<&str>,
         prior_turns: &[(String, String)],
     ) -> Result<String, LLMError> {
-        let mut system_prompt = compose_system_prompt(mode, hotwords);
-        if let Some(premise) = context_premise(
+        let (system_prompt, user_prompt) = compose_polish_prompts(
+            raw_text,
+            mode,
+            hotwords,
             working_languages,
             chinese_script_preference,
             output_language_preference,
             front_app,
-        ) {
-            system_prompt = format!("{}\n\n{}", premise, system_prompt);
-        }
-        // 多轮上下文模式：把"上一轮的指令是什么、不要复读上一轮答案"明确写进
-        // system prompt，配合 chat structure 让 LLM 自然不重复历史输出。
-        if !prior_turns.is_empty() {
-            system_prompt = format!(
-                "{}\n\n{}",
-                system_prompt,
-                prompts::polish_context_instruction()
-            );
-        }
-        let user_prompt = prompts::user_prompt(raw_text);
+            !prior_turns.is_empty(),
+        );
         if prior_turns.is_empty() {
             self.chat_completion(&system_prompt, &user_prompt).await
         } else {
@@ -140,15 +131,12 @@ impl OpenAICompatibleLLMProvider {
         F: Fn(&str) + Send + Sync,
         C: Fn() -> bool + Send + Sync,
     {
-        let mut system_prompt = prompts::qa_system_prompt();
-        if let Some(premise) = context_premise(
+        let system_prompt = compose_qa_system_prompt(
             working_languages,
             chinese_script_preference,
             output_language_preference,
             front_app,
-        ) {
-            system_prompt = format!("{}\n\n{}", premise, system_prompt);
-        }
+        );
         self.chat_completion_history_streaming(&system_prompt, messages, on_delta, should_cancel)
             .await
     }
@@ -164,18 +152,13 @@ impl OpenAICompatibleLLMProvider {
         _output_language_preference: OutputLanguagePreference,
         front_app: Option<&str>,
     ) -> Result<String, LLMError> {
-        let mut system_prompt = prompts::translate_system_prompt(target_language);
-        // 翻译模式必须以 target_language 为唯一输出语言约束，避免和 UI 驱动的
-        // output_language_preference 发生冲突（例如 UI=ja, target=en）。
-        if let Some(premise) = context_premise(
+        let (system_prompt, user_prompt) = compose_translate_prompts(
+            raw_text,
+            target_language,
             working_languages,
             chinese_script_preference,
-            OutputLanguagePreference::Auto,
             front_app,
-        ) {
-            system_prompt = format!("{}\n\n{}", premise, system_prompt);
-        }
-        let user_prompt = prompts::user_prompt(raw_text);
+        );
         self.chat_completion(&system_prompt, &user_prompt).await
     }
 
@@ -433,7 +416,7 @@ impl OpenAICompatibleLLMProvider {
 }
 
 /// Slice up to `end` bytes off `s`, but don't split a UTF-8 codepoint.
-fn safe_str_slice(s: &str, end: usize) -> &str {
+pub(crate) fn safe_str_slice(s: &str, end: usize) -> &str {
     if end >= s.len() {
         return s;
     }
@@ -560,6 +543,86 @@ fn context_premise(
     Some(lines.join("\n"))
 }
 
+/// 把 polish 输入参数装配成 `(system_prompt, user_prompt)` 二元组。
+///
+/// 抽出来是为了让 OpenAI 兼容客户端 (本文件) 和谷歌原生 Gemini 客户端
+/// (`llm_gemini.rs`) 共享同一套 prompt 装配规则——不再担心两路 LLM
+/// 在 `system_prompt` 拼接顺序、context_premise 注入时机、
+/// polish_context_instruction 追加条件上慢慢漂移。
+pub(crate) fn compose_polish_prompts(
+    raw_text: &str,
+    mode: PolishMode,
+    hotwords: &[String],
+    working_languages: &[String],
+    chinese_script_preference: ChineseScriptPreference,
+    output_language_preference: OutputLanguagePreference,
+    front_app: Option<&str>,
+    has_prior_turns: bool,
+) -> (String, String) {
+    let mut system_prompt = compose_system_prompt(mode, hotwords);
+    if let Some(premise) = context_premise(
+        working_languages,
+        chinese_script_preference,
+        output_language_preference,
+        front_app,
+    ) {
+        system_prompt = format!("{}\n\n{}", premise, system_prompt);
+    }
+    // 多轮上下文模式：把"上一轮的指令是什么、不要复读上一轮答案"明确写进
+    // system prompt，配合 chat structure 让 LLM 自然不重复历史输出。
+    if has_prior_turns {
+        system_prompt = format!(
+            "{}\n\n{}",
+            system_prompt,
+            prompts::polish_context_instruction()
+        );
+    }
+    let user_prompt = prompts::user_prompt(raw_text);
+    (system_prompt, user_prompt)
+}
+
+/// 翻译路径的 `(system_prompt, user_prompt)` 装配——和 polish 一样供两路 LLM 客户端共用。
+/// 翻译模式以 `target_language` 为唯一输出语言约束，OutputLanguagePreference 在这里被
+/// 强制设为 Auto 以避免 UI 偏好（如 ja）与 target_language（如 en）冲突。
+pub(crate) fn compose_translate_prompts(
+    raw_text: &str,
+    target_language: &str,
+    working_languages: &[String],
+    chinese_script_preference: ChineseScriptPreference,
+    front_app: Option<&str>,
+) -> (String, String) {
+    let mut system_prompt = prompts::translate_system_prompt(target_language);
+    if let Some(premise) = context_premise(
+        working_languages,
+        chinese_script_preference,
+        OutputLanguagePreference::Auto,
+        front_app,
+    ) {
+        system_prompt = format!("{}\n\n{}", premise, system_prompt);
+    }
+    let user_prompt = prompts::user_prompt(raw_text);
+    (system_prompt, user_prompt)
+}
+
+/// QA 划词问答的 system_prompt 装配。两路 LLM 客户端共用。
+pub(crate) fn compose_qa_system_prompt(
+    working_languages: &[String],
+    chinese_script_preference: ChineseScriptPreference,
+    output_language_preference: OutputLanguagePreference,
+    front_app: Option<&str>,
+) -> String {
+    let mut system_prompt = prompts::qa_system_prompt();
+    if let Some(premise) = context_premise(
+        working_languages,
+        chinese_script_preference,
+        output_language_preference,
+        front_app,
+    ) {
+        system_prompt = format!("{}\n\n{}", premise, system_prompt);
+    }
+    system_prompt
+}
+
 fn compose_system_prompt(mode: PolishMode, hotwords: &[String]) -> String {
     let base = prompts::system_prompt(mode);
     let cleaned: Vec<String> = hotwords
@@ -605,7 +668,10 @@ fn extract_assistant_content(body: &str) -> Result<String, LLMError> {
 /// and strips them. We don't have the `regex` crate, so we use prefix checks plus
 /// an iterative trim — if the model stacks two boilerplate sentences we'll still
 /// strip both.
-fn clean_polish_output(content: &str) -> String {
+///
+/// `pub(crate)` because `llm_gemini` 也要在它自己的解析路径上跑同一套清洗，
+/// 否则 polish prompt 已经禁用的"以下是整理后的内容"前缀只在 OpenAI 兼容路径生效。
+pub(crate) fn clean_polish_output(content: &str) -> String {
     let without_thinking = strip_thinking_blocks(content);
     let trimmed = without_thinking.trim();
     let stripped = strip_markdown_fence(trimmed);

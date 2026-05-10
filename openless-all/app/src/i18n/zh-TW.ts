@@ -363,6 +363,7 @@ export const zhTW: typeof zhCN = {
         deepseek: 'DeepSeek',
         siliconflow: '硅基流動',
         openai: 'OpenAI',
+        gemini: 'Google Gemini',
         mimo: '小米 MiMo',
         cometapi: 'CometAPI',
         openrouterFree: 'OpenRouter（免費模型）',

@@ -361,6 +361,7 @@ export const zhCN = {
         deepseek: 'DeepSeek',
         siliconflow: '硅基流动',
         openai: 'OpenAI',
+        gemini: 'Google Gemini',
         mimo: '小米 MiMo',
         cometapi: 'CometAPI',
         openrouterFree: 'OpenRouter（免费模型）',

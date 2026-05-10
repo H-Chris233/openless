@@ -20,6 +20,7 @@ mod correction;
 mod global_hotkey_runtime;
 mod hotkey;
 mod insertion;
+mod llm_gemini;
 mod permissions;
 mod persistence;
 mod polish;

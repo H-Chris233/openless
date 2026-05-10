@@ -36,6 +36,7 @@ use crate::persistence::{
     PreferencesStore,
 };
 
+use crate::llm_gemini::{GeminiConfig, GeminiProvider};
 use crate::polish::{OpenAICompatibleConfig, OpenAICompatibleLLMProvider};
 use crate::qa_hotkey::{QaHotkeyError, QaHotkeyEvent, QaHotkeyMonitor};
 use crate::recorder::{Recorder, RecorderError};
@@ -2046,6 +2047,27 @@ async fn polish_text(
     front_app: Option<&str>,
     prior_turns: &[(String, String)],
 ) -> anyhow::Result<String> {
+    // 谷歌 Gemini 分支：所有 LLM provider 共用 ark.* 凭据槽，唯独 Gemini 走原生
+    // generateContent / 自带 thinking-off 控制，不走 OpenAI 兼容协议；按 active
+    // provider id 把请求路由到 GeminiProvider 即可，其余 provider（ark/deepseek/
+    // openai/...）保持原 OpenAICompatibleLLMProvider 路径不动。
+    if CredentialsVault::get_active_llm() == "gemini" {
+        let (api_key, model, base_url) = read_gemini_credentials()?;
+        let provider = GeminiProvider::new(GeminiConfig::new(api_key, model, base_url));
+        return Ok(provider
+            .polish(
+                raw,
+                mode,
+                hotwords,
+                working_languages,
+                chinese_script_preference,
+                output_language_preference,
+                front_app,
+                prior_turns,
+            )
+            .await?);
+    }
+
     let api_key = CredentialsVault::get(CredentialAccount::ArkApiKey)?.unwrap_or_default();
     let model = CredentialsVault::get(CredentialAccount::ArkModelId)?
         .filter(|s| !s.is_empty())
@@ -2108,6 +2130,22 @@ async fn translate_text(
     output_language_preference: OutputLanguagePreference,
     front_app: Option<&str>,
 ) -> anyhow::Result<String> {
+    // 见 polish_text 顶部注释——同样的 Gemini 路由逻辑。
+    if CredentialsVault::get_active_llm() == "gemini" {
+        let (api_key, model, base_url) = read_gemini_credentials()?;
+        let provider = GeminiProvider::new(GeminiConfig::new(api_key, model, base_url));
+        return Ok(provider
+            .translate_to(
+                raw,
+                target_language,
+                working_languages,
+                chinese_script_preference,
+                output_language_preference,
+                front_app,
+            )
+            .await?);
+    }
+
     let api_key = CredentialsVault::get(CredentialAccount::ArkApiKey)?.unwrap_or_default();
     let model = CredentialsVault::get(CredentialAccount::ArkModelId)?
         .filter(|s| !s.is_empty())
@@ -2680,6 +2718,24 @@ where
     F: Fn(&str) + Send + Sync,
     C: Fn() -> bool + Send + Sync,
 {
+    // 见 polish_text 顶部注释——同样的 Gemini 路由逻辑，QA 流式回答走 Gemini
+    // 原生 :streamGenerateContent?alt=sse。
+    if CredentialsVault::get_active_llm() == "gemini" {
+        let (api_key, model, base_url) = read_gemini_credentials()?;
+        let provider = GeminiProvider::new(GeminiConfig::new(api_key, model, base_url));
+        return Ok(provider
+            .answer_chat_streaming(
+                messages,
+                working_languages,
+                chinese_script_preference,
+                output_language_preference,
+                front_app,
+                on_delta,
+                should_cancel,
+            )
+            .await?);
+    }
+
     let api_key = CredentialsVault::get(CredentialAccount::ArkApiKey)?.unwrap_or_default();
     let model = CredentialsVault::get(CredentialAccount::ArkModelId)?
         .filter(|s| !s.is_empty())
@@ -2702,6 +2758,30 @@ where
             should_cancel,
         )
         .await?)
+}
+
+/// 读 Gemini 凭据。所有 LLM provider 共用 ark.* 槽位（persistence 没做 per-provider
+/// 隔离），所以这里也是从 `ArkApiKey` / `ArkModelId` / `ArkEndpoint` 三个槽读，
+/// 但回退默认值改成谷歌的：base_url 默认 `https://generativelanguage.googleapis.com/v1beta`，
+/// 模型默认 `gemini-2.5-flash`。Settings.tsx::onLlmProviderChange 在用户切到 gemini
+/// 时会强制把 endpoint/model 覆盖为这两个默认值，所以 99% 情况下槽里读出来就是
+/// 这两个；这里的 `unwrap_or_else` 是给极端情况兜底（如旧版本切换 bug 留下的脏数据）。
+///
+/// base_url 末尾去掉 `/`，让 `llm_gemini::generate_content_url` 拼接稳定。
+/// 不去 `/chat/completions` 后缀——OpenAI 兼容路径才会有那个后缀，原生 Gemini 不会。
+fn read_gemini_credentials() -> anyhow::Result<(String, String, String)> {
+    let api_key = CredentialsVault::get(CredentialAccount::ArkApiKey)?.unwrap_or_default();
+    let model = CredentialsVault::get(CredentialAccount::ArkModelId)?
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "gemini-2.5-flash".to_string());
+    let base_url = CredentialsVault::get(CredentialAccount::ArkEndpoint)?
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "https://generativelanguage.googleapis.com/v1beta".to_string());
+    if api_key.trim().is_empty() {
+        anyhow::bail!("API Key 为空");
+    }
+    let base_url = base_url.trim_end_matches('/').to_string();
+    Ok((api_key, model, base_url))
 }
 
 fn resolve_ark_endpoint(api_key: &str) -> anyhow::Result<String> {
