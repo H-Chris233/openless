@@ -168,6 +168,11 @@ pub struct UserPreferences {
     pub microphone_device_name: String,
     pub active_asr_provider: String, // "volcengine" | "apple-speech" | ...
     pub active_llm_provider: String, // "ark" | "openai" | ...
+    /// LLM 思考模式开关。默认 false 以保持既有「尽量关闭思考」行为；
+    /// Gemini 走原生 thinkingConfig，OpenAI-compatible 路径仅按 provider/channel
+    /// 下发官方渠道级字段，不用 prompt 注入，也不做模型白名单适配。详见 issue #402。
+    #[serde(default)]
+    pub llm_thinking_enabled: bool,
     /// Windows/Linux 粘贴成功后是否恢复用户原剪贴板。默认 true 跟历史行为一致；
     /// 关掉就把听写文本留在剪贴板，让 simulate_paste 实际没生效时用户能 Ctrl+V 找回。
     /// macOS 走 AX 直写，不受这个开关影响。详见 issue #111。
@@ -319,6 +324,8 @@ struct UserPreferencesWire {
     microphone_device_name: String,
     active_asr_provider: String,
     active_llm_provider: String,
+    #[serde(default)]
+    llm_thinking_enabled: bool,
     restore_clipboard_after_paste: bool,
     #[serde(default)]
     paste_shortcut: PasteShortcut,
@@ -372,6 +379,7 @@ impl Default for UserPreferencesWire {
             microphone_device_name: prefs.microphone_device_name,
             active_asr_provider: prefs.active_asr_provider,
             active_llm_provider: prefs.active_llm_provider,
+            llm_thinking_enabled: prefs.llm_thinking_enabled,
             restore_clipboard_after_paste: prefs.restore_clipboard_after_paste,
             paste_shortcut: prefs.paste_shortcut,
             allow_non_tsf_insertion_fallback: prefs.allow_non_tsf_insertion_fallback,
@@ -422,6 +430,7 @@ impl<'de> Deserialize<'de> for UserPreferences {
             microphone_device_name: wire.microphone_device_name,
             active_asr_provider: wire.active_asr_provider,
             active_llm_provider: wire.active_llm_provider,
+            llm_thinking_enabled: wire.llm_thinking_enabled,
             restore_clipboard_after_paste: wire.restore_clipboard_after_paste,
             paste_shortcut: wire.paste_shortcut,
             allow_non_tsf_insertion_fallback: wire.allow_non_tsf_insertion_fallback,
@@ -539,6 +548,7 @@ impl Default for UserPreferences {
             microphone_device_name: String::new(),
             active_asr_provider: default_active_asr_provider(),
             active_llm_provider: "ark".into(),
+            llm_thinking_enabled: false,
             restore_clipboard_after_paste: true,
             paste_shortcut: PasteShortcut::default(),
             allow_non_tsf_insertion_fallback: true,

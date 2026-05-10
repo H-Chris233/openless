@@ -147,6 +147,8 @@ export interface UserPreferences {
   microphoneDeviceName: string;
   activeAsrProvider: string;
   activeLlmProvider: string;
+  /** LLM 思考模式开关。默认关闭，保持既有尽量关闭思考的行为。详见 issue #402。 */
+  llmThinkingEnabled: boolean;
   /** 仅 Windows/Linux：粘贴成功后是否恢复用户原剪贴板。默认 true。详见 issue #111。 */
   restoreClipboardAfterPaste: boolean;
   /** 仅 Windows/Linux：模拟粘贴时按下的快捷键。详见 issue #360：kitty/alacritty

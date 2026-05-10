@@ -14,7 +14,9 @@ use crate::asr::local::foundry::{
 use crate::asr::local::FoundryLocalRuntime;
 use crate::coordinator::Coordinator;
 use crate::permissions::{self, PermissionStatus};
-use crate::persistence::{CredentialAccount, CredentialsSnapshot, CredentialsVault};
+use crate::persistence::{
+    CredentialAccount, CredentialsSnapshot, CredentialsVault, PreferencesStore,
+};
 use crate::polish::{
     http_client_builder, CodexOAuthConfig, CodexOAuthCredentials, CodexOAuthLLMProvider, LLMError,
     OpenAICompatibleConfig, OpenAICompatibleLLMProvider, CODEX_DEFAULT_MODEL,
@@ -611,12 +613,18 @@ fn read_openai_provider_config(kind: &str) -> Result<ProviderConfig, String> {
 }
 
 async fn validate_llm_provider() -> Result<(), String> {
+    let llm_thinking_enabled = PreferencesStore::new()
+        .map_err(|e| e.to_string())?
+        .get()
+        .llm_thinking_enabled;
     if CredentialsVault::get_active_llm() == CODEX_OAUTH_PROVIDER_ID {
         let model = CredentialsVault::get(CredentialAccount::ArkModelId)
             .map_err(|e| e.to_string())?
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| CODEX_DEFAULT_MODEL.to_string());
-        let provider = CodexOAuthLLMProvider::new(CodexOAuthConfig::new(model));
+        let provider = CodexOAuthLLMProvider::new(
+            CodexOAuthConfig::new(model).with_thinking_enabled(llm_thinking_enabled),
+        );
         return provider
             .polish(
                 "验证连接",
@@ -639,17 +647,21 @@ async fn validate_llm_provider() -> Result<(), String> {
     }
 
     let config = read_openai_provider_config("llm")?;
+    let active_llm = CredentialsVault::get_active_llm();
     let model = CredentialsVault::get(CredentialAccount::ArkModelId)
         .map_err(|e| e.to_string())?
         .filter(|s| !s.is_empty())
         .ok_or_else(|| "llmModelMissing".to_string())?;
-    let provider = OpenAICompatibleLLMProvider::new(OpenAICompatibleConfig::new(
-        "ark",
-        "Doubao Ark",
-        config.base_url,
-        config.api_key,
-        model,
-    ));
+    let provider = OpenAICompatibleLLMProvider::new(
+        OpenAICompatibleConfig::new(
+            active_llm.clone(),
+            active_llm,
+            config.base_url,
+            config.api_key,
+            model,
+        )
+        .with_thinking_enabled(llm_thinking_enabled),
+    );
     provider
         .polish(
             "验证连接",

@@ -934,6 +934,7 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
     let working_languages = prefs.working_languages.clone();
     let chinese_script_preference = prefs.chinese_script_preference;
     let output_language_preference = prefs.output_language_preference;
+    let llm_thinking_enabled = prefs.llm_thinking_enabled;
     let front_app = inner.state.lock().front_app.clone();
     let translation_target = prefs.translation_target_language.trim().to_string();
     let translation_active =
@@ -978,6 +979,7 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
             &working_languages,
             chinese_script_preference,
             output_language_preference,
+            llm_thinking_enabled,
             front_app.as_deref(),
         )
         .await
@@ -989,6 +991,7 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
             &working_languages,
             chinese_script_preference,
             output_language_preference,
+            llm_thinking_enabled,
             front_app.as_deref(),
             &prior_turns,
         )

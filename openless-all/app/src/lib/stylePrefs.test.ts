@@ -26,6 +26,7 @@ const previousPrefs: UserPreferences = {
   microphoneDeviceName: '',
   activeAsrProvider: 'volcengine',
   activeLlmProvider: 'ark',
+  llmThinkingEnabled: false,
   restoreClipboardAfterPaste: true,
   pasteShortcut: 'ctrlV',
   allowNonTsfInsertionFallback: true,

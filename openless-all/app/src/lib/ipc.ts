@@ -57,6 +57,7 @@ const mockSettings: UserPreferences = {
   microphoneDeviceName: '',
   activeAsrProvider: 'foundry-local-whisper',
   activeLlmProvider: 'ark',
+  llmThinkingEnabled: false,
   restoreClipboardAfterPaste: true,
   pasteShortcut: 'ctrlV',
   allowNonTsfInsertionFallback: true,

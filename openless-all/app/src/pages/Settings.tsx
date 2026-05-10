@@ -1139,6 +1139,30 @@ export function Toggle({ on, onToggle }: { on: boolean; onToggle?: (next: boolea
   );
 }
 
+function LlmThinkingToggle({ enabled, onToggle }: { enabled: boolean; onToggle: (next: boolean) => void }) {
+  const { t } = useTranslation();
+  return (
+    <div
+      title={t('settings.providers.thinkingModeHint')}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
+        paddingLeft: 2,
+        whiteSpace: 'nowrap',
+      }}
+    >
+      <span style={{ fontSize: 11.5, color: 'var(--ol-ink-4)' }}>
+        {t('settings.providers.thinkingModeLabel')}
+      </span>
+      <Toggle on={enabled} onToggle={onToggle} />
+      <span style={{ fontSize: 11.5, color: enabled ? 'var(--ol-blue)' : 'var(--ol-ink-4)' }}>
+        {enabled ? t('settings.providers.thinkingModeOn') : t('settings.providers.thinkingModeOff')}
+      </span>
+    </div>
+  );
+}
+
 const LLM_PRESETS = [
   {
     id: 'ark',
@@ -1168,9 +1192,8 @@ const LLM_PRESETS = [
     // 谷歌官方 Gemini API（原生 generateContent，不走 OpenAI 兼容 shim）。
     // baseUrl 末尾 /v1beta 是当前 Generally Available 的 path（ai.google.dev/api）。
     // 后端 llm_gemini.rs 会拼成 `{baseUrl}/models/{model}:generateContent`，
-    // 并按模型 family 注入 thinkingConfig 强制关思考（2.5 flash 系列 thinkingBudget=0；
-    // 3.x pro 走 thinkingLevel="low"；3.x flash 走 thinkingLevel="minimal"；
-    // 2.5 pro 官方明示无法关闭思考）。模型列表用 ProviderTools「拉取模型」按钮取，
+    // 并按 Gemini 原生通道级 thinkingConfig 关闭或压低思考，不在前端维护模型适配表。
+    // 模型列表用 ProviderTools「拉取模型」按钮取，
     // 由 commands.rs::fetch_provider_models 识别 generativelanguage 域名后按 Gemini shape 解析。
     id: 'gemini',
     nameKey: 'gemini',
@@ -1332,6 +1355,14 @@ function ProvidersSection() {
     }
   };
 
+  const onLlmThinkingToggle = (enabled: boolean) => {
+    if (!prefs) return;
+    void updatePrefs(current => ({ ...current, llmThinkingEnabled: enabled })).catch(error => {
+      console.error('[settings] failed to update LLM thinking mode', error);
+      emitSaved('failed', t('common.operationFailed'));
+    });
+  };
+
   const onAsrProviderChange = async (id: AsrPresetId) => {
     setAsrProvider(id);
     const seq = ++asrSwitchSeqRef.current;
@@ -1420,7 +1451,14 @@ function ProvidersSection() {
           </>
         )}
         <CredentialField key={`${committedLlmProvider}:model:${llmModelRevision}`} label={t('settings.providers.modelLabel')} account="ark.model_id"
-          placeholder={preset.modelPlaceholder || 'model-name'} mono />
+          placeholder={preset.modelPlaceholder || 'model-name'} mono
+          trailing={(
+            <LlmThinkingToggle
+              enabled={prefs?.llmThinkingEnabled ?? false}
+              onToggle={onLlmThinkingToggle}
+            />
+          )}
+        />
         <ProviderTools key={committedLlmProvider} kind="llm" modelAccount="ark.model_id" onModelSelected={() => setLlmModelRevision(v => v + 1)} />
       </Card>
 
@@ -1884,9 +1922,10 @@ interface CredentialFieldProps {
   mono?: boolean;
   mask?: boolean;
   defaultValue?: string;
+  trailing?: ReactNode;
 }
 
-function CredentialField({ label, account, placeholder, mono, mask, defaultValue }: CredentialFieldProps) {
+function CredentialField({ label, account, placeholder, mono, mask, defaultValue, trailing }: CredentialFieldProps) {
   const { t } = useTranslation();
   const [value, setValue] = useState('');
   const [revealed, setRevealed] = useState(false);
@@ -2023,6 +2062,7 @@ function CredentialField({ label, account, placeholder, mono, mask, defaultValue
             <Icon name="check" size={13} />
           </button>
         )}
+        {trailing}
         {mask && (
           <button
             onClick={() => setRevealed(r => !r)}

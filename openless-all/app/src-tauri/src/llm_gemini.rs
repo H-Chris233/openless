@@ -1,11 +1,8 @@
 //! 谷歌 Gemini 原生 generateContent / streamGenerateContent 客户端。
 //!
 //! 为什么不复用 `polish.rs::OpenAICompatibleLLMProvider`：
-//! 1. **思考模式控制**——Gemini 系列必须按模型 family 注入对的字段
-//!    （`thinkingBudget` 给 2.5 / `thinkingLevel` 给 3.x），且两个字段不能同发。
-//!    OpenAI 兼容协议没有原生 thinking control 字段；谷歌的 OpenAI 兼容 shim
-//!    虽然支持 `reasoning_effort`，但仍是 beta、3.x 上要走 `extra_body` 绕路，
-//!    且官方文档对"是否真的关掉思考"措辞模糊。原生 endpoint 的契约最直接。
+//! 1. **思考模式控制**——Gemini 原生 `thinkingConfig` 比 OpenAI 兼容 shim
+//!    的 provider 私有字段更直接；OpenLess 只做渠道级开关，不维护单模型适配表。
 //! 2. **认证机制**——原生用 `x-goog-api-key` header（Bearer 不被识别），
 //!    OpenAICompatibleLLMProvider 写死了 Bearer Authorization。
 //! 3. **请求/响应 shape**——原生 `contents` 走 `role: user|model`，没有
@@ -39,6 +36,9 @@ pub struct GeminiConfig {
     pub base_url: String,
     pub temperature: f32,
     pub request_timeout_secs: u64,
+    /// true = 不下发关闭思考的 thinkingConfig，让模型按自身默认思考；
+    /// false = 下发 Gemini 原生渠道级最低思考配置。
+    pub thinking_enabled: bool,
 }
 
 impl GeminiConfig {
@@ -53,7 +53,13 @@ impl GeminiConfig {
             base_url: base_url.into(),
             temperature: DEFAULT_TEMPERATURE,
             request_timeout_secs: DEFAULT_REQUEST_TIMEOUT_SECS,
+            thinking_enabled: false,
         }
+    }
+
+    pub fn with_thinking_enabled(mut self, enabled: bool) -> Self {
+        self.thinking_enabled = enabled;
+        self
     }
 }
 
@@ -132,7 +138,8 @@ impl GeminiProvider {
 
         log::info!(
             "[llm] POST {} provider=gemini model={} translate=true",
-            url, self.config.model
+            url,
+            self.config.model
         );
 
         let body_text = self.send_unary(&url, &body).await?;
@@ -179,11 +186,11 @@ impl GeminiProvider {
             .await
     }
 
-    /// `generationConfig` 注入：温度 + 按模型 family 的 thinkingConfig。
+    /// `generationConfig` 注入：温度 + 渠道级 thinkingConfig。
     fn build_generate_body(&self, system_prompt: &str, contents: Vec<Value>) -> Value {
         let mut generation_config = json!({ "temperature": self.config.temperature });
-        if let Some(thinking) = thinking_config_for(&self.config.model) {
-            generation_config["thinkingConfig"] = thinking;
+        if !self.config.thinking_enabled {
+            generation_config["thinkingConfig"] = disabled_thinking_config();
         }
         json!({
             "systemInstruction": system_instruction(system_prompt),
@@ -403,9 +410,7 @@ fn drain_complete_sse_events(buffer: &mut Vec<u8>) -> Vec<String> {
             Ok(s) => s.to_string(),
             Err(e) => {
                 // 完整 event 自身 UTF-8 不合法（极少见，可能是上游异常）：丢弃此 event 不让流挂掉。
-                log::warn!(
-                    "[llm] gemini SSE event has invalid UTF-8 (skipping): {e}"
-                );
+                log::warn!("[llm] gemini SSE event has invalid UTF-8 (skipping): {e}");
                 buffer.drain(..end + delim_len);
                 continue;
             }
@@ -419,7 +424,10 @@ fn drain_complete_sse_events(buffer: &mut Vec<u8>) -> Vec<String> {
 /// 多轮 polish 的 contents 序列。
 /// 输入约定：`prior_turns` 与 polish.rs 一致（最新在前 newest-first），
 /// chat 时间序为 oldest-first，所以这里 `iter().rev()` 反转。
-fn build_polish_history_contents(prior_turns: &[(String, String)], user_prompt: &str) -> Vec<Value> {
+fn build_polish_history_contents(
+    prior_turns: &[(String, String)],
+    user_prompt: &str,
+) -> Vec<Value> {
     let mut contents: Vec<Value> = Vec::with_capacity(prior_turns.len() * 2 + 1);
     for (raw, polished) in prior_turns.iter().rev() {
         contents.push(user_content(&crate::polish::prompts::user_prompt(raw)));
@@ -436,38 +444,23 @@ fn qa_messages_to_contents(messages: &[QaChatMessage]) -> Vec<Value> {
     messages
         .iter()
         .map(|m| {
-            let role = if m.role == "assistant" { "model" } else { "user" };
+            let role = if m.role == "assistant" {
+                "model"
+            } else {
+                "user"
+            };
             json!({ "role": role, "parts": [{ "text": m.content }] })
         })
         .collect()
 }
 
-/// 按模型 ID 选 thinkingConfig。返回 None 表示该模型官方明示无法关思考
-/// （目前仅 gemini-2.5-pro），交由模型默认行为。
+/// Gemini 原生通道的关闭/最低思考请求。
 ///
-/// 字段对应矩阵（已对 ai.google.dev/gemini-api/docs/thinking 交叉核对）：
-/// - `gemini-2.5-flash`, `gemini-2.5-flash-lite`  → `thinkingBudget = 0`（完全关）
-/// - `gemini-2.5-pro`                              → 不可关（官方 N/A），不下发字段
-/// - `gemini-3*-pro*`                              → `thinkingLevel = "low"`（最低档）
-/// - `gemini-3*-flash*`                            → `thinkingLevel = "minimal"`（Flash-only）
-/// - 其它未知                                       → `thinkingLevel = "minimal"`（"尽量关"兜底）
-///
-/// 注意：thinkingBudget 与 thinkingLevel 不能同发——文档没明示但属未定义行为。
-fn thinking_config_for(model: &str) -> Option<Value> {
-    let m = model.to_ascii_lowercase();
-    if m.starts_with("gemini-2.5-pro") {
-        return None;
-    }
-    if m.starts_with("gemini-2.5-flash") {
-        return Some(json!({ "thinkingBudget": 0 }));
-    }
-    if m.starts_with("gemini-3") {
-        if m.contains("pro") {
-            return Some(json!({ "thinkingLevel": "low" }));
-        }
-        return Some(json!({ "thinkingLevel": "minimal" }));
-    }
-    Some(json!({ "thinkingLevel": "minimal" }))
+/// OpenLess 不维护 Gemini 单模型适配表；开启时不下发 thinkingConfig，关闭时
+/// 使用官方 thinkingConfig 中可表达“关闭思考”的 `thinkingBudget = 0`。若某个
+/// 具体模型不支持该字段或不能完全关闭思考，交由 Gemini API 自身处理。
+fn disabled_thinking_config() -> Value {
+    json!({ "thinkingBudget": 0 })
 }
 
 fn generate_content_url(base_url: &str, model: &str) -> String {
@@ -495,8 +488,8 @@ fn extract_assistant_content(body: &str) -> Result<String, LLMError> {
         .and_then(|c| c.get("parts"))
         .and_then(|p| p.as_array())
         .ok_or_else(|| LLMError::ParseError("missing content.parts".into()))?;
-    // 把所有 part.text 拼起来。模型在 thinking on 时可能产出多段，但我们已禁
-    // 思考；仍按 array 处理是为了不被 future-proof 单 part vs 多 part 的差异坑到。
+    // 把所有 part.text 拼起来。开启思考时模型可能产出多段；逐段拼接避免
+    // future-proof 单 part vs 多 part 的差异坑到。
     let mut buf = String::new();
     for part in parts {
         if let Some(t) = part.get("text").and_then(|v| v.as_str()) {
@@ -516,70 +509,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn thinking_config_2_5_flash_disables_thinking_via_budget_zero() {
-        let v = thinking_config_for("gemini-2.5-flash").unwrap();
-        assert_eq!(v, json!({ "thinkingBudget": 0 }));
-        // flash-lite 同款
-        let v2 = thinking_config_for("gemini-2.5-flash-lite").unwrap();
-        assert_eq!(v2, json!({ "thinkingBudget": 0 }));
-    }
-
-    #[test]
-    fn thinking_config_2_5_pro_returns_none_because_cannot_disable() {
-        assert!(thinking_config_for("gemini-2.5-pro").is_none());
-    }
-
-    #[test]
-    fn thinking_config_3_x_pro_uses_low_thinking_level() {
-        let v = thinking_config_for("gemini-3.1-pro-preview").unwrap();
-        assert_eq!(v, json!({ "thinkingLevel": "low" }));
-    }
-
-    #[test]
-    fn thinking_config_3_x_flash_uses_minimal() {
-        let v = thinking_config_for("gemini-3-flash-preview").unwrap();
-        assert_eq!(v, json!({ "thinkingLevel": "minimal" }));
-        let v2 = thinking_config_for("gemini-3.1-flash-lite").unwrap();
-        assert_eq!(v2, json!({ "thinkingLevel": "minimal" }));
-    }
-
-    #[test]
-    fn thinking_config_unknown_falls_back_to_minimal_level() {
-        // 未来未知 ID 兜底到 minimal——尽量"关"，避免默认放出长思考。
-        let v = thinking_config_for("gemini-99-future-model").unwrap();
-        assert_eq!(v, json!({ "thinkingLevel": "minimal" }));
-    }
-
-    #[test]
-    fn thinking_config_never_emits_both_budget_and_level() {
-        // 不变量：任一返回值最多含 `thinkingBudget` 或 `thinkingLevel` 中的一个，
-        // 不能同发——文档没明示但属未定义行为，回归就立刻暴露。
-        for model in [
-            "gemini-2.5-flash",
-            "gemini-2.5-flash-lite",
-            "gemini-3.1-pro-preview",
-            "gemini-3-flash-preview",
-            "gemini-3.1-flash-lite",
-            "gemini-3.1-flash-lite-preview",
-            "gemini-99-future-model",
-        ] {
-            let v = thinking_config_for(model).unwrap();
-            let obj = v.as_object().unwrap();
-            let has_budget = obj.contains_key("thinkingBudget");
-            let has_level = obj.contains_key("thinkingLevel");
-            assert!(
-                has_budget ^ has_level,
-                "model {model} 同时下发 budget 与 level，违反单字段不变量: {v}"
-            );
-        }
+    fn disabled_thinking_config_uses_channel_level_budget_zero() {
+        assert_eq!(disabled_thinking_config(), json!({ "thinkingBudget": 0 }));
     }
 
     #[test]
     fn generate_content_url_handles_trailing_slash_in_base_url() {
         let a = generate_content_url("https://x/v1beta", "gemini-2.5-flash");
         let b = generate_content_url("https://x/v1beta/", "gemini-2.5-flash");
-        assert_eq!(a, "https://x/v1beta/models/gemini-2.5-flash:generateContent");
-        assert_eq!(b, "https://x/v1beta/models/gemini-2.5-flash:generateContent");
+        assert_eq!(
+            a,
+            "https://x/v1beta/models/gemini-2.5-flash:generateContent"
+        );
+        assert_eq!(
+            b,
+            "https://x/v1beta/models/gemini-2.5-flash:generateContent"
+        );
     }
 
     #[test]
@@ -652,8 +597,8 @@ mod tests {
     }
 
     #[test]
-    fn build_generate_body_2_5_flash_includes_thinking_budget_zero() {
-        let cfg = GeminiConfig::new("k", "gemini-2.5-flash", "https://x/v1beta");
+    fn build_generate_body_disabled_includes_channel_level_thinking_budget_zero() {
+        let cfg = GeminiConfig::new("k", "any-gemini-model", "https://x/v1beta");
         let provider = GeminiProvider::new(cfg);
         let body = provider.build_generate_body("SYS", vec![user_content("hi")]);
         assert_eq!(
@@ -665,13 +610,14 @@ mod tests {
     }
 
     #[test]
-    fn build_generate_body_2_5_pro_omits_thinking_config() {
-        let cfg = GeminiConfig::new("k", "gemini-2.5-pro", "https://x/v1beta");
+    fn build_generate_body_thinking_enabled_omits_thinking_config() {
+        let cfg = GeminiConfig::new("k", "gemini-2.5-flash", "https://x/v1beta")
+            .with_thinking_enabled(true);
         let provider = GeminiProvider::new(cfg);
         let body = provider.build_generate_body("SYS", vec![user_content("hi")]);
         assert!(
             body["generationConfig"].get("thinkingConfig").is_none(),
-            "2.5 Pro 不能关思考，generationConfig 不应含 thinkingConfig 字段"
+            "开启思考模式时不下发关闭思考的 thinkingConfig"
         );
     }
 
@@ -743,16 +689,5 @@ mod tests {
         let events = drain_complete_sse_events(&mut buf);
         assert_eq!(events, vec!["data: ok", "data: ok2"]);
         assert!(buf.is_empty());
-    }
-
-    #[test]
-    fn build_generate_body_3_x_pro_emits_low_thinking_level() {
-        let cfg = GeminiConfig::new("k", "gemini-3.1-pro-preview", "https://x/v1beta");
-        let provider = GeminiProvider::new(cfg);
-        let body = provider.build_generate_body("SYS", vec![]);
-        assert_eq!(
-            body["generationConfig"]["thinkingConfig"],
-            json!({ "thinkingLevel": "low" })
-        );
     }
 }
