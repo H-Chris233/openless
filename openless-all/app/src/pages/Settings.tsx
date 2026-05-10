@@ -49,6 +49,7 @@ import type {
   HotkeyStatus,
   HotkeyTrigger,
   MicrophoneDevice,
+  PasteShortcut,
   PermissionStatus,
   WindowsImeStatus,
 } from '../lib/types';
@@ -304,6 +305,8 @@ function RecordingSection() {
     savePrefs({ ...prefs, microphoneDeviceName });
   const onRestoreClipboardChange = (restoreClipboardAfterPaste: boolean) =>
     savePrefs({ ...prefs, restoreClipboardAfterPaste });
+  const onPasteShortcutChange = (pasteShortcut: PasteShortcut) =>
+    savePrefs({ ...prefs, pasteShortcut });
   const onAllowNonTsfFallbackChange = (allowNonTsfInsertionFallback: boolean) =>
     savePrefs({ ...prefs, allowNonTsfInsertionFallback });
   // 历史保留 / 对话感知 polish 上下文窗口都用裸 number input；空字符串时回滚到默认值。
@@ -470,6 +473,22 @@ function RecordingSection() {
       >
         <Toggle on={prefs.restoreClipboardAfterPaste} onToggle={onRestoreClipboardChange} />
       </SettingRow>
+      {capability.adapter !== 'macEventTap' && (
+        <SettingRow
+          label={t('settings.recording.pasteShortcutLabel')}
+          desc={t('settings.recording.pasteShortcutDesc')}
+        >
+          <select
+            value={prefs.pasteShortcut}
+            onChange={e => onPasteShortcutChange(e.target.value as PasteShortcut)}
+            style={{ ...inputStyle, maxWidth: 220 }}
+          >
+            <option value="ctrlV">{t('settings.recording.pasteShortcutCtrlV')}</option>
+            <option value="ctrlShiftV">{t('settings.recording.pasteShortcutCtrlShiftV')}</option>
+            <option value="shiftInsert">{t('settings.recording.pasteShortcutShiftInsert')}</option>
+          </select>
+        </SettingRow>
+      )}
       {capability.adapter === 'windowsLowLevel' && (
         <SettingRow
           label={t('settings.recording.allowNonTsfFallbackLabel')}

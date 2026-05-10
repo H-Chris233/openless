@@ -1009,6 +1009,7 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
     let prefs = inner.prefs.get();
     let restore_clipboard = prefs.restore_clipboard_after_paste;
     let allow_non_tsf_insertion_fallback = prefs.allow_non_tsf_insertion_fallback;
+    let paste_shortcut = prefs.paste_shortcut;
     let status = if focus_ready_for_paste {
         #[cfg(target_os = "windows")]
         {
@@ -1019,13 +1020,14 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                 &polished,
                 restore_clipboard,
                 allow_non_tsf_insertion_fallback,
+                paste_shortcut,
                 ime_target,
             )
             .await
         }
         #[cfg(not(target_os = "windows"))]
         {
-            inner.inserter.insert(&polished, restore_clipboard)
+            inner.inserter.insert(&polished, restore_clipboard, paste_shortcut)
         }
     } else {
         log::warn!(
