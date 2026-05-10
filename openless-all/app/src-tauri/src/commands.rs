@@ -1,7 +1,6 @@
 //! Tauri command surface — every IPC entry the React UI invokes lives here.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -16,7 +15,11 @@ use crate::asr::local::FoundryLocalRuntime;
 use crate::coordinator::Coordinator;
 use crate::permissions::{self, PermissionStatus};
 use crate::persistence::{CredentialAccount, CredentialsSnapshot, CredentialsVault};
-use crate::polish::{LLMError, OpenAICompatibleConfig, OpenAICompatibleLLMProvider};
+use crate::polish::{
+    http_client_builder, CodexOAuthConfig, CodexOAuthCredentials, CodexOAuthLLMProvider, LLMError,
+    OpenAICompatibleConfig, OpenAICompatibleLLMProvider, CODEX_DEFAULT_MODEL,
+    CODEX_OAUTH_PROVIDER_ID,
+};
 use crate::recorder::{AudioConsumer, Recorder};
 use crate::types::{
     ChineseScriptPreference, ComboBinding, CorrectionRule, CredentialsStatus, DictationSession,
@@ -392,6 +395,9 @@ fn asr_configured_for_provider(provider: &str, snap: &CredentialsSnapshot) -> bo
 }
 
 fn llm_configured_for_provider(provider: &str, snap: &CredentialsSnapshot) -> bool {
+    if provider == CODEX_OAUTH_PROVIDER_ID {
+        return CodexOAuthCredentials::load_default().is_ok();
+    }
     let endpoint = snap.ark_endpoint.as_deref().unwrap_or_default();
     let endpoint_and_model = configured(&snap.ark_endpoint) && configured(&snap.ark_model_id);
     if endpoint_and_model
@@ -554,6 +560,16 @@ pub async fn list_provider_models(kind: String) -> Result<ProviderModelsResult, 
             models: vec![crate::asr::bailian::DEFAULT_MODEL.to_string()],
         });
     }
+    if kind == "llm" && CredentialsVault::get_active_llm() == CODEX_OAUTH_PROVIDER_ID {
+        return Ok(ProviderModelsResult {
+            models: vec![
+                CODEX_DEFAULT_MODEL.to_string(),
+                "gpt-5.3-codex".to_string(),
+                "gpt-5.4".to_string(),
+                "gpt-5.5".to_string(),
+            ],
+        });
+    }
     let config = read_openai_provider_config(&kind)?;
     fetch_provider_models(&config)
         .await
@@ -595,6 +611,33 @@ fn read_openai_provider_config(kind: &str) -> Result<ProviderConfig, String> {
 }
 
 async fn validate_llm_provider() -> Result<(), String> {
+    if CredentialsVault::get_active_llm() == CODEX_OAUTH_PROVIDER_ID {
+        let model = CredentialsVault::get(CredentialAccount::ArkModelId)
+            .map_err(|e| e.to_string())?
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| CODEX_DEFAULT_MODEL.to_string());
+        let provider = CodexOAuthLLMProvider::new(CodexOAuthConfig::new(model));
+        return provider
+            .polish(
+                "验证连接",
+                PolishMode::Raw,
+                &[],
+                &[],
+                ChineseScriptPreference::Auto,
+                OutputLanguagePreference::Auto,
+                None,
+                &[],
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| match e {
+                LLMError::InvalidResponse { status, .. } => {
+                    format!("providerHttpStatus:{status}")
+                }
+                other => other.to_string(),
+            });
+    }
+
     let config = read_openai_provider_config("llm")?;
     let model = CredentialsVault::get(CredentialAccount::ArkModelId)
         .map_err(|e| e.to_string())?
@@ -711,8 +754,7 @@ async fn validate_asr_transcription(config: &ProviderConfig, model: &str) -> Res
     let form = reqwest::multipart::Form::new()
         .part("file", wav_part)
         .text("model", model.to_string());
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(20))
+    let client = http_client_builder(&url, 20)
         .build()
         .map_err(|_| "providerClientInitFailed".to_string())?;
     let response = client
@@ -812,8 +854,7 @@ async fn fetch_provider_models(config: &ProviderConfig) -> Result<Vec<String>, S
     let url = models_url(&config.base_url);
     let is_gemini = is_gemini_base_url(&config.base_url);
     log::info!("[provider-check] GET {url} (gemini={is_gemini})");
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
+    let client = http_client_builder(&config.base_url, 15)
         .build()
         .map_err(|e| format!("HTTP client 初始化失败: {e}"))?;
     let mut request = client.get(&url);
@@ -903,7 +944,10 @@ fn parse_gemini_model_ids(body: &str) -> Result<Vec<String>, String> {
     let mut ids = models
         .iter()
         .filter(|item| {
-            match item.get("supportedGenerationMethods").and_then(|v| v.as_array()) {
+            match item
+                .get("supportedGenerationMethods")
+                .and_then(|v| v.as_array())
+            {
                 Some(methods) => methods
                     .iter()
                     .any(|m| m.as_str() == Some("generateContent")),
@@ -911,7 +955,12 @@ fn parse_gemini_model_ids(body: &str) -> Result<Vec<String>, String> {
             }
         })
         .filter_map(|item| item.get("name").and_then(|n| n.as_str()))
-        .map(|name| name.strip_prefix("models/").unwrap_or(name).trim().to_string())
+        .map(|name| {
+            name.strip_prefix("models/")
+                .unwrap_or(name)
+                .trim()
+                .to_string()
+        })
         .filter(|id| !id.is_empty())
         .collect::<Vec<_>>();
     ids.sort();
@@ -2234,10 +2283,16 @@ mod tests {
 
     #[test]
     fn is_gemini_base_url_matches_official_domain() {
-        assert!(is_gemini_base_url("https://generativelanguage.googleapis.com/v1beta"));
-        assert!(is_gemini_base_url("https://generativelanguage.googleapis.com/v1beta/"));
+        assert!(is_gemini_base_url(
+            "https://generativelanguage.googleapis.com/v1beta"
+        ));
+        assert!(is_gemini_base_url(
+            "https://generativelanguage.googleapis.com/v1beta/"
+        ));
         assert!(!is_gemini_base_url("https://api.openai.com/v1"));
-        assert!(!is_gemini_base_url("https://ark.cn-beijing.volces.com/api/v3"));
+        assert!(!is_gemini_base_url(
+            "https://ark.cn-beijing.volces.com/api/v3"
+        ));
     }
 
     #[test]

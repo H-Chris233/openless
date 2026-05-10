@@ -29,12 +29,7 @@ pub struct WhisperBatchASR {
 }
 
 impl WhisperBatchASR {
-    pub fn new(
-        api_key: String,
-        base_url: String,
-        model: String,
-        prompt: Option<String>,
-    ) -> Self {
+    pub fn new(api_key: String, base_url: String, model: String, prompt: Option<String>) -> Self {
         Self {
             api_key,
             base_url,
@@ -205,7 +200,10 @@ mod tests {
     #[test]
     fn build_prompt_single_phrase() {
         let phrases = vec!["梁山泊".to_string()];
-        assert_eq!(build_prompt_from_phrases(&phrases), Some("梁山泊.".to_string()));
+        assert_eq!(
+            build_prompt_from_phrases(&phrases),
+            Some("梁山泊.".to_string())
+        );
     }
 
     #[test]

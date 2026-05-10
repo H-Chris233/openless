@@ -37,7 +37,10 @@ use crate::persistence::{
 };
 
 use crate::llm_gemini::{GeminiConfig, GeminiProvider};
-use crate::polish::{OpenAICompatibleConfig, OpenAICompatibleLLMProvider};
+use crate::polish::{
+    ActiveLLMProvider, CodexOAuthConfig, CodexOAuthLLMProvider, OpenAICompatibleConfig,
+    OpenAICompatibleLLMProvider, CODEX_DEFAULT_MODEL, CODEX_OAUTH_PROVIDER_ID,
+};
 use crate::qa_hotkey::{QaHotkeyError, QaHotkeyEvent, QaHotkeyMonitor};
 use crate::recorder::{Recorder, RecorderError};
 use crate::selection::capture_selection;
@@ -2068,18 +2071,7 @@ async fn polish_text(
             .await?);
     }
 
-    let api_key = CredentialsVault::get(CredentialAccount::ArkApiKey)?.unwrap_or_default();
-    let model = CredentialsVault::get(CredentialAccount::ArkModelId)?
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "deepseek-v3-2".to_string());
-    let endpoint = resolve_ark_endpoint(&api_key)?;
-    let base_url = endpoint
-        .trim_end_matches("/chat/completions")
-        .trim_end_matches('/')
-        .to_string();
-
-    let config = OpenAICompatibleConfig::new("ark", "Doubao Ark", base_url, api_key, model);
-    let provider = OpenAICompatibleLLMProvider::new(config);
+    let provider = build_active_llm_provider()?;
     Ok(provider
         .polish(
             raw,
@@ -2146,18 +2138,7 @@ async fn translate_text(
             .await?);
     }
 
-    let api_key = CredentialsVault::get(CredentialAccount::ArkApiKey)?.unwrap_or_default();
-    let model = CredentialsVault::get(CredentialAccount::ArkModelId)?
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "deepseek-v3-2".to_string());
-    let endpoint = resolve_ark_endpoint(&api_key)?;
-    let base_url = endpoint
-        .trim_end_matches("/chat/completions")
-        .trim_end_matches('/')
-        .to_string();
-
-    let config = OpenAICompatibleConfig::new("ark", "Doubao Ark", base_url, api_key, model);
-    let provider = OpenAICompatibleLLMProvider::new(config);
+    let provider = build_active_llm_provider()?;
     Ok(provider
         .translate_to(
             raw,
@@ -2736,17 +2717,7 @@ where
             .await?);
     }
 
-    let api_key = CredentialsVault::get(CredentialAccount::ArkApiKey)?.unwrap_or_default();
-    let model = CredentialsVault::get(CredentialAccount::ArkModelId)?
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "deepseek-v3-2".to_string());
-    let endpoint = resolve_ark_endpoint(&api_key)?;
-    let base_url = endpoint
-        .trim_end_matches("/chat/completions")
-        .trim_end_matches('/')
-        .to_string();
-    let config = OpenAICompatibleConfig::new("ark", "Doubao Ark", base_url, api_key, model);
-    let provider = OpenAICompatibleLLMProvider::new(config);
+    let provider = build_active_llm_provider()?;
     Ok(provider
         .answer_chat_streaming(
             messages,
@@ -2782,6 +2753,29 @@ fn read_gemini_credentials() -> anyhow::Result<(String, String, String)> {
     }
     let base_url = base_url.trim_end_matches('/').to_string();
     Ok((api_key, model, base_url))
+}
+
+fn build_active_llm_provider() -> anyhow::Result<ActiveLLMProvider> {
+    let active = CredentialsVault::get_active_llm();
+    let model =
+        CredentialsVault::get(CredentialAccount::ArkModelId)?.filter(|s| !s.trim().is_empty());
+    if active == CODEX_OAUTH_PROVIDER_ID {
+        let config =
+            CodexOAuthConfig::new(model.unwrap_or_else(|| CODEX_DEFAULT_MODEL.to_string()));
+        return Ok(ActiveLLMProvider::Codex(CodexOAuthLLMProvider::new(config)));
+    }
+
+    let api_key = CredentialsVault::get(CredentialAccount::ArkApiKey)?.unwrap_or_default();
+    let model = model.unwrap_or_else(|| "deepseek-v3-2".to_string());
+    let endpoint = resolve_ark_endpoint(&api_key)?;
+    let base_url = endpoint
+        .trim_end_matches("/chat/completions")
+        .trim_end_matches('/')
+        .to_string();
+    let config = OpenAICompatibleConfig::new(active, "OpenLess LLM", base_url, api_key, model);
+    Ok(ActiveLLMProvider::OpenAI(OpenAICompatibleLLMProvider::new(
+        config,
+    )))
 }
 
 fn resolve_ark_endpoint(api_key: &str) -> anyhow::Result<String> {
