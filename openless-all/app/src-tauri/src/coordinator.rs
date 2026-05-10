@@ -2310,7 +2310,7 @@ async fn begin_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
 
     let microphone_device_name = selected_microphone_device_name(inner);
     stop_microphone_preview_monitor(inner, "QA recorder");
-    acquire_recording_mute(inner, "qa");
+    acquire_recording_mute(inner, "qa").await;
     match Recorder::start(microphone_device_name, consumer, level_handler) {
         Ok((rec, runtime_errors)) => {
             *inner.qa_recorder.lock() = Some(rec);
