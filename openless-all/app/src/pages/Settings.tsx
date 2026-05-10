@@ -1288,63 +1288,86 @@ function ProvidersSection() {
   const onLlmProviderChange = async (id: LlmPresetId) => {
     setLlmProvider(id);
     const seq = ++llmSwitchSeqRef.current;
-    await setActiveLlmProvider(id);
-    if (seq !== llmSwitchSeqRef.current) return;
-    if (prefs) {
-      const next = { ...prefs, activeLlmProvider: id };
-      await updatePrefs(next);
+    emitSaved('saving', t('common.saving'));
+    try {
+      await setActiveLlmProvider(id);
       if (seq !== llmSwitchSeqRef.current) return;
-    }
-    const preset = LLM_PRESETS.find(p => p.id === id);
-    // 修 bug：所有 LLM provider 共用 `ark.endpoint` / `ark.model_id` 一对凭据槽
-    // （persistence.rs 没做 per-provider 隔离）。旧逻辑只在槽空时填默认值，
-    // 老用户切换 preset 时槽里早有旧值——dropdown 看着切了，polish 实际还是
-    // 打老 endpoint。改成：切到任何非 custom 预设都强制覆盖 endpoint 与 model
-    // 到该预设的默认值，让"切换"真切到位。custom 预设没有默认值，跳过。
-    if (preset && preset.id !== 'custom') {
-      if (preset.baseUrl) {
-        await setCredential('ark.endpoint', preset.baseUrl);
+      if (prefs) {
+        const next = { ...prefs, activeLlmProvider: id };
+        await updatePrefs(next);
         if (seq !== llmSwitchSeqRef.current) return;
       }
-      if (preset.modelPlaceholder) {
-        await setCredential('ark.model_id', preset.modelPlaceholder);
-        if (seq !== llmSwitchSeqRef.current) return;
+      const preset = LLM_PRESETS.find(p => p.id === id);
+      // 修 bug：所有 LLM provider 共用 `ark.endpoint` / `ark.model_id` 一对凭据槽
+      // （persistence.rs 没做 per-provider 隔离）。旧逻辑只在槽空时填默认值，
+      // 老用户切换 preset 时槽里早有旧值——dropdown 看着切了，polish 实际还是
+      // 打老 endpoint。改成：切到任何非 custom 预设都强制覆盖 endpoint 与 model
+      // 到该预设的默认值，让"切换"真切到位。custom 预设没有默认值，跳过。
+      if (preset && preset.id !== 'custom') {
+        if (preset.baseUrl) {
+          await setCredential('ark.endpoint', preset.baseUrl);
+          if (seq !== llmSwitchSeqRef.current) return;
+        }
+        if (preset.modelPlaceholder) {
+          await setCredential('ark.model_id', preset.modelPlaceholder);
+          if (seq !== llmSwitchSeqRef.current) return;
+        }
       }
+      setCommittedLlmProvider(id);
+      emitSaved('saved', t('common.saved'));
+    } catch (err) {
+      // seq 守卫：只有当前 call 还是最新时才把 saving 翻成 failed；
+      // 旧 call 早被 newer call 的 emitSaved('saving') 覆盖，再叠 failed 会
+      // 把 newer 正在跑的 saving 假伪成失败。
+      if (seq === llmSwitchSeqRef.current) {
+        emitSaved('failed', t('common.operationFailed'));
+      }
+      throw err;
     }
-    setCommittedLlmProvider(id);
   };
 
   const onAsrProviderChange = async (id: AsrPresetId) => {
     setAsrProvider(id);
     const seq = ++asrSwitchSeqRef.current;
-    await setActiveAsrProvider(id);
-    if (seq !== asrSwitchSeqRef.current) return;
-    if (prefs) {
-      const next = { ...prefs, activeAsrProvider: id };
-      await updatePrefs(next);
+    emitSaved('saving', t('common.saving'));
+    try {
+      await setActiveAsrProvider(id);
       if (seq !== asrSwitchSeqRef.current) return;
-    }
-    // OpenAI 兼容厂商首次切换时预填 baseUrl / model 默认值，省得用户必踩
-    // 「跨厂商 model 名根本不一样」的坑；但用户已自定义后就不再覆盖。
-    // volcengine 走另一套凭据，跳过。
-    const preset = ASR_PRESETS.find(p => p.id === id);
-    if (preset && preset.baseUrl) {
-      const existing = await readCredential('asr.endpoint');
-      if (seq !== asrSwitchSeqRef.current) return;
-      if (!existing) {
-        await setCredential('asr.endpoint', preset.baseUrl);
+      if (prefs) {
+        const next = { ...prefs, activeAsrProvider: id };
+        await updatePrefs(next);
         if (seq !== asrSwitchSeqRef.current) return;
       }
-    }
-    if (preset && preset.model) {
-      const existing = await readCredential('asr.model');
-      if (seq !== asrSwitchSeqRef.current) return;
-      if (!existing) {
-        await setCredential('asr.model', preset.model);
+      // OpenAI 兼容厂商首次切换时预填 baseUrl / model 默认值，省得用户必踩
+      // 「跨厂商 model 名根本不一样」的坑；但用户已自定义后就不再覆盖。
+      // volcengine 走另一套凭据，跳过。
+      const preset = ASR_PRESETS.find(p => p.id === id);
+      if (preset && preset.baseUrl) {
+        const existing = await readCredential('asr.endpoint');
         if (seq !== asrSwitchSeqRef.current) return;
+        if (!existing) {
+          await setCredential('asr.endpoint', preset.baseUrl);
+          if (seq !== asrSwitchSeqRef.current) return;
+        }
       }
+      if (preset && preset.model) {
+        const existing = await readCredential('asr.model');
+        if (seq !== asrSwitchSeqRef.current) return;
+        if (!existing) {
+          await setCredential('asr.model', preset.model);
+          if (seq !== asrSwitchSeqRef.current) return;
+        }
+      }
+      setCommittedAsrProvider(id);
+      emitSaved('saved', t('common.saved'));
+    } catch (err) {
+      // seq 守卫同上 onLlmProviderChange：旧 call 不要把 newer call 的 saving
+      // 伪造成 failed。
+      if (seq === asrSwitchSeqRef.current) {
+        emitSaved('failed', t('common.operationFailed'));
+      }
+      throw err;
     }
-    setCommittedAsrProvider(id);
   };
 
   // preset 决定 placeholder 与 default —— 必须跟着 committed*Provider 走，
@@ -1365,7 +1388,9 @@ function ProvidersSection() {
             {t('settings.providers.llmDesc')}
           </div>
         </div>
-        <SettingRow label={t('settings.providers.providerLabel')} desc={t('settings.providers.llmProviderDesc')}>
+        {/* desc 已去掉——'选择后将自动填入 Base URL 默认值' 在 180px label 列必换行成两行，
+            视觉上 label 区出现"字体单独占一行"。下拉自身已经表达了"切换"含义，desc 冗余。 */}
+        <SettingRow label={t('settings.providers.providerLabel')}>
           <select
             value={llmProvider}
             onChange={e => onLlmProviderChange(e.target.value as LlmPresetId)}
@@ -1389,27 +1414,71 @@ function ProvidersSection() {
           <div style={{ fontSize: 13, fontWeight: 600 }}>{t('settings.providers.asrTitle')}</div>
           <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', marginTop: 2 }}>{t('settings.providers.asrDesc')}</div>
         </div>
-        <SettingRow label={t('settings.providers.providerLabel')} desc={t('settings.providers.asrProviderDesc')}>
-          {committedAsrProvider === 'local-qwen3' || committedAsrProvider === 'foundry-local-whisper' ? (
-            // active 是本地 ASR 时，下拉里没有它的 <option>（被 visibleAsrPresets
-            // 过滤掉了），用受控 <select> 强行渲染会回退到第一项制造视觉假象。
-            // 直接换成纯文本 notice，告诉用户"正在用本地 ASR，去高级中切换/禁用"。
-            <div style={{ fontSize: 12.5, color: 'var(--ol-ink-3)', lineHeight: 1.6 }}>
-              {t('settings.providers.localAsrActiveNotice', {
-                name: t(`settings.providers.presets.${committedAsrProvider === 'local-qwen3' ? 'asrLocalQwen3' : 'asrFoundryLocalWhisper'}`),
-              })}
-            </div>
-          ) : (
-            <select
-              value={asrProvider}
-              onChange={e => onAsrProviderChange(e.target.value as AsrPresetId)}
-              style={{ ...inputStyle, maxWidth: 200 }}
-            >
-              {visibleAsrPresets.map(p => (
-                <option key={p.id} value={p.id}>{t(`settings.providers.presets.${p.nameKey}`)}</option>
-              ))}
-            </select>
-          )}
+        {/* desc 同 LLM 行去掉，避免 180px label 列里换行。 */}
+        <SettingRow label={t('settings.providers.providerLabel')}>
+          {(() => {
+            // 平台本机引擎：macOS=Qwen3，Windows=Foundry。本机项始终在下拉里露出，
+            // 当用户未启用本地推理时呈 disabled——用户能看到"它存在 + 提示"，
+            // 但只能在 Advanced 启用；启用后整下拉锁住，**实际激活的** local 项被选中
+            // （pr_agent #403 fix：跨机器同步导致 macOS profile = foundry / Windows
+            // profile = qwen3 时，UI 不能假装是平台本机引擎而要忠实显示）。
+            const platformLocalAsr: AsrPresetId | null =
+              os === 'mac' ? 'local-qwen3' : os === 'win' ? 'foundry-local-whisper' : null;
+            const platformLocalNameKey = platformLocalAsr === 'local-qwen3'
+              ? 'asrLocalQwen3'
+              : platformLocalAsr === 'foundry-local-whisper'
+                ? 'asrFoundryLocalWhisper'
+                : null;
+            const isLocked = committedAsrProvider === 'local-qwen3' || committedAsrProvider === 'foundry-local-whisper';
+            // active 是本地时，selectedValue = 实际 committed 的 provider（不强制
+            // 覆盖成 platformLocalAsr）；非 active 时按 asrProvider（云端选项）显示。
+            const selectedValue: AsrPresetId = isLocked ? committedAsrProvider : asrProvider;
+            // 异常 local：当前激活的 local 不是本平台本机引擎（跨机器配置同步）。
+            // 必须把它也作为 disabled <option> 加进列表，否则受控 <select> 会回退
+            // 到第一项造成视觉假象。
+            const anomalousLocal: AsrPresetId | null =
+              isLocked && committedAsrProvider !== platformLocalAsr ? committedAsrProvider : null;
+            const anomalousNameKey = anomalousLocal === 'local-qwen3'
+              ? 'asrLocalQwen3'
+              : anomalousLocal === 'foundry-local-whisper'
+                ? 'asrFoundryLocalWhisper'
+                : null;
+            return (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-start', minWidth: 0 }}>
+                <select
+                  value={selectedValue}
+                  disabled={isLocked}
+                  onChange={e => onAsrProviderChange(e.target.value as AsrPresetId)}
+                  style={{
+                    ...inputStyle,
+                    maxWidth: 200,
+                    ...(isLocked ? { opacity: 0.65, cursor: 'not-allowed' } : {}),
+                  }}
+                >
+                  {visibleAsrPresets.map(p => (
+                    <option key={p.id} value={p.id}>{t(`settings.providers.presets.${p.nameKey}`)}</option>
+                  ))}
+                  {platformLocalAsr && platformLocalNameKey && (
+                    <option key={platformLocalAsr} value={platformLocalAsr} disabled>
+                      {t(`settings.providers.presets.${platformLocalNameKey}`)}
+                    </option>
+                  )}
+                  {anomalousLocal && anomalousNameKey && (
+                    <option key={anomalousLocal} value={anomalousLocal} disabled>
+                      {t(`settings.providers.presets.${anomalousNameKey}`)}
+                    </option>
+                  )}
+                </select>
+                {platformLocalAsr && platformLocalNameKey && (
+                  <div style={{ fontSize: 11, color: 'var(--ol-ink-4)', lineHeight: 1.5, maxWidth: 320 }}>
+                    {t('settings.providers.localAsrTakeoverHint', {
+                      name: t(`settings.providers.presets.${platformLocalNameKey}`),
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
         </SettingRow>
         {committedAsrProvider === 'volcengine' ? (
           <>
@@ -1477,24 +1546,25 @@ function ProvidersSection() {
 /// 设计：
 /// - 主 Providers 下拉只列云端选项；本地推理 (local-qwen3 / foundry-local-whisper)
 ///   完全收纳到此栏，新手不会在主流程里误开 CPU 推理。
-/// - 启用本地推理时弹出**页面顶部**的 React 浮层 popup（不再用 Tauri 系统对话框，
-///   也不再常驻一段长警告文本）——一个框、一段短话、确认/取消。
+/// - 启用本地推理时弹出**屏幕中央**的 modal（背景模糊）——一个框、一段短话、确认/取消。
 /// - 旧的「模型设置」独立页 (LocalAsr.tsx 作为 nav tab) 已下线，模型管理 UI
 ///   通过 <LocalAsr embedded /> 内嵌在此处统一管理。
 ///
-/// 平台可见性：
-/// - macOS:  仅 Qwen3-ASR
-/// - Windows: Qwen3-ASR + Foundry Local Whisper
-/// - Linux:  「该平台暂未支持本地 ASR 模型集成」
+/// 平台对称（每端只露本机有后端的引擎，另一端的引擎以 disabled 行 + "本平台暂不支持"提示露出）：
+/// - macOS:   Qwen3-ASR 主行可启用；Foundry **不显示**（macOS 不展示 Windows 端模型内容）。
+/// - Windows: Foundry 主行可启用；Qwen3 行 disabled，desc 为 notSupportedHere。
+/// - Linux:   「该平台暂未支持本地 ASR 模型集成」整段兜底。
 function AdvancedSection() {
   const { t } = useTranslation();
   const { prefs, updatePrefs } = useHotkeySettings();
   const os = detectOS();
-  const platformSupported = os === 'mac' || os === 'win';
+  const isMac = os === 'mac';
+  const isWin = os === 'win';
+  const platformSupported = isMac || isWin;
   const switchSeqRef = useRef(0);
   const [busy, setBusy] = useState(false);
-  // 待确认的启用目标。!== null 时浮层 popup 显示在页面顶部；用户点确认 → 真切；
-  // 点取消 → 回到 null。一次只允许一个 popup（用户的"只一个框"硬要求）。
+  // 待确认的启用目标。!== null 时中央 modal 弹出 + 背景模糊；用户点确认 → 真切；
+  // 点取消 → 回到 null。一次只允许一个 modal。
   const [pendingTarget, setPendingTarget] = useState<AsrPresetId | null>(null);
 
   const activeAsrProvider = (prefs?.activeAsrProvider ?? 'volcengine') as AsrPresetId;
@@ -1530,60 +1600,79 @@ function AdvancedSection() {
 
   return (
     <>
-      {/* ─── 页面顶部确认浮层 ────────────────────────────────────────────
-          用户硬要求：启用本地推理时**只**弹一个框、直接出现在页面最上方。
-          琥珀边框 + 琥珀字醒目；不阻塞滚动；点取消返回不切。 */}
+      {/* ─── 屏幕中央确认 modal（背景模糊） ─────────────────────────────
+          点击遮罩或取消按钮关闭；切换中（busy）禁止任何关闭路径以免半切失败。 */}
       {pendingTarget && pendingNameKey && (
-        <Card
+        <div
+          role="dialog"
+          aria-modal="true"
           style={{
-            background: 'rgba(255, 188, 60, 0.12)',
-            border: '1px solid rgba(220, 110, 0, 0.55)',
-            marginBottom: 12,
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0, 0, 0, 0.32)',
+            backdropFilter: 'blur(8px)',
+            WebkitBackdropFilter: 'blur(8px)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 1000,
+            padding: 16,
+          }}
+          onClick={(e) => {
+            if (e.target === e.currentTarget && !busy) setPendingTarget(null);
           }}>
-          <div style={{ fontSize: 13, fontWeight: 600, color: '#A04500', marginBottom: 6 }}>
-            ⚠️ {t('settings.advanced.confirmEnableLocalTitle')}
-          </div>
-          <div style={{ fontSize: 12.5, color: 'var(--ol-ink-2)', lineHeight: 1.6, marginBottom: 10 }}>
-            {t('settings.advanced.confirmEnableLocalBody', {
-              target: t(`settings.providers.presets.${pendingNameKey}`),
-            })}
-          </div>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <Btn
-              variant="primary"
-              size="sm"
-              disabled={busy}
-              onClick={() => void performSwitch(pendingTarget)}>
-              {t('settings.advanced.confirm')}
-            </Btn>
-            <Btn variant="ghost" size="sm" disabled={busy} onClick={() => setPendingTarget(null)}>
-              {t('common.cancel')}
-            </Btn>
-          </div>
-        </Card>
+          <Card
+            style={{
+              background: 'rgba(255, 188, 60, 0.12)',
+              border: '1px solid rgba(220, 110, 0, 0.55)',
+              maxWidth: 360,
+              width: '100%',
+            }}>
+            <div style={{ fontSize: 13, fontWeight: 600, color: '#A04500', marginBottom: 6 }}>
+              ⚠️ {t('settings.advanced.confirmEnableLocalTitle')}
+            </div>
+            <div style={{ fontSize: 12.5, color: 'var(--ol-ink-2)', lineHeight: 1.6, marginBottom: 10 }}>
+              {t('settings.advanced.confirmEnableLocalBody', {
+                target: t(`settings.providers.presets.${pendingNameKey}`),
+              })}
+            </div>
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <Btn variant="ghost" size="sm" disabled={busy} onClick={() => setPendingTarget(null)}>
+                {t('common.cancel')}
+              </Btn>
+              <Btn
+                variant="primary"
+                size="sm"
+                disabled={busy}
+                onClick={() => void performSwitch(pendingTarget)}>
+                {t('settings.advanced.confirm')}
+              </Btn>
+            </div>
+          </Card>
+        </div>
       )}
 
       <Card>
-        <div style={{ marginBottom: 10 }}>
-          <div style={{ fontSize: 13, fontWeight: 600 }}>{t('settings.advanced.localAsrTitle')}</div>
-          <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', marginTop: 2 }}>
-            {t('settings.advanced.localAsrDesc')}
+        {/* 标题 + 右上角 inline 警告小字（替换原琥珀大警告条）。 */}
+        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, marginBottom: 14 }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 13, fontWeight: 600 }}>{t('settings.advanced.localAsrTitle')}</div>
+            <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', marginTop: 2 }}>
+              {t('settings.advanced.localAsrDesc')}
+            </div>
           </div>
-        </div>
-
-        {/* 常驻短警告——一行字够了，详细解释留给点 Enable 后的页面顶部 popup。 */}
-        <div
-          style={{
-            padding: '8px 12px',
-            background: 'rgba(255, 188, 60, 0.14)',
-            border: '1px solid rgba(220, 110, 0, 0.4)',
-            borderRadius: 6,
-            fontSize: 12.5,
+          <div style={{
+            fontSize: 11,
             color: '#A04500',
             fontWeight: 500,
-            marginBottom: 14,
+            lineHeight: 1.4,
+            textAlign: 'right',
+            flexShrink: 0,
+            maxWidth: '52%',
+            paddingTop: 2,
           }}>
-          ⚠️ {t('settings.advanced.localAsrWarningShort')}
+            ⚠️ {t('settings.advanced.localAsrWarningShort')}
+          </div>
         </div>
 
         {!platformSupported ? (
@@ -1592,50 +1681,62 @@ function AdvancedSection() {
           </div>
         ) : (
           <>
+            {/* Qwen3 行 —— macOS Toggle 可点切换；Windows 后端是 stub，Toggle 始终 off
+                + 不可点 + desc=notSupportedHere，跟"本平台不可用"视觉一致。跨平台
+                异常（Windows profile 同步到 local-qwen3）时 active 状态靠下方独立
+                "禁用本地 ASR" 行兜底，避免 Toggle ON + desc 说不支持的自相矛盾感
+                （pr_agent #403 'Stale Windows state' 修法）。 */}
             <SettingRow
               label={t('settings.providers.presets.asrLocalQwen3')}
-              desc={t('settings.advanced.qwen3Desc')}>
-              <Btn
-                variant={isOnLocalQwen3 ? 'ghost' : 'primary'}
-                size="sm"
-                disabled={busy || isOnLocalQwen3 || pendingTarget !== null}
-                onClick={() => requestEnable('local-qwen3')}>
-                {isOnLocalQwen3 ? t('settings.advanced.alreadyActive') : t('settings.advanced.enable')}
-              </Btn>
+              desc={isMac ? t('settings.advanced.qwen3Desc') : t('settings.advanced.notSupportedHere')}>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', width: '100%' }}>
+                <Toggle
+                  on={isMac && isOnLocalQwen3}
+                  onToggle={isMac && !busy && pendingTarget === null ? (next) => {
+                    if (next) requestEnable('local-qwen3');
+                    else void performSwitch('volcengine');
+                  } : undefined}
+                />
+              </div>
             </SettingRow>
 
-            {os === 'win' && (
+            {/* Foundry 行 —— 仅 Windows 露出（macOS 不展示 Windows 端模型内容）。 */}
+            {isWin && (
               <SettingRow
                 label={t('settings.providers.presets.asrFoundryLocalWhisper')}
                 desc={t('settings.advanced.foundryDesc')}>
-                <Btn
-                  variant={isOnFoundry ? 'ghost' : 'primary'}
-                  size="sm"
-                  disabled={busy || isOnFoundry || pendingTarget !== null}
-                  onClick={() => requestEnable('foundry-local-whisper')}>
-                  {isOnFoundry ? t('settings.advanced.alreadyActive') : t('settings.advanced.enable')}
-                </Btn>
+                <div style={{ display: 'flex', justifyContent: 'flex-end', width: '100%' }}>
+                  <Toggle
+                    on={isOnFoundry}
+                    onToggle={!busy && pendingTarget === null ? (next) => {
+                      if (next) requestEnable('foundry-local-whisper');
+                      else void performSwitch('volcengine');
+                    } : undefined}
+                  />
+                </div>
               </SettingRow>
             )}
           </>
         )}
 
-        {/* 「禁用本地 ASR」按钮放在 platformSupported 分支之外——若用户在另一台
-            支持本地推理的机器上启用过 local-qwen3 / foundry，preferences 同步到
-            当前 Linux/不支持平台后会卡死（无 enable / disable UI 可点），polish
-            走老路径必失败。这里始终在 isOnAnyLocal 时露出 disable 入口，给用户
-            退路（PR #400 pr_agent advisory 的修法）。 */}
-        {isOnAnyLocal && (
+        {/* 「禁用本地 ASR」逃生入口——只在行内 Toggle 关不掉的场景露出：
+            - Linux / 不支持平台：根本没有任何引擎行
+            - 跨平台异常（macOS profile 同步到 foundry / Windows profile 同步到 qwen3）：
+              本机引擎 Toggle 是 off，关不动异常 active 的对方引擎
+            否则平台本机 Toggle 自身就能 off → 关停，重复 disable 行徒增视觉。 */}
+        {isOnAnyLocal && !((isMac && isOnLocalQwen3) || (isWin && isOnFoundry)) && (
           <SettingRow
             label={t('settings.advanced.disableLocalLabel')}
             desc={t('settings.advanced.disableLocalDesc')}>
-            <Btn
-              variant="primary"
-              size="sm"
-              disabled={busy || pendingTarget !== null}
-              onClick={() => void performSwitch('volcengine')}>
-              {t('settings.advanced.disable')}
-            </Btn>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', width: '100%' }}>
+              <Btn
+                variant="primary"
+                size="sm"
+                disabled={busy || pendingTarget !== null}
+                onClick={() => void performSwitch('volcengine')}>
+                {t('settings.advanced.disable')}
+              </Btn>
+            </div>
           </SettingRow>
         )}
       </Card>
@@ -2226,7 +2327,7 @@ function PermissionsSection() {
         {desc}
       </div>
       <SettingRow label={t('settings.permissions.micLabel')} desc={t('settings.permissions.micDesc')}>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'flex-end', width: '100%' }}>
           <PermissionPill status={microphone} />
           {microphone !== 'granted' && microphone !== 'notApplicable' && microphone !== 'loading' && (
             <Btn variant="ghost" size="sm" onClick={reRequestMicrophone}>
@@ -2251,13 +2352,13 @@ function PermissionsSection() {
         label={t('settings.permissions.hotkeyLabel')}
         desc={capability ? t('settings.permissions.hotkeyDescWithAdapter', { adapter: adapterDisplayName(capability.adapter) }) : t('settings.permissions.hotkeyDescPlain')}
       >
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center', minWidth: 0 }}>
-          <HotkeyStatusPill status={hotkey} />
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', minWidth: 0, justifyContent: 'flex-end', width: '100%' }}>
           {hotkey?.message && (
             <span style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', overflow: 'hidden', textOverflow: 'ellipsis' }}>
               {hotkey.message}
             </span>
           )}
+          <HotkeyStatusPill status={hotkey} />
         </div>
       </SettingRow>
       {windowsIme?.state !== 'notWindows' && (
@@ -2265,18 +2366,20 @@ function PermissionsSection() {
           label={t('settings.permissions.windowsImeLabel')}
           desc={t('settings.permissions.windowsImeDesc')}
         >
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center', minWidth: 0 }}>
-            <WindowsImeStatusPill status={windowsIme} />
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', minWidth: 0, justifyContent: 'flex-end', width: '100%' }}>
             {windowsIme && (
               <span style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                 {t(`settings.permissions.windowsIme.${windowsIme.state}`)}
               </span>
             )}
+            <WindowsImeStatusPill status={windowsIme} />
           </div>
         </SettingRow>
       )}
       <SettingRow label={t('settings.permissions.networkLabel')} desc={t('settings.permissions.networkDesc')}>
-        <Pill tone="ok"><Icon name="check" size={11} />{t('settings.permissions.networkOk')}</Pill>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', width: '100%' }}>
+          <Pill tone="ok"><Icon name="check" size={11} />{t('settings.permissions.networkOk')}</Pill>
+        </div>
       </SettingRow>
     </Card>
   );
