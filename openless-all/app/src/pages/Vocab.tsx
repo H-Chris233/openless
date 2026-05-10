@@ -3,12 +3,35 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { addVocab, isTauri, listVocab, removeVocab, setVocabEnabled } from '../lib/ipc';
-import type { DictionaryEntry, VocabPreset } from '../lib/types';
+import {
+  addCorrectionRule,
+  addVocab,
+  isTauri,
+  listCorrectionRules,
+  listVocab,
+  removeCorrectionRule,
+  removeVocab,
+  setCorrectionRuleEnabled,
+  setVocabEnabled,
+} from '../lib/ipc';
+import type { CorrectionRule, DictionaryEntry, VocabPreset } from '../lib/types';
 import { DEFAULT_VOCAB_PRESETS, loadVocabPresets, persistVocabPresets } from '../lib/vocabPresets';
 import { Btn, Card, PageHeader } from './_atoms';
 
 const NEW_PRESET_DRAFT_ID = '__new__';
+const NUM_TOKEN = '{num}';
+
+function isSupportedCorrectionRule(pattern: string, replacement: string) {
+  const tokenCount = pattern.split(NUM_TOKEN).length - 1;
+  if (!pattern) return false;
+  if (tokenCount > 1) return false;
+  if (replacement.includes(NUM_TOKEN) && tokenCount === 0) return false;
+  if (tokenCount === 1) {
+    const [prefix, suffix] = pattern.split(NUM_TOKEN);
+    return Boolean(prefix || suffix);
+  }
+  return true;
+}
 
 export function Vocab() {
   const { t } = useTranslation();
@@ -22,6 +45,9 @@ export function Vocab() {
   const [editingPresetId, setEditingPresetId] = useState<string | null>(null);
   const [presetNameDraft, setPresetNameDraft] = useState('');
   const [presetPhrasesDraft, setPresetPhrasesDraft] = useState('');
+  const [correctionRules, setCorrectionRules] = useState<CorrectionRule[]>([]);
+  const [rulePatternDraft, setRulePatternDraft] = useState('');
+  const [ruleReplacementDraft, setRuleReplacementDraft] = useState('');
 
   const refresh = async () => {
     try {
@@ -36,8 +62,22 @@ export function Vocab() {
     }
   };
 
+  const refreshCorrectionRules = async () => {
+    try {
+      const data = await listCorrectionRules();
+      setCorrectionRules(data);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const refreshAll = () => {
+    void refresh();
+    void refreshCorrectionRules();
+  };
+
   useEffect(() => {
-    refresh();
+    refreshAll();
     void loadVocabPresets()
       .then(setPresets)
       .catch(err => setError(err instanceof Error ? err.message : String(err)));
@@ -72,6 +112,44 @@ export function Vocab() {
     if (e.key === 'Enter') {
       e.preventDefault();
       void onAdd();
+    }
+  };
+
+  const onAddCorrectionRule = async () => {
+    const pattern = rulePatternDraft.trim();
+    if (!pattern) return;
+    const replacement = ruleReplacementDraft.trim();
+    if (!isSupportedCorrectionRule(pattern, replacement)) {
+      setError(t('vocab.corrections.invalid'));
+      return;
+    }
+    try {
+      const rule = await addCorrectionRule(pattern, replacement);
+      setCorrectionRules(prev => [rule, ...prev]);
+      setRulePatternDraft('');
+      setRuleReplacementDraft('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const onRemoveCorrectionRule = async (id: string) => {
+    try {
+      await removeCorrectionRule(id);
+      setCorrectionRules(prev => prev.filter(r => r.id !== id));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const onToggleCorrectionRule = async (rule: CorrectionRule) => {
+    const next = !rule.enabled;
+    setCorrectionRules(prev => prev.map(r => (r.id === rule.id ? { ...r, enabled: next } : r)));
+    try {
+      await setCorrectionRuleEnabled(rule.id, next);
+    } catch (err) {
+      setCorrectionRules(prev => prev.map(r => (r.id === rule.id ? { ...r, enabled: rule.enabled } : r)));
+      setError(err instanceof Error ? err.message : String(err));
     }
   };
 
@@ -184,7 +262,7 @@ export function Vocab() {
         desc={t('vocab.desc')}
         right={
           <div style={{ display: 'flex', gap: 8 }}>
-            <Btn icon="refresh" variant="ghost" size="sm" onClick={refresh}>{t('common.refresh')}</Btn>
+            <Btn icon="refresh" variant="ghost" size="sm" onClick={refreshAll}>{t('common.refresh')}</Btn>
           </div>
         }
       />
@@ -232,6 +310,43 @@ export function Vocab() {
           )}
         </div>
         <div style={{ padding: 18, borderBottom: '0.5px solid var(--ol-line)' }}>
+          <div style={{ display: 'grid', gap: 10 }}>
+            <div>
+              <strong style={{ fontSize: 12 }}>{t('vocab.corrections.title')}</strong>
+              <div style={{ fontSize: 11, color: 'var(--ol-ink-4)', marginTop: 6 }}>{t('vocab.corrections.tip')}</div>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto minmax(0, 1fr) auto', gap: 8, alignItems: 'center' }}>
+              <input
+                value={rulePatternDraft}
+                onChange={e => setRulePatternDraft(e.target.value)}
+                placeholder={t('vocab.corrections.patternPlaceholder')}
+                style={{ height: 32, padding: '0 10px', border: '0.5px solid var(--ol-line-strong)', borderRadius: 8, background: 'var(--ol-surface-2)' }}
+              />
+              <span style={{ color: 'var(--ol-ink-4)', fontSize: 12 }}>→</span>
+              <input
+                value={ruleReplacementDraft}
+                onChange={e => setRuleReplacementDraft(e.target.value)}
+                placeholder={t('vocab.corrections.replacementPlaceholder')}
+                style={{ height: 32, padding: '0 10px', border: '0.5px solid var(--ol-line-strong)', borderRadius: 8, background: 'var(--ol-surface-2)' }}
+              />
+              <Btn size="sm" variant="primary" onClick={() => void onAddCorrectionRule()}>{t('common.add')}</Btn>
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, minHeight: correctionRules.length ? undefined : 20 }}>
+              {correctionRules.length === 0 && (
+                <span style={{ fontSize: 12, color: 'var(--ol-ink-4)' }}>{t('vocab.corrections.empty')}</span>
+              )}
+              {correctionRules.map(rule => (
+                <CorrectionRuleChip
+                  key={rule.id}
+                  rule={rule}
+                  onToggle={() => void onToggleCorrectionRule(rule)}
+                  onRemove={() => void onRemoveCorrectionRule(rule.id)}
+                />
+              ))}
+            </div>
+          </div>
+        </div>
+        <div style={{ padding: 18, borderBottom: '0.5px solid var(--ol-line)' }}>
           <div style={{ display: 'flex', gap: 8 }}>
             <input
               ref={inputRef}
@@ -276,6 +391,46 @@ export function Vocab() {
         }
       `}</style>
     </>
+  );
+}
+
+interface CorrectionRuleChipProps {
+  rule: CorrectionRule;
+  onToggle: () => void;
+  onRemove: () => void;
+}
+
+function CorrectionRuleChip({ rule, onToggle, onRemove }: CorrectionRuleChipProps) {
+  const { t } = useTranslation();
+  const enabled = rule.enabled;
+  return (
+    <span
+      style={{
+        display: 'inline-flex', alignItems: 'center', gap: 6,
+        padding: '5px 8px 5px 10px',
+        borderRadius: 999,
+        border: '0.5px solid var(--ol-line-strong)',
+        background: enabled ? 'var(--ol-surface)' : 'var(--ol-surface-2)',
+        opacity: enabled ? 1 : 0.55,
+        fontSize: 12,
+        fontFamily: 'var(--ol-font-mono)',
+      }}
+    >
+      <button
+        onClick={onToggle}
+        title={enabled ? t('vocab.corrections.tipDisabled') : t('vocab.corrections.tipEnabled')}
+        style={{ background: 'transparent', border: 0, padding: 0, color: 'inherit', fontFamily: 'inherit', cursor: 'default' }}
+      >
+        {rule.pattern} → {rule.replacement}
+      </button>
+      <button
+        onClick={onRemove}
+        aria-label={t('vocab.corrections.removeAria')}
+        style={{ width: 18, height: 18, borderRadius: 999, border: 0, background: 'rgba(0,0,0,0.06)', color: 'var(--ol-ink-4)', cursor: 'default' }}
+      >
+        ×
+      </button>
+    </span>
   );
 }
 

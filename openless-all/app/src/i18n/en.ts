@@ -178,6 +178,17 @@ export const en: typeof zhCN = {
     tipDisabled: 'Click to disable this entry',
     tipEnabled: 'Click to enable this entry',
     removeAria: 'Remove',
+    corrections: {
+      title: 'Correction rules',
+      tip: 'Separate from hot words. Deterministically fixes common ASR mistakes; {num} matches numbers. Example: {num}粒 → {num}例.',
+      patternPlaceholder: 'Mistaken text, e.g. {num}粒',
+      replacementPlaceholder: 'Target text, e.g. {num}例',
+      empty: 'No correction rules yet.',
+      invalid: 'Only literal replacements or one {num} number wildcard are supported, for example {num}粒 → {num}例.',
+      tipDisabled: 'Click to disable this rule',
+      tipEnabled: 'Click to enable this rule',
+      removeAria: 'Remove correction rule',
+    },
     presets: {
       title: 'Scenario presets',
       tip: 'Multi-select to apply in batch; supports edit/create and keeps local preset structure ready for future import/export.',

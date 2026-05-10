@@ -180,6 +180,17 @@ export const ja: typeof zhCN = {
     tipDisabled: 'クリックで無効化',
     tipEnabled: 'クリックで有効化',
     removeAria: '削除',
+    corrections: {
+      title: '補正ルール',
+      tip: 'ホットワードとは別に、ASR のよくある誤認識を文字列として補正します。{num} は数字に一致します。例：{num}粒 → {num}例。',
+      patternPlaceholder: '誤認識された表記（例：{num}粒）',
+      replacementPlaceholder: '修正後の表記（例：{num}例）',
+      empty: '補正ルールはまだありません。',
+      invalid: '文字列の置換、または {num} 数字ワイルドカードを 1 つだけ含むルールに対応しています。例：{num}粒 → {num}例。',
+      tipDisabled: 'クリックしてこのルールを無効化',
+      tipEnabled: 'クリックしてこのルールを有効化',
+      removeAria: '補正ルールを削除',
+    },
     presets: {
       title: 'シーンプリセット',
       tip: '複数選択して一括有効化できます。編集と新規作成にも対応し、将来のインポート/エクスポート用のローカル構造を予約しています。',

@@ -21,7 +21,9 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::types::{DictationSession, DictionaryEntry, UserPreferences, VocabPresetStore};
+use crate::types::{
+    CorrectionRule, DictationSession, DictionaryEntry, UserPreferences, VocabPresetStore,
+};
 
 const HISTORY_CAP: usize = 200;
 const HISTORY_FILE: &str = "history.json";
@@ -29,6 +31,8 @@ const PREFERENCES_FILE: &str = "preferences.json";
 /// 与 Swift `Sources/OpenLessPersistence/DictionaryStore.swift` 同名，
 /// 让旧版词汇表在升级后无缝继承。**不要**改成 `vocab.json`，会丢用户数据。
 const VOCAB_FILE: &str = "dictionary.json";
+const CORRECTION_RULES_FILE: &str = "correction-rules.json";
+const CORRECTION_NUM_TOKEN: &str = "{num}";
 const VOCAB_PRESETS_FILE: &str = "vocab-presets.json";
 
 /// 旧版 plaintext JSON 凭据路径。仅作为迁移来源；成功写入系统凭据库后会删除。
@@ -1041,6 +1045,106 @@ pub fn save_vocab_presets(store: &VocabPresetStore) -> Result<()> {
     atomic_write(&path, &json)
 }
 
+// ───────────────────────── CorrectionRuleStore ─────────────────────────
+
+pub struct CorrectionRuleStore {
+    path: PathBuf,
+    lock: Mutex<()>,
+}
+
+impl CorrectionRuleStore {
+    pub fn new() -> Result<Self> {
+        let dir = data_dir()?;
+        ensure_dir(&dir)?;
+        Ok(Self {
+            path: dir.join(CORRECTION_RULES_FILE),
+            lock: Mutex::new(()),
+        })
+    }
+
+    pub fn list(&self) -> Result<Vec<CorrectionRule>> {
+        let _guard = self.lock.lock();
+        self.read_locked()
+    }
+
+    pub fn add(&self, pattern: String, replacement: String) -> Result<CorrectionRule> {
+        let pattern = pattern.trim().to_string();
+        let replacement = replacement.trim().to_string();
+        validate_correction_rule_syntax(&pattern, &replacement)?;
+        let _guard = self.lock.lock();
+        let mut rules = self.read_locked()?;
+        let rule = CorrectionRule {
+            id: Uuid::new_v4().to_string(),
+            pattern,
+            replacement,
+            enabled: true,
+            created_at: Utc::now().to_rfc3339(),
+        };
+        rules.insert(0, rule.clone());
+        self.write_locked(&rules)?;
+        Ok(rule)
+    }
+
+    pub fn remove(&self, id: &str) -> Result<()> {
+        let _guard = self.lock.lock();
+        let mut rules = self.read_locked()?;
+        let before = rules.len();
+        rules.retain(|r| r.id != id);
+        if rules.len() == before {
+            return Ok(());
+        }
+        self.write_locked(&rules)
+    }
+
+    pub fn set_enabled(&self, id: &str, enabled: bool) -> Result<()> {
+        let _guard = self.lock.lock();
+        let mut rules = self.read_locked()?;
+        let mut found = false;
+        for rule in rules.iter_mut() {
+            if rule.id == id {
+                rule.enabled = enabled;
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Err(anyhow!("correction rule {} not found", id));
+        }
+        self.write_locked(&rules)
+    }
+
+    fn read_locked(&self) -> Result<Vec<CorrectionRule>> {
+        read_or_default::<Vec<CorrectionRule>>(&self.path)
+    }
+
+    fn write_locked(&self, rules: &[CorrectionRule]) -> Result<()> {
+        let json = serde_json::to_vec_pretty(rules).context("encode correction rules failed")?;
+        atomic_write(&self.path, &json)
+    }
+}
+
+fn validate_correction_rule_syntax(pattern: &str, replacement: &str) -> Result<()> {
+    if pattern.is_empty() {
+        return Err(anyhow!("correction rule pattern is empty"));
+    }
+    let pattern_token_count = pattern.matches(CORRECTION_NUM_TOKEN).count();
+    if pattern_token_count > 1 {
+        return Err(anyhow!("unsupported correction rule syntax"));
+    }
+    if replacement.contains(CORRECTION_NUM_TOKEN) && pattern_token_count == 0 {
+        return Err(anyhow!("unsupported correction rule syntax"));
+    }
+    if pattern_token_count == 1 {
+        let Some((prefix, suffix)) = pattern.split_once(CORRECTION_NUM_TOKEN) else {
+            return Err(anyhow!("unsupported correction rule syntax"));
+        };
+        if prefix.is_empty() && suffix.is_empty() {
+            return Err(anyhow!("unsupported correction rule syntax"));
+        }
+    }
+    Ok(())
+}
+
 // ───────────────────────── CredentialsVault ─────────────────────────
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1185,7 +1289,8 @@ impl CredentialsVault {
 #[cfg(test)]
 mod tests {
     use super::{
-        chunk_json_payload, list_vocab_presets, save_vocab_presets, KEYRING_CHUNK_MAX_UTF16_UNITS,
+        chunk_json_payload, list_vocab_presets, save_vocab_presets,
+        validate_correction_rule_syntax, KEYRING_CHUNK_MAX_UTF16_UNITS,
     };
     use crate::types::{VocabPreset, VocabPresetStore};
     use std::fs;
@@ -1235,5 +1340,15 @@ mod tests {
         );
         assert_eq!(loaded.disabled_builtin_preset_ids, vec!["chef".to_string()]);
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn correction_rule_syntax_rejects_silent_noops() {
+        assert!(validate_correction_rule_syntax("{num}粒", "{num}例").is_ok());
+        assert!(validate_correction_rule_syntax("几粒", "几例").is_ok());
+        assert!(validate_correction_rule_syntax("", "几例").is_err());
+        assert!(validate_correction_rule_syntax("{num}", "{num}例").is_err());
+        assert!(validate_correction_rule_syntax("{num}到{num}粒", "{num}例").is_err());
+        assert!(validate_correction_rule_syntax("几粒", "{num}例").is_err());
     }
 }

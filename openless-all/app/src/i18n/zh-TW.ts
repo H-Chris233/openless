@@ -178,6 +178,17 @@ export const zhTW: typeof zhCN = {
     tipDisabled: '點擊禁用此詞條',
     tipEnabled: '點擊啓用此詞條',
     removeAria: '刪除',
+    corrections: {
+      title: '糾正規則',
+      tip: '獨立於熱詞，按字面修正 ASR 常見誤識別；支援 {num} 通配數字。例如：{num}粒 → {num}例。',
+      patternPlaceholder: '誤識別寫法，如 {num}粒',
+      replacementPlaceholder: '目標寫法，如 {num}例',
+      empty: '還沒有糾正規則。',
+      invalid: '僅支援字面替換，或一個 {num} 通配數字的規則，例如 {num}粒 → {num}例。',
+      tipDisabled: '點擊停用此規則',
+      tipEnabled: '點擊啟用此規則',
+      removeAria: '刪除糾正規則',
+    },
     presets: {
       title: '場景預設',
       tip: '可多選後批量啓用；支持編輯和新建，已爲後續導入導出預留本地結構。',

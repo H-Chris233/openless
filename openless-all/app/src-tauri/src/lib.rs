@@ -16,6 +16,7 @@ mod combo_hotkey;
 mod commands;
 mod coordinator;
 mod coordinator_state;
+mod correction;
 mod global_hotkey_runtime;
 mod hotkey;
 mod insertion;
@@ -157,8 +158,8 @@ pub fn run() {
                 // 登录都被主窗口打扰。OPENLESS_SHOW_MAIN_ON_START=1 仍保留
                 // 老的强制 show 路径（手动 dispatch 测试 / dev 用），优先级高
                 // 于 prefs。
-                let force_show = std::env::var("OPENLESS_SHOW_MAIN_ON_START").ok().as_deref()
-                    == Some("1");
+                let force_show =
+                    std::env::var("OPENLESS_SHOW_MAIN_ON_START").ok().as_deref() == Some("1");
                 let suppress_show = !force_show && coordinator.prefs().get().start_minimized;
                 if suppress_show {
                     log::info!("[main] start_minimized=true → 跳过初始 show，等用户点托盘");
@@ -254,6 +255,10 @@ pub fn run() {
             commands::add_vocab,
             commands::remove_vocab,
             commands::set_vocab_enabled,
+            commands::list_correction_rules,
+            commands::add_correction_rule,
+            commands::remove_correction_rule,
+            commands::set_correction_rule_enabled,
             commands::list_vocab_presets,
             commands::save_vocab_presets,
             commands::start_dictation,
@@ -1197,8 +1202,14 @@ mod tests {
 
     #[test]
     fn tray_style_menu_id_parsing_accepts_only_style_items() {
-        assert_eq!(parse_tray_polish_mode_id("style-raw"), Some(PolishMode::Raw));
-        assert_eq!(parse_tray_polish_mode_id("style-light"), Some(PolishMode::Light));
+        assert_eq!(
+            parse_tray_polish_mode_id("style-raw"),
+            Some(PolishMode::Raw)
+        );
+        assert_eq!(
+            parse_tray_polish_mode_id("style-light"),
+            Some(PolishMode::Light)
+        );
         assert_eq!(
             parse_tray_polish_mode_id("style-structured"),
             Some(PolishMode::Structured)

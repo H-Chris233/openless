@@ -176,6 +176,17 @@ export const zhCN = {
     tipDisabled: '点击禁用此词条',
     tipEnabled: '点击启用此词条',
     removeAria: '删除',
+    corrections: {
+      title: '纠正规则',
+      tip: '独立于热词，按字面修正 ASR 常见误识别；支持 {num} 通配数字。例如：{num}粒 → {num}例。',
+      patternPlaceholder: '误识别写法，如 {num}粒',
+      replacementPlaceholder: '目标写法，如 {num}例',
+      empty: '还没有纠正规则。',
+      invalid: '仅支持字面替换，或一个 {num} 通配数字的规则，例如 {num}粒 → {num}例。',
+      tipDisabled: '点击禁用此规则',
+      tipEnabled: '点击启用此规则',
+      removeAria: '删除纠正规则',
+    },
     presets: {
       title: '场景预设',
       tip: '可多选后批量启用；支持编辑和新建，已为后续导入导出预留本地结构。',

@@ -19,9 +19,9 @@ use crate::persistence::{CredentialAccount, CredentialsSnapshot, CredentialsVaul
 use crate::polish::{LLMError, OpenAICompatibleConfig, OpenAICompatibleLLMProvider};
 use crate::recorder::{AudioConsumer, Recorder};
 use crate::types::{
-    ChineseScriptPreference, ComboBinding, CredentialsStatus, DictationSession, DictionaryEntry,
-    HotkeyCapability, HotkeyStatus, OutputLanguagePreference, PolishMode, ShortcutBinding,
-    UpdateChannel, UserPreferences, VocabPresetStore, WindowsImeStatus,
+    ChineseScriptPreference, ComboBinding, CorrectionRule, CredentialsStatus, DictationSession,
+    DictionaryEntry, HotkeyCapability, HotkeyStatus, OutputLanguagePreference, PolishMode,
+    ShortcutBinding, UpdateChannel, UserPreferences, VocabPresetStore, WindowsImeStatus,
 };
 
 type CoordinatorState<'a> = State<'a, Arc<Coordinator>>;
@@ -160,7 +160,10 @@ pub fn set_settings(
         if let Err(err) = crate::refresh_tray_microphone_menu(&app_for_main) {
             log::warn!("[tray] refresh microphone menu after settings save failed: {err}");
             let tray_state = app_for_main.state::<TrayMicrophoneMenuState>();
-            sync_tray_microphone_selection(&tray_state.lock(), &prefs_for_main.microphone_device_name);
+            sync_tray_microphone_selection(
+                &tray_state.lock(),
+                &prefs_for_main.microphone_device_name,
+            );
         }
     });
     // 抑制 unused 警告：tray_microphones 现在改在闭包里通过 app.state 取，
@@ -246,7 +249,10 @@ pub async fn fetch_latest_beta_release() -> Result<Option<LatestBetaRelease>, St
 /// 用 `/releases/tag/` 这个唯一锚点抓 tag。
 fn parse_latest_beta_from_atom(body: &str) -> Option<LatestBetaRelease> {
     for entry in body.split("<entry>").skip(1) {
-        let entry_body = entry.split_once("</entry>").map(|(b, _)| b).unwrap_or(entry);
+        let entry_body = entry
+            .split_once("</entry>")
+            .map(|(b, _)| b)
+            .unwrap_or(entry);
         let needle = "/releases/tag/";
         let tag_start = match entry_body.find(needle) {
             Some(i) => i + needle.len(),
@@ -260,11 +266,9 @@ fn parse_latest_beta_from_atom(body: &str) -> Option<LatestBetaRelease> {
         if !tag_name.ends_with("-beta-tauri") {
             continue;
         }
-        let html_url = format!(
-            "https://github.com/appergb/openless/releases/tag/{tag_name}"
-        );
-        let published_at = extract_between(entry_body, "<updated>", "</updated>")
-            .unwrap_or_default();
+        let html_url = format!("https://github.com/appergb/openless/releases/tag/{tag_name}");
+        let published_at =
+            extract_between(entry_body, "<updated>", "</updated>").unwrap_or_default();
         return Some(LatestBetaRelease {
             tag_name,
             html_url,
@@ -927,6 +931,43 @@ pub fn set_vocab_enabled(
 }
 
 #[tauri::command]
+pub fn list_correction_rules(coord: CoordinatorState<'_>) -> Result<Vec<CorrectionRule>, String> {
+    coord.correction_rules().list().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn add_correction_rule(
+    coord: CoordinatorState<'_>,
+    pattern: String,
+    replacement: String,
+) -> Result<CorrectionRule, String> {
+    coord
+        .correction_rules()
+        .add(pattern, replacement)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn remove_correction_rule(coord: CoordinatorState<'_>, id: String) -> Result<(), String> {
+    coord
+        .correction_rules()
+        .remove(&id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_correction_rule_enabled(
+    coord: CoordinatorState<'_>,
+    id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    coord
+        .correction_rules()
+        .set_enabled(&id, enabled)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn list_vocab_presets() -> Result<VocabPresetStore, String> {
     crate::persistence::list_vocab_presets().map_err(|e| e.to_string())
 }
@@ -991,7 +1032,10 @@ pub fn set_default_polish_mode(
 ) -> Result<(), String> {
     let mut prefs = coord.prefs().get();
     prefs.default_mode = mode;
-    coord.prefs().set(prefs.clone()).map_err(|e| e.to_string())?;
+    coord
+        .prefs()
+        .set(prefs.clone())
+        .map_err(|e| e.to_string())?;
     // 跟 set_settings 同样：refresh_tray_microphone_menu 里 tray.set_menu 改 NSStatusItem，
     // 必须主线程；这里是同步 Tauri command 跑在 IPC 线程，直调会让 macOS 死锁。
     let app_for_main = app.clone();
@@ -1975,14 +2019,20 @@ mod tests {
         };
         assert!(llm_configured_for_provider("custom", &keyless_ready));
         assert!(llm_configured_for_provider("self-hosted", &keyless_ready));
-        assert!(llm_configured_for_provider("openrouterFree", &keyless_ready));
+        assert!(llm_configured_for_provider(
+            "openrouterFree",
+            &keyless_ready
+        ));
 
         let hosted_keyless = CredentialsSnapshot {
             ark_endpoint: Some("https://openrouter.ai/api/v1".into()),
             ark_model_id: Some("qwen/qwen3-coder:free".into()),
             ..snapshot()
         };
-        assert!(!llm_configured_for_provider("openrouterFree", &hosted_keyless));
+        assert!(!llm_configured_for_provider(
+            "openrouterFree",
+            &hosted_keyless
+        ));
 
         let hosted_ready = CredentialsSnapshot {
             ark_api_key: Some("key".into()),
@@ -1997,13 +2047,19 @@ mod tests {
             ark_model_id: Some("qwen".into()),
             ..snapshot()
         };
-        assert!(!llm_configured_for_provider("custom", &key_without_endpoint));
+        assert!(!llm_configured_for_provider(
+            "custom",
+            &key_without_endpoint
+        ));
 
         let endpoint_without_model = CredentialsSnapshot {
             ark_endpoint: Some("http://localhost:11434/v1".into()),
             ..snapshot()
         };
-        assert!(!llm_configured_for_provider("custom", &endpoint_without_model));
+        assert!(!llm_configured_for_provider(
+            "custom",
+            &endpoint_without_model
+        ));
     }
 
     impl SettingsWriter for FakeSettingsWriter {

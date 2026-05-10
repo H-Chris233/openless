@@ -32,19 +32,20 @@ use crate::coordinator_state::{
 use crate::hotkey::{HotkeyEvent, HotkeyMonitor};
 use crate::insertion::TextInserter;
 use crate::persistence::{
-    CredentialAccount, CredentialsVault, DictionaryStore, HistoryStore, PreferencesStore,
+    CorrectionRuleStore, CredentialAccount, CredentialsVault, DictionaryStore, HistoryStore,
+    PreferencesStore,
 };
 
 use crate::polish::{OpenAICompatibleConfig, OpenAICompatibleLLMProvider};
 use crate::qa_hotkey::{QaHotkeyError, QaHotkeyEvent, QaHotkeyMonitor};
 use crate::recorder::{Recorder, RecorderError};
 use crate::selection::capture_selection;
+#[cfg(target_os = "windows")]
+use crate::types::PasteShortcut;
 use crate::types::{
     CapsulePayload, CapsuleState, ChineseScriptPreference, DictationSession, HotkeyCapability,
     HotkeyStatus, HotkeyStatusState, InsertStatus, OutputLanguagePreference, PolishMode,
 };
-#[cfg(target_os = "windows")]
-use crate::types::PasteShortcut;
 #[cfg(target_os = "windows")]
 use crate::windows_ime_ipc::ImeSubmitTarget;
 #[cfg(target_os = "windows")]
@@ -96,6 +97,7 @@ struct Inner {
     history: HistoryStore,
     prefs: PreferencesStore,
     vocab: DictionaryStore,
+    correction_rules: CorrectionRuleStore,
     inserter: TextInserter,
     #[cfg(target_os = "windows")]
     windows_ime: WindowsImeSessionController,
@@ -176,6 +178,7 @@ impl Coordinator {
             });
             let prefs = PreferencesStore::new().expect("preferences store init");
             let vocab = DictionaryStore::new().expect("dictionary store init");
+            let correction_rules = CorrectionRuleStore::new().expect("correction rule store init");
 
             Self {
                 inner: Arc::new(Inner {
@@ -183,6 +186,7 @@ impl Coordinator {
                     history,
                     prefs,
                     vocab,
+                    correction_rules,
                     inserter: TextInserter::new(),
                     state: Mutex::new(SessionState::default()),
                     asr: Mutex::new(None),
@@ -218,6 +222,7 @@ impl Coordinator {
         });
         let prefs = PreferencesStore::new().expect("preferences store init");
         let vocab = DictionaryStore::new().expect("dictionary store init");
+        let correction_rules = CorrectionRuleStore::new().expect("correction rule store init");
 
         Self {
             inner: Arc::new(Inner {
@@ -225,6 +230,7 @@ impl Coordinator {
                 history,
                 prefs,
                 vocab,
+                correction_rules,
                 inserter: TextInserter::new(),
                 windows_ime: WindowsImeSessionController::new(),
                 prepared_windows_ime_session: Arc::new(Mutex::new(Vec::new())),
@@ -641,6 +647,9 @@ impl Coordinator {
     }
     pub fn vocab(&self) -> &DictionaryStore {
         &self.inner.vocab
+    }
+    pub fn correction_rules(&self) -> &CorrectionRuleStore {
+        &self.inner.correction_rules
     }
 
     pub fn update_hotkey_binding(&self) {
