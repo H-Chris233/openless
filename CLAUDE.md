@@ -161,3 +161,55 @@ If any step fails, do not announce the release; investigate `release-tauri.yml` 
 2. Register it in `lib.rs` (`mod <name>;`).
 3. Wire it into `coordinator.rs` and expose any frontend-callable surface via `commands.rs` + `invoke_handler!`.
 4. Add the matching TS wrapper in `openless-all/app/src/lib/ipc.ts` (with a mock branch for browser dev).
+
+## 调研先于编码：派子 agent 查 API / 库 / 平台文档
+
+**完整规则在 [AGENTS.md `Third-party service integrations & library / platform API research`](AGENTS.md) 段落（line 171-191）。** 这里列的是 Claude Code 入场后用得上的具体工具映射。
+
+### 触发条件 — 命中任一项都先派子 agent 调研，再下笔
+
+- 第三方 HTTP API（ASR 厂家 / LLM 端点 / GitHub API / Tauri plugin 服务等）
+- 不熟的 Rust crate / npm 包：连签名和 feature flag 都不确定时
+- 平台 API：Apple Security framework / CoreFoundation / Win32 / Carbon / AppKit
+- 仓库 lock 文件锁着的某版本到底支持什么 — 训练记忆和 `Cargo.lock` / `package-lock.json` 实际版本可能不一致
+- 任何跟「训练 cutoff 之后才迭代过」相关的接口
+
+### 不需要派子 agent
+
+- 仓库代码里已有现成调用 → `rg` / `grep` 找参考即可（仓库即文档）
+- 通用编程 / 算法 / 自己能推导的语言特性
+- 单文件 surgical 改动且改动点的 API 已有用例
+- 查本仓库已有模块（`types.rs` / `coordinator.rs` 等）— 直接 Read
+
+### 工具优先级
+
+```text
+1. Context7 MCP（最高优先 — 主流库覆盖广，version-aware）
+   - mcp__context7__resolve-library-id  → 拿 library id
+   - mcp__context7__query-docs          → 当前版本的官方文档片段
+
+2. documentation-lookup skill
+   /skill documentation-lookup —— 包装 Context7，含路由 + 缓存。
+
+3. Agent 子 agent（subagent_type=general-purpose）
+   场景：Context7 没覆盖（小众 crate / 新 SDK / 非英文文档），
+   或需多源交叉（官方文档 + GitHub README + Stack Overflow）。
+   子 agent 用 WebFetch / WebSearch / Context7 综合，回 200-400 字结构化结果。
+
+4. 单点兜底：直接 WebFetch 单页文档（只读最权威一篇时）
+```
+
+### 子 agent prompt 必备字段
+
+1. **目标问题**：一句话讲清要解决的具体技术问题（不要"了解一下 X"这种空靶）
+2. **本仓库现状**：当前 lock 着的版本（`Cargo.lock` / `package-lock.json` 拉一下）+ 现有调用点 `file:line`（若有）
+3. **必须返回的结构**：函数/端点签名 → 最小可运行示例（≤20 行）→ **版本兼容范围**（vs 训练记忆的核心校验点）→ 已知坑 / 平台差异 / 弃用计划
+4. **禁令**：不改本仓库代码；不贴文档原文（distill 关键部分，避免上下文撑爆）；多个独立服务分别派 agent — 一个服务一个 agent
+
+### 反例
+
+- ✗ 凭训练记忆写第三方 API 调用，假定参数签名就这样
+- ✗ 把整段官方文档 paste 进主上下文
+- ✗ 先写代码再查文档
+- ✗ 单子 agent 同时调研 5 个不相关库（每个独立 prompt + 独立上下文）
+- ✗ 子 agent 返回后跳过 cross-verify 直接写代码 — AGENTS.md 第 4 步要求至少用一次 `WebFetch` 直接命中官方源核对一项关键事实
