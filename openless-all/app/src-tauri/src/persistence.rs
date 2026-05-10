@@ -571,7 +571,7 @@ fn load_credentials() -> CredsRoot {
     if let Some(cached) = credentials_cache().lock().as_ref().cloned() {
         return cached;
     }
-    let root = match load_keyring_credentials() {
+    match load_keyring_credentials() {
         Ok(Some(root)) => {
             // 不在这里调 remove_legacy_keyring_credentials() —— 它内部对每个
             // 旧 account 各做一次 keyring delete，每次 delete 在 macOS Keychain
@@ -580,34 +580,52 @@ fn load_credentials() -> CredsRoot {
             // 只会反复弹「OpenLess 想删除 X」十几次。文件 legacy（plaintext
             // JSON）不需要 ACL，可继续 best-effort 删除。
             remove_legacy_credentials_file_best_effort();
+            store_credentials_cache(&root);
             root
         }
-        Ok(None) => migrate_legacy_sources(),
+        Ok(None) => {
+            // 没有现成 chunked manifest —— 走 migrate（如果有 legacy 则写入并返回写后的 root）。
+            // migrate_legacy_sources 内部 save_credentials 已经会刷 cache，这里再补一次
+            // 是为了「无 legacy 也无 manifest」走默认 root 的路径也能进 cache。
+            let root = migrate_legacy_sources();
+            store_credentials_cache(&root);
+            root
+        }
         Err(e) => {
+            // **不缓存 keyring 错误路径下的 fallback**。Keychain 可能只是临时不可读
+            // （用户尚未在第一次弹窗里点同意 / DataProtection 错误 / login keychain
+            // 还没 unlock）；如果在这里把 legacy fallback 写进 cache，等用户授权后
+            // 我们就再也不会重读 keyring，整个进程生命周期里都拿 stale 数据。下次
+            // 调用让它再尝试一次 keyring。pr_agent feedback on PR #394。
             log::warn!("[vault] system credential read failed: {e}");
             load_legacy_sources_without_migration()
         }
-    };
-    store_credentials_cache(&root);
-    root
+    }
 }
 
 fn load_credentials_for_update() -> Result<CredsRoot> {
     if let Some(cached) = credentials_cache().lock().as_ref().cloned() {
         return Ok(cached);
     }
-    let root = match load_keyring_credentials() {
+    match load_keyring_credentials() {
         Ok(Some(root)) => {
             // 同 load_credentials：不再每次 update 都尝试 delete legacy keyring
             // entries，避免反复触发 macOS Keychain ACL 弹窗。
             remove_legacy_credentials_file_best_effort();
-            root
+            store_credentials_cache(&root);
+            Ok(root)
         }
-        Ok(None) => migrate_legacy_sources_for_update()?,
-        Err(e) => return Err(e),
-    };
-    store_credentials_cache(&root);
-    Ok(root)
+        Ok(None) => {
+            // migrate_legacy_sources_for_update 内部如果实际 migrate 会调
+            // save_credentials，cache 会被刷新；如果只返回 default root（没 legacy），
+            // 我们这里再显式 cache 一次防御性补一下。
+            let root = migrate_legacy_sources_for_update()?;
+            store_credentials_cache(&root);
+            Ok(root)
+        }
+        // 错误路径不缓存 —— 同 load_credentials 注释；让下次读重试 keyring。
+        Err(e) => Err(e),
+    }
 }
 
 fn save_credentials(root: &CredsRoot) -> Result<()> {
