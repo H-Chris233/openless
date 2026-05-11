@@ -119,6 +119,11 @@ struct Inner {
     hotkey: Mutex<Option<HotkeyMonitor>>,
     hotkey_status: Mutex<HotkeyStatus>,
     hotkey_trigger_held: AtomicBool,
+    /// 防抖时间戳：handle_pressed_edge 入口检查与本字段的距离，< 250ms 的边沿直接
+    /// 丢弃（误触双击 / 微动开关回弹 / 用户连点过快造成的空转写报错）。
+    /// 与 `hotkey_trigger_held` 互补 —— held 防 press-without-release，本字段防
+    /// press-release-press 三连过快。
+    last_hotkey_dispatch_at: Mutex<Option<std::time::Instant>>,
     shortcut_recording_active: AtomicBool,
     /// 自定义组合键监听器（global-hotkey crate）。当 `prefs.hotkey.trigger == Custom` 时
     /// 代替 modifier-only 的 hotkey monitor。`None` 表示不使用自定义组合键或还没成功安装。
@@ -199,6 +204,7 @@ impl Coordinator {
                     hotkey: Mutex::new(None),
                     hotkey_status: Mutex::new(HotkeyStatus::default()),
                     hotkey_trigger_held: AtomicBool::new(false),
+                    last_hotkey_dispatch_at: Mutex::new(None),
                     shortcut_recording_active: AtomicBool::new(false),
                     combo_hotkey: Mutex::new(None),
                     translation_hotkey: Mutex::new(None),
@@ -245,6 +251,7 @@ impl Coordinator {
                 hotkey: Mutex::new(None),
                 hotkey_status: Mutex::new(HotkeyStatus::default()),
                 hotkey_trigger_held: AtomicBool::new(false),
+                last_hotkey_dispatch_at: Mutex::new(None),
                 shortcut_recording_active: AtomicBool::new(false),
                 combo_hotkey: Mutex::new(None),
                 translation_hotkey: Mutex::new(None),
