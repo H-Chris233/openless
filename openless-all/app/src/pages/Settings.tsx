@@ -63,7 +63,7 @@ import i18n, {
   setLocalePreference,
   type SupportedLocale,
 } from '../i18n';
-import { Btn, Card, PageHeader, Pill } from './_atoms';
+import { Btn, Card, Collapsible, PageHeader, Pill } from './_atoms';
 import {
   deleteLocalAsrModel,
   getLocalAsrSettings,
@@ -191,7 +191,10 @@ export function Settings({ embedded = false, initialSection = 'recording' }: Set
             display: 'flex',
             flexDirection: 'column',
             gap: 12,
-            ...(embedded ? { minHeight: 0, overflow: 'auto', paddingRight: 4 } : {}),
+            // paddingBottom: 滚到底时让最后一张 Card / Collapsible 的 border + box-shadow
+            // 不被滚动容器底边吃掉。16 跟 var(--ol-shadow-sm) 的扩散距离 + Card chrome 留白
+            // 匹配，视觉上跟顶部 toolbar 的呼吸感对齐。
+            ...(embedded ? { minHeight: 0, overflow: 'auto', paddingRight: 4, paddingBottom: 16 } : {}),
           }}
         >
           {section === 'recording' && <RecordingSection />}
@@ -350,6 +353,7 @@ function RecordingSection() {
     : t('settings.recording.microphoneDefault');
 
   return (
+    <>
     <Card>
       <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>{t('settings.recording.title')}</div>
       <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', marginBottom: 6 }}>{t('settings.recording.desc')}</div>
@@ -472,6 +476,10 @@ function RecordingSection() {
       >
         <Toggle on={prefs.muteDuringRecording} onToggle={onMuteDuringRecordingChange} />
       </SettingRow>
+    </Card>
+
+    {/* ─── 插入与剪贴板（折叠） ──────────────────────────────────── */}
+    <Collapsible title={t('settings.recording.insertGroupTitle')}>
       <SettingRow
         label={t('settings.recording.restoreClipboardLabel')}
         desc={t('settings.recording.restoreClipboardDesc')}
@@ -505,6 +513,10 @@ function RecordingSection() {
           />
         </SettingRow>
       )}
+    </Collapsible>
+
+    {/* ─── 历史与上下文（折叠） ────────────────────────────────── */}
+    <Collapsible title={t('settings.recording.historyGroupTitle')}>
       <SettingRow
         label={t('settings.recording.historyRetentionLabel')}
         desc={t('settings.recording.historyRetentionDesc')}
@@ -531,6 +543,10 @@ function RecordingSection() {
           style={{ ...inputStyle, width: 80, textAlign: 'right' }}
         />
       </SettingRow>
+    </Collapsible>
+
+    {/* ─── 启动（折叠） ──────────────────────────────────────────── */}
+    <Collapsible title={t('settings.recording.startupGroupTitle')}>
       <AutostartRow />
       <SettingRow
         label={t('settings.recording.startMinimizedLabel')}
@@ -543,7 +559,8 @@ function RecordingSection() {
           {capability.statusHint}
         </div>
       )}
-    </Card>
+    </Collapsible>
+    </>
   );
 }
 
