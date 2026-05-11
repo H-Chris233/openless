@@ -898,7 +898,7 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
             CapsuleState::Error,
             0.0,
             elapsed,
-            Some("ASR returned empty transcript".to_string()),
+            Some("没有识别到语音".to_string()),
             None,
         );
         restore_prepared_windows_ime_session(inner, current_session_id);
