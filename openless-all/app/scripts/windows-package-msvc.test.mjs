@@ -65,6 +65,10 @@ for (const fragment of requiredFragments) {
 assert.match(script, /\[switch\]\$SkipRustInstall/, "script should support opting out of Rust installation");
 assert.match(script, /\[switch\]\$SkipNpmCi/, "script should support reusing existing node_modules");
 assert.match(script, /\[switch\]\$CleanArtifacts/, "script should support cleaning the output directory");
+assert.doesNotMatch(script, /WixTools314/, "MSVC packaging must not hard-code a single Tauri WiX tools version");
+assert.doesNotMatch(ciWorkflow, /WixTools314/, "CI MSI repair must not hard-code a single Tauri WiX tools version");
+assert.match(script, /-Filter "WixTools\*"/, "MSVC packaging should discover Tauri WiX tools by WixTools* glob");
+assert.match(ciWorkflow, /WixTools\*\\light\.exe/, "CI MSI repair should discover Tauri WiX tools by WixTools* glob");
 
 assert.match(imeBuild, /\[string\]\$OutputDirectory/, "IME build should support a package-specific output directory");
 assert.match(imeBuild, /\[string\]\$IntermediateDirectory/, "IME build should support a package-specific intermediate directory");
@@ -120,11 +124,10 @@ assert.match(wixFragment, /UnregisterOpenLessImeX86/, "MSI should unregister x86
 assert.match(nsisHook, /NSIS_HOOK_PREINSTALL/, "NSIS should copy IME DLLs before install completes");
 assert.match(nsisHook, /NSIS_HOOK_POSTINSTALL/, "NSIS should register IME DLLs after files are installed");
 assert.match(nsisHook, /NSIS_HOOK_PREUNINSTALL/, "NSIS should unregister IME DLLs before uninstall removes them");
-assert.match(nsisHook, /\$%OPENLESS_IME_DLL_X64%/, "NSIS should consume the CI-built x64 IME DLL");
-assert.match(nsisHook, /\$%OPENLESS_IME_DLL_X86%/, "NSIS should consume the CI-built x86 IME DLL");
-assert.match(nsisHook, /SetOutPath "\$INSTDIR\\windows-ime\\x64"/, "NSIS should install the x64 IME DLL beside the app");
-assert.match(nsisHook, /SetOutPath "\$INSTDIR\\windows-ime\\x86"/, "NSIS should install the x86 IME DLL beside the app");
-assert.match(nsisHook, /File \/oname=OpenLessIme\.dll/, "NSIS should embed OpenLessIme.dll in the installer");
+assert.match(nsisHook, /OPENLESS_IME_STAGE_AND_REPLACE "x64" "OPENLESS_IME_DLL_X64"/, "NSIS should consume the CI-built x64 IME DLL");
+assert.match(nsisHook, /OPENLESS_IME_STAGE_AND_REPLACE "x86" "OPENLESS_IME_DLL_X86"/, "NSIS should consume the CI-built x86 IME DLL");
+assert.match(nsisHook, /SetOutPath "\$INSTDIR\\windows-ime\\\$\{PLATFORM_DIR\}"/, "NSIS should install the IME DLL beside the app by platform");
+assert.match(nsisHook, /File \/oname=OpenLessIme\.dll\.new "\$%\$\{ENV_VAR\}%"/, "NSIS should embed OpenLessIme.dll in the installer");
 assert.match(nsisHook, /Sysnative\\regsvr32\.exe/, "NSIS should use 64-bit regsvr32 for the x64 IME");
 assert.match(nsisHook, /SysWOW64\\regsvr32\.exe/, "NSIS should use 32-bit regsvr32 for the x86 IME");
 assert.match(nsisHook, /System32\\regsvr32\.exe[\s\S]*windows-ime\\x86\\OpenLessIme\.dll/, "NSIS should use System32 regsvr32 for the x86 IME on 32-bit Windows");

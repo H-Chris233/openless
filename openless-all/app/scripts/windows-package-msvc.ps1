@@ -93,9 +93,16 @@ function Find-VsDevCmd {
 }
 
 function Find-WixTool($Name) {
-  $tauriWixTool = Join-Path $env:LOCALAPPDATA "tauri\WixTools314\$Name"
-  if (Test-Path $tauriWixTool) {
-    return (Resolve-Path $tauriWixTool).Path
+  $tauriWixRoot = Join-Path $env:LOCALAPPDATA "tauri"
+  if (Test-Path $tauriWixRoot) {
+    $tauriWixTools = Get-ChildItem -LiteralPath $tauriWixRoot -Directory -Filter "WixTools*" -ErrorAction SilentlyContinue |
+      Sort-Object @{ Expression = { if ($_.Name -match '^WixTools(\d+)$') { [int]$Matches[1] } else { -1 } }; Descending = $true }, @{ Expression = "Name"; Descending = $true }
+    foreach ($toolDir in $tauriWixTools) {
+      $tauriWixTool = Join-Path $toolDir.FullName $Name
+      if (Test-Path $tauriWixTool) {
+        return (Resolve-Path $tauriWixTool).Path
+      }
+    }
   }
 
   $cmd = Get-Command $Name -ErrorAction SilentlyContinue
@@ -103,7 +110,7 @@ function Find-WixTool($Name) {
     return $cmd.Source
   }
 
-  throw "$Name not found. Run the Tauri MSI build once so the WiX tools are installed."
+  throw "$Name not found. Run the Tauri MSI build once so a WiX tools directory is installed under $tauriWixRoot."
 }
 
 function Get-PackageVersion {

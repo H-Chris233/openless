@@ -300,8 +300,10 @@ jobs:
               throw "Required WiX object missing: $p — tauri build aborted before candle ran. Check the Build (Windows) step log."
             }
           }
-          $light = (Get-ChildItem "$env:LOCALAPPDATA\tauri\WixTools314\light.exe" -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
-          if (-not $light) { throw "WiX light.exe not found in $env:LOCALAPPDATA\tauri\WixTools314" }
+          $light = Get-ChildItem "$env:LOCALAPPDATA\tauri\WixTools*\light.exe" -ErrorAction SilentlyContinue |
+            Sort-Object FullName |
+            Select-Object -Last 1 -ExpandProperty FullName
+          if (-not $light) { throw "WiX light.exe not found under $env:LOCALAPPDATA\tauri\WixTools*" }
           $version = (Get-Content src-tauri\tauri.conf.json -Raw | ConvertFrom-Json).version
           $bundleDir = Join-Path $appRoot 'src-tauri\target\release\bundle\msi'
           New-Item -ItemType Directory -Force -Path $bundleDir | Out-Null
