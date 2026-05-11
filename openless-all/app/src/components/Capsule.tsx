@@ -56,26 +56,6 @@ function AudioBars({ level }: AudioBarsProps) {
   );
 }
 
-function ProcessingDots() {
-  return (
-    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4, width: 20 }}>
-      {[0, 1, 2].map(i => (
-        <span
-          key={i}
-          style={{
-            width: 4,
-            height: 4,
-            borderRadius: 999,
-            background: 'var(--ol-blue)',
-            opacity: 0.85,
-            animation: `cap-dot 0.9s var(--ol-motion-soft) ${i * 0.3}s infinite`,
-          }}
-        />
-      ))}
-    </div>
-  );
-}
-
 interface CenterTextProps {
   os: OS;
   kind: 'default' | 'processing' | 'error';
@@ -176,6 +156,20 @@ function Pill({ os, state, level, insertedChars, message, onCancel, onConfirm }:
   const processingLayout = getCapsuleMessageLayout(os, 'processing');
   const enabled = state === 'recording';
 
+  // "thinking" 扫光速度：进入 transcribing/polishing 的头 2 秒走快速（0.9s/cycle，提示
+  // 「流式刚开始」），之后切回慢速（2.4s）作为稳态。切回 idle / done / 其他 state 也复位
+  // 为 fast，下次进入时从头开始 burst。
+  const [shineFast, setShineFast] = useState(true);
+  useEffect(() => {
+    if (state === 'transcribing' || state === 'polishing') {
+      setShineFast(true);
+      const t = setTimeout(() => setShineFast(false), 2000);
+      return () => clearTimeout(t);
+    }
+    setShineFast(true);
+    return undefined;
+  }, [state]);
+
   let center: JSX.Element;
   switch (state) {
     case 'recording':
@@ -187,24 +181,43 @@ function Pill({ os, state, level, insertedChars, message, onCancel, onConfirm }:
         <div
           style={{
             display: 'inline-flex',
-            flexDirection: os === 'win' ? 'column' : 'row',
             alignItems: 'center',
-            gap: os === 'win' ? 4 : 6,
+            // 左右 4px 内边距 + 外层 gap 已经让 "thinking" ↔ ✗/✓ 视觉间距落在 ~4-5px。
+            padding: '0 4px',
             width: '100%',
             maxWidth: metrics.textWidth,
             minWidth: 0,
             justifyContent: 'center',
+            // state 进入动画 —— 用户从 recording 切到 polishing 时多一道淡入提示，
+            // 比纯切换 center 内容更容易被感知。
+            animation: 'cap-state-enter 220ms var(--ol-motion-soft) both',
           }}
         >
-          <ProcessingDots />
           <span
             style={{
-              fontSize: 10.5,
+              // 放大 11 → 14 让 thinking 在胶囊里更显眼。
+              fontSize: 14,
+              // 字重 500：用户反馈 700 太粗。500 是 medium 视觉重量，扫光更稳。
               fontWeight: 500,
+              letterSpacing: 0.5,
+              // 字号 14 + 字重 500 时小写 g/y/p 等下伸字符在 line-height: 1 下会被
+              // clip。给 line-height 一点冗余 + 上下 1px padding，descender 不再被切。
+              paddingBlock: 1,
+              // 扫光：渐变中段用更饱和的 ol-blue（不靠透明度），尾段保留 ink-3 作收尾，
+              // 整条 stripe 比之前更醒目（用户反馈"扫光不够明显"）。
               color: 'var(--ol-ink-2)',
+              backgroundImage:
+                'linear-gradient(100deg, var(--ol-ink-3) 0%, var(--ol-ink-3) 35%, var(--ol-blue) 50%, var(--ol-ink-3) 65%, var(--ol-ink-3) 100%)',
+              backgroundSize: '220% auto',
+              WebkitBackgroundClip: 'text',
+              backgroundClip: 'text',
+              WebkitTextFillColor: 'transparent',
+              // 进入流式的头 ~2 秒用 0.9s 高速扫光（视觉提示「刚开始」），之后 React 副作用
+              // 切到 2.4s 慢速。duration 变化时浏览器不重启动画，会平滑减速。
+              animation: `cap-shine ${shineFast ? '0.9s' : '2.4s'} linear infinite`,
               minWidth: 0,
               textAlign: 'center',
-              lineHeight: processingLayout.allowWrap ? 1.15 : 1,
+              lineHeight: processingLayout.allowWrap ? 1.3 : 1.25,
               whiteSpace: processingLayout.allowWrap ? 'normal' : 'nowrap',
               overflow: 'hidden',
               textOverflow: 'ellipsis',
@@ -242,7 +255,7 @@ function Pill({ os, state, level, insertedChars, message, onCancel, onConfirm }:
         display: 'inline-flex',
         alignItems: 'center',
         justifyContent: 'space-between',
-        gap: 8,
+        gap: 4,
         padding: '0 8px',
         width: metrics.width,
         height: metrics.height,
@@ -400,9 +413,13 @@ export function Capsule() {
           from { opacity: 0; transform: translateY(6px) scale(.96); }
           to   { opacity: 1; transform: translateY(0) scale(1); }
         }
-        @keyframes cap-dot {
-          0%, 100% { opacity: 0.3; transform: scale(0.8); }
-          50%      { opacity: 1.0; transform: scale(1.0); }
+        @keyframes cap-shine {
+          0%   { background-position: 200% center; }
+          100% { background-position: -200% center; }
+        }
+        @keyframes cap-state-enter {
+          from { opacity: 0; transform: translateY(2px); }
+          to   { opacity: 1; transform: translateY(0); }
         }
       `}</style>
     </div>

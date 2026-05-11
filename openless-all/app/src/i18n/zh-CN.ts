@@ -28,7 +28,7 @@ export const zhCN = {
     durationMinutes: '{{value}} 分钟',
   },
   capsule: {
-    thinking: '正在思考中',
+    thinking: 'thinking',
     cancelled: '已取消',
     error: '出错了',
     inserted: '已插入 {{count}}',

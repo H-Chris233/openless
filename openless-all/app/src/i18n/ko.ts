@@ -32,7 +32,7 @@ export const ko: typeof zhCN = {
     durationMinutes: '{{value}}분',
   },
   capsule: {
-    thinking: '생각 중',
+    thinking: 'thinking',
     cancelled: '취소됨',
     error: '오류 발생',
     inserted: '{{count}}자 입력됨',
