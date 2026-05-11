@@ -196,14 +196,26 @@ async fn run_streaming_polish(
                     return (text, Some(reason), false);
                 }
             }
-            // 把 final text 写回剪贴板（默认 on，可关）。一次性路径天然走剪贴板，开关
-            // 默认对齐一次性行为，让 Cmd+V 重复粘贴可用。
+            // 先确定 final_text —— typer 中途失败时屏幕只有 typed_text 这一段，
+            // history 记完整 polish 反而会让用户复盘困惑。让 history / clipboard /
+            // 后续逻辑统统用 final_text，三处保持一致。
+            // pr-agent #412 反馈 \"Clipboard Mismatch\"：之前先写 text 到剪贴板再
+            // 决定 typer 是否中途失败，导致 Cmd+V 粘出用户屏幕上没见过的内容。
+            let (final_text, polish_err) = match typer_failure {
+                Some(e) => (
+                    typed_text,
+                    Some(format!("typing partially failed: {e}")),
+                ),
+                None => (text, None),
+            };
+            // 把 final_text 写回剪贴板（默认 on，可关）。一次性路径天然走剪贴板，
+            // 开关默认对齐一次性行为，让 Cmd+V 重复粘贴可用。
             if inner.prefs.get().streaming_insert_save_clipboard {
                 match arboard::Clipboard::new() {
-                    Ok(mut cb) => match cb.set_text(text.clone()) {
+                    Ok(mut cb) => match cb.set_text(final_text.clone()) {
                         Ok(()) => log::info!(
                             "[coord] streaming_insert: final text written to clipboard ({} chars)",
-                            text.chars().count()
+                            final_text.chars().count()
                         ),
                         Err(e) => log::warn!(
                             "[coord] streaming_insert: clipboard set_text failed: {e}"
@@ -218,17 +230,7 @@ async fn run_streaming_polish(
                     "[coord] streaming_insert: clipboard save skipped (pref off)"
                 );
             }
-            // typer 中途失败但 polish 成功（typed_chars > 0 但 typer_failure 也存在）：
-            // 屏幕只有 typed_text 这一段，history 记完整 polish 反而会让用户复盘困惑。
-            // 让 history 跟屏幕一致——记 typed_text，polish_error 写明 typer 截断原因。
-            match typer_failure {
-                Some(e) => (
-                    typed_text,
-                    Some(format!("typing partially failed: {e}")),
-                    true,
-                ),
-                None => (text, None, true),
-            }
+            (final_text, polish_err, true)
         }
         super::StreamingPolishOutcome::UnsupportedFallback => {
             log::info!("[coord] streaming_insert: dispatch reported unsupported, fall back to one-shot");
