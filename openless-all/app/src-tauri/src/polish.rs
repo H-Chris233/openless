@@ -33,6 +33,10 @@ pub struct OpenAICompatibleConfig {
     pub extra_headers: HashMap<String, String>,
     pub temperature: f32,
     pub request_timeout_secs: u64,
+    /// true = 让支持的 OpenAI-compatible provider 启用推理 / 思考；
+    /// false = 按渠道级官方参数关闭或压低思考。不做模型白名单判断，
+    /// 具体模型兼容性交给 provider 处理。
+    pub thinking_enabled: bool,
 }
 
 impl OpenAICompatibleConfig {
@@ -52,7 +56,13 @@ impl OpenAICompatibleConfig {
             extra_headers: HashMap::new(),
             temperature: DEFAULT_TEMPERATURE,
             request_timeout_secs: DEFAULT_REQUEST_TIMEOUT_SECS,
+            thinking_enabled: false,
         }
+    }
+
+    pub fn with_thinking_enabled(mut self, enabled: bool) -> Self {
+        self.thinking_enabled = enabled;
+        self
     }
 }
 
@@ -315,12 +325,7 @@ impl OpenAICompatibleLLMProvider {
     ) -> Result<String, LLMError> {
         let url = chat_completions_url(&self.config.base_url);
         let messages = build_polish_history_messages(system_prompt, prior_turns, user_prompt);
-        let body = json!({
-            "model": self.config.model,
-            "stream": false,
-            "temperature": self.config.temperature,
-            "messages": messages,
-        });
+        let body = self.chat_body(false, messages);
 
         log::info!(
             "[llm] POST {} provider={} model={} prior_turns={}",
@@ -340,15 +345,13 @@ impl OpenAICompatibleLLMProvider {
         user_prompt: &str,
     ) -> Result<String, LLMError> {
         let url = chat_completions_url(&self.config.base_url);
-        let body = json!({
-            "model": self.config.model,
-            "stream": false,
-            "temperature": self.config.temperature,
-            "messages": [
-                { "role": "system", "content": system_prompt },
-                { "role": "user", "content": user_prompt },
+        let body = self.chat_body(
+            false,
+            vec![
+                json!({ "role": "system", "content": system_prompt }),
+                json!({ "role": "user", "content": user_prompt }),
             ],
-        });
+        );
 
         log::info!(
             "[llm] POST {} provider={} model={}",
@@ -358,6 +361,17 @@ impl OpenAICompatibleLLMProvider {
         );
 
         self.send_chat_request(&url, &body).await
+    }
+
+    fn chat_body(&self, stream: bool, messages: Vec<Value>) -> Value {
+        let mut body = json!({
+            "model": self.config.model,
+            "stream": stream,
+            "temperature": self.config.temperature,
+            "messages": messages,
+        });
+        apply_openai_compatible_thinking_control(&mut body, &self.config);
+        body
     }
 
     /// 共用的 HTTP send + body 解析。chat_completion / chat_completion_with_polish_history
@@ -430,12 +444,7 @@ impl OpenAICompatibleLLMProvider {
         }
 
         let url = chat_completions_url(&self.config.base_url);
-        let body = json!({
-            "model": self.config.model,
-            "stream": true,
-            "temperature": self.config.temperature,
-            "messages": msgs,
-        });
+        let body = self.chat_body(true, msgs);
 
         log::info!(
             "[llm] POST {} provider={} model={} chat_turns={} stream=true",
@@ -583,6 +592,11 @@ impl CodexOAuthConfig {
 
     pub fn with_auth_path(mut self, auth_path: PathBuf) -> Self {
         self.auth_path = Some(auth_path);
+        self
+    }
+
+    pub fn with_thinking_enabled(mut self, enabled: bool) -> Self {
+        self.reasoning_effort = Some(if enabled { "medium" } else { "low" }.to_string());
         self
     }
 }
@@ -1156,6 +1170,54 @@ fn unix_now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+fn apply_openai_compatible_thinking_control(body: &mut Value, config: &OpenAICompatibleConfig) {
+    match openai_compatible_thinking_control(&config.provider_id) {
+        Some(ThinkingControl::ReasoningEffort) => {
+            // OpenAI Chat Completions 的 reasoning_effort 是渠道级请求字段。
+            // 关闭时统一压到 low，避免引入模型白名单；不支持该字段的模型由 provider 自行处理。
+            body["reasoning_effort"] = json!(if config.thinking_enabled {
+                "medium"
+            } else {
+                "low"
+            });
+        }
+        Some(ThinkingControl::EnableThinking) => {
+            body["enable_thinking"] = json!(config.thinking_enabled);
+        }
+        Some(ThinkingControl::OpenRouterReasoning) => {
+            body["reasoning"] = json!({
+                "effort": if config.thinking_enabled { "medium" } else { "none" },
+                // OpenLess 的 QA/润色输出只展示最终答案；推理内容即使生成，也不应进 UI。
+                "exclude": true,
+            });
+        }
+        Some(ThinkingControl::DeepSeekThinking) => {
+            body["thinking"] = json!({
+                "type": if config.thinking_enabled { "enabled" } else { "disabled" },
+            });
+        }
+        None => {}
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThinkingControl {
+    ReasoningEffort,
+    EnableThinking,
+    OpenRouterReasoning,
+    DeepSeekThinking,
+}
+
+fn openai_compatible_thinking_control(provider_id: &str) -> Option<ThinkingControl> {
+    match provider_id.trim() {
+        "deepseek" => Some(ThinkingControl::DeepSeekThinking),
+        "openrouterFree" => Some(ThinkingControl::OpenRouterReasoning),
+        "alibabaCoding" => Some(ThinkingControl::EnableThinking),
+        "openai" | "codingPlanX" => Some(ThinkingControl::ReasoningEffort),
+        _ => None,
+    }
 }
 
 /// 把 working_languages + front_app 拼成 system prompt 头部前提：
@@ -2056,6 +2118,124 @@ mod tests {
     }
 
     #[test]
+    fn openai_chat_body_adds_reasoning_effort_for_openai_channel() {
+        let provider = OpenAICompatibleLLMProvider::new(
+            OpenAICompatibleConfig::new(
+                "openai",
+                "OpenAI",
+                "https://api.openai.com/v1",
+                "k",
+                "any-model",
+            )
+            .with_thinking_enabled(true),
+        );
+
+        let body = provider.chat_body(false, vec![json!({ "role": "user", "content": "hi" })]);
+
+        assert_eq!(body["reasoning_effort"], "medium");
+    }
+
+    #[test]
+    fn openai_chat_body_lowers_reasoning_when_disabled_for_channel() {
+        let provider = OpenAICompatibleLLMProvider::new(OpenAICompatibleConfig::new(
+            "codingPlanX",
+            "Coding Plan X",
+            "https://api.codingplanx.ai/v1",
+            "k",
+            "any-model",
+        ));
+
+        let body = provider.chat_body(false, vec![json!({ "role": "user", "content": "hi" })]);
+
+        assert_eq!(body["reasoning_effort"], "low");
+    }
+
+    #[test]
+    fn openai_chat_body_adds_enable_thinking_for_alibaba_channel() {
+        let provider = OpenAICompatibleLLMProvider::new(
+            OpenAICompatibleConfig::new(
+                "alibabaCoding",
+                "Alibaba Coding",
+                "https://coding-intl.dashscope.aliyuncs.com/v1",
+                "k",
+                "any-model",
+            )
+            .with_thinking_enabled(true),
+        );
+
+        let body = provider.chat_body(false, vec![json!({ "role": "user", "content": "hi" })]);
+
+        assert_eq!(body["enable_thinking"], true);
+    }
+
+    #[test]
+    fn openai_chat_body_adds_openrouter_reasoning_control() {
+        let provider = OpenAICompatibleLLMProvider::new(OpenAICompatibleConfig::new(
+            "openrouterFree",
+            "OpenRouter",
+            "https://openrouter.ai/api/v1",
+            "k",
+            "openai/gpt-5-mini",
+        ));
+
+        let body = provider.chat_body(true, vec![json!({ "role": "user", "content": "hi" })]);
+
+        assert_eq!(body["reasoning"]["effort"], "none");
+        assert_eq!(body["reasoning"]["exclude"], true);
+    }
+
+    #[test]
+    fn openai_chat_body_adds_openrouter_reasoning_by_channel_not_model() {
+        let provider = OpenAICompatibleLLMProvider::new(OpenAICompatibleConfig::new(
+            "openrouterFree",
+            "OpenRouter",
+            "https://openrouter.ai/api/v1",
+            "k",
+            "qwen/qwen3-coder:free",
+        ));
+
+        let body = provider.chat_body(true, vec![json!({ "role": "user", "content": "hi" })]);
+
+        assert_eq!(body["reasoning"]["effort"], "none");
+        assert_eq!(body["reasoning"]["exclude"], true);
+    }
+
+    #[test]
+    fn openai_chat_body_adds_deepseek_thinking_toggle_by_channel() {
+        let provider = OpenAICompatibleLLMProvider::new(OpenAICompatibleConfig::new(
+            "deepseek",
+            "DeepSeek",
+            "https://api.deepseek.com/v1",
+            "k",
+            "any-model",
+        ));
+
+        let body = provider.chat_body(false, vec![json!({ "role": "user", "content": "hi" })]);
+
+        assert_eq!(body["thinking"]["type"], "disabled");
+    }
+
+    #[test]
+    fn openai_chat_body_omits_thinking_control_for_unknown_provider() {
+        let provider = OpenAICompatibleLLMProvider::new(
+            OpenAICompatibleConfig::new(
+                "custom",
+                "Custom",
+                "https://example.test/v1",
+                "k",
+                "custom-model",
+            )
+            .with_thinking_enabled(true),
+        );
+
+        let body = provider.chat_body(false, vec![json!({ "role": "user", "content": "hi" })]);
+
+        assert!(body.get("reasoning_effort").is_none());
+        assert!(body.get("enable_thinking").is_none());
+        assert!(body.get("reasoning").is_none());
+    }
+
+    #[test]
     fn structured_prompt_includes_dense_github_request_example() {
         let prompt = prompts::system_prompt(PolishMode::Structured);
 
@@ -2257,6 +2437,13 @@ mod tests {
         );
     }
 
+    #[test]
+    fn codex_oauth_config_lowers_reasoning_when_thinking_disabled() {
+        let config = CodexOAuthConfig::new("gpt-5.5").with_thinking_enabled(false);
+
+        assert_eq!(config.reasoning_effort.as_deref(), Some("low"));
+    }
+
     #[tokio::test]
     async fn codex_oauth_provider_streams_text_from_codex_responses() {
         let auth_path = write_codex_auth_fixture("acct-openless", unix_now_secs() + 3600);
@@ -2277,6 +2464,7 @@ mod tests {
             assert!(request_text.contains(r#""stream":true"#));
             assert!(request_text.contains(r#""role":"developer"#));
             assert!(request_text.contains(r#""type":"input_text"#));
+            assert!(request_text.contains(r#""reasoning":{"effort":"medium"}"#));
             assert!(!request_text.contains(r#""temperature":"#));
 
             let body = concat!(

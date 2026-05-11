@@ -773,6 +773,7 @@ impl Coordinator {
         let working_languages = prefs.working_languages;
         let chinese_script_preference = prefs.chinese_script_preference;
         let output_language_preference = prefs.output_language_preference;
+        let llm_thinking_enabled = prefs.llm_thinking_enabled;
         // repolish 是历史记录里手动重新润色，不再绑定原 session 的前台 app；
         // 当下用户调起的 app 才是相关上下文（如果可拿）。
         let front_app = capture_frontmost_app();
@@ -785,6 +786,7 @@ impl Coordinator {
             &working_languages,
             chinese_script_preference,
             output_language_preference,
+            llm_thinking_enabled,
             front_app.as_deref(),
             &[],
         )
@@ -2013,6 +2015,7 @@ async fn polish_or_passthrough(
     working_languages: &[String],
     chinese_script_preference: ChineseScriptPreference,
     output_language_preference: OutputLanguagePreference,
+    llm_thinking_enabled: bool,
     front_app: Option<&str>,
     prior_turns: &[(String, String)],
 ) -> (String, Option<String>) {
@@ -2026,6 +2029,7 @@ async fn polish_or_passthrough(
         working_languages,
         chinese_script_preference,
         output_language_preference,
+        llm_thinking_enabled,
         front_app,
         prior_turns,
     )
@@ -2047,16 +2051,19 @@ async fn polish_text(
     working_languages: &[String],
     chinese_script_preference: ChineseScriptPreference,
     output_language_preference: OutputLanguagePreference,
+    llm_thinking_enabled: bool,
     front_app: Option<&str>,
     prior_turns: &[(String, String)],
 ) -> anyhow::Result<String> {
     // 谷歌 Gemini 分支：所有 LLM provider 共用 ark.* 凭据槽，唯独 Gemini 走原生
-    // generateContent / 自带 thinking-off 控制，不走 OpenAI 兼容协议；按 active
-    // provider id 把请求路由到 GeminiProvider 即可，其余 provider（ark/deepseek/
-    // openai/...）保持原 OpenAICompatibleLLMProvider 路径不动。
-    if CredentialsVault::get_active_llm() == "gemini" {
+    // generateContent / 自带 thinkingConfig 控制；其余 provider 走 OpenAI
+    // 兼容协议，并在该路径里按 provider/channel 下发对应的思考开关。
+    let active_llm = CredentialsVault::get_active_llm();
+    if active_llm == "gemini" {
         let (api_key, model, base_url) = read_gemini_credentials()?;
-        let provider = GeminiProvider::new(GeminiConfig::new(api_key, model, base_url));
+        let provider = GeminiProvider::new(
+            GeminiConfig::new(api_key, model, base_url).with_thinking_enabled(llm_thinking_enabled),
+        );
         return Ok(provider
             .polish(
                 raw,
@@ -2071,7 +2078,7 @@ async fn polish_text(
             .await?);
     }
 
-    let provider = build_active_llm_provider()?;
+    let provider = build_active_llm_provider(llm_thinking_enabled)?;
     Ok(provider
         .polish(
             raw,
@@ -2093,6 +2100,7 @@ async fn translate_or_passthrough(
     working_languages: &[String],
     chinese_script_preference: ChineseScriptPreference,
     output_language_preference: OutputLanguagePreference,
+    llm_thinking_enabled: bool,
     front_app: Option<&str>,
 ) -> (String, Option<String>) {
     match translate_text(
@@ -2101,6 +2109,7 @@ async fn translate_or_passthrough(
         working_languages,
         chinese_script_preference,
         output_language_preference,
+        llm_thinking_enabled,
         front_app,
     )
     .await
@@ -2120,12 +2129,16 @@ async fn translate_text(
     working_languages: &[String],
     chinese_script_preference: ChineseScriptPreference,
     output_language_preference: OutputLanguagePreference,
+    llm_thinking_enabled: bool,
     front_app: Option<&str>,
 ) -> anyhow::Result<String> {
-    // 见 polish_text 顶部注释——同样的 Gemini 路由逻辑。
-    if CredentialsVault::get_active_llm() == "gemini" {
+    // 见 polish_text 顶部注释——同样的 Gemini / OpenAI-compatible 路由逻辑。
+    let active_llm = CredentialsVault::get_active_llm();
+    if active_llm == "gemini" {
         let (api_key, model, base_url) = read_gemini_credentials()?;
-        let provider = GeminiProvider::new(GeminiConfig::new(api_key, model, base_url));
+        let provider = GeminiProvider::new(
+            GeminiConfig::new(api_key, model, base_url).with_thinking_enabled(llm_thinking_enabled),
+        );
         return Ok(provider
             .translate_to(
                 raw,
@@ -2138,7 +2151,7 @@ async fn translate_text(
             .await?);
     }
 
-    let provider = build_active_llm_provider()?;
+    let provider = build_active_llm_provider(llm_thinking_enabled)?;
     Ok(provider
         .translate_to(
             raw,
@@ -2500,6 +2513,7 @@ async fn end_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
     let working_languages = prefs.working_languages.clone();
     let chinese_script_preference = prefs.chinese_script_preference;
     let output_language_preference = prefs.output_language_preference;
+    let llm_thinking_enabled = prefs.llm_thinking_enabled;
     let (messages_for_llm, front_app) = {
         let st = inner.qa_state.lock();
         (st.messages.clone(), st.front_app.clone())
@@ -2540,6 +2554,7 @@ async fn end_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
         &working_languages,
         chinese_script_preference,
         output_language_preference,
+        llm_thinking_enabled,
         front_app.as_deref(),
         on_delta,
         should_cancel,
@@ -2691,6 +2706,7 @@ async fn answer_chat_dispatch<F, C>(
     working_languages: &[String],
     chinese_script_preference: ChineseScriptPreference,
     output_language_preference: OutputLanguagePreference,
+    llm_thinking_enabled: bool,
     front_app: Option<&str>,
     on_delta: F,
     should_cancel: C,
@@ -2699,11 +2715,14 @@ where
     F: Fn(&str) + Send + Sync,
     C: Fn() -> bool + Send + Sync,
 {
-    // 见 polish_text 顶部注释——同样的 Gemini 路由逻辑，QA 流式回答走 Gemini
-    // 原生 :streamGenerateContent?alt=sse。
-    if CredentialsVault::get_active_llm() == "gemini" {
+    // 见 polish_text 顶部注释——同样的 Gemini / OpenAI-compatible 路由逻辑，
+    // QA 流式回答走 Gemini 原生 :streamGenerateContent?alt=sse。
+    let active_llm = CredentialsVault::get_active_llm();
+    if active_llm == "gemini" {
         let (api_key, model, base_url) = read_gemini_credentials()?;
-        let provider = GeminiProvider::new(GeminiConfig::new(api_key, model, base_url));
+        let provider = GeminiProvider::new(
+            GeminiConfig::new(api_key, model, base_url).with_thinking_enabled(llm_thinking_enabled),
+        );
         return Ok(provider
             .answer_chat_streaming(
                 messages,
@@ -2717,7 +2736,7 @@ where
             .await?);
     }
 
-    let provider = build_active_llm_provider()?;
+    let provider = build_active_llm_provider(llm_thinking_enabled)?;
     Ok(provider
         .answer_chat_streaming(
             messages,
@@ -2755,13 +2774,14 @@ fn read_gemini_credentials() -> anyhow::Result<(String, String, String)> {
     Ok((api_key, model, base_url))
 }
 
-fn build_active_llm_provider() -> anyhow::Result<ActiveLLMProvider> {
+fn build_active_llm_provider(llm_thinking_enabled: bool) -> anyhow::Result<ActiveLLMProvider> {
     let active = CredentialsVault::get_active_llm();
     let model =
         CredentialsVault::get(CredentialAccount::ArkModelId)?.filter(|s| !s.trim().is_empty());
     if active == CODEX_OAUTH_PROVIDER_ID {
         let config =
-            CodexOAuthConfig::new(model.unwrap_or_else(|| CODEX_DEFAULT_MODEL.to_string()));
+            CodexOAuthConfig::new(model.unwrap_or_else(|| CODEX_DEFAULT_MODEL.to_string()))
+                .with_thinking_enabled(llm_thinking_enabled);
         return Ok(ActiveLLMProvider::Codex(CodexOAuthLLMProvider::new(config)));
     }
 
@@ -2772,7 +2792,8 @@ fn build_active_llm_provider() -> anyhow::Result<ActiveLLMProvider> {
         .trim_end_matches("/chat/completions")
         .trim_end_matches('/')
         .to_string();
-    let config = OpenAICompatibleConfig::new(active, "OpenLess LLM", base_url, api_key, model);
+    let config = OpenAICompatibleConfig::new(active, "OpenLess LLM", base_url, api_key, model)
+        .with_thinking_enabled(llm_thinking_enabled);
     Ok(ActiveLLMProvider::OpenAI(OpenAICompatibleLLMProvider::new(
         config,
     )))
