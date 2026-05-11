@@ -184,12 +184,14 @@ export function Collapsible({ title, desc, defaultOpen = false, embedded = false
       <button
         type="button"
         onClick={() => setOpen(o => !o)}
+        aria-expanded={open}
+        // 让屏幕阅读器朗读折叠状态；键盘 focus 保留浏览器默认 outline 而不是
+        // outline: 'none'，避免 Tab 切换时丢失视觉焦点指示（pr-agent #407 反馈）。
         style={{
           width: '100%',
           padding: '14px 18px',
           background: 'transparent',
           border: 0,
-          outline: 'none',
           textAlign: 'left',
           fontFamily: 'inherit',
           color: 'inherit',
