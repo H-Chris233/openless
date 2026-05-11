@@ -229,6 +229,12 @@ export function Collapsible({ title, desc, defaultOpen = false, embedded = false
           gridTemplateRows: open ? '1fr' : '0fr',
           transition: 'grid-template-rows 0.22s var(--ol-motion-soft)',
         }}
+        // inert 把内部交互元素从 tab 顺序 + a11y 树移除，避免折叠后键盘用户
+        // 仍能 tab 到不可见的输入框 / 按钮 / Toggle（pr-agent #407 反馈）。
+        // 受支持范围：Chromium 102+（Tauri WebView 远高于此）/ Safari 15.4+。
+        // React 18 类型没收 `inert`，用 spread 传 string-boolean 绕过编译器。
+        {...(!open ? { inert: '' } : {})}
+        aria-hidden={!open}
       >
         {/* minHeight: 0 必填：默认 grid item 不允许收缩到小于内容固有高度，
             没这条 trick 不生效，行高动画也跟着失败。 */}
