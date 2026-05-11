@@ -9,9 +9,33 @@ use super::qa::handle_qa_option_edge;
 use super::resources::*;
 use super::*;
 
+/// 同一个 hotkey 边沿之间的最小间隔。低于此阈值的连按整体作为误触丢弃 ——
+/// 避免微动开关回弹 / 用户手抖双击造成的空转写报错和 ASR session 抢资源。
+const HOTKEY_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(250);
+
 pub(super) async fn handle_pressed_edge(inner: &Arc<Inner>) {
     let was_held = inner.hotkey_trigger_held.swap(true, Ordering::SeqCst);
     if !was_held {
+        // 防抖：相邻 < HOTKEY_DEBOUNCE 的边沿直接丢弃，记到 log 方便排查。
+        // 与 `hotkey_trigger_held` 互补：held 防 press-without-release，本检查防
+        // press-release-press 三连过快。每个有效边沿都会更新时间戳。
+        let now = std::time::Instant::now();
+        let too_soon = {
+            let mut last = inner.last_hotkey_dispatch_at.lock();
+            let drop = matches!(*last, Some(t) if now.duration_since(t) < HOTKEY_DEBOUNCE);
+            if !drop {
+                *last = Some(now);
+            }
+            drop
+        };
+        if too_soon {
+            log::info!(
+                "[coord] hotkey pressed edge debounced (< {} ms since last dispatch)",
+                HOTKEY_DEBOUNCE.as_millis()
+            );
+            return;
+        }
+
         // 路由：QA 浮窗可见时，rightOption 边沿走 QA；否则走主听写。详见 issue #118 v2。
         // 例外：dictation session 已经在跑（Starting / Listening / Processing / Inserting），
         // 即使 QA 浮窗被打开了，这条边沿也必须先走 dictation。否则 begin_qa_session 会
