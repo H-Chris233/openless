@@ -1630,6 +1630,7 @@ function AdvancedSection() {
   const os = detectOS();
   const isMac = os === 'mac';
   const isWin = os === 'win';
+  const isLinux = os === 'linux';
   const platformSupported = isMac || isWin;
   const switchSeqRef = useRef(0);
   const [busy, setBusy] = useState(false);
@@ -1721,6 +1722,52 @@ function AdvancedSection() {
           </Card>
         </div>
       )}
+
+      {/* ─── 流式输入（全平台 opt-in） ───────────────────────────────────
+          润色 SSE 一边到达一边逐字模拟键盘事件落到光标。开启后用户感知到的处理
+          时延显著降低，但有几个限制（不满足时自动回落原一次性插入路径）：
+          - macOS：CGEvent Unicode + 临时切到 ABC 输入源（CJK / 日文 IME 拦截兜底）
+          - Windows：SendInput Unicode，绕过 TSF / IME，不需要切输入法
+          - Linux（实验）：enigo XTest；Wayland compositor 拒绝 libei 时失败回落
+          - 仅 OpenAI-compatible provider 实装；Gemini / Codex 透明降级
+          - 密码框 / 1Password / SSH prompt 等 Secure Input 框拒绝合成按键 → 失败回落
+          每个平台用各自的 hint key，互相不显示对方平台的细节。 */}
+      <Card>
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>
+          {t(isLinux
+            ? 'settings.advanced.streamingInsertTitleLinux'
+            : 'settings.advanced.streamingInsertTitle')}
+        </div>
+        <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', marginBottom: 10 }}>
+          {t('settings.advanced.streamingInsertDesc')}
+        </div>
+        <SettingRow
+          label={t('settings.advanced.streamingInsertLabel')}
+          desc={t(
+            isMac
+              ? 'settings.advanced.streamingInsertHintMac'
+              : isWin
+                ? 'settings.advanced.streamingInsertHintWindows'
+                : 'settings.advanced.streamingInsertHintLinux'
+          )}>
+          <Toggle
+            on={!!prefs?.streamingInsert}
+            onToggle={(next) => {
+              if (prefs) void updatePrefs({ ...prefs, streamingInsert: next });
+            }}
+          />
+        </SettingRow>
+        <SettingRow
+          label={t('settings.advanced.streamingInsertSaveClipboardLabel')}
+          desc={t('settings.advanced.streamingInsertSaveClipboardHint')}>
+          <Toggle
+            on={!!prefs?.streamingInsertSaveClipboard}
+            onToggle={(next) => {
+              if (prefs) void updatePrefs({ ...prefs, streamingInsertSaveClipboard: next });
+            }}
+          />
+        </SettingRow>
+      </Card>
 
       <Card>
         {/* 标题 + 右上角 inline 警告小字（替换原琥珀大警告条）。 */}

@@ -484,6 +484,19 @@ export const zhTW: typeof zhCN = {
       },
     },
     advanced: {
+      streamingInsertTitle: '流式輸入',
+      streamingInsertTitleLinux: '流式輸入（實驗）',
+      streamingInsertDesc:
+        '開啟後潤色 SSE 邊到達邊逐字落到游標，感知延遲顯著降低。需要滿足：OpenAI 相容 LLM 提供商（Ark / DeepSeek 等）+ 非 Raw / 翻譯模式 + 焦點不是密碼框等 Secure Input 控件。任何條件不滿足都自動回落到原一次性貼上路徑，行為與關閉等價。',
+      streamingInsertLabel: '啟用流式輸入',
+      streamingInsertHintMac:
+        '流式期間臨時切換到 ABC 輸入源（規避中文 / 日文 IME 攔截 Unicode 字元），session 結束自動切回。',
+      streamingInsertHintWindows:
+        'SendInput Unicode 直接發字元事件，繞過 TSF / IME，不切輸入法。',
+      streamingInsertHintLinux:
+        '實驗性：enigo + XTest 模擬鍵盤事件，X11 穩定；Wayland 看 compositor 是否允許 libei，失敗自動回落到一次性插入。',
+      streamingInsertSaveClipboardLabel: '同步寫入剪貼簿',
+      streamingInsertSaveClipboardHint: '流式輸入成功後把這次的最終文字寫到系統剪貼簿，方便 Cmd+V 再次貼上。關閉後流式過程完全不動剪貼簿。',
       localAsrTitle: '本地 ASR 模型（實驗性）',
       localAsrDesc: '把轉寫從雲端切到本機推理。僅推薦離線 / 隱私敏感場景。',
       localAsrWarningShort: '本地推理較慢，配置不足時可能吞字。',

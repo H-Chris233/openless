@@ -13,6 +13,237 @@ use super::*;
 /// 避免微动开关回弹 / 用户手抖双击造成的空转写报错和 ASR session 抢资源。
 const HOTKEY_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// 跑流式润色路径（opt-in，跨平台）。
+///
+/// 平台差异：
+/// - **macOS**：`switch_to_ascii` 切到 ABC 输入源（规避 CJK / 日文 IME 拦截 Unicode 事件），
+///   session 结束 `restore_input_source` 切回。`type_unicode_chunk` 走 CGEvent FFI。
+/// - **Windows**：`switch_to_ascii` 是 no-op（SendInput Unicode 绕过 TSF）；
+///   `type_unicode_chunk` 走 `SendInput(KEYEVENTF_UNICODE)`。
+/// - **Linux（实验）**：`switch_to_ascii` 是 no-op；`type_unicode_chunk` 走 enigo
+///   `Keyboard::text`。X11 / XTest 稳定，Wayland 看 compositor 给不给 libei 权限。
+///
+/// 通用流程：
+/// 1. `switch_to_ascii`（macOS）/ no-op（其他）；失败则降级回一次性 `polish_or_passthrough`。
+/// 2. 起一个 `spawn_blocking` 后台任务，从 mpsc 收 SSE delta，逐 delta 调
+///    `type_unicode_chunk` 模拟键盘事件落到光标处。串行有序，无竞态。
+/// 3. 调 `polish_or_passthrough_streaming`，`on_delta` 把 chunk 塞进 mpsc。
+/// 4. 流结束 / 失败 / 取消 → drop mpsc 发送端 → typer 任务 drain 完剩余 delta 退出 →
+///    `restore_input_source` 恢复用户原输入源（macOS 才有意义，其他平台 no-op）。
+/// 5. 返回 `(polished, polish_error, already_streamed)`：
+///    - 成功：`(text, None, true)` — 字符已经在屏幕上，调用方应当跳过 `inserter.insert`
+///    - 失败：`(raw_text, Some(reason), false)` — 流式过程出错，调用方走 raw 一次性兜底
+///    - 不支持：`run_streaming_polish` 内部直接调 `polish_or_passthrough` 透明降级
+///
+/// **不在流式路径里做**：`apply_chinese_script_preference` / `apply_correction_rules`
+/// 这两步在 v1 跳过 —— 字符已经一边流一边落出去了，不好回退。需要的话只能关 toggle 走
+/// 一次性路径。
+#[allow(clippy::too_many_arguments)]
+async fn run_streaming_polish(
+    inner: &Arc<Inner>,
+    raw: &RawTranscript,
+    mode: PolishMode,
+    hotwords: &[String],
+    working_languages: &[String],
+    chinese_script_preference: crate::types::ChineseScriptPreference,
+    output_language_preference: crate::types::OutputLanguagePreference,
+    llm_thinking_enabled: bool,
+    front_app: Option<&str>,
+    prior_turns: &[(String, String)],
+) -> (String, Option<String>, bool) {
+    log::info!(
+        "[coord] streaming_insert path ENTER (raw_chars={})",
+        raw.text.chars().count()
+    );
+
+    let app = inner.app.lock().clone();
+    let Some(app) = app else {
+        log::warn!("[coord] streaming_insert: no AppHandle in Inner; fall back to one-shot");
+        let (p, e) = polish_or_passthrough(
+            raw,
+            mode,
+            hotwords,
+            working_languages,
+            chinese_script_preference,
+            output_language_preference,
+            llm_thinking_enabled,
+            front_app,
+            prior_turns,
+        )
+        .await;
+        return (p, e, false);
+    };
+
+    // 1. 切到 ABC 输入源。失败则降级 —— 流式路径上 CJK IME 拦截不是可恢复错误。
+    log::info!("[coord] streaming_insert: switching input source to ABC");
+    let prev_ime = match crate::unicode_keystroke::switch_to_ascii(&app).await {
+        Ok(prev) => {
+            log::info!(
+                "[coord] streaming_insert: switched to ABC (had_previous={})",
+                prev.is_some()
+            );
+            prev
+        }
+        Err(e) => {
+            log::warn!(
+                "[coord] streaming_insert: switch_to_ascii failed: {e}; fall back to one-shot"
+            );
+            let (p, err) = polish_or_passthrough(
+                raw,
+                mode,
+                hotwords,
+                working_languages,
+                chinese_script_preference,
+                output_language_preference,
+                llm_thinking_enabled,
+                front_app,
+                prior_turns,
+            )
+            .await;
+            return (p, err, false);
+        }
+    };
+
+    // 2. 起 typer 后台任务：从 mpsc 收 delta，串行调 type_unicode_chunk。
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let typer_handle = tokio::task::spawn_blocking(move || {
+        let mut rx = rx;
+        let mut total_chars: usize = 0;
+        let mut first_failure: Option<String> = None;
+        while let Some(delta) = rx.blocking_recv() {
+            if first_failure.is_some() {
+                // 一旦类型链路出错（如 Secure Input 启用），后续 delta 全部丢弃，但仍
+                // 把 mpsc drain 完，避免发送端阻塞。
+                continue;
+            }
+            match crate::unicode_keystroke::type_unicode_chunk(&delta) {
+                Ok(()) => {
+                    total_chars += delta.chars().count();
+                }
+                Err(e) => {
+                    log::error!(
+                        "[coord] streaming_insert: type_unicode_chunk failed at typed={total_chars} chars: {e}; \
+                         dropping remaining deltas"
+                    );
+                    first_failure = Some(e.to_string());
+                }
+            }
+        }
+        (total_chars, first_failure)
+    });
+
+    // 3. 调流式润色，on_delta 塞 mpsc；should_cancel 检查 dictation 取消旗。
+    let inner_for_cancel = Arc::clone(inner);
+    let should_cancel = move || inner_for_cancel.state.lock().cancelled;
+    let outcome = super::polish_or_passthrough_streaming(
+        raw,
+        mode,
+        hotwords,
+        working_languages,
+        chinese_script_preference,
+        output_language_preference,
+        llm_thinking_enabled,
+        front_app,
+        prior_turns,
+        move |delta: &str| {
+            let _ = tx.send(delta.to_string());
+        },
+        should_cancel,
+    )
+    .await;
+    // tx 已经被 move 进 on_delta 闭包；闭包随 polish_or_passthrough_streaming 返回
+    // 而 drop，typer 那侧 blocking_recv 拿到 None 自然退出。
+
+    // 4. 等 typer 把缓冲 drain 完，拿到实际打字 chars 数 + 第一条失败原因。
+    let (typed_chars, typer_failure) = typer_handle.await.unwrap_or_else(|e| {
+        log::error!("[coord] streaming_insert: typer task join failed: {e}");
+        (0, Some(format!("typer join: {e}")))
+    });
+    log::info!("[coord] streaming_insert: typer drained, typed {typed_chars} chars");
+
+    // 5. 无论流是否成功，都恢复用户原输入源。
+    log::info!("[coord] streaming_insert: restoring input source");
+    if let Err(e) = crate::unicode_keystroke::restore_input_source(&app, prev_ime).await {
+        log::warn!("[coord] streaming_insert: restore_input_source failed: {e}");
+    } else {
+        log::info!("[coord] streaming_insert: input source restored");
+    }
+
+    // 6. 把 outcome 翻译成 (polished, polish_error, already_streamed)。
+    match outcome {
+        super::StreamingPolishOutcome::Streamed(text) => {
+            log::info!(
+                "[coord] streaming_insert SUCCESS: polished_chars={} typed_chars={} typer_err={:?}",
+                text.chars().count(),
+                typed_chars,
+                typer_failure
+            );
+            // 把 final text 写回剪贴板（默认 on，可关）。一次性路径天然走剪贴板，开关
+            // 默认对齐一次性行为，让 Cmd+V 重复粘贴可用。
+            if inner.prefs.get().streaming_insert_save_clipboard {
+                match arboard::Clipboard::new() {
+                    Ok(mut cb) => match cb.set_text(text.clone()) {
+                        Ok(()) => log::info!(
+                            "[coord] streaming_insert: final text written to clipboard ({} chars)",
+                            text.chars().count()
+                        ),
+                        Err(e) => log::warn!(
+                            "[coord] streaming_insert: clipboard set_text failed: {e}"
+                        ),
+                    },
+                    Err(e) => log::warn!(
+                        "[coord] streaming_insert: clipboard handle init failed: {e}"
+                    ),
+                }
+            } else {
+                log::info!(
+                    "[coord] streaming_insert: clipboard save skipped (pref off)"
+                );
+            }
+            // typer 失败但 polish 成功的边界 case（Secure Input 中途启用之类）：
+            // 已经流出去的字保留在屏幕上，typer_failure 进 polish_error 让用户知情。
+            let err = typer_failure.map(|e| format!("typing partially failed: {e}"));
+            (text, err, true)
+        }
+        super::StreamingPolishOutcome::UnsupportedFallback => {
+            log::info!("[coord] streaming_insert: dispatch reported unsupported, fall back to one-shot");
+            let (p, e) = polish_or_passthrough(
+                raw,
+                mode,
+                hotwords,
+                working_languages,
+                chinese_script_preference,
+                output_language_preference,
+                llm_thinking_enabled,
+                front_app,
+                prior_turns,
+            )
+            .await;
+            (p, e, false)
+        }
+        super::StreamingPolishOutcome::Failed(reason) => {
+            log::warn!(
+                "[coord] streaming_insert FAILED: {reason}; typed {typed_chars} chars before failure; falling back to raw + one-shot for any remaining content"
+            );
+            // 流式失败但已经流了一部分 chars：用户屏幕上有半截 polish，再走一次性塞
+            // raw.text 会重复内容。最不糟的选择：保留已流的半截作为最终输出（不再二次
+            // 插入），记 polish_error。如果一字都没流（typed_chars == 0），按现有失败
+            // 语义回到 raw 一次性兜底。
+            if typed_chars > 0 {
+                (
+                    raw.text.clone(),
+                    Some(format!(
+                        "streaming polish failed mid-stream after {typed_chars} chars: {reason}"
+                    )),
+                    true,
+                )
+            } else {
+                (raw.text.clone(), Some(reason), false)
+            }
+        }
+    }
+}
+
 pub(super) async fn handle_pressed_edge(inner: &Arc<Inner>) {
     let was_held = inner.hotkey_trigger_held.swap(true, Ordering::SeqCst);
     if !was_held {
@@ -990,14 +1221,22 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
     } else {
         Vec::new()
     };
-    let (polished, polish_error) = if translation_active {
+    // 流式插入 opt-in 路径：开关打开 + 非翻译 + 非 Raw 模式 → 进入流式分支。
+    // 任何不满足都走原一次性 polish_or_passthrough 路径，行为跟历史完全一致。
+    let streaming_eligible =
+        prefs.streaming_insert && !translation_active && mode != PolishMode::Raw;
+    log::info!(
+        "[coord] polish dispatch: translation={translation_active} mode={mode:?} streaming_eligible={streaming_eligible}"
+    );
+
+    let (polished, polish_error, already_streamed) = if translation_active {
         log::info!(
             "[coord] translation mode → target=\u{300C}{}\u{300D} working={:?} front_app={:?}",
             translation_target,
             working_languages,
             front_app
         );
-        translate_or_passthrough(
+        let (p, e) = translate_or_passthrough(
             &raw,
             &translation_target,
             &working_languages,
@@ -1006,9 +1245,11 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
             llm_thinking_enabled,
             front_app.as_deref(),
         )
-        .await
-    } else {
-        polish_or_passthrough(
+        .await;
+        (p, e, false)
+    } else if streaming_eligible {
+        run_streaming_polish(
+            inner,
             &raw,
             mode,
             &hotword_strs,
@@ -1020,6 +1261,20 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
             &prior_turns,
         )
         .await
+    } else {
+        let (p, e) = polish_or_passthrough(
+            &raw,
+            mode,
+            &hotword_strs,
+            &working_languages,
+            chinese_script_preference,
+            output_language_preference,
+            llm_thinking_enabled,
+            front_app.as_deref(),
+            &prior_turns,
+        )
+        .await;
+        (p, e, false)
     };
 
     // 仅在“ASR 直出文本”场景做强制简繁收敛，避免误伤成功的翻译/常规 LLM 输出：
@@ -1053,9 +1308,13 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
     // 在同一 lock 内决定「丢弃」还是「进入 Inserting」。一旦设到 Inserting，
     // cancel_session 就拒绝介入（Cmd+V 已发出，撤销不掉）。这是 audit HIGH #2 的修复，
     // 之前 check 与 inserter.insert 之间有窗口期。
+    //
+    // 流式路径例外：`already_streamed = true` 表示字符已经一边流一边落到光标了，
+    // 撤销不掉。即使 cancel 旗在中途被立起来，也只能尊重「已经发生」的事实，进入
+    // Inserting 状态完成 history / vocab 等收尾工作。
     let proceed_to_insert = {
         let mut state = inner.state.lock();
-        if state.cancelled {
+        if state.cancelled && !already_streamed {
             state.phase = SessionPhase::Idle;
             false
         } else {
@@ -1078,7 +1337,15 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
     let restore_clipboard = prefs.restore_clipboard_after_paste;
     let allow_non_tsf_insertion_fallback = prefs.allow_non_tsf_insertion_fallback;
     let paste_shortcut = prefs.paste_shortcut;
-    let status = if focus_ready_for_paste {
+    // 流式路径下，字符已经通过 Unicode keystroke 落到光标处，跳过 inserter.insert。
+    let status = if already_streamed {
+        log::info!(
+            "[coord] insertion skipped: {} chars already streamed via unicode_keystroke (polish_error={:?})",
+            polished.chars().count(),
+            polish_error
+        );
+        InsertStatus::Inserted
+    } else if focus_ready_for_paste {
         #[cfg(target_os = "windows")]
         {
             let ime_target = capture_ime_submit_target();

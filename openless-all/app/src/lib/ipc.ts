@@ -82,6 +82,8 @@ const mockSettings: UserPreferences = {
   polishContextWindowMinutes: 5,
   startMinimized: false,
   updateChannel: 'stable',
+  streamingInsert: false,
+  streamingInsertSaveClipboard: true,
 };
 
 const mockHotkeyCapability: HotkeyCapability = {
