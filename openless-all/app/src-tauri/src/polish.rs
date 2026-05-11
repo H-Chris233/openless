@@ -88,6 +88,53 @@ pub enum ActiveLLMProvider {
 }
 
 impl ActiveLLMProvider {
+    /// v1 流式润色只在 OpenAI-compatible 走通；Codex 走 Responses API，shape 与
+    /// chat completions SSE 不同，留给 v2。Gemini 在 coordinator.rs 路径上自己分流，
+    /// 不进 ActiveLLMProvider 枚举。
+    pub fn supports_streaming_polish(&self) -> bool {
+        matches!(self, Self::OpenAI(_))
+    }
+
+    pub async fn polish_streaming<F, C>(
+        &self,
+        raw_text: &str,
+        mode: PolishMode,
+        hotwords: &[String],
+        working_languages: &[String],
+        chinese_script_preference: ChineseScriptPreference,
+        output_language_preference: OutputLanguagePreference,
+        front_app: Option<&str>,
+        prior_turns: &[(String, String)],
+        on_delta: F,
+        should_cancel: C,
+    ) -> Result<String, LLMError>
+    where
+        F: Fn(&str) + Send + Sync,
+        C: Fn() -> bool + Send + Sync,
+    {
+        match self {
+            Self::OpenAI(provider) => {
+                provider
+                    .polish_streaming(
+                        raw_text,
+                        mode,
+                        hotwords,
+                        working_languages,
+                        chinese_script_preference,
+                        output_language_preference,
+                        front_app,
+                        prior_turns,
+                        on_delta,
+                        should_cancel,
+                    )
+                    .await
+            }
+            Self::Codex(_) => Err(LLMError::Network(
+                "streaming polish not implemented for codex provider (v1)".into(),
+            )),
+        }
+    }
+
     pub async fn polish(
         &self,
         raw_text: &str,
@@ -260,6 +307,49 @@ impl OpenAICompatibleLLMProvider {
             self.chat_completion_with_polish_history(&system_prompt, prior_turns, &user_prompt)
                 .await
         }
+    }
+
+    /// 润色路径的**流式**变体。Prompts 与 `polish()` 完全同源（共用 `compose_polish_prompts`
+    /// + `build_polish_history_messages`），只是 body 开 `stream: true`，SSE 一帧一帧
+    /// 喂给 `on_delta`。最终返回拼好的完整字符串供调用方写 history / 记词条命中。
+    /// `should_cancel` 让上层在用户取消时立即 break SSE 读循环，避免烧 LLM quota。
+    pub async fn polish_streaming<F, C>(
+        &self,
+        raw_text: &str,
+        mode: PolishMode,
+        hotwords: &[String],
+        working_languages: &[String],
+        chinese_script_preference: ChineseScriptPreference,
+        output_language_preference: OutputLanguagePreference,
+        front_app: Option<&str>,
+        prior_turns: &[(String, String)],
+        on_delta: F,
+        should_cancel: C,
+    ) -> Result<String, LLMError>
+    where
+        F: Fn(&str) + Send + Sync,
+        C: Fn() -> bool + Send + Sync,
+    {
+        let (system_prompt, user_prompt) = compose_polish_prompts(
+            raw_text,
+            mode,
+            hotwords,
+            working_languages,
+            chinese_script_preference,
+            output_language_preference,
+            front_app,
+            !prior_turns.is_empty(),
+        );
+        let messages = build_polish_history_messages(&system_prompt, prior_turns, &user_prompt);
+        log::info!(
+            "[llm] polish_streaming provider={} model={} prior_turns={} raw_chars={}",
+            self.config.provider_id,
+            self.config.model,
+            prior_turns.len(),
+            raw_text.chars().count()
+        );
+        self.chat_completion_messages_streaming(messages, on_delta, should_cancel)
+            .await
     }
 
     /// 多轮划词追问，**流式**返回。`messages` 包含历史对话（user/assistant 交替），
@@ -557,6 +647,133 @@ impl OpenAICompatibleLLMProvider {
             return Err(LLMError::InvalidResponse {
                 status: 200,
                 body: "empty stream".to_string(),
+            });
+        }
+        Ok(full_text)
+    }
+
+    /// 把已经构造好的 `messages` 列表（包含 system + 历史 + 当前 user）作为
+    /// `stream: true` 的 body 发出去，SSE 一帧一帧解析。供 `polish_streaming` 复用，
+    /// 跟 `chat_completion_history_streaming` 的 SSE 解析逻辑同款 —— 后者多了一步从
+    /// `QaChatMessage[]` 装配 messages 的工作。
+    async fn chat_completion_messages_streaming<F, C>(
+        &self,
+        messages: Vec<Value>,
+        on_delta: F,
+        should_cancel: C,
+    ) -> Result<String, LLMError>
+    where
+        F: Fn(&str) + Send + Sync,
+        C: Fn() -> bool + Send + Sync,
+    {
+        let url = chat_completions_url(&self.config.base_url);
+        let body = self.chat_body(true, messages);
+
+        let mut request = self
+            .client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("Accept", "text/event-stream");
+        if !self.config.api_key.trim().is_empty() {
+            request = request.header("Authorization", format!("Bearer {}", self.config.api_key));
+        }
+        for (k, v) in &self.config.extra_headers {
+            request = request.header(k.as_str(), v.as_str());
+        }
+        let request = request.json(&body);
+
+        let response = match request.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                if e.is_timeout() {
+                    return Err(LLMError::Timeout);
+                }
+                return Err(LLMError::Network(e.to_string()));
+            }
+        };
+
+        let status = response.status();
+        if !status.is_success() {
+            let body_text = response
+                .text()
+                .await
+                .map_err(|e| LLMError::Network(e.to_string()))?;
+            let preview_end = BODY_PREVIEW_LIMIT.min(body_text.len());
+            let preview = safe_str_slice(&body_text, preview_end);
+            log::error!("[llm] streaming HTTP {} body={}", status.as_u16(), preview);
+            return Err(LLMError::InvalidResponse {
+                status: status.as_u16(),
+                body: preview.to_string(),
+            });
+        }
+
+        let mut response = response;
+        let mut buffer = String::new();
+        let mut full_text = String::new();
+        let mut delta_count: u64 = 0;
+        loop {
+            if should_cancel() {
+                log::info!(
+                    "[llm] polish stream cancelled by caller after {} deltas ({} chars); breaking SSE loop",
+                    delta_count,
+                    full_text.chars().count()
+                );
+                break;
+            }
+            let chunk_opt = response
+                .chunk()
+                .await
+                .map_err(|e| LLMError::Network(e.to_string()))?;
+            let Some(chunk) = chunk_opt else { break };
+            let s = std::str::from_utf8(&chunk)
+                .map_err(|e| LLMError::Network(format!("non-utf8 SSE chunk: {e}")))?;
+            buffer.push_str(s);
+
+            while let Some(idx) = buffer.find("\n\n") {
+                let event = buffer[..idx].to_string();
+                buffer.drain(..idx + 2);
+                for line in event.lines() {
+                    let Some(payload) = line
+                        .strip_prefix("data: ")
+                        .or_else(|| line.strip_prefix("data:"))
+                    else {
+                        continue;
+                    };
+                    let payload = payload.trim();
+                    if payload.is_empty() || payload == "[DONE]" {
+                        continue;
+                    }
+                    let v: Value = match serde_json::from_str(payload) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            log::warn!(
+                                "[llm] polish SSE parse skip: {e}; payload preview: {}",
+                                safe_str_slice(payload, 80)
+                            );
+                            continue;
+                        }
+                    };
+                    if let Some(delta) = v["choices"][0]["delta"]["content"].as_str() {
+                        if !delta.is_empty() {
+                            full_text.push_str(delta);
+                            delta_count += 1;
+                            on_delta(delta);
+                        }
+                    }
+                }
+            }
+        }
+
+        log::info!(
+            "[llm] polish stream done; total deltas={} chars={}",
+            delta_count,
+            full_text.chars().count()
+        );
+
+        if full_text.is_empty() {
+            return Err(LLMError::InvalidResponse {
+                status: 200,
+                body: "empty polish stream".to_string(),
             });
         }
         Ok(full_text)

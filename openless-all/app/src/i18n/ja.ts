@@ -486,6 +486,19 @@ export const ja: typeof zhCN = {
       },
     },
     advanced: {
+      streamingInsertTitle: 'ストリーミング入力',
+      streamingInsertTitleLinux: 'ストリーミング入力（実験的）',
+      streamingInsertDesc:
+        'ON にすると、整形済みテキストが SSE の到着に合わせて 1 文字ずつカーソル位置に挿入され、体感遅延が大幅に短くなります。条件：OpenAI 互換 LLM プロバイダ（Ark / DeepSeek 等）+ Raw / 翻訳モード以外 + フォーカスがパスワード欄など Secure Input 制御でないこと。いずれかの条件を満たさない場合は自動で従来の一括貼り付けに戻り、OFF と同じ挙動になります。',
+      streamingInsertLabel: 'ストリーミング入力を有効化',
+      streamingInsertHintMac:
+        'ストリーミング中は一時的に ABC 入力ソースへ切り替わります（中国語 / 日本語 IME による Unicode 文字傍受を回避）。セッション終了時に自動で元に戻ります。',
+      streamingInsertHintWindows:
+        'SendInput Unicode で文字イベントを直接送信し、TSF / IME を迂回します。入力ソースの切り替えは不要です。',
+      streamingInsertHintLinux:
+        '実験的：enigo + XTest によるキーボードイベント合成。X11 では安定動作、Wayland では compositor が libei を許可するかどうかに依存し、失敗時は自動的に一括挿入にフォールバックします。',
+      streamingInsertSaveClipboardLabel: 'クリップボードにも保存',
+      streamingInsertSaveClipboardHint: 'ストリーミング入力成功後、最終テキストをシステムクリップボードに書き込んで Cmd+V で再貼り付けできるようにします。OFF にすると、ストリーミング処理はクリップボードに一切触れません。',
       localAsrTitle: 'ローカル ASR モデル（実験的）',
       localAsrDesc: '転写をクラウドから本機推論に切り替えます。オフライン／プライバシー重視向け。',
       localAsrWarningShort: 'ローカル推論は遅く、スペック不足では欠字の可能性があります。',
