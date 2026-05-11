@@ -30,7 +30,7 @@ export const en: typeof zhCN = {
     durationMinutes: '{{value}}m',
   },
   capsule: {
-    thinking: 'Thinking…',
+    thinking: 'thinking',
     cancelled: 'Cancelled',
     error: 'Something went wrong',
     inserted: 'Inserted {{count}}',

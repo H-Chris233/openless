@@ -30,7 +30,7 @@ export const zhTW: typeof zhCN = {
     durationMinutes: '{{value}} 分鐘',
   },
   capsule: {
-    thinking: '正在思考中',
+    thinking: 'thinking',
     cancelled: '已取消',
     error: '出錯了',
     inserted: '已插入 {{count}}',
