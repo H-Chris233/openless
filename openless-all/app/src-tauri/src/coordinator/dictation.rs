@@ -105,10 +105,13 @@ async fn run_streaming_polish(
     };
 
     // 2. 起 typer 后台任务：从 mpsc 收 delta，串行调 type_unicode_chunk。
+    // 同时累积 typed_text：屏幕上真正落字的内容，用于（a）SSE 中途失败时让 history
+    // 与用户实际看到的内容一致；（b）pr-agent #412 反馈 \"saved output diverges
+    // from what the user actually sees\"。
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let typer_handle = tokio::task::spawn_blocking(move || {
         let mut rx = rx;
-        let mut total_chars: usize = 0;
+        let mut typed_text = String::new();
         let mut first_failure: Option<String> = None;
         while let Some(delta) = rx.blocking_recv() {
             if first_failure.is_some() {
@@ -118,18 +121,19 @@ async fn run_streaming_polish(
             }
             match crate::unicode_keystroke::type_unicode_chunk(&delta) {
                 Ok(()) => {
-                    total_chars += delta.chars().count();
+                    typed_text.push_str(&delta);
                 }
                 Err(e) => {
                     log::error!(
-                        "[coord] streaming_insert: type_unicode_chunk failed at typed={total_chars} chars: {e}; \
-                         dropping remaining deltas"
+                        "[coord] streaming_insert: type_unicode_chunk failed at typed={} chars: {e}; \
+                         dropping remaining deltas",
+                        typed_text.chars().count()
                     );
                     first_failure = Some(e.to_string());
                 }
             }
         }
-        (total_chars, first_failure)
+        (typed_text, first_failure)
     });
 
     // 3. 调流式润色，on_delta 塞 mpsc；should_cancel 检查 dictation 取消旗。
@@ -154,11 +158,12 @@ async fn run_streaming_polish(
     // tx 已经被 move 进 on_delta 闭包；闭包随 polish_or_passthrough_streaming 返回
     // 而 drop，typer 那侧 blocking_recv 拿到 None 自然退出。
 
-    // 4. 等 typer 把缓冲 drain 完，拿到实际打字 chars 数 + 第一条失败原因。
-    let (typed_chars, typer_failure) = typer_handle.await.unwrap_or_else(|e| {
+    // 4. 等 typer 把缓冲 drain 完，拿到实际落字的全文 + 第一条失败原因。
+    let (typed_text, typer_failure) = typer_handle.await.unwrap_or_else(|e| {
         log::error!("[coord] streaming_insert: typer task join failed: {e}");
-        (0, Some(format!("typer join: {e}")))
+        (String::new(), Some(format!("typer join: {e}")))
     });
+    let typed_chars = typed_text.chars().count();
     log::info!("[coord] streaming_insert: typer drained, typed {typed_chars} chars");
 
     // 5. 无论流是否成功，都恢复用户原输入源。
@@ -178,6 +183,19 @@ async fn run_streaming_polish(
                 typed_chars,
                 typer_failure
             );
+            // 边界 case：polish 成功但 typer 在第一字就失败（最常见：session 开始时
+            // 已处于 Secure Input；或 SendInput / enigo 拒绝）。屏幕上一字未见，
+            // already_streamed=true 会让上层跳过 inserter，最终用户看不到任何内容。
+            // 这里显式回退到一次性兜底，让正常 inserter 路径写出 polish 结果。
+            // pr-agent #412 反馈 \"Missing fallback\"。
+            if typed_chars == 0 {
+                if let Some(reason) = typer_failure {
+                    log::warn!(
+                        "[coord] streaming_insert: zero chars typed despite polish success ({reason}); falling back to one-shot inserter"
+                    );
+                    return (text, Some(reason), false);
+                }
+            }
             // 把 final text 写回剪贴板（默认 on，可关）。一次性路径天然走剪贴板，开关
             // 默认对齐一次性行为，让 Cmd+V 重复粘贴可用。
             if inner.prefs.get().streaming_insert_save_clipboard {
@@ -200,10 +218,17 @@ async fn run_streaming_polish(
                     "[coord] streaming_insert: clipboard save skipped (pref off)"
                 );
             }
-            // typer 失败但 polish 成功的边界 case（Secure Input 中途启用之类）：
-            // 已经流出去的字保留在屏幕上，typer_failure 进 polish_error 让用户知情。
-            let err = typer_failure.map(|e| format!("typing partially failed: {e}"));
-            (text, err, true)
+            // typer 中途失败但 polish 成功（typed_chars > 0 但 typer_failure 也存在）：
+            // 屏幕只有 typed_text 这一段，history 记完整 polish 反而会让用户复盘困惑。
+            // 让 history 跟屏幕一致——记 typed_text，polish_error 写明 typer 截断原因。
+            match typer_failure {
+                Some(e) => (
+                    typed_text,
+                    Some(format!("typing partially failed: {e}")),
+                    true,
+                ),
+                None => (text, None, true),
+            }
         }
         super::StreamingPolishOutcome::UnsupportedFallback => {
             log::info!("[coord] streaming_insert: dispatch reported unsupported, fall back to one-shot");
@@ -223,15 +248,15 @@ async fn run_streaming_polish(
         }
         super::StreamingPolishOutcome::Failed(reason) => {
             log::warn!(
-                "[coord] streaming_insert FAILED: {reason}; typed {typed_chars} chars before failure; falling back to raw + one-shot for any remaining content"
+                "[coord] streaming_insert FAILED: {reason}; typed {typed_chars} chars before failure"
             );
-            // 流式失败但已经流了一部分 chars：用户屏幕上有半截 polish，再走一次性塞
-            // raw.text 会重复内容。最不糟的选择：保留已流的半截作为最终输出（不再二次
-            // 插入），记 polish_error。如果一字都没流（typed_chars == 0），按现有失败
-            // 语义回到 raw 一次性兜底。
+            // 流式失败但已经流了一部分 chars：用户屏幕上有半截 polish。history 应当
+            // 跟屏幕一致 —— 记 typed_text 而不是 raw.text，否则保存内容跟用户看见的
+            // 内容会分叉（pr-agent #412 \"Wrong final text\" 反馈）。
+            // 一字都没流时 typed_text 是空串，回到 raw 一次性兜底。
             if typed_chars > 0 {
                 (
-                    raw.text.clone(),
+                    typed_text,
                     Some(format!(
                         "streaming polish failed mid-stream after {typed_chars} chars: {reason}"
                     )),
