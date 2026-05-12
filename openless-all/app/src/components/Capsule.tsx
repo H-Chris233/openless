@@ -100,7 +100,9 @@ function CircleButton({ variant, enabled, onClick }: CircleButtonProps) {
   const { t } = useTranslation();
   const isCancel = variant === 'cancel';
   const os = detectOS();
-  const useBackdrop = os !== 'win' && isCancel;
+  // v1.3.1-7 用户反馈"Windows 胶囊磨砂玻璃没了" —— 之前 Windows 强制关掉 backdrop-filter，
+  // 现在 WebView2 支持，打开让玻璃感对齐 macOS。仍只 cancel 按钮加磨砂（confirm 按钮纯白底）。
+  const useBackdrop = isCancel;
   return (
     <button
       onClick={enabled ? onClick : undefined}
@@ -195,18 +197,16 @@ function Pill({ os, state, level, insertedChars, message, onCancel, onConfirm }:
         >
           <span
             style={{
-              // v1.3.1-6 用户反馈"thinking 不明显"——字号 14 → 17、字重 500 → 700、
-              // 配色由用户拍板：两侧底字浅亮黄（#FCD34D / amber-300），中段扫光深蓝
-              // (var(--ol-blue) ≈ #2563EB)。浅黄底色 + 深蓝扫光对比强但暖底不刺眼。
+              // v1.3.1-7 用户拍板：黑色底字 + 蓝色扫光（亮黄太显眼，黑底更稳）。
+              // 字号保持 17，字重 700 → 600 稍细一些。
               fontSize: 17,
-              fontWeight: 700,
+              fontWeight: 600,
               letterSpacing: 0.3,
-              // 字号 17 + 字重 700 时小写 g/y/p 等下伸字符在 line-height: 1 下会被 clip。
-              // 给 line-height 冗余 + 上下 padding，descender 不再被切。
+              // line-height: 1 下 g/y/p 等下伸字符会被 clip，给 padding 留 descender 空间。
               paddingBlock: 1,
               color: 'var(--ol-ink-2)',
               backgroundImage:
-                'linear-gradient(100deg, #FCD34D 0%, #FCD34D 35%, var(--ol-blue) 50%, #FCD34D 65%, #FCD34D 100%)',
+                'linear-gradient(100deg, var(--ol-ink) 0%, var(--ol-ink) 35%, var(--ol-blue) 50%, var(--ol-ink) 65%, var(--ol-ink) 100%)',
               backgroundSize: '220% auto',
               WebkitBackgroundClip: 'text',
               backgroundClip: 'text',
@@ -246,7 +246,8 @@ function Pill({ os, state, level, insertedChars, message, onCancel, onConfirm }:
   const ambient = state === 'recording' ? Math.min(1, Math.max(0, level)) : 0;
   const scale = os === 'win' ? 1 : 1 + ambient * 0.018;
   const shadowAlpha = 0.20 + ambient * 0.10;
-  const useBackdrop = os !== 'win';
+  // v1.3.1-7 用户反馈"Windows 胶囊磨砂玻璃没了" —— 打开 Windows backdrop-filter。
+  const useBackdrop = true;
 
   return (
     <div
