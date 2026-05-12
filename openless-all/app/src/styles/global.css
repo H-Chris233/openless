@@ -25,6 +25,12 @@ button {
   background: transparent;
   color: inherit;
   padding: 0;
+  /* Windows Chromium / WebView2 默认给 <button> 应用 OS-native appearance（outset
+     边框 + 内阴影 + min-width），在 Vocab 词条这种依赖父级 padding 决定外形的 button
+     上会显示一圈灰色"大圈"。macOS WKWebView 对此处理较弱所以不显。统一关掉 user-agent
+     button styling，全仓所有 inline 重写背景边框的 button 在 Windows 上视觉与 macOS 对齐。 */
+  appearance: none;
+  -webkit-appearance: none;
 }
 
 @keyframes ol-select-pop {

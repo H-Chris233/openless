@@ -145,15 +145,14 @@ pub fn run() {
                 #[cfg(target_os = "windows")]
                 {
                     use window_vibrancy::apply_mica;
-                    // The window starts hidden so Windows native chrome can be disabled before
-                    // the first show; doing this after the native frame is visible is unreliable.
-                    if let Err(e) = main.set_decorations(false) {
-                        log::warn!("[main] disable native decorations failed: {e}");
-                    }
+                    // Windows 走 Tauri decorations:true 原生 Win11 标题栏 / 关闭按钮 /
+                    // 拖动 / 圆角 / resize border。PR #419 删除自定义 WinTitleBar 后，
+                    // 早先的 set_decorations(false) + apply_windows_rounded_frame 链路
+                    // 会让窗口完全无 chrome，用户无法拖/关/最小化（只能 tray 退出）。
+                    // 保留 apply_mica 给原生 chrome 提供磨砂材质。
                     if let Err(e) = apply_mica(&main, None) {
                         log::warn!("[main] mica failed: {e}");
                     }
-                    apply_windows_rounded_frame(&main);
                 }
                 // 静默启动开关：prefs.start_minimized = true → 不弹主窗口，
                 // 用户从菜单栏 / 托盘点击访问。开机自启时尤其有用，避免每次
@@ -338,16 +337,6 @@ pub fn run() {
                     if let tauri::WindowEvent::CloseRequested { ref api, .. } = event {
                         api.prevent_close();
                         hide_main_window(app);
-                    }
-                    #[cfg(target_os = "windows")]
-                    if matches!(
-                        event,
-                        tauri::WindowEvent::Resized(_)
-                            | tauri::WindowEvent::ScaleFactorChanged { .. }
-                    ) {
-                        if let Some(main) = app.get_webview_window("main") {
-                            apply_windows_rounded_frame(&main);
-                        }
                     }
                 }
             }
@@ -613,97 +602,6 @@ fn handle_style_tray_menu_event(app: &AppHandle, id: &str) -> bool {
         log::warn!("[tray] refresh style menu after polish mode change failed: {err}");
     }
     true
-}
-
-#[cfg(target_os = "windows")]
-fn apply_windows_rounded_frame<R: Runtime>(window: &tauri::WebviewWindow<R>) {
-    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    use windows::Win32::Foundation::{BOOL, HWND, RECT};
-    use windows::Win32::Graphics::Dwm::{
-        DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
-    };
-    use windows::Win32::Graphics::Gdi::{CreateRoundRectRgn, SetWindowRgn, HRGN};
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetWindowLongW, GetWindowRect, SetWindowLongW, SetWindowPos, GWL_STYLE, SWP_FRAMECHANGED,
-        SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_CAPTION, WS_THICKFRAME,
-    };
-
-    let handle = match window.window_handle().map(|h| h.as_raw()) {
-        Ok(RawWindowHandle::Win32(handle)) => handle,
-        Ok(other) => {
-            log::warn!("[main] unexpected raw window handle for DWM frame: {other:?}");
-            return;
-        }
-        Err(e) => {
-            log::warn!("[main] read raw window handle failed: {e}");
-            return;
-        }
-    };
-    let hwnd = HWND(handle.hwnd.get() as *mut core::ffi::c_void);
-
-    unsafe {
-        let style = GetWindowLongW(hwnd, GWL_STYLE);
-        let desired_style = (style | WS_THICKFRAME.0 as i32) & !(WS_CAPTION.0 as i32);
-        if style != desired_style {
-            SetWindowLongW(hwnd, GWL_STYLE, desired_style);
-            if let Err(e) = SetWindowPos(
-                hwnd,
-                HWND::default(),
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
-            ) {
-                log::warn!("[main] refresh native frame after style update failed: {e}");
-            }
-        }
-
-        if window.is_maximized().unwrap_or(false) {
-            let _ = SetWindowRgn(hwnd, HRGN::default(), BOOL(1));
-            return;
-        }
-
-        let corner_preference = DWMWCP_ROUND;
-        if let Err(e) = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_WINDOW_CORNER_PREFERENCE,
-            &corner_preference as *const _ as *const core::ffi::c_void,
-            std::mem::size_of_val(&corner_preference) as u32,
-        ) {
-            log::warn!("[main] set DWM rounded corners failed: {e}");
-        }
-
-        // Remove DWM's fallback 1px light border; the React shell draws the visual stroke.
-        let border_color_none: u32 = 0xFFFFFFFE;
-        if let Err(e) = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_BORDER_COLOR,
-            &border_color_none as *const _ as *const core::ffi::c_void,
-            std::mem::size_of_val(&border_color_none) as u32,
-        ) {
-            log::warn!("[main] remove DWM border color failed: {e}");
-        }
-
-        let mut rect = RECT::default();
-        if let Err(e) = GetWindowRect(hwnd, &mut rect) {
-            log::warn!("[main] read window rect for rounded region failed: {e}");
-            return;
-        }
-        let width = rect.right - rect.left;
-        let height = rect.bottom - rect.top;
-        if width <= 0 || height <= 0 {
-            return;
-        }
-        let region = CreateRoundRectRgn(0, 0, width + 1, height + 1, 18, 18);
-        if region.is_invalid() {
-            log::warn!("[main] create rounded window region failed");
-            return;
-        }
-        if SetWindowRgn(hwnd, region, BOOL(1)) == 0 {
-            log::warn!("[main] apply rounded window region failed");
-        }
-    }
 }
 
 #[tauri::command]
