@@ -36,13 +36,15 @@ export function WindowChrome({
   const consoleRadius = os === 'mac' ? 20 : os === 'win' ? WIN_CONSOLE_RADIUS : 14;
   const titlebarHeight = os === 'mac' ? MAC_TITLEBAR_HEIGHT : 0;
 
-  const background = os === 'win'
-    ? 'linear-gradient(180deg, rgba(245,245,247,1) 0%, rgba(232,232,236,1) 100%)'
-    : `
-        radial-gradient(120% 80% at 0% 0%, rgba(255,255,255,0.7) 0%, rgba(255,255,255,0) 60%),
-        radial-gradient(100% 70% at 100% 100%, rgba(37,99,235,0.07) 0%, rgba(37,99,235,0) 55%),
-        linear-gradient(180deg, rgba(245,245,247,0.92) 0%, rgba(232,232,236,0.92) 100%)
-      `;
+  // 两个平台用同一份半透明玻璃 background + backdropFilter，让 sidebar 透明地坐在
+  // 磨砂底板上时有可见的玻璃感。
+  // Windows: Tauri transparent:true + lib.rs apply_mica 提供 Win11 Mica 透出来；
+  // macOS: NSVisualEffectView 提供材质。alpha 0.78 比之前的 0.92 更明显但不过透。
+  const background = `
+    radial-gradient(120% 80% at 0% 0%, rgba(255,255,255,0.55) 0%, rgba(255,255,255,0) 60%),
+    radial-gradient(100% 70% at 100% 100%, rgba(37,99,235,0.07) 0%, rgba(37,99,235,0) 55%),
+    linear-gradient(180deg, rgba(245,245,247,0.78) 0%, rgba(232,232,236,0.78) 100%)
+  `;
 
   return (
     <div
@@ -60,8 +62,8 @@ export function WindowChrome({
         flexDirection: 'column',
         border: os === 'win' ? 'none' : os === 'mac' ? 'none' : '0.5px solid rgba(0,0,0,.10)',
         background,
-        backdropFilter: os === 'win' ? undefined : 'blur(var(--ol-glass-blur-strong)) saturate(190%)',
-        WebkitBackdropFilter: os === 'win' ? undefined : 'blur(var(--ol-glass-blur-strong)) saturate(190%)',
+        backdropFilter: 'blur(var(--ol-glass-blur-strong)) saturate(190%)',
+        WebkitBackdropFilter: 'blur(var(--ol-glass-blur-strong)) saturate(190%)',
         animation: os === 'win' ? undefined : 'ol-window-enter 0.42s var(--ol-motion-spring) both',
         transition: 'box-shadow 0.28s var(--ol-motion-soft), border-color 0.28s var(--ol-motion-soft), backdrop-filter 0.28s var(--ol-motion-soft)',
         willChange: 'opacity, transform, filter',
