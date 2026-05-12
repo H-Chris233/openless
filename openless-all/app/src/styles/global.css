@@ -43,6 +43,12 @@ button {
   to   { opacity: 1; transform: translateY(0) scale(1); }
 }
 
+/* SelectLite popover 关闭动画 —— 反向收缩 + 淡出 + 上移，跟入场对偶。 */
+@keyframes ol-select-pop-out {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to   { opacity: 0; transform: translateY(-4px) scale(.98); }
+}
+
 /* 键盘焦点指示：鼠标点击 (:focus) 不显示，键盘 Tab (:focus-visible) 才显示。
    用 box-shadow 而非 outline 是因为组件内联 style 可能用 outline:none
    把默认 ring 干掉，box-shadow 不受影响仍能上色。配合 pr-agent #407 的 a11y 要求。 */
