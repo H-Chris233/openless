@@ -45,6 +45,21 @@ pub enum OutputLanguagePreference {
     Ko,
 }
 
+/// 模拟粘贴时实际按下的快捷键。macOS 走 AX 直写 / Cmd+V，本枚举只在
+/// Windows / Linux 的 simulate_paste 路径生效。详见 issue #360：kitty 等
+/// Linux 终端只接受 Ctrl+Shift+V，硬编码 Ctrl+V 会被吞掉，听写文本只剩
+/// 在剪贴板里。默认 `CtrlV` 与历史行为一致；用户在 Settings 里改成
+/// `CtrlShiftV`（kitty/alacritty/wezterm/gnome-terminal/foot/...）或
+/// `ShiftInsert`（xterm/urxvt）后，simulate_paste 用对应组合。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum PasteShortcut {
+    #[default]
+    CtrlV,
+    CtrlShiftV,
+    ShiftInsert,
+}
+
 /// Auto-update 渠道。决定 Settings → 关于 里展示哪一类版本信息。
 /// `Stable` 沿用 `tauri-plugin-updater` 的默认 endpoints（即 `tauri.conf.json`
 /// 里的 `latest-{{target}}-{{arch}}.json`），与发版 pipeline 对齐。
@@ -106,6 +121,18 @@ pub struct DictionaryEntry {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CorrectionRule {
+    pub id: String,
+    pub pattern: String,
+    pub replacement: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct VocabPreset {
     pub id: String,
     pub name: String,
@@ -141,10 +168,20 @@ pub struct UserPreferences {
     pub microphone_device_name: String,
     pub active_asr_provider: String, // "volcengine" | "apple-speech" | ...
     pub active_llm_provider: String, // "ark" | "openai" | ...
+    /// LLM 思考模式开关。默认 false 以保持既有「尽量关闭思考」行为；
+    /// Gemini 走原生 thinkingConfig，OpenAI-compatible 路径仅按 provider/channel
+    /// 下发官方渠道级字段，不用 prompt 注入，也不做模型白名单适配。详见 issue #402。
+    #[serde(default)]
+    pub llm_thinking_enabled: bool,
     /// Windows/Linux 粘贴成功后是否恢复用户原剪贴板。默认 true 跟历史行为一致；
     /// 关掉就把听写文本留在剪贴板，让 simulate_paste 实际没生效时用户能 Ctrl+V 找回。
     /// macOS 走 AX 直写，不受这个开关影响。详见 issue #111。
     pub restore_clipboard_after_paste: bool,
+    /// Windows / Linux 的模拟粘贴键。macOS 走 AX 直写不受影响。详见 issue #360：
+    /// kitty 等 Linux 终端不接受 Ctrl+V，只能配 Ctrl+Shift+V。默认 CtrlV 与历史
+    /// 行为一致，不破坏既有用户。
+    #[serde(default)]
+    pub paste_shortcut: PasteShortcut,
     /// Windows: 是否允许 TSF 失败后继续使用 SendInput / 粘贴类非 TSF 兜底。
     /// 默认开启以保持可用性；关闭后可验证文本是否真正由 TSF 上屏。
     #[serde(default = "default_true")]
@@ -231,6 +268,28 @@ pub struct UserPreferences {
     /// 用户改用托盘菜单访问主窗口。默认 false 跟历史行为一致。
     #[serde(default)]
     pub start_minimized: bool,
+    /// 流式输入：润色 SSE 一边到达一边逐字模拟键盘事件输出到当前焦点。开启后用户感知到
+    /// 的处理时延显著降低（润色 LLM 第一个 token 即开始落字）。
+    ///
+    /// 平台原语：
+    /// - macOS：CGEvent Unicode FFI；CJK / 日文 IME 会拦截，session 期间临时切到 ABC
+    /// - Windows：SendInput Unicode（绕过 TSF）；不需要切输入法
+    /// - Linux（实验性）：enigo `Keyboard::text`；X11 稳定，Wayland 看 compositor
+    ///
+    /// 限制：
+    /// - 不再走剪贴板路径，对 secure input 框（密码框 / 1Password）静默拒绝
+    /// - 仅 OpenAI-compatible provider 实装（v1）；Gemini / Codex provider 走原一次性
+    ///   插入路径
+    ///
+    /// 默认 false 与历史行为一致。
+    #[serde(default)]
+    pub streaming_insert: bool,
+    /// 流式输入成功后是否把最终润色文本写回剪贴板。一次性路径天然走剪贴板，所以
+    /// Cmd+V 可以重复粘贴；流式路径直接合成键盘事件、不动剪贴板，会让用户失去这层
+    /// 兜底。开启后流式成功收尾时把 final text 写到系统剪贴板，跟一次性行为对齐。
+    /// 默认 true（更接近用户习惯）。
+    #[serde(default = "default_true")]
+    pub streaming_insert_save_clipboard: bool,
 }
 
 fn default_local_asr_model() -> String {
@@ -287,7 +346,11 @@ struct UserPreferencesWire {
     microphone_device_name: String,
     active_asr_provider: String,
     active_llm_provider: String,
+    #[serde(default)]
+    llm_thinking_enabled: bool,
     restore_clipboard_after_paste: bool,
+    #[serde(default)]
+    paste_shortcut: PasteShortcut,
     allow_non_tsf_insertion_fallback: bool,
     working_languages: Vec<String>,
     translation_target_language: String,
@@ -322,6 +385,10 @@ struct UserPreferencesWire {
     polish_context_window_minutes: u32,
     #[serde(default)]
     start_minimized: bool,
+    #[serde(default)]
+    streaming_insert: bool,
+    #[serde(default = "default_true")]
+    streaming_insert_save_clipboard: bool,
 }
 
 impl Default for UserPreferencesWire {
@@ -338,7 +405,9 @@ impl Default for UserPreferencesWire {
             microphone_device_name: prefs.microphone_device_name,
             active_asr_provider: prefs.active_asr_provider,
             active_llm_provider: prefs.active_llm_provider,
+            llm_thinking_enabled: prefs.llm_thinking_enabled,
             restore_clipboard_after_paste: prefs.restore_clipboard_after_paste,
+            paste_shortcut: prefs.paste_shortcut,
             allow_non_tsf_insertion_fallback: prefs.allow_non_tsf_insertion_fallback,
             working_languages: prefs.working_languages,
             translation_target_language: prefs.translation_target_language,
@@ -361,6 +430,8 @@ impl Default for UserPreferencesWire {
             history_retention_days: prefs.history_retention_days,
             polish_context_window_minutes: prefs.polish_context_window_minutes,
             start_minimized: prefs.start_minimized,
+            streaming_insert: prefs.streaming_insert,
+            streaming_insert_save_clipboard: prefs.streaming_insert_save_clipboard,
         }
     }
 }
@@ -387,7 +458,9 @@ impl<'de> Deserialize<'de> for UserPreferences {
             microphone_device_name: wire.microphone_device_name,
             active_asr_provider: wire.active_asr_provider,
             active_llm_provider: wire.active_llm_provider,
+            llm_thinking_enabled: wire.llm_thinking_enabled,
             restore_clipboard_after_paste: wire.restore_clipboard_after_paste,
+            paste_shortcut: wire.paste_shortcut,
             allow_non_tsf_insertion_fallback: wire.allow_non_tsf_insertion_fallback,
             working_languages: wire.working_languages,
             translation_target_language: wire.translation_target_language,
@@ -417,6 +490,8 @@ impl<'de> Deserialize<'de> for UserPreferences {
             history_retention_days: wire.history_retention_days,
             polish_context_window_minutes: wire.polish_context_window_minutes,
             start_minimized: wire.start_minimized,
+            streaming_insert: wire.streaming_insert,
+            streaming_insert_save_clipboard: wire.streaming_insert_save_clipboard,
         })
     }
 }
@@ -503,7 +578,9 @@ impl Default for UserPreferences {
             microphone_device_name: String::new(),
             active_asr_provider: default_active_asr_provider(),
             active_llm_provider: "ark".into(),
+            llm_thinking_enabled: false,
             restore_clipboard_after_paste: true,
+            paste_shortcut: PasteShortcut::default(),
             allow_non_tsf_insertion_fallback: true,
             working_languages: default_working_languages(),
             translation_target_language: String::new(),
@@ -526,6 +603,8 @@ impl Default for UserPreferences {
             history_retention_days: default_history_retention_days(),
             polish_context_window_minutes: default_polish_context_window_minutes(),
             start_minimized: false,
+            streaming_insert: false,
+            streaming_insert_save_clipboard: true,
         }
     }
 }
@@ -1125,6 +1204,31 @@ mod tests {
         let prefs: UserPreferences = serde_json::from_str("{}").unwrap();
 
         assert!(prefs.allow_non_tsf_insertion_fallback);
+    }
+
+    /// issue #360: 默认值必须是 CtrlV，跟历史行为一致；老配置文件没有
+    /// pasteShortcut 字段时反序列化也得回到 CtrlV，否则会把现有用户的粘贴
+    /// 行为静默改掉。
+    #[test]
+    fn paste_shortcut_defaults_to_ctrl_v() {
+        let prefs = UserPreferences::default();
+        assert_eq!(prefs.paste_shortcut, PasteShortcut::CtrlV);
+
+        let from_empty: UserPreferences = serde_json::from_str("{}").unwrap();
+        assert_eq!(from_empty.paste_shortcut, PasteShortcut::CtrlV);
+    }
+
+    #[test]
+    fn paste_shortcut_round_trips_explicit_values() {
+        for (raw, expected) in [
+            ("ctrlV", PasteShortcut::CtrlV),
+            ("ctrlShiftV", PasteShortcut::CtrlShiftV),
+            ("shiftInsert", PasteShortcut::ShiftInsert),
+        ] {
+            let json = format!(r#"{{ "pasteShortcut": "{raw}" }}"#);
+            let prefs: UserPreferences = serde_json::from_str(&json).unwrap();
+            assert_eq!(prefs.paste_shortcut, expected, "raw={raw}");
+        }
     }
 
     #[test]

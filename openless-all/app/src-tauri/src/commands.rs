@@ -1,7 +1,6 @@
 //! Tauri command surface — every IPC entry the React UI invokes lives here.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -15,13 +14,19 @@ use crate::asr::local::foundry::{
 use crate::asr::local::FoundryLocalRuntime;
 use crate::coordinator::Coordinator;
 use crate::permissions::{self, PermissionStatus};
-use crate::persistence::{CredentialAccount, CredentialsSnapshot, CredentialsVault};
-use crate::polish::{LLMError, OpenAICompatibleConfig, OpenAICompatibleLLMProvider};
+use crate::persistence::{
+    CredentialAccount, CredentialsSnapshot, CredentialsVault, PreferencesStore,
+};
+use crate::polish::{
+    http_client_builder, CodexOAuthConfig, CodexOAuthCredentials, CodexOAuthLLMProvider, LLMError,
+    OpenAICompatibleConfig, OpenAICompatibleLLMProvider, CODEX_DEFAULT_MODEL,
+    CODEX_OAUTH_PROVIDER_ID,
+};
 use crate::recorder::{AudioConsumer, Recorder};
 use crate::types::{
-    ChineseScriptPreference, ComboBinding, CredentialsStatus, DictationSession, DictionaryEntry,
-    HotkeyCapability, HotkeyStatus, OutputLanguagePreference, PolishMode, ShortcutBinding,
-    UpdateChannel, UserPreferences, VocabPresetStore, WindowsImeStatus,
+    ChineseScriptPreference, ComboBinding, CorrectionRule, CredentialsStatus, DictationSession,
+    DictionaryEntry, HotkeyCapability, HotkeyStatus, OutputLanguagePreference, PolishMode,
+    ShortcutBinding, UpdateChannel, UserPreferences, VocabPresetStore, WindowsImeStatus,
 };
 
 type CoordinatorState<'a> = State<'a, Arc<Coordinator>>;
@@ -160,7 +165,10 @@ pub fn set_settings(
         if let Err(err) = crate::refresh_tray_microphone_menu(&app_for_main) {
             log::warn!("[tray] refresh microphone menu after settings save failed: {err}");
             let tray_state = app_for_main.state::<TrayMicrophoneMenuState>();
-            sync_tray_microphone_selection(&tray_state.lock(), &prefs_for_main.microphone_device_name);
+            sync_tray_microphone_selection(
+                &tray_state.lock(),
+                &prefs_for_main.microphone_device_name,
+            );
         }
     });
     // 抑制 unused 警告：tray_microphones 现在改在闭包里通过 app.state 取，
@@ -246,7 +254,10 @@ pub async fn fetch_latest_beta_release() -> Result<Option<LatestBetaRelease>, St
 /// 用 `/releases/tag/` 这个唯一锚点抓 tag。
 fn parse_latest_beta_from_atom(body: &str) -> Option<LatestBetaRelease> {
     for entry in body.split("<entry>").skip(1) {
-        let entry_body = entry.split_once("</entry>").map(|(b, _)| b).unwrap_or(entry);
+        let entry_body = entry
+            .split_once("</entry>")
+            .map(|(b, _)| b)
+            .unwrap_or(entry);
         let needle = "/releases/tag/";
         let tag_start = match entry_body.find(needle) {
             Some(i) => i + needle.len(),
@@ -260,11 +271,9 @@ fn parse_latest_beta_from_atom(body: &str) -> Option<LatestBetaRelease> {
         if !tag_name.ends_with("-beta-tauri") {
             continue;
         }
-        let html_url = format!(
-            "https://github.com/appergb/openless/releases/tag/{tag_name}"
-        );
-        let published_at = extract_between(entry_body, "<updated>", "</updated>")
-            .unwrap_or_default();
+        let html_url = format!("https://github.com/appergb/openless/releases/tag/{tag_name}");
+        let published_at =
+            extract_between(entry_body, "<updated>", "</updated>").unwrap_or_default();
         return Some(LatestBetaRelease {
             tag_name,
             html_url,
@@ -381,10 +390,16 @@ fn asr_configured_for_provider(provider: &str, snap: &CredentialsSnapshot) -> bo
         // 本地 ASR 不依赖云端凭据。
         return true;
     }
+    if provider == crate::asr::bailian::PROVIDER_ID {
+        return configured(&snap.asr_api_key);
+    }
     configured(&snap.asr_endpoint) && configured(&snap.asr_model)
 }
 
 fn llm_configured_for_provider(provider: &str, snap: &CredentialsSnapshot) -> bool {
+    if provider == CODEX_OAUTH_PROVIDER_ID {
+        return CodexOAuthCredentials::load_default().is_ok();
+    }
     let endpoint = snap.ark_endpoint.as_deref().unwrap_or_default();
     let endpoint_and_model = configured(&snap.ark_endpoint) && configured(&snap.ark_model_id);
     if endpoint_and_model
@@ -403,6 +418,9 @@ fn llm_provider_default_endpoint(provider: &str) -> Option<&'static str> {
         "deepseek" => Some("https://api.deepseek.com/v1"),
         "siliconflow" => Some("https://api.siliconflow.cn/v1"),
         "openai" => Some("https://api.openai.com/v1"),
+        // 谷歌 Gemini 原生 API（v1beta）。后端 llm_gemini.rs 会拼成
+        // `{baseUrl}/models/{model}:generateContent`，认证用 x-goog-api-key 头。
+        "gemini" => Some("https://generativelanguage.googleapis.com/v1beta"),
         "mimo" => Some("https://api.xiaomimimo.com/v1"),
         "cometapi" => Some("https://api.cometapi.com/v1"),
         "openrouterFree" => Some("https://openrouter.ai/api/v1"),
@@ -539,6 +557,21 @@ pub async fn validate_provider_credentials(kind: String) -> Result<ProviderCheck
 
 #[tauri::command]
 pub async fn list_provider_models(kind: String) -> Result<ProviderModelsResult, String> {
+    if kind == "asr" && CredentialsVault::get_active_asr() == crate::asr::bailian::PROVIDER_ID {
+        return Ok(ProviderModelsResult {
+            models: vec![crate::asr::bailian::DEFAULT_MODEL.to_string()],
+        });
+    }
+    if kind == "llm" && CredentialsVault::get_active_llm() == CODEX_OAUTH_PROVIDER_ID {
+        return Ok(ProviderModelsResult {
+            models: vec![
+                CODEX_DEFAULT_MODEL.to_string(),
+                "gpt-5.3-codex".to_string(),
+                "gpt-5.4".to_string(),
+                "gpt-5.5".to_string(),
+            ],
+        });
+    }
     let config = read_openai_provider_config(&kind)?;
     fetch_provider_models(&config)
         .await
@@ -580,18 +613,55 @@ fn read_openai_provider_config(kind: &str) -> Result<ProviderConfig, String> {
 }
 
 async fn validate_llm_provider() -> Result<(), String> {
+    let llm_thinking_enabled = PreferencesStore::new()
+        .map_err(|e| e.to_string())?
+        .get()
+        .llm_thinking_enabled;
+    if CredentialsVault::get_active_llm() == CODEX_OAUTH_PROVIDER_ID {
+        let model = CredentialsVault::get(CredentialAccount::ArkModelId)
+            .map_err(|e| e.to_string())?
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| CODEX_DEFAULT_MODEL.to_string());
+        let provider = CodexOAuthLLMProvider::new(
+            CodexOAuthConfig::new(model).with_thinking_enabled(llm_thinking_enabled),
+        );
+        return provider
+            .polish(
+                "验证连接",
+                PolishMode::Raw,
+                &[],
+                &[],
+                ChineseScriptPreference::Auto,
+                OutputLanguagePreference::Auto,
+                None,
+                &[],
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| match e {
+                LLMError::InvalidResponse { status, .. } => {
+                    format!("providerHttpStatus:{status}")
+                }
+                other => other.to_string(),
+            });
+    }
+
     let config = read_openai_provider_config("llm")?;
+    let active_llm = CredentialsVault::get_active_llm();
     let model = CredentialsVault::get(CredentialAccount::ArkModelId)
         .map_err(|e| e.to_string())?
         .filter(|s| !s.is_empty())
         .ok_or_else(|| "llmModelMissing".to_string())?;
-    let provider = OpenAICompatibleLLMProvider::new(OpenAICompatibleConfig::new(
-        "ark",
-        "Doubao Ark",
-        config.base_url,
-        config.api_key,
-        model,
-    ));
+    let provider = OpenAICompatibleLLMProvider::new(
+        OpenAICompatibleConfig::new(
+            active_llm.clone(),
+            active_llm,
+            config.base_url,
+            config.api_key,
+            model,
+        )
+        .with_thinking_enabled(llm_thinking_enabled),
+    );
     provider
         .polish(
             "验证连接",
@@ -619,12 +689,54 @@ async fn validate_asr_provider() -> Result<(), String> {
         return Ok(());
     }
 
+    if active_asr == crate::asr::bailian::PROVIDER_ID {
+        return validate_bailian_asr_provider().await;
+    }
+
     let config = read_openai_provider_config("asr")?;
     let model = CredentialsVault::get(CredentialAccount::AsrModel)
         .map_err(|e| e.to_string())?
         .filter(|s| !s.trim().is_empty())
         .ok_or_else(|| "asrModelMissing".to_string())?;
     validate_asr_transcription(&config, model.trim()).await
+}
+
+async fn validate_bailian_asr_provider() -> Result<(), String> {
+    let api_key = CredentialsVault::get(CredentialAccount::AsrApiKey)
+        .map_err(|e| e.to_string())?
+        .unwrap_or_default();
+    if api_key.trim().is_empty() {
+        return Err("API Key 为空".to_string());
+    }
+    let endpoint = CredentialsVault::get(CredentialAccount::AsrEndpoint)
+        .map_err(|e| e.to_string())?
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| crate::asr::bailian::DEFAULT_ENDPOINT.to_string());
+    let model = CredentialsVault::get(CredentialAccount::AsrModel)
+        .map_err(|e| e.to_string())?
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| crate::asr::bailian::DEFAULT_MODEL.to_string());
+    let vocabulary_id = CredentialsVault::get(CredentialAccount::AsrVocabularyId)
+        .map_err(|e| e.to_string())?
+        .filter(|s| !s.trim().is_empty());
+    let asr = std::sync::Arc::new(crate::asr::BailianRealtimeASR::new(
+        crate::asr::BailianCredentials {
+            api_key,
+            endpoint,
+            model,
+            vocabulary_id,
+        },
+    ));
+    asr.open_session().await.map_err(|e| e.to_string())?;
+    crate::asr::AudioConsumer::consume_pcm_chunk(
+        &*asr,
+        &vec![0u8; crate::asr::bailian::TARGET_AUDIO_CHUNK_BYTES],
+    );
+    asr.send_last_frame().await.map_err(|e| e.to_string())?;
+    asr.await_final_result()
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 fn active_asr_is_keyless_for_validation(provider: &str) -> bool {
@@ -654,8 +766,7 @@ async fn validate_asr_transcription(config: &ProviderConfig, model: &str) -> Res
     let form = reqwest::multipart::Form::new()
         .part("file", wav_part)
         .text("model", model.to_string());
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(20))
+    let client = http_client_builder(&url, 20)
         .build()
         .map_err(|_| "providerClientInitFailed".to_string())?;
     let response = client
@@ -753,14 +864,20 @@ fn encode_wav_16k_mono_silence(duration_ms: u32) -> Vec<u8> {
 
 async fn fetch_provider_models(config: &ProviderConfig) -> Result<Vec<String>, String> {
     let url = models_url(&config.base_url);
-    log::info!("[provider-check] GET {url}");
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
+    let is_gemini = is_gemini_base_url(&config.base_url);
+    log::info!("[provider-check] GET {url} (gemini={is_gemini})");
+    let client = http_client_builder(&config.base_url, 15)
         .build()
         .map_err(|e| format!("HTTP client 初始化失败: {e}"))?;
     let mut request = client.get(&url);
     if !config.api_key.trim().is_empty() {
-        request = request.header("Authorization", format!("Bearer {}", config.api_key));
+        // 谷歌原生 generativelanguage.googleapis.com 不识别 Bearer Authorization,
+        // 必须用 x-goog-api-key 头。其它 OpenAI 兼容 provider 仍走 Bearer。
+        if is_gemini {
+            request = request.header("x-goog-api-key", config.api_key.as_str());
+        } else {
+            request = request.header("Authorization", format!("Bearer {}", config.api_key));
+        }
     }
     let response = request.send().await.map_err(|e| {
         if e.is_timeout() {
@@ -777,7 +894,15 @@ async fn fetch_provider_models(config: &ProviderConfig) -> Result<Vec<String>, S
     if !status.is_success() {
         return Err(format!("providerHttpStatus:{}", status.as_u16()));
     }
-    parse_model_ids(&body)
+    if is_gemini {
+        parse_gemini_model_ids(&body)
+    } else {
+        parse_model_ids(&body)
+    }
+}
+
+fn is_gemini_base_url(base_url: &str) -> bool {
+    base_url.contains("generativelanguage.googleapis.com")
 }
 
 fn models_url(base_url: &str) -> String {
@@ -810,6 +935,51 @@ fn parse_model_ids(body: &str) -> Result<Vec<String>, String> {
     Ok(models)
 }
 
+/// 谷歌 v1beta/models 响应形状：`{models: [{name: "models/gemini-2.5-flash",
+/// supportedGenerationMethods: ["generateContent", ...], ...}, ...]}`。
+/// 与 OpenAI `{data: [{id: "..."}]}` 不兼容，所以单独解析；name 字段去掉
+/// "models/" 前缀后即是 ProviderTools「拉取模型」按钮可直接写入 ark.model_id
+/// 的字符串。
+///
+/// 过滤：只保留声明支持 `generateContent` 的模型——Google 的 model list 同时
+/// 暴露 embedding (`gemini-embedding-2`)、TTS、image 等不支持
+/// generateContent 的家族；用户选中那种 ID 后 polish 必失败（PR #398 pr_agent
+/// 漏洞反馈）。`supportedGenerationMethods` 字段缺失时保守保留——某些 preview
+/// 模型可能未暴露这个字段，宁误显示也不要把新模型挡在外面。
+fn parse_gemini_model_ids(body: &str) -> Result<Vec<String>, String> {
+    let json: Value =
+        serde_json::from_str(body).map_err(|e| format!("模型列表不是有效 JSON: {e}"))?;
+    let models = json
+        .get("models")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "Gemini 模型列表缺少 models 数组".to_string())?;
+    let mut ids = models
+        .iter()
+        .filter(|item| {
+            match item
+                .get("supportedGenerationMethods")
+                .and_then(|v| v.as_array())
+            {
+                Some(methods) => methods
+                    .iter()
+                    .any(|m| m.as_str() == Some("generateContent")),
+                None => true, // 字段缺失：保守包含
+            }
+        })
+        .filter_map(|item| item.get("name").and_then(|n| n.as_str()))
+        .map(|name| {
+            name.strip_prefix("models/")
+                .unwrap_or(name)
+                .trim()
+                .to_string()
+        })
+        .filter(|id| !id.is_empty())
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids.dedup();
+    Ok(ids)
+}
+
 fn parse_account(s: &str) -> Result<CredentialAccount, String> {
     match s {
         "volcengine.app_key" => Ok(CredentialAccount::VolcengineAppKey),
@@ -821,6 +991,7 @@ fn parse_account(s: &str) -> Result<CredentialAccount, String> {
         "asr.api_key" => Ok(CredentialAccount::AsrApiKey),
         "asr.endpoint" => Ok(CredentialAccount::AsrEndpoint),
         "asr.model" => Ok(CredentialAccount::AsrModel),
+        "asr.vocabulary_id" => Ok(CredentialAccount::AsrVocabularyId),
         _ => Err(format!("unknown account: {s}")),
     }
 }
@@ -871,6 +1042,43 @@ pub fn set_vocab_enabled(
 ) -> Result<(), String> {
     coord
         .vocab()
+        .set_enabled(&id, enabled)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn list_correction_rules(coord: CoordinatorState<'_>) -> Result<Vec<CorrectionRule>, String> {
+    coord.correction_rules().list().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn add_correction_rule(
+    coord: CoordinatorState<'_>,
+    pattern: String,
+    replacement: String,
+) -> Result<CorrectionRule, String> {
+    coord
+        .correction_rules()
+        .add(pattern, replacement)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn remove_correction_rule(coord: CoordinatorState<'_>, id: String) -> Result<(), String> {
+    coord
+        .correction_rules()
+        .remove(&id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_correction_rule_enabled(
+    coord: CoordinatorState<'_>,
+    id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    coord
+        .correction_rules()
         .set_enabled(&id, enabled)
         .map_err(|e| e.to_string())
 }
@@ -940,7 +1148,10 @@ pub fn set_default_polish_mode(
 ) -> Result<(), String> {
     let mut prefs = coord.prefs().get();
     prefs.default_mode = mode;
-    coord.prefs().set(prefs.clone()).map_err(|e| e.to_string())?;
+    coord
+        .prefs()
+        .set(prefs.clone())
+        .map_err(|e| e.to_string())?;
     // 跟 set_settings 同样：refresh_tray_microphone_menu 里 tray.set_menu 改 NSStatusItem，
     // 必须主线程；这里是同步 Tauri command 跑在 IPC 线程，直调会让 macOS 死锁。
     let app_for_main = app.clone();
@@ -1743,10 +1954,11 @@ mod tests {
     use super::{
         active_asr_is_keyless_for_validation, active_foundry_model_from_prefs,
         asr_configured_for_provider, asr_transcriptions_url, fetch_provider_models,
-        llm_configured_for_provider, local_asr_release_plan_for_provider, models_url,
-        normalize_foundry_language_hint, parse_latest_beta_from_atom, parse_model_ids,
-        persist_settings, release_foundry_runtime_if_inactive, validate_foundry_model_alias,
-        ProviderConfig, SettingsWriter,
+        is_gemini_base_url, llm_configured_for_provider, local_asr_release_plan_for_provider,
+        models_url, normalize_foundry_language_hint, parse_gemini_model_ids,
+        parse_latest_beta_from_atom, parse_model_ids, persist_settings,
+        release_foundry_runtime_if_inactive, validate_foundry_model_alias, ProviderConfig,
+        SettingsWriter,
     };
     use crate::persistence::CredentialsSnapshot;
     use crate::types::{
@@ -1784,6 +1996,10 @@ mod tests {
             ..snapshot()
         };
         assert!(!asr_configured_for_provider("whisper", &whisper_key_only));
+        assert!(asr_configured_for_provider(
+            crate::asr::bailian::PROVIDER_ID,
+            &whisper_key_only
+        ));
 
         let whisper_keyless_ready = CredentialsSnapshot {
             asr_endpoint: Some("https://api.openai.com/v1".into()),
@@ -1792,6 +2008,10 @@ mod tests {
         };
         assert!(asr_configured_for_provider(
             "whisper",
+            &whisper_keyless_ready
+        ));
+        assert!(!asr_configured_for_provider(
+            crate::asr::bailian::PROVIDER_ID,
             &whisper_keyless_ready
         ));
 
@@ -1916,14 +2136,20 @@ mod tests {
         };
         assert!(llm_configured_for_provider("custom", &keyless_ready));
         assert!(llm_configured_for_provider("self-hosted", &keyless_ready));
-        assert!(llm_configured_for_provider("openrouterFree", &keyless_ready));
+        assert!(llm_configured_for_provider(
+            "openrouterFree",
+            &keyless_ready
+        ));
 
         let hosted_keyless = CredentialsSnapshot {
             ark_endpoint: Some("https://openrouter.ai/api/v1".into()),
             ark_model_id: Some("qwen/qwen3-coder:free".into()),
             ..snapshot()
         };
-        assert!(!llm_configured_for_provider("openrouterFree", &hosted_keyless));
+        assert!(!llm_configured_for_provider(
+            "openrouterFree",
+            &hosted_keyless
+        ));
 
         let hosted_ready = CredentialsSnapshot {
             ark_api_key: Some("key".into()),
@@ -1938,13 +2164,19 @@ mod tests {
             ark_model_id: Some("qwen".into()),
             ..snapshot()
         };
-        assert!(!llm_configured_for_provider("custom", &key_without_endpoint));
+        assert!(!llm_configured_for_provider(
+            "custom",
+            &key_without_endpoint
+        ));
 
         let endpoint_without_model = CredentialsSnapshot {
             ark_endpoint: Some("http://localhost:11434/v1".into()),
             ..snapshot()
         };
-        assert!(!llm_configured_for_provider("custom", &endpoint_without_model));
+        assert!(!llm_configured_for_provider(
+            "custom",
+            &endpoint_without_model
+        ));
     }
 
     impl SettingsWriter for FakeSettingsWriter {
@@ -2012,6 +2244,67 @@ mod tests {
             parse_model_ids(r#"{ "data": [{ "id": "b" }, { "id": "a" }, { "id": "b" }] }"#)
                 .unwrap();
         assert_eq!(models, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn parse_gemini_model_ids_strips_models_prefix_and_dedups() {
+        // Google v1beta/models 真实响应的子集——name 字段带 `models/` 前缀，
+        // ProviderTools 选中后写入 ark.model_id 时不能带这个前缀（generateContent
+        // URL 拼接已经会加 `models/`，不去前缀就会变成 `models/models/...`）。
+        // 字段缺失时保守保留（视为支持 generateContent）。
+        let body = r#"{"models":[
+            {"name":"models/gemini-2.5-pro"},
+            {"name":"models/gemini-2.5-flash"},
+            {"name":"models/gemini-2.5-flash"},
+            {"name":"models/gemini-3-flash-preview"}
+        ]}"#;
+        let ids = parse_gemini_model_ids(body).unwrap();
+        assert_eq!(
+            ids,
+            vec![
+                "gemini-2.5-flash".to_string(),
+                "gemini-2.5-pro".to_string(),
+                "gemini-3-flash-preview".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_gemini_model_ids_filters_out_non_generate_content_families() {
+        // 真实 Google v1beta/models 响应里同时有 generateContent / embedContent /
+        // generateMessage 等多种家族。用户选中 embedding/TTS/image 模型写入
+        // ark.model_id → polish 必败。这里是 PR #398 pr_agent advisory 的回归用例：
+        // 只把 supportedGenerationMethods 里含 generateContent 的过滤出来。
+        let body = r#"{"models":[
+            {"name":"models/gemini-2.5-flash","supportedGenerationMethods":["generateContent","streamGenerateContent","countTokens"]},
+            {"name":"models/gemini-embedding-2","supportedGenerationMethods":["embedContent"]},
+            {"name":"models/text-embedding-004","supportedGenerationMethods":["embedContent","countTextTokens"]},
+            {"name":"models/gemini-2.5-pro-preview-tts","supportedGenerationMethods":["generateContent"]},
+            {"name":"models/gemini-2.5-flash-image","supportedGenerationMethods":["predict"]}
+        ]}"#;
+        let ids = parse_gemini_model_ids(body).unwrap();
+        // 只剩两条声明 generateContent 的；embedding 与 image (predict-only) 必须被过滤。
+        assert_eq!(
+            ids,
+            vec![
+                "gemini-2.5-flash".to_string(),
+                "gemini-2.5-pro-preview-tts".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn is_gemini_base_url_matches_official_domain() {
+        assert!(is_gemini_base_url(
+            "https://generativelanguage.googleapis.com/v1beta"
+        ));
+        assert!(is_gemini_base_url(
+            "https://generativelanguage.googleapis.com/v1beta/"
+        ));
+        assert!(!is_gemini_base_url("https://api.openai.com/v1"));
+        assert!(!is_gemini_base_url(
+            "https://ark.cn-beijing.volces.com/api/v3"
+        ));
     }
 
     #[test]

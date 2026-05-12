@@ -167,3 +167,27 @@ Windows release 链路修过四颗雷，每一颗的 fix 都是不可合并的�
 2. Register it in `lib.rs` (`mod <name>;`).
 3. Wire it into `coordinator.rs` and expose any frontend-callable surface via `commands.rs` + `invoke_handler!`.
 4. Add the matching TS wrapper in `openless-all/app/src/lib/ipc.ts` (with a mock branch for browser dev).
+
+### Third-party service integrations & library / platform API research
+
+When implementing features that depend on **anything outside this repo** — external HTTP APIs (ASR providers, polish endpoints, GitHub API), unfamiliar crates / npm packages, platform APIs (Apple Security framework, Win32, CoreFoundation), or any SDK whose surface shifts faster than your training cut-off — do not write integration code from memory. API surfaces drift; model training data is stale by definition. The same workflow below applies whether you are calling an HTTP endpoint, learning a new Rust crate, or wiring a system framework — substitute "endpoint URL" / "function signature" / "feature flag" as appropriate.
+
+Follow this research-first workflow:
+
+1. **Analyze before coding.** Identify every external call this feature needs: endpoint URL, HTTP method, authentication mechanism, request body schema, expected response schema, and error codes.
+2. **Delegate web search to a sub-agent.** Spawn a read-only sub-agent whose sole job is to search for official documentation. The sub-agent runs in parallel — you continue other work instead of blocking on sequential web pages.
+3. **Filter sub-agent results.** When the sub-agent returns, extract only the information directly relevant to the current implementation. Discard marketing pages, unrelated API versions, or tangential tutorials.
+4. **Cross-verify one key finding.** Before writing code, validate at least one structural claim (endpoint URL, required header, auth format) with a direct `web_search` or `fetch_url` call. Sub-agents can hallucinate.
+5. **Implement from verified documentation.** Only write integration code after the above steps. Never guess.
+
+**Sub-agent search brief:**
+- Focus each sub-agent on a single external service or protocol — one service, one sub-agent.
+- Prioritize official documentation domains (e.g., `docs.volcengine.com`, `platform.openai.com/docs`), falling back to the project's GitHub README.
+- The sub-agent must return **structured** findings: endpoint URL, HTTP method, required headers, request body JSON Schema, response body JSON Schema, and error code meanings.
+- If the documentation covers multiple API versions, the sub-agent must note which version was referenced.
+
+**Anti-patterns (do not do these):**
+- ✗ Writing API integration code from memory without a documentation search.
+- ✗ Pasting entire web pages into the main agent context — the sub-agent does the filtering.
+- ✗ Mixing field names or endpoint paths from different API versions.
+- ✗ Skipping error handling — every external call must degrade gracefully when the service is unavailable.

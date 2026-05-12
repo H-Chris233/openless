@@ -19,8 +19,8 @@ use uuid::Uuid;
 #[cfg(target_os = "windows")]
 use crate::asr::local::{foundry, FoundryLocalRuntime, FoundryLocalWhisperAsr};
 use crate::asr::{
-    DictionaryHotword, RawTranscript, VolcengineCredentials, VolcengineStreamingASR,
-    WhisperBatchASR,
+    BailianCredentials, BailianRealtimeASR, DictionaryHotword, RawTranscript,
+    VolcengineCredentials, VolcengineStreamingASR, WhisperBatchASR,
 };
 use crate::combo_hotkey::{ComboHotkeyError, ComboHotkeyEvent, ComboHotkeyMonitor};
 use crate::coordinator_state::{
@@ -32,13 +32,20 @@ use crate::coordinator_state::{
 use crate::hotkey::{HotkeyEvent, HotkeyMonitor};
 use crate::insertion::TextInserter;
 use crate::persistence::{
-    CredentialAccount, CredentialsVault, DictionaryStore, HistoryStore, PreferencesStore,
+    CorrectionRuleStore, CredentialAccount, CredentialsVault, DictionaryStore, HistoryStore,
+    PreferencesStore,
 };
 
-use crate::polish::{OpenAICompatibleConfig, OpenAICompatibleLLMProvider};
+use crate::llm_gemini::{GeminiConfig, GeminiProvider};
+use crate::polish::{
+    ActiveLLMProvider, CodexOAuthConfig, CodexOAuthLLMProvider, OpenAICompatibleConfig,
+    OpenAICompatibleLLMProvider, CODEX_DEFAULT_MODEL, CODEX_OAUTH_PROVIDER_ID,
+};
 use crate::qa_hotkey::{QaHotkeyError, QaHotkeyEvent, QaHotkeyMonitor};
 use crate::recorder::{Recorder, RecorderError};
 use crate::selection::capture_selection;
+#[cfg(target_os = "windows")]
+use crate::types::PasteShortcut;
 use crate::types::{
     CapsulePayload, CapsuleState, ChineseScriptPreference, DictationSession, HotkeyCapability,
     HotkeyStatus, HotkeyStatusState, InsertStatus, OutputLanguagePreference, PolishMode,
@@ -69,6 +76,7 @@ use resources::{
 enum ActiveAsr {
     Volcengine(Arc<VolcengineStreamingASR>),
     Whisper(Arc<WhisperBatchASR>),
+    Bailian(Arc<BailianRealtimeASR>),
     #[cfg(target_os = "windows")]
     FoundryLocalWhisper(Arc<FoundryLocalWhisperAsr>),
     /// 本地 Qwen3-ASR；只在 macOS + 模型已下载时可达。
@@ -93,6 +101,7 @@ struct Inner {
     history: HistoryStore,
     prefs: PreferencesStore,
     vocab: DictionaryStore,
+    correction_rules: CorrectionRuleStore,
     inserter: TextInserter,
     #[cfg(target_os = "windows")]
     windows_ime: WindowsImeSessionController,
@@ -110,6 +119,11 @@ struct Inner {
     hotkey: Mutex<Option<HotkeyMonitor>>,
     hotkey_status: Mutex<HotkeyStatus>,
     hotkey_trigger_held: AtomicBool,
+    /// 防抖时间戳：handle_pressed_edge 入口检查与本字段的距离，< 250ms 的边沿直接
+    /// 丢弃（误触双击 / 微动开关回弹 / 用户连点过快造成的空转写报错）。
+    /// 与 `hotkey_trigger_held` 互补 —— held 防 press-without-release，本字段防
+    /// press-release-press 三连过快。
+    last_hotkey_dispatch_at: Mutex<Option<std::time::Instant>>,
     shortcut_recording_active: AtomicBool,
     /// 自定义组合键监听器（global-hotkey crate）。当 `prefs.hotkey.trigger == Custom` 时
     /// 代替 modifier-only 的 hotkey monitor。`None` 表示不使用自定义组合键或还没成功安装。
@@ -138,6 +152,11 @@ struct Inner {
     /// polish::chat_completion_history_streaming 的 loop 每帧检查，true 时 break loop
     /// 避免取消后 LLM 仍 drain HTTP body 烧 token。详见 issue #161。
     qa_stream_cancelled: Arc<AtomicBool>,
+    /// Coordinator 退出信号。各 hotkey supervisor loop 在每轮重试 sleep 之前会检查
+    /// 此 flag；为 true 时 loop 立刻 return。生产场景里 process exit 一并 reap 所有
+    /// supervisor 线程，但 integration test 和未来 RunEvent::Exit 钩子需要这条
+    /// 显式退出路径。审计 3.1.2。
+    shutdown: AtomicBool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,6 +187,7 @@ impl Coordinator {
             });
             let prefs = PreferencesStore::new().expect("preferences store init");
             let vocab = DictionaryStore::new().expect("dictionary store init");
+            let correction_rules = CorrectionRuleStore::new().expect("correction rule store init");
 
             Self {
                 inner: Arc::new(Inner {
@@ -175,6 +195,7 @@ impl Coordinator {
                     history,
                     prefs,
                     vocab,
+                    correction_rules,
                     inserter: TextInserter::new(),
                     state: Mutex::new(SessionState::default()),
                     asr: Mutex::new(None),
@@ -183,6 +204,7 @@ impl Coordinator {
                     hotkey: Mutex::new(None),
                     hotkey_status: Mutex::new(HotkeyStatus::default()),
                     hotkey_trigger_held: AtomicBool::new(false),
+                    last_hotkey_dispatch_at: Mutex::new(None),
                     shortcut_recording_active: AtomicBool::new(false),
                     combo_hotkey: Mutex::new(None),
                     translation_hotkey: Mutex::new(None),
@@ -196,6 +218,7 @@ impl Coordinator {
                     qa_recorder: Mutex::new(None),
                     qa_stream_cancelled: Arc::new(AtomicBool::new(false)),
                     local_asr_cache: Arc::new(crate::asr::local::LocalAsrCache::new()),
+                    shutdown: AtomicBool::new(false),
                 }),
             }
         }
@@ -209,6 +232,7 @@ impl Coordinator {
         });
         let prefs = PreferencesStore::new().expect("preferences store init");
         let vocab = DictionaryStore::new().expect("dictionary store init");
+        let correction_rules = CorrectionRuleStore::new().expect("correction rule store init");
 
         Self {
             inner: Arc::new(Inner {
@@ -216,6 +240,7 @@ impl Coordinator {
                 history,
                 prefs,
                 vocab,
+                correction_rules,
                 inserter: TextInserter::new(),
                 windows_ime: WindowsImeSessionController::new(),
                 prepared_windows_ime_session: Arc::new(Mutex::new(Vec::new())),
@@ -226,6 +251,7 @@ impl Coordinator {
                 hotkey: Mutex::new(None),
                 hotkey_status: Mutex::new(HotkeyStatus::default()),
                 hotkey_trigger_held: AtomicBool::new(false),
+                last_hotkey_dispatch_at: Mutex::new(None),
                 shortcut_recording_active: AtomicBool::new(false),
                 combo_hotkey: Mutex::new(None),
                 translation_hotkey: Mutex::new(None),
@@ -240,6 +266,7 @@ impl Coordinator {
                 qa_stream_cancelled: Arc::new(AtomicBool::new(false)),
                 local_asr_cache: Arc::new(crate::asr::local::LocalAsrCache::new()),
                 foundry_local_runtime,
+                shutdown: AtomicBool::new(false),
             }),
         }
     }
@@ -296,6 +323,15 @@ impl Coordinator {
 
     pub fn bind_app(&self, handle: AppHandle) {
         *self.inner.app.lock() = Some(handle);
+    }
+
+    /// 让所有 hotkey supervisor loop（dictation / qa / combo / translation /
+    /// switch_style / open_app）在下一轮 sleep / poll 后退出。生产场景下进程退出
+    /// 一并 reap 所有线程，但 integration test 和未来 RunEvent::Exit 钩子需要
+    /// 显式退出路径。审计 3.1.2。
+    #[allow(dead_code)]
+    pub fn request_shutdown(&self) {
+        self.inner.shutdown.store(true, Ordering::SeqCst);
     }
 
     pub fn start_hotkey_listener(&self) {
@@ -623,6 +659,9 @@ impl Coordinator {
     pub fn vocab(&self) -> &DictionaryStore {
         &self.inner.vocab
     }
+    pub fn correction_rules(&self) -> &CorrectionRuleStore {
+        &self.inner.correction_rules
+    }
 
     pub fn update_hotkey_binding(&self) {
         let prefs = self.inner.prefs.get();
@@ -741,6 +780,7 @@ impl Coordinator {
         let working_languages = prefs.working_languages;
         let chinese_script_preference = prefs.chinese_script_preference;
         let output_language_preference = prefs.output_language_preference;
+        let llm_thinking_enabled = prefs.llm_thinking_enabled;
         // repolish 是历史记录里手动重新润色，不再绑定原 session 的前台 app；
         // 当下用户调起的 app 才是相关上下文（如果可拿）。
         let front_app = capture_frontmost_app();
@@ -753,6 +793,7 @@ impl Coordinator {
             &working_languages,
             chinese_script_preference,
             output_language_preference,
+            llm_thinking_enabled,
             front_app.as_deref(),
             &[],
         )
@@ -767,6 +808,9 @@ fn hotkey_supervisor_loop(inner: Arc<Inner>) {
     let mut attempts: u32 = 0;
     let capability = HotkeyMonitor::capability();
     loop {
+        if inner.shutdown.load(Ordering::SeqCst) {
+            return;
+        }
         let prefs = inner.prefs.get();
 
         if inner.hotkey.lock().is_some() {
@@ -837,6 +881,9 @@ fn hotkey_supervisor_loop(inner: Arc<Inner>) {
 fn qa_hotkey_supervisor_loop(inner: Arc<Inner>) {
     let mut attempts: u32 = 0;
     loop {
+        if inner.shutdown.load(Ordering::SeqCst) {
+            return;
+        }
         // 用户已经把 QA 关掉就睡着等 prefs 改动；改动通过 update_qa_hotkey_binding 唤醒。
         let binding = match inner.prefs.get().qa_hotkey.clone() {
             Some(b) => b,
@@ -944,6 +991,9 @@ fn qa_hotkey_bridge_loop(inner: Arc<Inner>, rx: mpsc::Receiver<QaHotkeyEvent>) {
 fn combo_hotkey_supervisor_loop(inner: Arc<Inner>) {
     let mut attempts: u32 = 0;
     loop {
+        if inner.shutdown.load(Ordering::SeqCst) {
+            return;
+        }
         // 读当前 prefs
         let prefs = inner.prefs.get();
         if crate::shortcut_binding::legacy_modifier_trigger(&prefs.dictation_hotkey).is_some() {
@@ -1042,6 +1092,9 @@ fn combo_hotkey_bridge_loop(inner: Arc<Inner>, rx: mpsc::Receiver<ComboHotkeyEve
 fn translation_hotkey_supervisor_loop(inner: Arc<Inner>) {
     let mut attempts: u32 = 0;
     loop {
+        if inner.shutdown.load(Ordering::SeqCst) {
+            return;
+        }
         let binding = inner.prefs.get().translation_hotkey;
         if is_builtin_translation_shift(&binding)
             || crate::shortcut_binding::legacy_modifier_trigger(&binding).is_some()
@@ -1141,6 +1194,9 @@ fn translation_hotkey_bridge_loop(inner: Arc<Inner>, rx: mpsc::Receiver<ComboHot
 fn action_hotkey_supervisor_loop(inner: Arc<Inner>, kind: ActionHotkeyKind) {
     let mut attempts: u32 = 0;
     loop {
+        if inner.shutdown.load(Ordering::SeqCst) {
+            return;
+        }
         let binding = action_hotkey_binding(&inner, kind);
         if is_modifier_only_shortcut(&binding) {
             take_action_hotkey_on_main_thread(&inner, kind);
@@ -1541,7 +1597,7 @@ fn window_key_matches_trigger(trigger: crate::types::HotkeyTrigger, key: &str, c
         HotkeyTrigger::RightOption | HotkeyTrigger::RightAlt => {
             (key == "Alt" || key == "AltGraph") && code == "AltRight"
         }
-        HotkeyTrigger::LeftOption => (key == "Alt" || key == "AltGraph") && code == "AltRight",
+        HotkeyTrigger::LeftOption => (key == "Alt" || key == "AltGraph") && code == "AltLeft",
         HotkeyTrigger::RightCommand => key == "Meta" && code == "MetaRight",
         HotkeyTrigger::Fn => key == "Control" && code == "ControlRight",
         // Custom 走 global-hotkey crate，不走 window hotkey fallback
@@ -1642,6 +1698,7 @@ async fn insert_with_windows_ime_first(
     polished: &str,
     restore_clipboard: bool,
     allow_non_tsf_insertion_fallback: bool,
+    paste_shortcut: PasteShortcut,
     ime_target: Option<ImeSubmitTarget>,
 ) -> InsertStatus {
     let prepared = {
@@ -1654,7 +1711,7 @@ async fn insert_with_windows_ime_first(
             allow_non_tsf_insertion_fallback,
             InsertStatus::Failed,
         ) {
-            return insert_via_non_tsf_fallback(inner, polished, restore_clipboard);
+            return insert_via_non_tsf_fallback(inner, polished, restore_clipboard, paste_shortcut);
         }
         log::warn!("[windows-ime] non-TSF insertion fallback is disabled; failing insert");
         return InsertStatus::Failed;
@@ -1679,7 +1736,7 @@ async fn insert_with_windows_ime_first(
     if ime_status == InsertStatus::Inserted {
         ime_status
     } else if should_try_non_tsf_insertion_fallback(allow_non_tsf_insertion_fallback, ime_status) {
-        insert_via_non_tsf_fallback(inner, polished, restore_clipboard)
+        insert_via_non_tsf_fallback(inner, polished, restore_clipboard, paste_shortcut)
     } else {
         log::warn!("[windows-ime] TSF did not insert; non-TSF insertion fallback is disabled");
         InsertStatus::Failed
@@ -1699,6 +1756,7 @@ fn insert_via_non_tsf_fallback(
     inner: &Arc<Inner>,
     polished: &str,
     restore_clipboard: bool,
+    paste_shortcut: PasteShortcut,
 ) -> InsertStatus {
     if inner.inserter.insert_via_unicode_keystrokes(polished) == InsertStatus::Inserted {
         log::info!("[windows-ime] TSF unavailable; inserted via Unicode SendInput");
@@ -1706,7 +1764,7 @@ fn insert_via_non_tsf_fallback(
     } else {
         inner
             .inserter
-            .insert_via_clipboard_fallback(polished, restore_clipboard)
+            .insert_via_clipboard_fallback(polished, restore_clipboard, paste_shortcut)
     }
 }
 
@@ -1785,7 +1843,7 @@ fn ensure_asr_credentials() -> Result<(), String> {
         return Ok(());
     }
 
-    if is_whisper_compatible_provider(&active_asr) {
+    if is_whisper_compatible_provider(&active_asr) || is_bailian_provider(&active_asr) {
         let api_key = CredentialsVault::get(CredentialAccount::AsrApiKey)
             .ok()
             .flatten()
@@ -1918,6 +1976,10 @@ fn is_whisper_compatible_provider(id: &str) -> bool {
     matches!(id, "whisper" | "siliconflow" | "zhipu" | "groq")
 }
 
+fn is_bailian_provider(id: &str) -> bool {
+    id == crate::asr::bailian::PROVIDER_ID
+}
+
 fn apply_chinese_script_preference(text: &str, pref: ChineseScriptPreference) -> String {
     if text.is_empty() {
         return String::new();
@@ -1953,6 +2015,105 @@ fn ensure_qa_volcengine_credentials() -> Result<(), String> {
 
 /// 润色文本；失败时返回原文 + 失败原因，调用方据此弹错误胶囊 + 写历史 error_code。
 /// 之前固定返回 String，调用方拿不到失败信号 → 用户感知"为什么风格设置没生效"。issue #57。
+/// 流式润色的三态结果。让上层（dictation pipeline）能区分「已经流出去了」、
+/// 「降级到一次性」和「真失败了走 raw 兜底」三种 case。
+pub enum StreamingPolishOutcome {
+    /// 流式润色成功，`String` 是已经一边流一边交给 `on_delta` 的全部文本（用于写
+    /// history、做词条命中统计）。调用方不应再 `inserter.insert(&text)`，因为字符
+    /// 已经通过键盘事件落到光标处。
+    Streamed(String),
+    /// 当前配置不支持流式：用户没开 streaming_insert / Gemini provider / Codex
+    /// provider / Raw 模式 / 翻译模式 / 不是 macOS。调用方应回到现有的
+    /// `polish_or_passthrough` 一次性路径，跟历史行为完全一致。
+    UnsupportedFallback,
+    /// 流式过程中失败（HTTP / 解析 / 空流等）。`String` 是失败原因，调用方应当
+    /// 走 raw 兜底（同 `polish_or_passthrough` 失败分支的语义）。
+    Failed(String),
+}
+
+/// 流式润色入口。在不支持流式的所有 case 都返回 `UnsupportedFallback`，让调用方
+/// 透明降级。不修改任何持久化 / 焦点 / 光标状态。
+///
+/// `on_delta` 每收到一个 SSE chunk 就被调用一次（同步），调用方负责把 chunk 实际
+/// 模拟键盘事件落到光标 —— 见 `coordinator/dictation.rs` 的流式分支。
+/// `should_cancel` 用户取消时返回 true，立即 break SSE 读循环避免烧 quota。
+pub async fn polish_or_passthrough_streaming<F, C>(
+    raw: &RawTranscript,
+    mode: PolishMode,
+    hotwords: &[String],
+    working_languages: &[String],
+    chinese_script_preference: ChineseScriptPreference,
+    output_language_preference: OutputLanguagePreference,
+    llm_thinking_enabled: bool,
+    front_app: Option<&str>,
+    prior_turns: &[(String, String)],
+    on_delta: F,
+    should_cancel: C,
+) -> StreamingPolishOutcome
+where
+    F: Fn(&str) + Send + Sync,
+    C: Fn() -> bool + Send + Sync,
+{
+    if mode == PolishMode::Raw {
+        log::info!("[coord] streaming polish skipped: mode=Raw, fall back to one-shot");
+        return StreamingPolishOutcome::UnsupportedFallback;
+    }
+    let active_llm = CredentialsVault::get_active_llm();
+    if active_llm == "gemini" {
+        log::info!(
+            "[coord] streaming polish skipped: active LLM provider=gemini (v1 not implemented), fall back to one-shot"
+        );
+        return StreamingPolishOutcome::UnsupportedFallback;
+    }
+    let provider = match build_active_llm_provider(llm_thinking_enabled) {
+        Ok(p) => p,
+        Err(e) => {
+            log::error!("[coord] streaming polish: build provider failed: {e}");
+            return StreamingPolishOutcome::Failed(e.to_string());
+        }
+    };
+    if !provider.supports_streaming_polish() {
+        log::info!(
+            "[coord] streaming polish skipped: provider does not support streaming (likely codex OAuth), fall back to one-shot"
+        );
+        return StreamingPolishOutcome::UnsupportedFallback;
+    }
+    log::info!(
+        "[coord] streaming polish START: provider=openai-compatible mode={:?} raw_chars={} prior_turns={}",
+        mode,
+        raw.text.chars().count(),
+        prior_turns.len()
+    );
+    match provider
+        .polish_streaming(
+            &raw.text,
+            mode,
+            hotwords,
+            working_languages,
+            chinese_script_preference,
+            output_language_preference,
+            front_app,
+            prior_turns,
+            on_delta,
+            should_cancel,
+        )
+        .await
+    {
+        Ok(text) => {
+            log::info!(
+                "[coord] streaming polish OK: final_chars={}",
+                text.chars().count()
+            );
+            StreamingPolishOutcome::Streamed(text)
+        }
+        Err(e) => {
+            let reason = e.to_string();
+            log::error!("[coord] streaming polish FAILED: {reason}");
+            StreamingPolishOutcome::Failed(reason)
+        }
+    }
+}
+
 async fn polish_or_passthrough(
     raw: &RawTranscript,
     mode: PolishMode,
@@ -1960,6 +2121,7 @@ async fn polish_or_passthrough(
     working_languages: &[String],
     chinese_script_preference: ChineseScriptPreference,
     output_language_preference: OutputLanguagePreference,
+    llm_thinking_enabled: bool,
     front_app: Option<&str>,
     prior_turns: &[(String, String)],
 ) -> (String, Option<String>) {
@@ -1973,6 +2135,7 @@ async fn polish_or_passthrough(
         working_languages,
         chinese_script_preference,
         output_language_preference,
+        llm_thinking_enabled,
         front_app,
         prior_turns,
     )
@@ -1994,21 +2157,34 @@ async fn polish_text(
     working_languages: &[String],
     chinese_script_preference: ChineseScriptPreference,
     output_language_preference: OutputLanguagePreference,
+    llm_thinking_enabled: bool,
     front_app: Option<&str>,
     prior_turns: &[(String, String)],
 ) -> anyhow::Result<String> {
-    let api_key = CredentialsVault::get(CredentialAccount::ArkApiKey)?.unwrap_or_default();
-    let model = CredentialsVault::get(CredentialAccount::ArkModelId)?
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "deepseek-v3-2".to_string());
-    let endpoint = resolve_ark_endpoint(&api_key)?;
-    let base_url = endpoint
-        .trim_end_matches("/chat/completions")
-        .trim_end_matches('/')
-        .to_string();
+    // 谷歌 Gemini 分支：所有 LLM provider 共用 ark.* 凭据槽，唯独 Gemini 走原生
+    // generateContent / 自带 thinkingConfig 控制；其余 provider 走 OpenAI
+    // 兼容协议，并在该路径里按 provider/channel 下发对应的思考开关。
+    let active_llm = CredentialsVault::get_active_llm();
+    if active_llm == "gemini" {
+        let (api_key, model, base_url) = read_gemini_credentials()?;
+        let provider = GeminiProvider::new(
+            GeminiConfig::new(api_key, model, base_url).with_thinking_enabled(llm_thinking_enabled),
+        );
+        return Ok(provider
+            .polish(
+                raw,
+                mode,
+                hotwords,
+                working_languages,
+                chinese_script_preference,
+                output_language_preference,
+                front_app,
+                prior_turns,
+            )
+            .await?);
+    }
 
-    let config = OpenAICompatibleConfig::new("ark", "Doubao Ark", base_url, api_key, model);
-    let provider = OpenAICompatibleLLMProvider::new(config);
+    let provider = build_active_llm_provider(llm_thinking_enabled)?;
     Ok(provider
         .polish(
             raw,
@@ -2030,6 +2206,7 @@ async fn translate_or_passthrough(
     working_languages: &[String],
     chinese_script_preference: ChineseScriptPreference,
     output_language_preference: OutputLanguagePreference,
+    llm_thinking_enabled: bool,
     front_app: Option<&str>,
 ) -> (String, Option<String>) {
     match translate_text(
@@ -2038,6 +2215,7 @@ async fn translate_or_passthrough(
         working_languages,
         chinese_script_preference,
         output_language_preference,
+        llm_thinking_enabled,
         front_app,
     )
     .await
@@ -2057,20 +2235,29 @@ async fn translate_text(
     working_languages: &[String],
     chinese_script_preference: ChineseScriptPreference,
     output_language_preference: OutputLanguagePreference,
+    llm_thinking_enabled: bool,
     front_app: Option<&str>,
 ) -> anyhow::Result<String> {
-    let api_key = CredentialsVault::get(CredentialAccount::ArkApiKey)?.unwrap_or_default();
-    let model = CredentialsVault::get(CredentialAccount::ArkModelId)?
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "deepseek-v3-2".to_string());
-    let endpoint = resolve_ark_endpoint(&api_key)?;
-    let base_url = endpoint
-        .trim_end_matches("/chat/completions")
-        .trim_end_matches('/')
-        .to_string();
+    // 见 polish_text 顶部注释——同样的 Gemini / OpenAI-compatible 路由逻辑。
+    let active_llm = CredentialsVault::get_active_llm();
+    if active_llm == "gemini" {
+        let (api_key, model, base_url) = read_gemini_credentials()?;
+        let provider = GeminiProvider::new(
+            GeminiConfig::new(api_key, model, base_url).with_thinking_enabled(llm_thinking_enabled),
+        );
+        return Ok(provider
+            .translate_to(
+                raw,
+                target_language,
+                working_languages,
+                chinese_script_preference,
+                output_language_preference,
+                front_app,
+            )
+            .await?);
+    }
 
-    let config = OpenAICompatibleConfig::new("ark", "Doubao Ark", base_url, api_key, model);
-    let provider = OpenAICompatibleLLMProvider::new(config);
+    let provider = build_active_llm_provider(llm_thinking_enabled)?;
     Ok(provider
         .translate_to(
             raw,
@@ -2098,6 +2285,33 @@ fn read_whisper_credentials() -> (String, String, String) {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "whisper-1".to_string());
     (api_key, base_url, model)
+}
+
+fn read_bailian_credentials() -> BailianCredentials {
+    let api_key = CredentialsVault::get(CredentialAccount::AsrApiKey)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let endpoint = CredentialsVault::get(CredentialAccount::AsrEndpoint)
+        .ok()
+        .flatten()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| crate::asr::bailian::DEFAULT_ENDPOINT.to_string());
+    let model = CredentialsVault::get(CredentialAccount::AsrModel)
+        .ok()
+        .flatten()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| crate::asr::bailian::DEFAULT_MODEL.to_string());
+    let vocabulary_id = CredentialsVault::get(CredentialAccount::AsrVocabularyId)
+        .ok()
+        .flatten()
+        .filter(|s| !s.trim().is_empty());
+    BailianCredentials {
+        api_key,
+        endpoint,
+        model,
+        vocabulary_id,
+    }
 }
 
 fn read_volc_credentials() -> VolcengineCredentials {
@@ -2243,7 +2457,7 @@ async fn begin_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
 
     let microphone_device_name = selected_microphone_device_name(inner);
     stop_microphone_preview_monitor(inner, "QA recorder");
-    acquire_recording_mute(inner, "qa");
+    acquire_recording_mute(inner, "qa").await;
     match Recorder::start(microphone_device_name, consumer, level_handler) {
         Ok((rec, runtime_errors)) => {
             *inner.qa_recorder.lock() = Some(rec);
@@ -2405,6 +2619,7 @@ async fn end_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
     let working_languages = prefs.working_languages.clone();
     let chinese_script_preference = prefs.chinese_script_preference;
     let output_language_preference = prefs.output_language_preference;
+    let llm_thinking_enabled = prefs.llm_thinking_enabled;
     let (messages_for_llm, front_app) = {
         let st = inner.qa_state.lock();
         (st.messages.clone(), st.front_app.clone())
@@ -2445,6 +2660,7 @@ async fn end_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
         &working_languages,
         chinese_script_preference,
         output_language_preference,
+        llm_thinking_enabled,
         front_app.as_deref(),
         on_delta,
         should_cancel,
@@ -2596,6 +2812,7 @@ async fn answer_chat_dispatch<F, C>(
     working_languages: &[String],
     chinese_script_preference: ChineseScriptPreference,
     output_language_preference: OutputLanguagePreference,
+    llm_thinking_enabled: bool,
     front_app: Option<&str>,
     on_delta: F,
     should_cancel: C,
@@ -2604,17 +2821,28 @@ where
     F: Fn(&str) + Send + Sync,
     C: Fn() -> bool + Send + Sync,
 {
-    let api_key = CredentialsVault::get(CredentialAccount::ArkApiKey)?.unwrap_or_default();
-    let model = CredentialsVault::get(CredentialAccount::ArkModelId)?
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "deepseek-v3-2".to_string());
-    let endpoint = resolve_ark_endpoint(&api_key)?;
-    let base_url = endpoint
-        .trim_end_matches("/chat/completions")
-        .trim_end_matches('/')
-        .to_string();
-    let config = OpenAICompatibleConfig::new("ark", "Doubao Ark", base_url, api_key, model);
-    let provider = OpenAICompatibleLLMProvider::new(config);
+    // 见 polish_text 顶部注释——同样的 Gemini / OpenAI-compatible 路由逻辑，
+    // QA 流式回答走 Gemini 原生 :streamGenerateContent?alt=sse。
+    let active_llm = CredentialsVault::get_active_llm();
+    if active_llm == "gemini" {
+        let (api_key, model, base_url) = read_gemini_credentials()?;
+        let provider = GeminiProvider::new(
+            GeminiConfig::new(api_key, model, base_url).with_thinking_enabled(llm_thinking_enabled),
+        );
+        return Ok(provider
+            .answer_chat_streaming(
+                messages,
+                working_languages,
+                chinese_script_preference,
+                output_language_preference,
+                front_app,
+                on_delta,
+                should_cancel,
+            )
+            .await?);
+    }
+
+    let provider = build_active_llm_provider(llm_thinking_enabled)?;
     Ok(provider
         .answer_chat_streaming(
             messages,
@@ -2626,6 +2854,55 @@ where
             should_cancel,
         )
         .await?)
+}
+
+/// 读 Gemini 凭据。所有 LLM provider 共用 ark.* 槽位（persistence 没做 per-provider
+/// 隔离），所以这里也是从 `ArkApiKey` / `ArkModelId` / `ArkEndpoint` 三个槽读，
+/// 但回退默认值改成谷歌的：base_url 默认 `https://generativelanguage.googleapis.com/v1beta`，
+/// 模型默认 `gemini-2.5-flash`。Settings.tsx::onLlmProviderChange 在用户切到 gemini
+/// 时会强制把 endpoint/model 覆盖为这两个默认值，所以 99% 情况下槽里读出来就是
+/// 这两个；这里的 `unwrap_or_else` 是给极端情况兜底（如旧版本切换 bug 留下的脏数据）。
+///
+/// base_url 末尾去掉 `/`，让 `llm_gemini::generate_content_url` 拼接稳定。
+/// 不去 `/chat/completions` 后缀——OpenAI 兼容路径才会有那个后缀，原生 Gemini 不会。
+fn read_gemini_credentials() -> anyhow::Result<(String, String, String)> {
+    let api_key = CredentialsVault::get(CredentialAccount::ArkApiKey)?.unwrap_or_default();
+    let model = CredentialsVault::get(CredentialAccount::ArkModelId)?
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "gemini-2.5-flash".to_string());
+    let base_url = CredentialsVault::get(CredentialAccount::ArkEndpoint)?
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "https://generativelanguage.googleapis.com/v1beta".to_string());
+    if api_key.trim().is_empty() {
+        anyhow::bail!("API Key 为空");
+    }
+    let base_url = base_url.trim_end_matches('/').to_string();
+    Ok((api_key, model, base_url))
+}
+
+fn build_active_llm_provider(llm_thinking_enabled: bool) -> anyhow::Result<ActiveLLMProvider> {
+    let active = CredentialsVault::get_active_llm();
+    let model =
+        CredentialsVault::get(CredentialAccount::ArkModelId)?.filter(|s| !s.trim().is_empty());
+    if active == CODEX_OAUTH_PROVIDER_ID {
+        let config =
+            CodexOAuthConfig::new(model.unwrap_or_else(|| CODEX_DEFAULT_MODEL.to_string()))
+                .with_thinking_enabled(llm_thinking_enabled);
+        return Ok(ActiveLLMProvider::Codex(CodexOAuthLLMProvider::new(config)));
+    }
+
+    let api_key = CredentialsVault::get(CredentialAccount::ArkApiKey)?.unwrap_or_default();
+    let model = model.unwrap_or_else(|| "deepseek-v3-2".to_string());
+    let endpoint = resolve_ark_endpoint(&api_key)?;
+    let base_url = endpoint
+        .trim_end_matches("/chat/completions")
+        .trim_end_matches('/')
+        .to_string();
+    let config = OpenAICompatibleConfig::new(active, "OpenLess LLM", base_url, api_key, model)
+        .with_thinking_enabled(llm_thinking_enabled);
+    Ok(ActiveLLMProvider::OpenAI(OpenAICompatibleLLMProvider::new(
+        config,
+    )))
 }
 
 fn resolve_ark_endpoint(api_key: &str) -> anyhow::Result<String> {
@@ -2727,8 +3004,8 @@ mod tests {
             (HotkeyTrigger::RightOption, "Alt", "AltRight"),
             (HotkeyTrigger::RightAlt, "AltGraph", "AltRight"),
             (HotkeyTrigger::RightCommand, "Meta", "MetaRight"),
+            (HotkeyTrigger::LeftOption, "Alt", "AltLeft"),
             // Mirrors Windows trigger_to_vk_code aliases.
-            (HotkeyTrigger::LeftOption, "Alt", "AltRight"),
             (HotkeyTrigger::Fn, "Control", "ControlRight"),
         ];
         for (trigger, key, code) in cases {
@@ -2746,7 +3023,7 @@ mod tests {
         assert!(!window_key_matches_trigger(
             HotkeyTrigger::LeftOption,
             "Alt",
-            "AltLeft"
+            "AltRight"
         ));
         assert!(!window_key_matches_trigger(HotkeyTrigger::Fn, "Fn", "Fn"));
     }
@@ -3624,37 +3901,55 @@ fn emit_capsule(
 ) {
     let app_opt = inner.app.lock().clone();
     let Some(app) = app_opt else { return };
+    let translation = inner.translation_modifier_seen.load(Ordering::SeqCst);
     let payload = CapsulePayload {
         state,
         level,
         elapsed_ms,
         message,
         inserted_chars,
-        translation: inner.translation_modifier_seen.load(Ordering::SeqCst),
+        translation,
     };
 
-    let show_capsule = inner.prefs.get().show_capsule;
-    if let Some(window) = app.get_webview_window("capsule") {
+    // visible / translation 是「这一帧 capsule:state event 的 payload」内容 ——
+    // 必须在 call-site（即音频线程触发 emit_capsule 时）就算定，否则 main thread
+    // 闭包里读到的将是「下一帧」的 state，跟实际下发给 JS 的 payload 不一致。
+    let visible = !matches!(state, CapsuleState::Idle);
+
+    // emit_capsule 会被 cpal process_callback（音频回调线程）调用 ~30 Hz —— 在该
+    // 线程上调用 NSWindow / HWND API 会撞 macOS dispatch_assert_queue_fail SIGTRAP
+    // 或者 Win32 SendMessage 死锁。把 window.show/hide + 位置调整 marshal 到主线程；
+    // app.emit_to 走 Tauri 内部事件总线，本身线程安全，保留同步调用。详见 audit 3.2.2。
+    //
+    // show_capsule（用户偏好）在主线程执行时再读 —— 用户可以在录音过程中改设置，
+    // 闭包入队到真正跑之间窗口上限是一两帧（~16-33ms），用最新值消除 stale-pref
+    // 闪烁。pr_agent 关注点 — 见 audit follow-up。
+    let inner_for_main = Arc::clone(inner);
+    let app_for_main = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let Some(window) = app_for_main.get_webview_window("capsule") else {
+            return;
+        };
+        let show_capsule = inner_for_main.prefs.get().show_capsule;
         // 三平台统一：Done / Cancelled / Error 状态保留 ~1.5s toast
         // （schedule_capsule_idle 之后会回 Idle 隐藏）。
         // Windows 上 linger 的真实问题（截图选中 / 死区 / 拖拽卡顿）由 #140 加的
         // `hide_capsule_window_if_present()` Win32 hard-hide 在 visible=false 分支
         // 处理，不依赖把 Done/Cancelled/Error 打成 invisible。详见 PR #140 评论。
-        let visible = !matches!(state, CapsuleState::Idle);
-        maybe_position_capsule_bottom_center(inner, &window, payload.translation);
+        maybe_position_capsule_bottom_center(&inner_for_main, &window, translation);
         if show_capsule && visible {
-            if !show_capsule_window_no_activate(&app, &window) {
+            if !show_capsule_window_no_activate(&app_for_main, &window) {
                 let _ = window.show();
             }
             // macOS/Windows 优先走 no-activate show，避免录音胶囊抢走主窗口点击焦点。
             // 若 fallback 到 show()，OpenLess 已是前台 app 时再把 key window 还给 main。
             #[cfg(target_os = "macos")]
-            crate::restore_main_window_key_if_active(&app);
+            crate::restore_main_window_key_if_active(&app_for_main);
         } else {
             hide_capsule_window_if_present();
             let _ = window.hide();
         }
-    }
+    });
 
     let _ = app.emit_to("capsule", "capsule:state", payload);
 }

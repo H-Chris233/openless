@@ -10,6 +10,10 @@ The active codebase lives at `openless-all/app/` and is **Tauri 2 + Rust backend
 
 UI must match `openless-all/design_handoff_openless/*.jsx` pixel-for-pixel; the JSX is reference-only, never imported.
 
+Adjacent docs:
+- `AGENTS.md` is the parallel of this file for **Codex** sessions; the research-before-coding rules at the bottom of this file delegate to it.
+- `README.md` / `README.zh.md` (root) are user-facing install + feature guides; `USAGE.md` covers runtime usage. Update them when shipping user-visible features, not for internal refactors.
+
 ## Build, Run, Test
 
 ### Tauri (current — start here)
@@ -53,27 +57,48 @@ There is no test runner wired in for the frontend. `src/lib/providerSetup.test.t
 
 ## Architecture
 
-`coordinator::Coordinator` is the **single owner of session state**. Hotkey edges drive a small phase enum (`Idle → Starting → Listening → Processing`); recorder, ASR, polish, insertion, and history are wired here and nowhere else. Library/module code never calls across modules — they each depend only on shared types.
+`coordinator::Coordinator` is the **single owner of all session state** — both the dictation phase machine (`Idle → Starting → Listening → Processing → Inserting → Done`) **and** the parallel QA phase machine (`Idle → Recording → Processing`). Hotkey edges drive both. Recorder, ASR, polish, insertion, selection capture, and history are wired here and nowhere else. Leaf modules never call across each other — they each depend only on `types.rs`.
+
+The coordinator was split into a module: `coordinator.rs` is the public entry; `coordinator/{dictation,qa,resources}.rs` carry per-pipeline logic; `coordinator_state.rs` is the pure (no Tauri / audio / clipboard) state-transition layer that makes phase decisions unit-testable.
 
 ```
-Rust (openless-all/app/src-tauri/src)        Purpose
-──────────────────────────────────────        ────────────────────────────────
-types.rs                                      Pure value types: DictationSession, PolishMode, HotkeyBinding, errors
-hotkey.rs                                     Global hotkey monitor (modifier-key edges)
-recorder.rs                                   Mic → 16 kHz mono Int16 PCM, RMS callback
-asr/{mod,frame,volcengine,whisper}.rs         ASR providers: Volcengine streaming WebSocket + Whisper HTTP
-polish.rs                                     OpenAI-compatible chat completions (Ark / DeepSeek / etc.)
-insertion.rs                                  AX focused-element write → clipboard + Cmd+V → copy-only fallback
-persistence.rs                                History/preferences/vocab JSON + platform credential vault
-coordinator.rs + commands.rs + lib.rs         State machine, IPC surface, tray icon, window plumbing
-permissions.rs                                TCC checks (Accessibility / Microphone)
+Rust (openless-all/app/src-tauri/src)            Purpose
+──────────────────────────────────────────       ────────────────────────────────
+types.rs                                          Pure value types: sessions, PolishMode, HotkeyBinding, errors, QaChatMessage
+coordinator.rs                                    Public entry; owns Inner, hotkey wiring, capsule emits
+coordinator/{dictation,qa,resources}.rs           Dictation pipeline / QA pipeline / shared helpers (begin/end/cancel)
+coordinator_state.rs                              Pure state transitions — Tauri-free, unit-testable
+commands.rs + lib.rs + main.rs                    IPC surface (`invoke_handler!`), tray icon, window plumbing, entry
+permissions.rs                                    TCC checks (Accessibility / Microphone / AppleEvents)
+
+— Hotkeys (three parallel monitors) —
+hotkey.rs                                         Modifier-only hotkey via native CGEventTap (macOS) / rdev (Win/Linux)
+combo_hotkey.rs                                   Custom-combo dictation hotkey (when user picks combo over modifier-only)
+qa_hotkey.rs                                      QA toggle hotkey (default Cmd/Ctrl+Shift+;) via `global-hotkey` crate
+global_hotkey_runtime.rs                          Shared `global-hotkey` Carbon/Win event runtime (combo + QA share it)
+shortcut_binding.rs                               Shared parse/validate of user-configurable bindings
+
+— Audio / ASR / LLM —
+recorder.rs                                       Mic → 16 kHz mono Int16 PCM, RMS callback
+audio_mute.rs                                     System-output mute guard while recording (RAII)
+asr/{mod,frame,volcengine,whisper}.rs + asr/local/* ASR providers: Volcengine streaming WS, Whisper HTTP, Bailian, local Foundry
+polish.rs                                         OpenAI-compatible chat completions (Ark / DeepSeek / Codex OAuth reuse)
+llm_gemini.rs                                     Native Google Gemini client — NOT OpenAI-compatible (separate auth, thinkingConfig, role:model)
+correction.rs                                     User-defined correction rules (separate from vocab dictionary)
+
+— Insertion (two paths) —
+insertion.rs                                      AX focused-element write → clipboard + paste shortcut → copy-only fallback
+windows_ime_{ipc,profile,protocol,session}.rs    Windows IME-side text injection over IPC (parallel insertion path; activates OpenLess TSF profile and submits text via named pipe)
+selection.rs                                      Cross-platform selection capture for QA: macOS AX → Cmd/Ctrl+C simulate-copy → Linux PRIMARY (best-effort)
+
+persistence.rs                                    history.json / preferences.json / dictionary.json + platform credential vault
 
 Frontend (openless-all/app/src)
-src/components/Capsule.tsx                    Capsule view + state enum
-src/ (React)                                  Main window UI: Overview / History / Vocab / Style / Settings
-src/i18n/                                     react-i18next init + zh-CN / en resources
-src/pages/_atoms.tsx                          Recoil atoms — global frontend state
-src/state/HotkeySettingsContext.tsx           HotkeySettings React context (capability + binding from backend)
+src/components/Capsule.tsx                        Capsule view + state enum
+src/ (React)                                      Main window UI: Overview / History / Vocab / Style / Settings
+src/i18n/                                         react-i18next init + zh-CN / en resources (zh-CN is source of truth)
+src/pages/_atoms.tsx                              Recoil atoms — global frontend state
+src/state/HotkeySettingsContext.tsx               HotkeySettings React context (capability + binding from backend)
 ```
 
 ### Dictation pipeline
@@ -88,6 +113,32 @@ Invariants:
 - **Polish/ASR fallbacks are silent.** Missing Ark creds → insert raw transcript. Missing Volcengine creds → mock pipeline copies a placeholder. The contract is *"the user's words don't get lost"* — don't add hard errors here.
 - **`BufferingAudioConsumer`** queues PCM until the WebSocket is ready, then drains. Recorder always pushes to it; ASR is attached after `openSession` resolves.
 - **Hotkey is toggle-only**, not press-and-hold. The monitor yields one edge per modifier-key keydown; the coordinator interprets odd/even.
+
+### Q&A pipeline (selection-based ask-the-LLM)
+
+Parallel state machine, lives in `coordinator/qa.rs` + `qa_hotkey.rs` + `selection.rs`. Default trigger: `Cmd+Shift+;` (macOS) / `Ctrl+Shift+;` (Win/Linux).
+
+```
+QA hotkey edge          →  toggle panel:    open → capture front_app, clear messages, show QA window
+                                            close → cancel session, hide window, sweep capsule
+Option/dictation edge   →  routed by panel_visible flag (see below):
+  while panel_visible & dictation Idle → handle_qa_option_edge:
+    QaPhase::Idle      →  begin_qa_session: capture_selection() → Recorder.start → ASR.openSession
+    QaPhase::Recording →  end_qa_session:   Recorder.stop → ASR final → LLM (with selection as context) → emit qa:state
+    QaPhase::Processing→  ignored (LLM in flight)
+  otherwise                                  handle_pressed (normal dictation)
+```
+
+Invariants & gotchas:
+- **Hotkey routing.** When the QA panel is visible, the dictation hotkey edge routes to QA — *unless* a dictation session is already mid-flight (`Starting/Listening/Processing/Inserting`), in which case the edge stays with dictation. Otherwise QA's `begin_qa_session` would race for the same mic device (cpal rejects the second `build_input_stream` on macOS/Win, PipeWire opens two streams on Linux — neither is recoverable from the QA panel UI). See audit 3.3.1 in `coordinator/dictation.rs`.
+- **Capsule sweep on panel open.** Open emits a fresh `CapsuleState::Idle` *only if* dictation is Idle. If dictation is Recording/Polishing/Inserting/Done, the sweep is suppressed so the user's in-flight feedback isn't wiped. See audit 3.3.4.
+- **Selection capture is a 3-tier fallback** (`selection.rs`): (1) macOS AX `kAXSelectedTextAttribute` direct read, no clipboard touched; (2) macOS/Windows simulate Cmd/Ctrl+C → snapshot + restore original clipboard, 80 ms read window; (3) Linux PRIMARY via `wl-paste` / `xclip` / `xsel`, best-effort. Returns `None` when the user genuinely selected nothing.
+- **Selection truncation.** Hard cap 4000 chars; over → keep first 2000 + `[…truncated…]` + last 2000. Don't raise this without checking LLM context budgeting — Gemini and Ark have different limits.
+- **Multi-turn memory.** `QaSessionState.messages` accumulates `user→assistant` pairs across turns within a single panel session; closing the panel clears them.
+
+### Insertion paths
+
+`insertion.rs` is the cross-platform default. On Windows there is a **second insertion path** in `windows_ime_{ipc,profile,protocol,session}.rs` that activates a TSF profile (CLSID + GUID baked in `windows_ime_profile.rs`) and submits text over a named-pipe IPC. The coordinator picks one based on user preference / fallback status; both routes return the same `InsertStatus` (`Inserted` / `CopiedFallback`). When changing insertion behavior, decide which path you're touching — they don't share code.
 
 ### Permissions, credentials, on-disk state
 
@@ -161,3 +212,55 @@ If any step fails, do not announce the release; investigate `release-tauri.yml` 
 2. Register it in `lib.rs` (`mod <name>;`).
 3. Wire it into `coordinator.rs` and expose any frontend-callable surface via `commands.rs` + `invoke_handler!`.
 4. Add the matching TS wrapper in `openless-all/app/src/lib/ipc.ts` (with a mock branch for browser dev).
+
+## 调研先于编码：派子 agent 查 API / 库 / 平台文档
+
+**完整规则在 [AGENTS.md `Third-party service integrations & library / platform API research`](AGENTS.md) 段落（line 171-191）。** 这里列的是 Claude Code 入场后用得上的具体工具映射。
+
+### 触发条件 — 命中任一项都先派子 agent 调研，再下笔
+
+- 第三方 HTTP API（ASR 厂家 / LLM 端点 / GitHub API / Tauri plugin 服务等）
+- 不熟的 Rust crate / npm 包：连签名和 feature flag 都不确定时
+- 平台 API：Apple Security framework / CoreFoundation / Win32 / Carbon / AppKit
+- 仓库 lock 文件锁着的某版本到底支持什么 — 训练记忆和 `Cargo.lock` / `package-lock.json` 实际版本可能不一致
+- 任何跟「训练 cutoff 之后才迭代过」相关的接口
+
+### 不需要派子 agent
+
+- 仓库代码里已有现成调用 → `rg` / `grep` 找参考即可（仓库即文档）
+- 通用编程 / 算法 / 自己能推导的语言特性
+- 单文件 surgical 改动且改动点的 API 已有用例
+- 查本仓库已有模块（`types.rs` / `coordinator.rs` 等）— 直接 Read
+
+### 工具优先级
+
+```text
+1. Context7 MCP（最高优先 — 主流库覆盖广，version-aware）
+   - mcp__context7__resolve-library-id  → 拿 library id
+   - mcp__context7__query-docs          → 当前版本的官方文档片段
+
+2. documentation-lookup skill
+   /skill documentation-lookup —— 包装 Context7，含路由 + 缓存。
+
+3. Agent 子 agent（subagent_type=general-purpose）
+   场景：Context7 没覆盖（小众 crate / 新 SDK / 非英文文档），
+   或需多源交叉（官方文档 + GitHub README + Stack Overflow）。
+   子 agent 用 WebFetch / WebSearch / Context7 综合，回 200-400 字结构化结果。
+
+4. 单点兜底：直接 WebFetch 单页文档（只读最权威一篇时）
+```
+
+### 子 agent prompt 必备字段
+
+1. **目标问题**：一句话讲清要解决的具体技术问题（不要"了解一下 X"这种空靶）
+2. **本仓库现状**：当前 lock 着的版本（`Cargo.lock` / `package-lock.json` 拉一下）+ 现有调用点 `file:line`（若有）
+3. **必须返回的结构**：函数/端点签名 → 最小可运行示例（≤20 行）→ **版本兼容范围**（vs 训练记忆的核心校验点）→ 已知坑 / 平台差异 / 弃用计划
+4. **禁令**：不改本仓库代码；不贴文档原文（distill 关键部分，避免上下文撑爆）；多个独立服务分别派 agent — 一个服务一个 agent
+
+### 反例
+
+- ✗ 凭训练记忆写第三方 API 调用，假定参数签名就这样
+- ✗ 把整段官方文档 paste 进主上下文
+- ✗ 先写代码再查文档
+- ✗ 单子 agent 同时调研 5 个不相关库（每个独立 prompt + 独立上下文）
+- ✗ 子 agent 返回后跳过 cross-verify 直接写代码 — AGENTS.md 第 4 步要求至少用一次 `WebFetch` 直接命中官方源核对一项关键事实

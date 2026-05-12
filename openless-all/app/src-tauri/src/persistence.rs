@@ -21,7 +21,9 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::types::{DictationSession, DictionaryEntry, UserPreferences, VocabPresetStore};
+use crate::types::{
+    CorrectionRule, DictationSession, DictionaryEntry, UserPreferences, VocabPresetStore,
+};
 
 const HISTORY_CAP: usize = 200;
 const HISTORY_FILE: &str = "history.json";
@@ -29,6 +31,8 @@ const PREFERENCES_FILE: &str = "preferences.json";
 /// 与 Swift `Sources/OpenLessPersistence/DictionaryStore.swift` 同名，
 /// 让旧版词汇表在升级后无缝继承。**不要**改成 `vocab.json`，会丢用户数据。
 const VOCAB_FILE: &str = "dictionary.json";
+const CORRECTION_RULES_FILE: &str = "correction-rules.json";
+const CORRECTION_NUM_TOKEN: &str = "{num}";
 const VOCAB_PRESETS_FILE: &str = "vocab-presets.json";
 
 /// 旧版 plaintext JSON 凭据路径。仅作为迁移来源；成功写入系统凭据库后会删除。
@@ -45,6 +49,41 @@ static CREDENTIALS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn credentials_lock() -> &'static Mutex<()> {
     CREDENTIALS_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+/// Process-wide credentials cache.
+///
+/// Without this cache every `CredentialsVault::get_*` / `snapshot` call hits
+/// `load_credentials()` → `load_keyring_credentials()` which reads the
+/// manifest entry plus every chunk entry from the OS keyring. On macOS each
+/// distinct keychain entry has its own ACL — so an ad-hoc-signed binary (or
+/// any binary whose ACL grants haven't been set up yet) prompts on every read
+/// of every entry. A single dictation cycle reads credentials 5–10 times,
+/// times (1 manifest + N chunks) entries → tens of "OpenLess wants to use
+/// the keychain" prompts per recording.
+///
+/// With this cache the first read populates `Some(CredsRoot)` and every
+/// subsequent read in the same process is silent. `save_credentials` keeps
+/// the cache in sync after writes so Settings → Recording credential edits
+/// take effect immediately.
+///
+/// Cross-process changes (e.g. user edits via `security` CLI, or another
+/// instance of the app — single-instance is enforced but defense in depth)
+/// will be invisible until the next process launch. Acceptable trade-off
+/// per the credential vault contract: the keyring is owned by this app.
+static CREDENTIALS_CACHE: OnceLock<Mutex<Option<CredsRoot>>> = OnceLock::new();
+
+fn credentials_cache() -> &'static Mutex<Option<CredsRoot>> {
+    CREDENTIALS_CACHE.get_or_init(|| Mutex::new(None))
+}
+
+fn store_credentials_cache(root: &CredsRoot) {
+    *credentials_cache().lock() = Some(root.clone());
+}
+
+#[cfg(test)]
+fn reset_credentials_cache_for_tests() {
+    *credentials_cache().lock() = None;
 }
 
 // ───────────────────────── path helpers ─────────────────────────
@@ -166,7 +205,7 @@ fn read_or_default<T: for<'de> Deserialize<'de> + Default>(path: &Path) -> Resul
 //     "version": 1,
 //     "active": { "asr": "<id>", "llm": "<id>" },
 //     "providers": {
-//       "asr": { "<id>": { "appKey", "accessKey", "resourceId", "apiKey", "baseURL", "model" } },
+//       "asr": { "<id>": { "appKey", "accessKey", "resourceId", "apiKey", "baseURL", "model", "vocabularyId" } },
 //       "llm": { "<id>": { "displayName", "apiKey", "baseURL", "model", "temperature", "extraHeaders" } }
 //     }
 //   }
@@ -244,6 +283,8 @@ struct CredsAsrEntry {
     accessKey: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     resourceId: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vocabularyId: Option<String>,
 }
 
 impl CredsAsrEntry {
@@ -254,6 +295,7 @@ impl CredsAsrEntry {
             && self.appKey.as_deref().unwrap_or("").is_empty()
             && self.accessKey.as_deref().unwrap_or("").is_empty()
             && self.resourceId.as_deref().unwrap_or("").is_empty()
+            && self.vocabularyId.as_deref().unwrap_or("").is_empty()
     }
 }
 
@@ -530,19 +572,35 @@ fn migrate_legacy_sources_for_update() -> Result<CredsRoot> {
 }
 
 fn load_credentials() -> CredsRoot {
+    if let Some(cached) = credentials_cache().lock().as_ref().cloned() {
+        return cached;
+    }
     match load_keyring_credentials() {
         Ok(Some(root)) => {
-            // 不在这里调 remove_legacy_keyring_credentials() —— 它内部对 9 个
+            // 不在这里调 remove_legacy_keyring_credentials() —— 它内部对每个
             // 旧 account 各做一次 keyring delete，每次 delete 在 macOS Keychain
             // 上仍要触发 ACL 检查。第一次成功 load 时 legacy entries 通常已经
             // 被 migrate_legacy_sources_for_update 清理过了；这里若再无脑跑，
             // 只会反复弹「OpenLess 想删除 X」十几次。文件 legacy（plaintext
             // JSON）不需要 ACL，可继续 best-effort 删除。
             remove_legacy_credentials_file_best_effort();
+            store_credentials_cache(&root);
             root
         }
-        Ok(None) => migrate_legacy_sources(),
+        Ok(None) => {
+            // 没有现成 chunked manifest —— 走 migrate（如果有 legacy 则写入并返回写后的 root）。
+            // migrate_legacy_sources 内部 save_credentials 已经会刷 cache，这里再补一次
+            // 是为了「无 legacy 也无 manifest」走默认 root 的路径也能进 cache。
+            let root = migrate_legacy_sources();
+            store_credentials_cache(&root);
+            root
+        }
         Err(e) => {
+            // **不缓存 keyring 错误路径下的 fallback**。Keychain 可能只是临时不可读
+            // （用户尚未在第一次弹窗里点同意 / DataProtection 错误 / login keychain
+            // 还没 unlock）；如果在这里把 legacy fallback 写进 cache，等用户授权后
+            // 我们就再也不会重读 keyring，整个进程生命周期里都拿 stale 数据。下次
+            // 调用让它再尝试一次 keyring。pr_agent feedback on PR #394。
             log::warn!("[vault] system credential read failed: {e}");
             load_legacy_sources_without_migration()
         }
@@ -550,14 +608,26 @@ fn load_credentials() -> CredsRoot {
 }
 
 fn load_credentials_for_update() -> Result<CredsRoot> {
+    if let Some(cached) = credentials_cache().lock().as_ref().cloned() {
+        return Ok(cached);
+    }
     match load_keyring_credentials() {
         Ok(Some(root)) => {
             // 同 load_credentials：不再每次 update 都尝试 delete legacy keyring
             // entries，避免反复触发 macOS Keychain ACL 弹窗。
             remove_legacy_credentials_file_best_effort();
+            store_credentials_cache(&root);
             Ok(root)
         }
-        Ok(None) => migrate_legacy_sources_for_update(),
+        Ok(None) => {
+            // migrate_legacy_sources_for_update 内部如果实际 migrate 会调
+            // save_credentials，cache 会被刷新；如果只返回 default root（没 legacy），
+            // 我们这里再显式 cache 一次防御性补一下。
+            let root = migrate_legacy_sources_for_update()?;
+            store_credentials_cache(&root);
+            Ok(root)
+        }
+        // 错误路径不缓存 —— 同 load_credentials 注释；让下次读重试 keyring。
         Err(e) => Err(e),
     }
 }
@@ -613,6 +683,9 @@ fn save_credentials(root: &CredsRoot) -> Result<()> {
     }
 
     remove_legacy_credentials_file_best_effort();
+    // 写完成功后立刻刷新 process cache —— 同进程后续读不再回 Keychain。
+    // 见 CREDENTIALS_CACHE 的 doc。
+    store_credentials_cache(&cleaned);
     Ok(())
 }
 
@@ -632,6 +705,7 @@ fn lookup_account(root: &CredsRoot, account: CredentialAccount) -> Option<String
         CredentialAccount::AsrApiKey => asr.and_then(|e| pick(&e.apiKey)),
         CredentialAccount::AsrEndpoint => asr.and_then(|e| pick(&e.baseURL)),
         CredentialAccount::AsrModel => asr.and_then(|e| pick(&e.model)),
+        CredentialAccount::AsrVocabularyId => asr.and_then(|e| pick(&e.vocabularyId)),
     }
 }
 
@@ -676,6 +750,10 @@ fn write_account(root: &mut CredsRoot, account: CredentialAccount, value: Option
             let entry = root.providers.asr.entry(asr_id).or_default();
             entry.model = normalized;
         }
+        CredentialAccount::AsrVocabularyId => {
+            let entry = root.providers.asr.entry(asr_id).or_default();
+            entry.vocabularyId = normalized;
+        }
     }
 }
 
@@ -718,8 +796,7 @@ impl HistoryStore {
         // Prepend so the newest session is at index 0, matching the Swift impl.
         sessions.insert(0, session);
         if retention_days > 0 {
-            let cutoff =
-                chrono::Utc::now() - chrono::Duration::days(i64::from(retention_days));
+            let cutoff = chrono::Utc::now() - chrono::Duration::days(i64::from(retention_days));
             sessions.retain(|s| {
                 chrono::DateTime::parse_from_rfc3339(&s.created_at)
                     .map(|t| t.with_timezone(&chrono::Utc) >= cutoff)
@@ -967,6 +1044,106 @@ pub fn save_vocab_presets(store: &VocabPresetStore) -> Result<()> {
     atomic_write(&path, &json)
 }
 
+// ───────────────────────── CorrectionRuleStore ─────────────────────────
+
+pub struct CorrectionRuleStore {
+    path: PathBuf,
+    lock: Mutex<()>,
+}
+
+impl CorrectionRuleStore {
+    pub fn new() -> Result<Self> {
+        let dir = data_dir()?;
+        ensure_dir(&dir)?;
+        Ok(Self {
+            path: dir.join(CORRECTION_RULES_FILE),
+            lock: Mutex::new(()),
+        })
+    }
+
+    pub fn list(&self) -> Result<Vec<CorrectionRule>> {
+        let _guard = self.lock.lock();
+        self.read_locked()
+    }
+
+    pub fn add(&self, pattern: String, replacement: String) -> Result<CorrectionRule> {
+        let pattern = pattern.trim().to_string();
+        let replacement = replacement.trim().to_string();
+        validate_correction_rule_syntax(&pattern, &replacement)?;
+        let _guard = self.lock.lock();
+        let mut rules = self.read_locked()?;
+        let rule = CorrectionRule {
+            id: Uuid::new_v4().to_string(),
+            pattern,
+            replacement,
+            enabled: true,
+            created_at: Utc::now().to_rfc3339(),
+        };
+        rules.insert(0, rule.clone());
+        self.write_locked(&rules)?;
+        Ok(rule)
+    }
+
+    pub fn remove(&self, id: &str) -> Result<()> {
+        let _guard = self.lock.lock();
+        let mut rules = self.read_locked()?;
+        let before = rules.len();
+        rules.retain(|r| r.id != id);
+        if rules.len() == before {
+            return Ok(());
+        }
+        self.write_locked(&rules)
+    }
+
+    pub fn set_enabled(&self, id: &str, enabled: bool) -> Result<()> {
+        let _guard = self.lock.lock();
+        let mut rules = self.read_locked()?;
+        let mut found = false;
+        for rule in rules.iter_mut() {
+            if rule.id == id {
+                rule.enabled = enabled;
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Err(anyhow!("correction rule {} not found", id));
+        }
+        self.write_locked(&rules)
+    }
+
+    fn read_locked(&self) -> Result<Vec<CorrectionRule>> {
+        read_or_default::<Vec<CorrectionRule>>(&self.path)
+    }
+
+    fn write_locked(&self, rules: &[CorrectionRule]) -> Result<()> {
+        let json = serde_json::to_vec_pretty(rules).context("encode correction rules failed")?;
+        atomic_write(&self.path, &json)
+    }
+}
+
+fn validate_correction_rule_syntax(pattern: &str, replacement: &str) -> Result<()> {
+    if pattern.is_empty() {
+        return Err(anyhow!("correction rule pattern is empty"));
+    }
+    let pattern_token_count = pattern.matches(CORRECTION_NUM_TOKEN).count();
+    if pattern_token_count > 1 {
+        return Err(anyhow!("unsupported correction rule syntax"));
+    }
+    if replacement.contains(CORRECTION_NUM_TOKEN) && pattern_token_count == 0 {
+        return Err(anyhow!("unsupported correction rule syntax"));
+    }
+    if pattern_token_count == 1 {
+        let Some((prefix, suffix)) = pattern.split_once(CORRECTION_NUM_TOKEN) else {
+            return Err(anyhow!("unsupported correction rule syntax"));
+        };
+        if prefix.is_empty() && suffix.is_empty() {
+            return Err(anyhow!("unsupported correction rule syntax"));
+        }
+    }
+    Ok(())
+}
+
 // ───────────────────────── CredentialsVault ─────────────────────────
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -983,6 +1160,8 @@ pub enum CredentialAccount {
     AsrEndpoint,
     /// Active ASR provider's model name.
     AsrModel,
+    /// Active ASR provider's optional hotword vocabulary ID.
+    AsrVocabularyId,
 }
 
 impl CredentialAccount {
@@ -1000,6 +1179,7 @@ impl CredentialAccount {
             CredentialAccount::AsrApiKey => "asr.api_key",
             CredentialAccount::AsrEndpoint => "asr.endpoint",
             CredentialAccount::AsrModel => "asr.model",
+            CredentialAccount::AsrVocabularyId => "asr.vocabulary_id",
         }
     }
 
@@ -1014,6 +1194,7 @@ impl CredentialAccount {
             CredentialAccount::AsrApiKey,
             CredentialAccount::AsrEndpoint,
             CredentialAccount::AsrModel,
+            CredentialAccount::AsrVocabularyId,
         ]
     }
 }
@@ -1107,7 +1288,8 @@ impl CredentialsVault {
 #[cfg(test)]
 mod tests {
     use super::{
-        chunk_json_payload, list_vocab_presets, save_vocab_presets, KEYRING_CHUNK_MAX_UTF16_UNITS,
+        chunk_json_payload, list_vocab_presets, save_vocab_presets,
+        validate_correction_rule_syntax, KEYRING_CHUNK_MAX_UTF16_UNITS,
     };
     use crate::types::{VocabPreset, VocabPresetStore};
     use std::fs;
@@ -1157,5 +1339,15 @@ mod tests {
         );
         assert_eq!(loaded.disabled_builtin_preset_ids, vec!["chef".to_string()]);
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn correction_rule_syntax_rejects_silent_noops() {
+        assert!(validate_correction_rule_syntax("{num}粒", "{num}例").is_ok());
+        assert!(validate_correction_rule_syntax("几粒", "几例").is_ok());
+        assert!(validate_correction_rule_syntax("", "几例").is_err());
+        assert!(validate_correction_rule_syntax("{num}", "{num}例").is_err());
+        assert!(validate_correction_rule_syntax("{num}到{num}粒", "{num}例").is_err());
+        assert!(validate_correction_rule_syntax("几粒", "{num}例").is_err());
     }
 }

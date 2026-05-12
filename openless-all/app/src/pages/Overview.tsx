@@ -25,6 +25,7 @@ interface OverviewProps {
 
 const ASR_NAME_KEY_BY_ID: Record<string, string> = {
   volcengine: 'asrVolcengine',
+  bailian: 'asrBailian',
   siliconflow: 'asrSiliconflow',
   zhipu: 'asrZhipu',
   groq: 'asrGroq',
@@ -38,6 +39,7 @@ const LLM_NAME_KEY_BY_ID: Record<string, string> = {
   deepseek: 'deepseek',
   siliconflow: 'siliconflow',
   openai: 'openai',
+  codex_oauth: 'codexOAuth',
   mimo: 'mimo',
   cometapi: 'cometapi',
   openrouterFree: 'openrouterFree',

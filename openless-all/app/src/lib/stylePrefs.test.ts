@@ -1,8 +1,13 @@
 import {
   applyStylePreferencesNotification,
+  isStyleMasterEnabled,
+  rollbackDefaultAndEnabledChange,
   persistStylePreferenceChange,
   rollbackStyleEnabledChange,
   rollbackWholeStylePreferences,
+  styleDefaultModePreferences,
+  styleMasterFallbackModes,
+  styleMasterOffPreferences,
 } from './stylePrefs';
 import type { UserPreferences } from './types';
 
@@ -21,7 +26,9 @@ const previousPrefs: UserPreferences = {
   microphoneDeviceName: '',
   activeAsrProvider: 'volcengine',
   activeLlmProvider: 'ark',
+  llmThinkingEnabled: false,
   restoreClipboardAfterPaste: true,
+  pasteShortcut: 'ctrlV',
   allowNonTsfInsertionFallback: true,
   workingLanguages: ['简体中文'],
   translationTargetLanguage: '',
@@ -43,6 +50,9 @@ const previousPrefs: UserPreferences = {
   historyRetentionDays: 7,
   polishContextWindowMinutes: 5,
   startMinimized: false,
+  updateChannel: 'stable',
+  streamingInsert: false,
+  streamingInsertSaveClipboard: true,
 };
 
 const nextPrefs: UserPreferences = {
@@ -114,3 +124,53 @@ const notifiedPrefs: UserPreferences = {
 };
 const syncedPrefs = applyStylePreferencesNotification(previousPrefs, notifiedPrefs);
 assert(syncedPrefs === notifiedPrefs, 'prefs notification should replace stale style page prefs');
+
+const masterOffPrefs = styleMasterOffPreferences(previousPrefs);
+assert(
+  masterOffPrefs.enabledModes.join(',') === 'raw,light',
+  `master toggle off should persist raw and current default, got ${masterOffPrefs.enabledModes.join(',')}`,
+);
+
+const masterFallback = styleMasterFallbackModes('light');
+assert(
+  masterFallback.join(',') === 'raw,light',
+  `master toggle off should preserve raw and current default, got ${masterFallback.join(',')}`,
+);
+assert(
+  isStyleMasterEnabled({ ...previousPrefs, enabledModes: masterFallback }) === false,
+  'master toggle should render off when only raw and default remain enabled',
+);
+assert(
+  isStyleMasterEnabled(previousPrefs) === true,
+  'master toggle should render on when extra styles remain enabled',
+);
+const rawFallback = styleMasterFallbackModes('raw');
+assert(
+  rawFallback.join(',') === 'raw',
+  `raw default fallback should not duplicate raw, got ${rawFallback.join(',')}`,
+);
+
+
+const defaultAfterMasterOff = styleDefaultModePreferences(
+  { ...previousPrefs, enabledModes: ['raw', 'light'] },
+  'formal',
+);
+assert(
+  defaultAfterMasterOff.defaultMode === 'formal' && defaultAfterMasterOff.enabledModes.join(',') === 'raw,formal',
+  `default change while master is off should refresh fallback modes, got ${defaultAfterMasterOff.defaultMode}/${defaultAfterMasterOff.enabledModes.join(',')}`,
+);
+assert(
+  isStyleMasterEnabled(defaultAfterMasterOff) === false,
+  'master toggle should stay off after changing default while off',
+);
+
+let rolledBackDefaultAndEnabled: UserPreferences | null = defaultAfterMasterOff;
+const rollbackDefaultAndEnabled = rollbackDefaultAndEnabledChange(
+  { ...previousPrefs, enabledModes: ['raw', 'light'] },
+  defaultAfterMasterOff,
+);
+rolledBackDefaultAndEnabled = rollbackDefaultAndEnabled(rolledBackDefaultAndEnabled);
+assert(
+  rolledBackDefaultAndEnabled?.defaultMode === 'light' && rolledBackDefaultAndEnabled.enabledModes.join(',') === 'raw,light',
+  'failed off-state default save should roll back both default mode and enabled modes',
+);

@@ -7,7 +7,7 @@
 //  - 监听 `local-asr-download-progress` 事件实时刷新进度
 //  - Win 端引擎不可用时禁用下载按钮，提示见 issue #256
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { isTauri, setActiveAsrProvider } from '../lib/ipc';
 import {
@@ -52,7 +52,13 @@ import { Btn, Card, PageHeader, Pill } from './_atoms';
 // Foundry Local Whisper 后端只在 Windows 编译实体（foundry_local_sdk 仅 Windows），
 // 非 Windows 平台 runtime 是 stub 永远 unavailable。前端这一页对应的卡片、状态拉取、
 // 事件订阅都必须按 OS 隔离，避免 macOS / Linux 用户看到 Windows 专属的 UI。
+//
+// 同理 Qwen3-ASR 后端只在 macOS 编译实体（qwen_engine / cache / local_provider 全是
+// `#[cfg(target_os = "macos")]`），Qwen3 模型管理 UI 也按 IS_MAC 守严——之前用
+// `!IS_WINDOWS` 会让假设的 Linux 渲染路径暴露死 UI（pr_agent #403 'Linux regression'
+// 修法）。
 const IS_WINDOWS = detectOS() === 'win';
+const IS_MAC = detectOS() === 'mac';
 
 interface RemoteSize {
   totalBytes: number;
@@ -61,7 +67,16 @@ interface RemoteSize {
   error: string | null;
 }
 
-export function LocalAsr() {
+interface LocalAsrProps {
+  /// `embedded=true` 表示作为子组件嵌入「高级」设置页（Settings → Advanced）；
+  /// 此时跳过外层 page padding/height、PageHeader 与独立警告 Card —— 这些由
+  /// 宿主 AdvancedSection 决定（包括把警告统一到页面顶部的浮层 popup 上）。
+  /// `embedded=false`（默认）保留原全屏页样式，供 v 旧版本的独立「模型设置」
+  /// 页面入口使用——但当前代码里该入口已删，本分支会一并移除。
+  embedded?: boolean;
+}
+
+export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
   const { t } = useTranslation();
   const { prefs, updatePrefs } = useHotkeySettings();
   const [settings, setSettings] = useState<LocalAsrSettings | null>(null);
@@ -553,20 +568,35 @@ export function LocalAsr() {
       ? t('localAsr.foundryRetryPrepare')
       : t('localAsr.foundryPrepare');
 
-  return (
-    <div style={{ padding: '20px 28px 32px', overflowY: 'auto', height: '100%' }}>
-      <PageHeader
-        kicker={t('localAsr.kicker')}
-        title={t('localAsr.title')}
-        desc={t('localAsr.desc')}
-      />
-
-      {/* 性能/质量预期警告 —— 用户硬要求要写清楚 */}
-      <Card style={{ marginBottom: 16, background: 'rgba(255, 215, 130, 0.18)' }}>
-        <div style={{ fontSize: 13, color: 'var(--ol-ink-2)', lineHeight: 1.6 }}>
-          ⚠️ {t('localAsr.performanceWarning')}
+  // embedded=true 嵌入「高级」设置：跳过外层 page padding/height、PageHeader，
+  // 与独立警告 Card——AdvancedSection 自己负责标题与短警告 + 启用时的浮层 popup，
+  // LocalAsr 只输出实际功能 Cards（Foundry / Qwen3 模型状态 / 模型列表）。
+  const Wrapper = embedded
+    ? (props: { children: ReactNode }) => <>{props.children}</>
+    : (props: { children: ReactNode }) => (
+        <div style={{ padding: '20px 28px 32px', overflowY: 'auto', height: '100%' }}>
+          {props.children}
         </div>
-      </Card>
+      );
+
+  return (
+    <Wrapper>
+      {!embedded && (
+        <PageHeader
+          kicker={t('localAsr.kicker')}
+          title={t('localAsr.title')}
+          desc={t('localAsr.desc')}
+        />
+      )}
+
+      {!embedded && (
+        /* 性能/质量预期警告 —— embedded 模式下由 AdvancedSection 自己渲染，避免重复。 */
+        <Card style={{ marginBottom: 16, background: 'rgba(255, 215, 130, 0.18)' }}>
+          <div style={{ fontSize: 13, color: 'var(--ol-ink-2)', lineHeight: 1.6 }}>
+            ⚠️ {t('localAsr.performanceWarning')}
+          </div>
+        </Card>
+      )}
 
       {IS_WINDOWS && (
       <Card style={{ marginBottom: 16 }}>
@@ -748,6 +778,11 @@ export function LocalAsr() {
       </Card>
       )}
 
+      {/* Qwen3 模型管理区——只在 macOS 渲染（后端 #[cfg(target_os = "macos")] 独占）。
+          Windows / Linux 看见镜像源 / 下载 / 模型列表都是 dead UI。Foundry 块自身已经
+          被上方 IS_WINDOWS 守卫，错误 Card（共享 setError，被 Foundry handler 也写）
+          保持无条件露出。 */}
+      {IS_MAC && (<>
       {!engineAvailable && (
         <Card style={{ marginBottom: 16, background: 'rgba(255, 235, 200, 0.4)' }}>
           <div style={{ fontSize: 13, color: 'var(--ol-ink-2)' }}>
@@ -846,6 +881,7 @@ export function LocalAsr() {
           </div>
         </Card>
       )}
+      </>)}
 
       {error && (
         <Card style={{ marginBottom: 16, background: 'rgba(255, 220, 220, 0.5)' }}>
@@ -853,6 +889,7 @@ export function LocalAsr() {
         </Card>
       )}
 
+      {IS_MAC && (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         {models.map(model => (
           <ModelRow
@@ -873,7 +910,8 @@ export function LocalAsr() {
           />
         ))}
       </div>
-    </div>
+      )}
+    </Wrapper>
   );
 }
 

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tauri::Emitter;
 
-use crate::coordinator_state::{initial_session_id, SessionId};
+use crate::coordinator_state::{initial_session_id, SessionId, SessionPhase};
 use crate::selection::SelectionContext;
 use crate::types::CapsuleState;
 
@@ -86,9 +86,16 @@ pub(super) fn open_qa_panel(inner: &Arc<Inner>) {
         state.selection = None;
         state.front_app = capture_frontmost_app();
     }
-    // 先把胶囊清干净，避免主听写上一次 Done 状态残留的 message/insertedChars
-    // 在 QA Done 阶段被 capsule UI 错误复用（"已之一粘贴这个 0" 那种）。
-    emit_capsule(inner, CapsuleState::Idle, 0.0, 0, None, None);
+    // 主听写 phase 是 Idle 才需要 sweep capsule —— 这里的语义是清掉「上一次 dictation
+    // Done 状态残留」的 message / insertedChars，让 QA 自己的 capsule 状态从干净起跑
+    // （否则 capsule UI 会出现 "已粘贴这个 0" 之类把上一次 inserted_chars 错误复用的
+    // 显示）。但如果 dictation 当前正处于 Recording / Polishing / Inserting / Done toast
+    // 显示中，强行 emit Idle 会把用户没看完的反馈抹掉、或者把 Polishing 中的进度条
+    // 卡死。审计 3.3.4。
+    let dictation_idle = matches!(inner.state.lock().phase, SessionPhase::Idle);
+    if dictation_idle {
+        emit_capsule(inner, CapsuleState::Idle, 0.0, 0, None, None);
+    }
     if let Some(app) = inner.app.lock().clone() {
         crate::show_qa_window(&app, "idle");
         let _ = app.emit_to(

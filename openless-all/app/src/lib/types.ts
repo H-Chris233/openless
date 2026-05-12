@@ -29,6 +29,14 @@ export interface DictionaryEntry {
   createdAt: string;
 }
 
+export interface CorrectionRule {
+  id: string;
+  pattern: string;
+  replacement: string;
+  enabled: boolean;
+  createdAt: string;
+}
+
 export interface VocabPreset {
   id: string;
   name: string;
@@ -102,6 +110,13 @@ export type QaHotkeyBinding = ShortcutBinding;
 /** 自定义录音组合键绑定。当 hotkey.trigger == 'custom' 时使用。 */
 export type ComboBinding = ShortcutBinding;
 
+/** 模拟粘贴时按下的快捷键。仅 Windows/Linux 生效；macOS 走 AX 直写。
+ *  - ctrlV       : 标准粘贴（默认；大多数编辑器、浏览器、IDE）
+ *  - ctrlShiftV  : kitty / alacritty / wezterm / gnome-terminal / foot 等终端
+ *  - shiftInsert : xterm / urxvt 等老派 X11 终端
+ *  详见 issue #360。 */
+export type PasteShortcut = 'ctrlV' | 'ctrlShiftV' | 'shiftInsert';
+
 export type WindowsImeInstallState =
   | 'installed'
   | 'notInstalled'
@@ -114,6 +129,10 @@ export interface WindowsImeStatus {
   message: string;
   dllPath: string | null;
 }
+
+/** Auto-update 渠道偏好。stable = 跟正式版（默认）；beta = Settings 里多一个
+ *  手动下载 Beta 的入口。不影响 plugin-updater 的自动检查路径。 */
+export type UpdateChannel = 'stable' | 'beta';
 
 export interface UserPreferences {
   hotkey: HotkeyBinding;
@@ -128,8 +147,14 @@ export interface UserPreferences {
   microphoneDeviceName: string;
   activeAsrProvider: string;
   activeLlmProvider: string;
+  /** LLM 思考模式开关。默认关闭，保持既有尽量关闭思考的行为。详见 issue #402。 */
+  llmThinkingEnabled: boolean;
   /** 仅 Windows/Linux：粘贴成功后是否恢复用户原剪贴板。默认 true。详见 issue #111。 */
   restoreClipboardAfterPaste: boolean;
+  /** 仅 Windows/Linux：模拟粘贴时按下的快捷键。详见 issue #360：kitty/alacritty
+   *  等终端只接受 Ctrl+Shift+V，硬编码 Ctrl+V 会被吞掉，听写文本只剩在剪贴板里。
+   *  macOS 走 AX 直写不受影响。默认 'ctrlV' 与历史行为一致。 */
+  pasteShortcut: PasteShortcut;
   /** Windows：TSF 失败后是否允许 SendInput / 粘贴类非 TSF 兜底。关闭后可验证是否真实 TSF 上屏。 */
   allowNonTsfInsertionFallback: boolean;
   /** 用户的工作语言（多选，原生名）；作为前提注入 LLM polish/translate prompt 头部。 */
@@ -174,6 +199,16 @@ export interface UserPreferences {
   /** 启动时静默运行（不弹主窗口）。Windows 开机自启场景常用——只想要后台 + 托盘，
    *  不想被主窗口打扰。开后所有启动路径都不弹窗，从菜单栏 / 托盘进入主窗口。默认 false。 */
   startMinimized: boolean;
+  /** 自动更新渠道。'stable'（默认）= plugin-updater 仅检查正式版；
+   *  'beta' = Settings → About 出现手动下载 Beta 的入口。 */
+  updateChannel: UpdateChannel;
+  /** 流式输入：润色 SSE 一边到达一边逐字模拟键盘事件输出到当前焦点。开启后用户感知到
+   *  的处理时延显著降低。v1 限定 macOS + OpenAI-compatible provider，其他配置自动回落
+   *  到原一次性插入。默认 false 与历史行为一致。 */
+  streamingInsert: boolean;
+  /** 流式输入成功后是否把最终润色文本写回剪贴板。开启后 Cmd+V 还能重复粘贴该次输出，
+   *  与一次性路径行为对齐。默认 true。 */
+  streamingInsertSaveClipboard: boolean;
 }
 
 export interface MicrophoneDevice {

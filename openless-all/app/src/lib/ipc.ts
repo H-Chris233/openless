@@ -4,6 +4,7 @@
 
 import type {
   ComboBinding,
+  CorrectionRule,
   CredentialsStatus,
   DictationSession,
   DictionaryEntry,
@@ -14,10 +15,12 @@ import type {
   PolishMode,
   QaHotkeyBinding,
   ShortcutBinding,
+  UpdateChannel,
   UserPreferences,
   WindowsImeStatus,
   VocabPresetStore,
 } from './types';
+export type { UpdateChannel } from './types';
 import { OL_DATA } from './mockData';
 import { defaultAppShortcutModifiers, defaultQaShortcut, formatComboLabel } from './hotkey';
 
@@ -54,7 +57,9 @@ const mockSettings: UserPreferences = {
   microphoneDeviceName: '',
   activeAsrProvider: 'foundry-local-whisper',
   activeLlmProvider: 'ark',
+  llmThinkingEnabled: false,
   restoreClipboardAfterPaste: true,
+  pasteShortcut: 'ctrlV',
   allowNonTsfInsertionFallback: true,
   workingLanguages: ['简体中文'],
   translationTargetLanguage: '',
@@ -76,6 +81,9 @@ const mockSettings: UserPreferences = {
   historyRetentionDays: 7,
   polishContextWindowMinutes: 5,
   startMinimized: false,
+  updateChannel: 'stable',
+  streamingInsert: false,
+  streamingInsertSaveClipboard: true,
 };
 
 const mockHotkeyCapability: HotkeyCapability = {
@@ -147,6 +155,16 @@ const mockVocab: DictionaryEntry[] = OL_DATA.vocab.map((v, i) => ({
   createdAt: new Date().toISOString(),
 }));
 
+const mockCorrectionRules: CorrectionRule[] = [
+  {
+    id: 'rule-quantity-classifier',
+    pattern: '{num}粒',
+    replacement: '{num}例',
+    enabled: true,
+    createdAt: new Date().toISOString(),
+  },
+];
+
 // ── Settings ───────────────────────────────────────────────────────────
 export function getSettings(): Promise<UserPreferences> {
   return invokeOrMock('get_settings', undefined, () => mockSettings);
@@ -159,7 +177,8 @@ export function setSettings(prefs: UserPreferences): Promise<void> {
 // ── Release channel (Beta opt-in) ──────────────────────────────────────
 // 渠道偏好与 fetch_latest_beta_release 实际效果只在 Tauri runtime 内有意义；
 // 浏览器开发模式下走 mock，避免设置页因 invoke 抛错而白屏。
-export type UpdateChannel = 'stable' | 'beta';
+// UpdateChannel 类型搬到 types.ts（UserPreferences.updateChannel 字段使用），
+// 这里 re-export 保持外部模块（SettingsModal 等）import 路径不变。
 
 export interface LatestBetaRelease {
   tagName: string;
@@ -267,6 +286,28 @@ export function removeVocab(id: string): Promise<void> {
 
 export function setVocabEnabled(id: string, enabled: boolean): Promise<void> {
   return invokeOrMock('set_vocab_enabled', { id, enabled }, () => undefined);
+}
+
+export function listCorrectionRules(): Promise<CorrectionRule[]> {
+  return invokeOrMock('list_correction_rules', undefined, () => mockCorrectionRules);
+}
+
+export function addCorrectionRule(pattern: string, replacement: string): Promise<CorrectionRule> {
+  return invokeOrMock('add_correction_rule', { pattern, replacement }, () => ({
+    id: `rule-new-${Date.now()}`,
+    pattern,
+    replacement,
+    enabled: true,
+    createdAt: new Date().toISOString(),
+  }));
+}
+
+export function removeCorrectionRule(id: string): Promise<void> {
+  return invokeOrMock('remove_correction_rule', { id }, () => undefined);
+}
+
+export function setCorrectionRuleEnabled(id: string, enabled: boolean): Promise<void> {
+  return invokeOrMock('set_correction_rule_enabled', { id, enabled }, () => undefined);
 }
 
 export function listVocabPresets(): Promise<VocabPresetStore> {
