@@ -183,6 +183,7 @@ export function SelectLite({
       <button
         ref={triggerRef}
         type="button"
+        className="ol-focus-ring"
         role="combobox"
         aria-haspopup="listbox"
         aria-expanded={open}

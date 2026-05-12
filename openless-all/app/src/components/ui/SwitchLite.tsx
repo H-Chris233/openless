@@ -11,6 +11,7 @@ export function SwitchLite({ on: initial = false }: SwitchLiteProps) {
   return (
     <button
       type="button"
+      className="ol-focus-ring"
       onClick={() => setOn(!on)}
       style={{
         position: 'relative', width: 32, height: 18, borderRadius: 999, border: 0,
