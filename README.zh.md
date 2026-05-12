@@ -141,7 +141,7 @@ OpenLess 只做一件事：**把语音变成可用的书面文字（尤其是 AI
 - Tauri 2 + Rust 后端 + React/TS 前端；macOS 12+，Windows 10+。
 - **切换式 + 按住说话** 双模式录音；任意阶段按 `Esc` 都能取消（包括润色 / 插入中）。
 - **云端 ASR**：火山引擎流式 ASR、OpenAI Whisper 兼容批式 ASR、Apple Speech（macOS）。
-- **本地 ASR**：内置 Qwen3-ASR（0.6B / 1.7B），通过 vendored `antirez/qwen-asr` 链接；Windows 端支持 Foundry Local Whisper。
+- **本地 ASR**：内置 Qwen3-ASR（0.6B / 1.7B），通过 vendored `Open-Less/qwen-asr` 链接；Windows 端支持 Foundry Local Whisper。
 - **润色 Provider**：Ark / DeepSeek / OpenAI / Doubao / Anthropic 兼容的 Chat Completions，以及任意 OpenAI 兼容的自定义 endpoint。
 - 4 种输出模式：原文、轻度润色、清晰结构（**AI prompt 模式**）、正式表达。另含**翻译热键**——按下后说一段话直接转成目标语言插入（[#43](../../issues/43)）。
 - **划词语音问答（QA）面板** — 独立热键打开浮窗，对当前选中文本发起语音 Q&A（[#118](../../issues/118)）。
@@ -192,7 +192,7 @@ OpenLess 只做一件事：**把语音变成可用的书面文字（尤其是 AI
 
 ## 从源码构建（开发者）
 
-当前活跃代码库在 `openless-all/app/`（Tauri 2 + Rust + React/TS）。macOS 构建会链接一份 vendored 的本地 ASR 引擎（[`antirez/qwen-asr`](https://github.com/antirez/qwen-asr)），以 git submodule 形式挂在 `src-tauri/vendor/qwen-asr/`，首次 clone 后必须先拉子模块。
+当前活跃代码库在 `openless-all/app/`（Tauri 2 + Rust + React/TS）。macOS 构建会链接一份 vendored 的本地 ASR 引擎（[`Open-Less/qwen-asr`](https://github.com/Open-Less/qwen-asr)，fork 自 `antirez/qwen-asr`），以 git submodule 形式挂在 `src-tauri/vendor/qwen-asr/`，首次 clone 后必须先拉子模块。
 
 ```bash
 # 首次 clone 后拉取子模块
