@@ -285,11 +285,18 @@ function Pill({ os, state, level, insertedChars, message, onCancel, onConfirm }:
   );
 }
 
+// 与 @keyframes capsule-out 的 0.24s 时长一致——必须同步，否则定时器先于
+// 动画结束就 unmount → 用户看到半截动画被截断。
+const EXIT_ANIM_MS = 240;
+// 初始可见 state：Tauri 内运行从 idle 开始（等后端 capsule:state 事件），
+// 浏览器 dev 模式从 recording 开始以便直接看到胶囊。
+const INITIAL_VISIBLE_STATE: CapsuleState = isTauri ? 'idle' : 'recording';
+
 export function Capsule() {
   const { t } = useTranslation();
   const os = detectOS();
   const metrics = getCapsulePillMetrics(os);
-  const [state, setState] = useState<CapsuleState>(isTauri ? 'idle' : 'recording');
+  const [state, setState] = useState<CapsuleState>(INITIAL_VISIBLE_STATE);
   const [level, setLevel] = useState<number>(isTauri ? 0 : 0.6);
   const [insertedChars, setInsertedChars] = useState<number>(0);
   const [message, setMessage] = useState<string | undefined>();
@@ -297,10 +304,10 @@ export function Capsule() {
   // `leaving` 与 `lastVisibleState` 协同实现「退出动画」：
   // - 当 state 从非 idle 变成 idle 时，不立即卸载，而是把 leaving 置为 true 并保留
   //   最后一帧的可见 state（lastVisibleState），让胶囊用 capsule-out 动画收缩淡出。
-  // - 动画结束（~240ms）后再把 leaving 置回 false，组件回到「真正未挂载」分支。
+  // - 动画结束（EXIT_ANIM_MS）后再把 leaving 置回 false，组件回到「真正未挂载」分支。
   // - 若期间 state 又切回非 idle（例如用户连按热键），立刻中止 leaving 并恢复显示。
   const [leaving, setLeaving] = useState<boolean>(false);
-  const [lastVisibleState, setLastVisibleState] = useState<CapsuleState>(isTauri ? 'idle' : 'recording');
+  const [lastVisibleState, setLastVisibleState] = useState<CapsuleState>(INITIAL_VISIBLE_STATE);
   // Windows 端 host 在翻译模式从 84 长到 118；macOS / Linux 上 capsuleLayout 已固定 42 忽略此参数。
   const hostMetrics = getCapsuleHostMetrics(os, translation);
 
@@ -327,12 +334,12 @@ export function Capsule() {
     };
   }, []);
 
-  // 退出动画调度：在 state 真正进入 idle 时，先用 capsule-out 播放 ~240ms，再卸载。
+  // 退出动画调度：在 state 真正进入 idle 时，先用 capsule-out 播放 EXIT_ANIM_MS，再卸载。
   // 设计要点：
   // 1. 进入非 idle：清掉 leaving，记录最新可见 state；
   // 2. 进入 idle 且之前可见：开启 leaving 并启动定时器；
-  // 3. 期间又被打回非 idle：定时器仍会触发，但 effect 内会读到 state !== idle，
-  //    所以 cleanup 时直接 clearTimeout，避免错误地把可见状态切到 idle。
+  // 3. 期间又被打回非 idle：cleanup 直接 clearTimeout，定时器不会触发，
+  //    新一轮 effect 会立即恢复可见态，避免错误地把可见状态切到 idle。
   useEffect(() => {
     if (state !== 'idle') {
       // 立即恢复可见，并取消上一轮可能挂着的离场。
@@ -346,7 +353,7 @@ export function Capsule() {
     const timer = setTimeout(() => {
       setLeaving(false);
       setLastVisibleState('idle');
-    }, 240);
+    }, EXIT_ANIM_MS);
     return () => clearTimeout(timer);
     // 故意只依赖 state —— lastVisibleState / leaving 是内部派生量，
     // 把它们加进依赖会让定时器被反复重建。

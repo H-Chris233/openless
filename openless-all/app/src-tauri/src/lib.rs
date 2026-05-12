@@ -627,14 +627,16 @@ fn apply_windows_caption_color<R: Runtime>(window: &tauri::WebviewWindow<R>) {
     };
     let hwnd = HWND(handle.hwnd.get() as *mut core::ffi::c_void);
 
-    // COLORREF 0x00BBGGRR 编码——白色就是 0x00FFFFFF。
-    let white: u32 = 0x00FFFFFF;
+    // COLORREF 0x00BBGGRR 编码——选用 rgb(245,245,247) 跟 WindowChrome 的 glass linear-gradient
+    // 起始色一致，减小原生 caption bar 跟应用磨砂玻璃的色差（用户反馈：纯白 caption + 半透灰 glass
+    // 色差很丑）。R=0xF5 G=0xF5 B=0xF7 → COLORREF = 0x00F7F5F5。
+    let glass_match: u32 = 0x00F7F5F5;
     unsafe {
         if let Err(e) = DwmSetWindowAttribute(
             hwnd,
             DWMWA_CAPTION_COLOR,
-            &white as *const _ as *const core::ffi::c_void,
-            std::mem::size_of_val(&white) as u32,
+            &glass_match as *const _ as *const core::ffi::c_void,
+            std::mem::size_of_val(&glass_match) as u32,
         ) {
             log::warn!("[main] set caption color failed (likely pre-22H2 Win): {e}");
         }

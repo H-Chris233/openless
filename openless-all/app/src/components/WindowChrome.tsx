@@ -39,11 +39,12 @@ export function WindowChrome({
   // 两个平台用同一份半透明玻璃 background + backdropFilter，让 sidebar 透明地坐在
   // 磨砂底板上时有可见的玻璃感。
   // Windows: Tauri transparent:true + lib.rs apply_mica 提供 Win11 Mica 透出来；
-  // macOS: NSVisualEffectView 提供材质。alpha 0.78 比之前的 0.92 更明显但不过透。
+  // macOS: NSVisualEffectView 提供材质。
+  // alpha 0.92：和原生 Win11 caption（lib.rs 设为 rgb(245,245,247)）色差最小，玻璃感仍可见。
   const background = `
     radial-gradient(120% 80% at 0% 0%, rgba(255,255,255,0.55) 0%, rgba(255,255,255,0) 60%),
     radial-gradient(100% 70% at 100% 100%, rgba(37,99,235,0.07) 0%, rgba(37,99,235,0) 55%),
-    linear-gradient(180deg, rgba(245,245,247,0.78) 0%, rgba(232,232,236,0.78) 100%)
+    linear-gradient(180deg, rgba(245,245,247,0.92) 0%, rgba(232,232,236,0.92) 100%)
   `;
 
   return (

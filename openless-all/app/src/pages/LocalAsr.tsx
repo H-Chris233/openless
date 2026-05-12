@@ -772,6 +772,10 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
       )}
       <div
         aria-disabled={IS_WINDOWS || undefined}
+        // @ts-expect-error — `inert` 是 HTML5 标准属性（React 19+ 一类型，TS lib.dom 旧版未收录）。
+        // 跟 pointerEvents:none 配合让键盘 Tab 也跳过区域内所有 focusable 控件，避免 AT 用户
+        // 激活无效后端的 IPC（review-qwen3 High）。
+        inert={IS_WINDOWS || undefined}
         style={
           IS_WINDOWS
             ? { opacity: 0.5, filter: 'grayscale(0.4)', pointerEvents: 'none' as const }
@@ -877,6 +881,10 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
       {(IS_MAC || IS_WINDOWS) && (
       <div
         aria-disabled={IS_WINDOWS || undefined}
+        // @ts-expect-error — `inert` 是 HTML5 标准属性（React 19+ 一类型，TS lib.dom 旧版未收录）。
+        // 跟 pointerEvents:none 配合让键盘 Tab 也跳过区域内所有 focusable 控件，避免 AT 用户
+        // 激活无效后端的 IPC（review-qwen3 High）。
+        inert={IS_WINDOWS || undefined}
         style={
           IS_WINDOWS
             ? { opacity: 0.5, filter: 'grayscale(0.4)', pointerEvents: 'none' as const }
