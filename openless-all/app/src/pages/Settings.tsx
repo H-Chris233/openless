@@ -1428,30 +1428,20 @@ function ProvidersSection() {
           <div style={{ fontSize: 13, fontWeight: 600 }}>{t('settings.providers.asrTitle')}</div>
           <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', marginTop: 2 }}>{t('settings.providers.asrDesc')}</div>
         </div>
-        {/* desc 同 LLM 行去掉，避免 180px label 列里换行。 */}
+        {/* 下拉只放云端选项；本地引擎激活时锁住 + 在下方放一行"ASR 提供商已被接管"提示，
+            未激活时不显示提示。 */}
         <SettingRow label={t('settings.providers.providerLabel')}>
           {(() => {
-            // 平台本机引擎：macOS=Qwen3，Windows=Foundry。本机项始终在下拉里露出，
-            // 当用户未启用本地推理时呈 disabled——用户能看到"它存在 + 提示"，
-            // 但只能在 Advanced 启用；启用后整下拉锁住，**实际激活的** local 项被选中
-            // （pr_agent #403 fix：跨机器同步导致 macOS profile = foundry / Windows
-            // profile = qwen3 时，UI 不能假装是平台本机引擎而要忠实显示）。
-            const platformLocalAsr: AsrPresetId | null =
-              os === 'mac' ? 'local-qwen3' : os === 'win' ? 'foundry-local-whisper' : null;
-            const platformLocalNameKey = platformLocalAsr === 'local-qwen3'
-              ? 'asrLocalQwen3'
-              : platformLocalAsr === 'foundry-local-whisper'
-                ? 'asrFoundryLocalWhisper'
-                : null;
-            const isLocked = committedAsrProvider === 'local-qwen3' || committedAsrProvider === 'foundry-local-whisper';
-            // active 是本地时，selectedValue = 实际 committed 的 provider（不强制
-            // 覆盖成 platformLocalAsr）；非 active 时按 asrProvider（云端选项）显示。
+            const isLocked =
+              committedAsrProvider === 'local-qwen3' ||
+              committedAsrProvider === 'foundry-local-whisper';
             const selectedValue: AsrPresetId = isLocked ? committedAsrProvider : asrProvider;
-            // 异常 local：当前激活的 local 不是本平台本机引擎（跨机器配置同步）。
-            // 必须把它也作为 disabled <option> 加进列表，否则受控 <select> 会回退
-            // 到第一项造成视觉假象。
+            // 跨机器同步异常兜底：committed 是本地但不在 visibleAsrPresets 里时，受控
+            // select 会回退到首项造成假象 —— 补一个 disabled option 让 select 找到当前值。
             const anomalousLocal: AsrPresetId | null =
-              isLocked && committedAsrProvider !== platformLocalAsr ? committedAsrProvider : null;
+              isLocked && !visibleAsrPresets.some(p => p.id === committedAsrProvider)
+                ? committedAsrProvider
+                : null;
             const anomalousNameKey = anomalousLocal === 'local-qwen3'
               ? 'asrLocalQwen3'
               : anomalousLocal === 'foundry-local-whisper'
@@ -1468,13 +1458,6 @@ function ProvidersSection() {
                       value: p.id,
                       label: t(`settings.providers.presets.${p.nameKey}`),
                     })),
-                    ...(platformLocalAsr && platformLocalNameKey
-                      ? [{
-                          value: platformLocalAsr,
-                          label: t(`settings.providers.presets.${platformLocalNameKey}`),
-                          disabled: true,
-                        }]
-                      : []),
                     ...(anomalousLocal && anomalousNameKey
                       ? [{
                           value: anomalousLocal,
@@ -1486,11 +1469,9 @@ function ProvidersSection() {
                   ariaLabel={t('settings.providers.providerLabel')}
                   style={{ ...inputStyle, maxWidth: 200 }}
                 />
-                {platformLocalAsr && platformLocalNameKey && (
-                  <div style={{ fontSize: 11, color: 'var(--ol-ink-4)', lineHeight: 1.5, maxWidth: 320 }}>
-                    {t('settings.providers.localAsrTakeoverHint', {
-                      name: t(`settings.providers.presets.${platformLocalNameKey}`),
-                    })}
+                {isLocked && (
+                  <div style={{ fontSize: 11, color: 'var(--ol-ink-4)', lineHeight: 1.5 }}>
+                    {t('settings.providers.asrProviderTakenOver')}
                   </div>
                 )}
               </div>

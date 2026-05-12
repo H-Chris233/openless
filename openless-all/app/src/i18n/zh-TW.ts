@@ -391,6 +391,7 @@ export const zhTW: typeof zhCN = {
       volcengineMappingNote: 'Secret Key 當前無需填寫。Resource ID 默認使用 volc.bigasr.sauc.duration。',
       localAsrActiveNotice: '當前已啓用「{{name}}」，可在「高級」中切換或停用。',
       localAsrTakeoverHint: '啓動「{{name}}」後，ASR 提供商將被接管。',
+      asrProviderTakenOver: 'ASR 提供商已被接管',
       localAsrHint: '本地 Qwen3-ASR 在本機運行，無需 API Key。模型從 HuggingFace 下載到本地後即可使用。',
       foundryLocalAsrHint: 'Windows 本地 Whisper 在本機運行，無需 ASR API Key。首次使用會下載 Foundry Local 運行組件和 Whisper 模型；LLM 潤色仍按你配置的 LLM 提供商調用。',
       localAsrPerformanceWarning: '本地推理跑在 CPU + Apple Silicon Accelerate 上，**首次轉寫需要加載模型（數秒）**，之後單次轉寫也會比雲端 ASR 慢若干秒；中文識別準確率與方言/口音表現通常不如火山引擎 / Whisper turbo。適用場景：離線 / 隱私敏感 / 不願付費雲 API。',

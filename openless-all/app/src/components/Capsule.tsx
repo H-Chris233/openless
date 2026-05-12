@@ -99,9 +99,7 @@ interface CircleButtonProps {
 function CircleButton({ variant, enabled, onClick }: CircleButtonProps) {
   const { t } = useTranslation();
   const isCancel = variant === 'cancel';
-  const os = detectOS();
-  // v1.3.1-7 用户反馈"Windows 胶囊磨砂玻璃没了" —— 之前 Windows 强制关掉 backdrop-filter，
-  // 现在 WebView2 支持，打开让玻璃感对齐 macOS。仍只 cancel 按钮加磨砂（confirm 按钮纯白底）。
+  // confirm 是主操作锚点，纯白；cancel 半透 + 自带 backdrop blur 跟 pill 拉开层级。
   const useBackdrop = isCancel;
   return (
     <button
@@ -246,7 +244,6 @@ function Pill({ os, state, level, insertedChars, message, onCancel, onConfirm }:
   const ambient = state === 'recording' ? Math.min(1, Math.max(0, level)) : 0;
   const scale = os === 'win' ? 1 : 1 + ambient * 0.018;
   const shadowAlpha = 0.20 + ambient * 0.10;
-  // v1.3.1-7 用户反馈"Windows 胶囊磨砂玻璃没了" —— 打开 Windows backdrop-filter。
   const useBackdrop = true;
 
   return (
@@ -261,7 +258,7 @@ function Pill({ os, state, level, insertedChars, message, onCancel, onConfirm }:
         height: metrics.height,
         boxSizing: metrics.boxSizing,
         borderRadius: 999,
-        background: 'rgba(255, 255, 255, 0.62)',
+        background: 'rgba(255, 255, 255, 0.85)',
         backdropFilter: useBackdrop ? 'blur(28px) saturate(180%)' : 'none',
         WebkitBackdropFilter: useBackdrop ? 'blur(28px) saturate(180%)' : 'none',
         border: '1px solid rgba(255, 255, 255, 0.55)',

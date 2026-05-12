@@ -1,8 +1,9 @@
-// SelectLite — 受控的下拉组件，替代 native <select> 以避开 Windows Win32 ComboBox
-// 弹框的直角丑框（issue #418）。
+// SelectLite — Win/Linux 用自定义 popover 替代 native <select> 避开 Win32 ComboBox
+// 的直角丑框（issue #418）。macOS 走原生 <select>（NSPopUpButton），WKWebView 里
+// portal+position:fixed 的自定义 popover 位置漂移反复修不干净。
 //
-// 设计：
-// - 触发器是一个 button（chevron + 当前值标签），样式可被 `style` 覆盖
+// Win/Linux 自定义分支设计：
+// - 触发器是 button（chevron + 当前值），样式可被 `style` 覆盖
 // - popover 用 portal 渲染到 document.body，避开父容器 overflow:hidden
 // - 键盘：ArrowDown/ArrowUp 切换高亮，Enter 确认，Esc 关闭
 // - 点击外部 / 滚动外部容器都会关闭（popover 内部 scroll 不关闭）
@@ -20,6 +21,7 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import { Icon } from '../Icon';
+import { detectOS } from '../WindowChrome';
 
 export interface SelectOption {
   value: string;
@@ -85,17 +87,16 @@ export function SelectLite({
     const trigger = triggerRef.current;
     if (!trigger) return;
     const rect = trigger.getBoundingClientRect();
-    const popoverRect = popoverRef.current?.getBoundingClientRect();
-    const popoverHeight = popoverRect?.height ?? 280;
-    // popover 宽度优先用真实测量值（>= trigger 宽），fallback 才用 trigger 宽。
-    const popoverWidth = Math.max(popoverRect?.width ?? 0, rect.width);
+    // popover 高度只用真实测量；fallback 280 仅在首帧 popover 还没挂载时用。
+    const popoverHeight = popoverRef.current?.getBoundingClientRect().height ?? 280;
     // 纵向：默认在触发器下方；若下方空间放不下 popover，翻转向上避免被视口裁剪。
     const spaceBelow = window.innerHeight - rect.bottom;
     const flipUp = spaceBelow < popoverHeight + 8 && rect.top > popoverHeight + 8;
     const top = flipUp ? rect.top - popoverHeight - 4 : rect.bottom + 4;
-    // 横向：窗口右边的 select 可能让 popover 溢出屏幕；clamp 到 [8, viewport-width-8]。
+    // popover 强制 width=trigger.width（见下方 style），所以 maxLeft 用 rect.width 算；
+    // popover 没挂载和挂载后两帧 left 一致，避免 first-paint 跳位。
     const minLeft = 8;
-    const maxLeft = Math.max(minLeft, window.innerWidth - popoverWidth - 8);
+    const maxLeft = Math.max(minLeft, window.innerWidth - rect.width - 8);
     const left = Math.min(Math.max(rect.left, minLeft), maxLeft);
     setAnchor({ left, top, width: rect.width });
   }, []);
@@ -241,6 +242,37 @@ export function SelectLite({
     cursor: disabled ? 'not-allowed' : 'default',
   };
 
+  // macOS 走原生 select（理由见文件头）。继承 triggerStyle 视觉，paddingRight 22 给
+  // 系统 chevron 留位；appearance:auto 关掉全局 button reset 让原生外观回来。
+  if (detectOS() === 'mac') {
+    return (
+      <select
+        className="ol-focus-ring"
+        aria-label={ariaLabel}
+        value={value}
+        disabled={disabled}
+        onChange={e => onChange(e.target.value)}
+        style={{
+          ...triggerStyle,
+          appearance: 'auto',
+          WebkitAppearance: 'menulist',
+          paddingRight: 22,
+        }}
+      >
+        {placeholder && !selected && (
+          <option value="" disabled>
+            {placeholder}
+          </option>
+        )}
+        {options.map(opt => (
+          <option key={opt.value || `__opt_${opt.label}`} value={opt.value} disabled={opt.disabled}>
+            {opt.label}
+          </option>
+        ))}
+      </select>
+    );
+  }
+
   return (
     <>
       <button
@@ -279,7 +311,9 @@ export function SelectLite({
             position: 'fixed',
             left: anchor.left,
             top: anchor.top,
-            minWidth: anchor.width,
+            // 锁到 trigger 宽（不是 minWidth），避免 content 撑大让 popover 跑出
+            // trigger 范围；长 label 走 textOverflow:ellipsis 截断。
+            width: anchor.width,
             maxHeight: 280,
             overflowY: 'auto',
             padding: 4,

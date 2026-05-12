@@ -393,6 +393,7 @@ export const ko: typeof zhCN = {
       volcengineMappingNote: 'Secret Key 는 현재 입력 불필요. Resource ID 기본값은 volc.bigasr.sauc.duration.',
       localAsrActiveNotice: '현재 "{{name}}" 사용 중. "고급" 탭에서 전환 또는 비활성화할 수 있습니다.',
       localAsrTakeoverHint: '"{{name}}" 활성화 시 ASR 프로바이더가 인수됩니다.',
+      asrProviderTakenOver: 'ASR 프로바이더 인수 완료',
       localAsrHint: '로컬 Qwen3-ASR 은 본 기기에서 실행되며 API Key 가 필요 없습니다. HuggingFace 에서 모델을 로컬로 다운로드하면 즉시 사용 가능합니다.',
       foundryLocalAsrHint: 'Windows 로컬 Whisper 는 이 기기에서 실행되며 ASR API Key 가 필요 없습니다. 첫 사용 시 Foundry Local 런타임 구성 요소와 Whisper 모델을 다운로드합니다. LLM 정리는 계속 설정된 LLM 공급자를 사용합니다.',
       localAsrPerformanceWarning: '로컬 추론은 CPU + Apple Silicon Accelerate 에서 동작하므로, 한 번의 전사 시간이 **클라우드 ASR 보다 몇 초 더 걸립니다**. 중국어 인식 정확도와 방언/억양 대응도 **일반적으로** Volcengine / Whisper turbo 에 미치지 못합니다. 네트워크 제한 또는 프라이버시가 중요한 경우에 사용하세요.',

@@ -391,6 +391,7 @@ export const en: typeof zhCN = {
       volcengineMappingNote: 'Secret Key is not required right now. Resource ID defaults to volc.bigasr.sauc.duration.',
       localAsrActiveNotice: 'Local ASR ({{name}}) is currently active. Switch or disable it from the Advanced tab.',
       localAsrTakeoverHint: 'Once "{{name}}" is enabled, the ASR provider will be taken over.',
+      asrProviderTakenOver: 'ASR provider taken over',
       localAsrHint: 'Local Qwen3-ASR runs entirely on this machine. No API key needed — just download the model from HuggingFace.',
       foundryLocalAsrHint: 'Windows local Whisper runs on this device and does not need an ASR API key. First use downloads Foundry Local runtime components and a Whisper model; LLM polishing still uses your configured LLM provider.',
       localAsrPerformanceWarning: 'Local inference runs on CPU + Apple Silicon Accelerate; each transcription takes **several seconds longer than cloud ASR**, and Chinese / dialect accuracy is **typically lower** than Volcengine or Whisper turbo. Use it for offline, privacy-sensitive, or no-cloud-API scenarios.',

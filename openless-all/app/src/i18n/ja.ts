@@ -393,6 +393,7 @@ export const ja: typeof zhCN = {
       volcengineMappingNote: 'Secret Key は現在不要。Resource ID のデフォルトは volc.bigasr.sauc.duration。',
       localAsrActiveNotice: '現在「{{name}}」を使用中。「詳細設定」タブから切り替えまたは無効化できます。',
       localAsrTakeoverHint: '「{{name}}」を有効化すると ASR プロバイダーが引き継がれます。',
+      asrProviderTakenOver: 'ASR プロバイダーは引き継ぎ済み',
       localAsrHint: 'ローカル Qwen3-ASR は本機で実行されるため API Key 不要。HuggingFace からモデルをダウンロードすればすぐに利用できます。',
       foundryLocalAsrHint: 'Windows ローカル Whisper は本機で実行され、ASR API Key は不要です。初回使用時に Foundry Local ランタイムコンポーネントと Whisper モデルをダウンロードします。LLM 整文は引き続き設定済みの LLM プロバイダーを使用します。',
       localAsrPerformanceWarning: 'ローカル推論は CPU + Apple Silicon Accelerate で動作するため、1 回の転写時間は **クラウド ASR より数秒長くなります**。中国語認識精度や方言/訛り対応も **通常は** Volcengine / Whisper turbo に劣ります。ネットワーク制限下またはプライバシー重視の場合に選択してください。',
