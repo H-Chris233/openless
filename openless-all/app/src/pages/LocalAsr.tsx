@@ -47,6 +47,7 @@ import {
 } from '../lib/localAsr';
 import { useHotkeySettings } from '../state/HotkeySettingsContext';
 import { detectOS } from '../components/WindowChrome';
+import { SelectLite } from '../components/ui/SelectLite';
 import { Btn, Card, PageHeader, Pill } from './_atoms';
 
 // Foundry Local Whisper 后端只在 Windows 编译实体（foundry_local_sdk 仅 Windows），
@@ -626,73 +627,52 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
             <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
               <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 11, color: 'var(--ol-ink-4)' }}>
                 {t('localAsr.foundrySelectedModel')}
-                <select
+                <SelectLite
                   value={selectedFoundryAlias}
-                  onChange={e => {
+                  onChange={next => {
                     foundrySelectionDirty.current = true;
-                    setSelectedFoundryAlias(e.target.value as FoundryLocalAsrModelAlias);
+                    setSelectedFoundryAlias(next as FoundryLocalAsrModelAlias);
                   }}
                   disabled={foundryBusy !== null}
-                  style={{
-                    fontSize: 13,
-                    padding: '6px 10px',
-                    borderRadius: 8,
-                    border: '0.5px solid rgba(0,0,0,0.12)',
-                    background: 'var(--ol-surface)',
-                    color: 'var(--ol-ink)',
-                    minWidth: 260,
-                  }}>
-                  {FOUNDRY_LOCAL_ASR_MODELS.map(model => {
+                  options={FOUNDRY_LOCAL_ASR_MODELS.map(model => {
                     const catalog = foundryCatalog.find(item => item.alias === model.alias);
                     const sizeMb = formatFoundrySizeMb(catalog?.fileSizeMb);
-                    return (
-                      <option key={model.alias} value={model.alias}>
-                        {t(model.labelKey)}
-                        {sizeMb ? ` · ${t('localAsr.foundryApproxSizeMb', { mb: sizeMb })}` : ''}
-                      </option>
-                    );
+                    const sizeSuffix = sizeMb ? ` · ${t('localAsr.foundryApproxSizeMb', { mb: sizeMb })}` : '';
+                    return { value: model.alias, label: `${t(model.labelKey)}${sizeSuffix}` };
                   })}
-                </select>
+                  ariaLabel={t('localAsr.foundrySelectedModel')}
+                  style={{ fontSize: 13, background: 'var(--ol-surface)', minWidth: 260 }}
+                />
               </label>
               <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 11, color: 'var(--ol-ink-4)' }}>
                 {t('localAsr.foundryRuntimeSourceLabel')}
-                <select
+                <SelectLite
                   value={selectedFoundryRuntimeSource}
-                  onChange={e => void handleFoundryRuntimeSourceChange(e.target.value as FoundryRuntimeSource)}
+                  onChange={next => void handleFoundryRuntimeSourceChange(next as FoundryRuntimeSource)}
                   disabled={foundryBusy !== null}
-                  style={{
-                    fontSize: 13,
-                    padding: '6px 10px',
-                    borderRadius: 8,
-                    border: '0.5px solid rgba(0,0,0,0.12)',
-                    background: 'var(--ol-surface)',
-                    color: 'var(--ol-ink)',
-                    minWidth: 200,
-                  }}>
-                  <option value="auto">{t('localAsr.foundryRuntimeSourceAuto')}</option>
-                  <option value="nuget">{t('localAsr.foundryRuntimeSourceNuget')}</option>
-                  <option value="ort-nightly">{t('localAsr.foundryRuntimeSourceOrtNightly')}</option>
-                </select>
+                  options={[
+                    { value: 'auto', label: t('localAsr.foundryRuntimeSourceAuto') },
+                    { value: 'nuget', label: t('localAsr.foundryRuntimeSourceNuget') },
+                    { value: 'ort-nightly', label: t('localAsr.foundryRuntimeSourceOrtNightly') },
+                  ]}
+                  ariaLabel={t('localAsr.foundryRuntimeSourceLabel')}
+                  style={{ fontSize: 13, background: 'var(--ol-surface)', minWidth: 200 }}
+                />
               </label>
               <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 11, color: 'var(--ol-ink-4)' }}>
                 {t('localAsr.foundryLanguageLabel')}
-                <select
+                <SelectLite
                   value={selectedFoundryLanguageHint}
-                  onChange={e => void handleFoundryLanguageChange(e.target.value as FoundryLocalAsrLanguageHint)}
+                  onChange={next => void handleFoundryLanguageChange(next as FoundryLocalAsrLanguageHint)}
                   disabled={foundryBusy !== null}
-                  style={{
-                    fontSize: 13,
-                    padding: '6px 10px',
-                    borderRadius: 8,
-                    border: '0.5px solid rgba(0,0,0,0.12)',
-                    background: 'var(--ol-surface)',
-                    color: 'var(--ol-ink)',
-                    minWidth: 132,
-                  }}>
-                  <option value="">{t('localAsr.foundryLanguageAuto')}</option>
-                  <option value="zh">{t('localAsr.foundryLanguageZh')}</option>
-                  <option value="en">{t('localAsr.foundryLanguageEn')}</option>
-                </select>
+                  options={[
+                    { value: '', label: t('localAsr.foundryLanguageAuto') },
+                    { value: 'zh', label: t('localAsr.foundryLanguageZh') },
+                    { value: 'en', label: t('localAsr.foundryLanguageEn') },
+                  ]}
+                  ariaLabel={t('localAsr.foundryLanguageLabel')}
+                  style={{ fontSize: 13, background: 'var(--ol-surface)', minWidth: 132 }}
+                />
               </label>
             </div>
           </div>
@@ -805,21 +785,16 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
               {t('localAsr.mirrorDesc')}
             </div>
           </div>
-          <select
+          <SelectLite
             value={settings?.mirror ?? 'huggingface'}
-            onChange={e => void handleMirrorChange(e.target.value)}
-            style={{
-              fontSize: 13,
-              padding: '6px 10px',
-              borderRadius: 8,
-              border: '0.5px solid rgba(0,0,0,0.12)',
-              background: 'var(--ol-surface)',
-              color: 'var(--ol-ink)',
-              minWidth: 200,
-            }}>
-            <option value="huggingface">{t('localAsr.mirrorHuggingface')}</option>
-            <option value="hf-mirror">{t('localAsr.mirrorHfMirror')}</option>
-          </select>
+            onChange={next => void handleMirrorChange(next)}
+            options={[
+              { value: 'huggingface', label: t('localAsr.mirrorHuggingface') },
+              { value: 'hf-mirror', label: t('localAsr.mirrorHfMirror') },
+            ]}
+            ariaLabel={t('localAsr.mirrorLabel')}
+            style={{ fontSize: 13, background: 'var(--ol-surface)', minWidth: 200 }}
+          />
         </div>
       </Card>
 
@@ -859,24 +834,19 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                   {t('localAsr.keepLoadedDesc')}
                 </div>
               </div>
-              <select
-                value={engineStatus?.keepLoadedSecs ?? 300}
-                onChange={e => void handleKeepLoadedChange(Number(e.target.value))}
-                style={{
-                  fontSize: 13,
-                  padding: '6px 10px',
-                  borderRadius: 8,
-                  border: '0.5px solid rgba(0,0,0,0.12)',
-                  background: 'var(--ol-surface)',
-                  color: 'var(--ol-ink)',
-                  minWidth: 200,
-                }}>
-                <option value={0}>{t('localAsr.keepImmediate')}</option>
-                <option value={60}>{t('localAsr.keep1min')}</option>
-                <option value={300}>{t('localAsr.keep5min')}</option>
-                <option value={1800}>{t('localAsr.keep30min')}</option>
-                <option value={86400}>{t('localAsr.keepForever')}</option>
-              </select>
+              <SelectLite
+                value={String(engineStatus?.keepLoadedSecs ?? 300)}
+                onChange={next => void handleKeepLoadedChange(Number(next))}
+                options={[
+                  { value: '0', label: t('localAsr.keepImmediate') },
+                  { value: '60', label: t('localAsr.keep1min') },
+                  { value: '300', label: t('localAsr.keep5min') },
+                  { value: '1800', label: t('localAsr.keep30min') },
+                  { value: '86400', label: t('localAsr.keepForever') },
+                ]}
+                ariaLabel={t('localAsr.keepLoadedLabel')}
+                style={{ fontSize: 13, background: 'var(--ol-surface)', minWidth: 200 }}
+              />
             </div>
           </div>
         </Card>

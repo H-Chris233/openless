@@ -600,7 +600,6 @@ export const en: typeof zhCN = {
       appearanceSystem: 'Follow system',
       appearanceLight: 'Light',
       appearanceDark: 'Dark',
-      language: 'Interface language',
       font: 'Font size',
       fontDesc: 'Scale the entire UI font size — applies instantly.',
       fontSmall: 'Small',

@@ -600,7 +600,6 @@ export const zhTW: typeof zhCN = {
       appearanceSystem: '跟隨系統',
       appearanceLight: '淺色',
       appearanceDark: '深色',
-      language: '界面語言',
       font: '字體大小',
       fontDesc: '整體縮放界面字號，立即生效。',
       fontSmall: '小',

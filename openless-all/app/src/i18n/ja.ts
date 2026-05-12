@@ -602,7 +602,6 @@ export const ja: typeof zhCN = {
       appearanceSystem: 'システムに従う',
       appearanceLight: 'ライト',
       appearanceDark: 'ダーク',
-      language: '表示言語',
       font: 'フォントサイズ',
       fontDesc: 'UI のフォントサイズを全体的にスケール。即時反映。',
       fontSmall: '小',

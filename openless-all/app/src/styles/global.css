@@ -27,6 +27,11 @@ button {
   padding: 0;
 }
 
+@keyframes ol-select-pop {
+  from { opacity: 0; transform: translateY(-4px) scale(.98); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
 input, textarea {
   font-family: inherit;
   user-select: text;
