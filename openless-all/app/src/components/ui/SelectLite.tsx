@@ -80,12 +80,18 @@ export function SelectLite({
     const trigger = triggerRef.current;
     if (!trigger) return;
     const rect = trigger.getBoundingClientRect();
-    // 默认在触发器下方；若下方空间放不下 popover（按 maxHeight 280 估），翻转向上以避免被视口裁剪。
-    const popoverMaxHeight = popoverRef.current?.getBoundingClientRect().height ?? 280;
+    const popoverRect = popoverRef.current?.getBoundingClientRect();
+    const popoverHeight = popoverRect?.height ?? 280;
+    const popoverWidth = popoverRect?.width ?? rect.width;
+    // 纵向：默认在触发器下方；若下方空间放不下 popover，翻转向上以避免被视口裁剪。
     const spaceBelow = window.innerHeight - rect.bottom;
-    const flipUp = spaceBelow < popoverMaxHeight + 8 && rect.top > popoverMaxHeight + 8;
-    const top = flipUp ? rect.top - popoverMaxHeight - 4 : rect.bottom + 4;
-    setAnchor({ left: rect.left, top, width: rect.width });
+    const flipUp = spaceBelow < popoverHeight + 8 && rect.top > popoverHeight + 8;
+    const top = flipUp ? rect.top - popoverHeight - 4 : rect.bottom + 4;
+    // 横向：在窗口右边的 select 可能让 popover 溢出屏幕；clamp 到 [8, viewport - width - 8] 区间。
+    const minLeft = 8;
+    const maxLeft = Math.max(minLeft, window.innerWidth - popoverWidth - 8);
+    const left = Math.min(Math.max(rect.left, minLeft), maxLeft);
+    setAnchor({ left, top, width: rect.width });
   }, []);
 
   useLayoutEffect(() => {
@@ -99,6 +105,17 @@ export function SelectLite({
       window.removeEventListener('scroll', handleReflow, true);
     };
   }, [open, positionPopover]);
+
+  // 键盘 ArrowUp/Down 改 highlight 后把高亮项 scroll into view —— 长 dropdown 超过
+  // maxHeight 280 时键盘用户能看到当前高亮。{ block: 'nearest' } 避免把已经可见的项
+  // 强行滚到顶部，符合 listbox 滚动惯例。
+  useEffect(() => {
+    if (!open || highlight < 0) return;
+    const target = popoverRef.current?.querySelector(
+      `[data-option-index="${highlight}"]`,
+    ) as HTMLElement | null;
+    target?.scrollIntoView({ block: 'nearest' });
+  }, [highlight, open]);
 
   useEffect(() => {
     if (!open) return;
@@ -238,6 +255,7 @@ export function SelectLite({
             return (
               <div
                 key={option.value || `__opt_${index}`}
+                data-option-index={index}
                 role="option"
                 aria-selected={isSelected}
                 aria-disabled={option.disabled}
