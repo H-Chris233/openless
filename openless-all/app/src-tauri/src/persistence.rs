@@ -125,7 +125,7 @@ fn ensure_dir(dir: &Path) -> Result<()> {
 }
 
 /// 本地 ASR 模型根目录：`<data_dir>/models/qwen3-asr/`。
-/// 子目录 = 模型 id（如 `qwen3-asr-0.6b`），存 antirez `download_model.sh`
+/// 子目录 = 模型 id（如 `qwen3-asr-0.6b`），存 qwen-asr `download_model.sh`
 /// 列出的 5–7 个文件。
 pub fn local_models_root() -> Result<PathBuf> {
     let dir = data_dir()?.join("models").join("qwen3-asr");

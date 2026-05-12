@@ -141,7 +141,7 @@ OpenLess does one thing: **turn speech into usable written text (especially AI p
 - Tauri 2 + Rust backend + React/TS frontend. macOS 12+, Windows 10+.
 - **Toggle and push-to-talk** recording modes. `Esc` cancels at any phase, including polish/insert.
 - **Cloud ASR**: Volcengine streaming ASR, OpenAI Whisper-compatible batch ASR, Apple Speech (macOS).
-- **Local ASR**: bundled Qwen3-ASR (0.6B / 1.7B) via vendored `antirez/qwen-asr`; Windows Foundry Local Whisper variants.
+- **Local ASR**: bundled Qwen3-ASR (0.6B / 1.7B) via vendored `Open-Less/qwen-asr`; Windows Foundry Local Whisper variants.
 - **Polish providers**: Ark / DeepSeek / OpenAI / Doubao / Anthropic-compatible chat-completions, plus any OpenAI-compatible endpoint you bring.
 - 4 output modes: raw, light polish, structured (**AI prompt mode**), formal. Plus a **translation hotkey** that converts speech directly into the configured target language ([#43](../../issues/43)).
 - **Selection-ask QA panel** — separate hotkey opens a floating panel that runs voice Q&A against the highlighted text in any app ([#118](../../issues/118)).
@@ -189,7 +189,7 @@ Full end-user walkthrough: [USAGE.md](USAGE.md).
 
 ## Build from source (developers)
 
-The active codebase is in `openless-all/app/` (Tauri 2 + Rust + React/TS). The macOS build links a vendored C ASR engine ([`antirez/qwen-asr`](https://github.com/antirez/qwen-asr)) pulled in as a git submodule under `src-tauri/vendor/qwen-asr/`, so initialize submodules on first clone.
+The active codebase is in `openless-all/app/` (Tauri 2 + Rust + React/TS). The macOS build links a vendored C ASR engine ([`Open-Less/qwen-asr`](https://github.com/Open-Less/qwen-asr), forked from `antirez/qwen-asr`) pulled in as a git submodule under `src-tauri/vendor/qwen-asr/`, so initialize submodules on first clone.
 
 ```bash
 # First clone only — pull in vendored submodules
