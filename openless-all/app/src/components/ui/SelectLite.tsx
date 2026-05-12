@@ -11,6 +11,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -112,6 +113,17 @@ export function SelectLite({
     },
     [positionPopover],
   );
+
+  // v1.3.1-8 hotfix: open=true 时立即设 anchor（用 trigger 宽 fallback），不再依赖
+  // popover mount 触发 callback ref。之前的死锁：anchor 初始 null → portal 条件
+  // `open && anchor` 不通过 → popover DOM 永不挂载 → callback ref 永不 fire →
+  // anchor 永远 null。结果所有 dropdown 点击后什么都不发生。
+  // 现在 open=true 立即 setAnchor，popover 渲染挂载后 callback ref 再 RAF 重定位
+  // 拿真实 popover 宽。
+  useLayoutEffect(() => {
+    if (!open) return;
+    positionPopover();
+  }, [open, positionPopover]);
 
   // 键盘 ArrowUp/Down 改 highlight 后把高亮项 scroll into view —— 长 dropdown 超过
   // maxHeight 280 时键盘用户能看到当前高亮。
