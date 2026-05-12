@@ -195,19 +195,18 @@ function Pill({ os, state, level, insertedChars, message, onCancel, onConfirm }:
         >
           <span
             style={{
-              // 放大 11 → 14 让 thinking 在胶囊里更显眼。
-              fontSize: 14,
-              // 字重 500：用户反馈 700 太粗。500 是 medium 视觉重量，扫光更稳。
-              fontWeight: 500,
-              letterSpacing: 0.5,
-              // 字号 14 + 字重 500 时小写 g/y/p 等下伸字符在 line-height: 1 下会被
-              // clip。给 line-height 一点冗余 + 上下 1px padding，descender 不再被切。
+              // v1.3.1-6 用户反馈"thinking 不明显"——字号 14 → 17、字重 500 → 700、
+              // 配色由用户拍板：两侧底字浅亮黄（#FCD34D / amber-300），中段扫光深蓝
+              // (var(--ol-blue) ≈ #2563EB)。浅黄底色 + 深蓝扫光对比强但暖底不刺眼。
+              fontSize: 17,
+              fontWeight: 700,
+              letterSpacing: 0.3,
+              // 字号 17 + 字重 700 时小写 g/y/p 等下伸字符在 line-height: 1 下会被 clip。
+              // 给 line-height 冗余 + 上下 padding，descender 不再被切。
               paddingBlock: 1,
-              // 扫光：渐变中段用更饱和的 ol-blue（不靠透明度），尾段保留 ink-3 作收尾，
-              // 整条 stripe 比之前更醒目（用户反馈"扫光不够明显"）。
               color: 'var(--ol-ink-2)',
               backgroundImage:
-                'linear-gradient(100deg, var(--ol-ink-3) 0%, var(--ol-ink-3) 35%, var(--ol-blue) 50%, var(--ol-ink-3) 65%, var(--ol-ink-3) 100%)',
+                'linear-gradient(100deg, #FCD34D 0%, #FCD34D 35%, var(--ol-blue) 50%, #FCD34D 65%, #FCD34D 100%)',
               backgroundSize: '220% auto',
               WebkitBackgroundClip: 'text',
               backgroundClip: 'text',
@@ -285,9 +284,10 @@ function Pill({ os, state, level, insertedChars, message, onCancel, onConfirm }:
   );
 }
 
-// 与 @keyframes capsule-out 的 0.24s 时长一致——必须同步，否则定时器先于
+// 与 @keyframes capsule-out 的 0.36s 时长一致——必须同步，否则定时器先于
 // 动画结束就 unmount → 用户看到半截动画被截断。
-const EXIT_ANIM_MS = 240;
+// v1.3.1-6: 从 240ms 加到 360ms 让用户看清退出动画（240ms 太快感知不到）。
+const EXIT_ANIM_MS = 360;
 // 初始可见 state：Tauri 内运行从 idle 开始（等后端 capsule:state 事件），
 // 浏览器 dev 模式从 recording 开始以便直接看到胶囊。
 const INITIAL_VISIBLE_STATE: CapsuleState = isTauri ? 'idle' : 'recording';
@@ -398,8 +398,12 @@ export function Capsule() {
         // 三平台一致 —— 旧版 Windows 走 animation:'none' 的分支已删除。
         // transformOrigin 默认就是 50% 50%，所以 scaleX 天然以中央为锚点。
         animation: leaving
-          ? 'capsule-out .24s cubic-bezier(.4,0,.7,.2) forwards'
-          : 'capsule-in .26s cubic-bezier(.2,.9,.3,1.1) both',
+          // v1.3.1-6 调整：
+          // - 入场 .26s → .38s，cubic-bezier 加强 spring overshoot（更曲线感）
+          // - 出场 .24s → .36s（前面 EXIT_ANIM_MS 也同步到 360），曲线改成 ease-in-out 平滑
+          //   收缩 + 下移 + 淡出三段同步进行
+          ? 'capsule-out .36s cubic-bezier(.55,.06,.68,.19) forwards'
+          : 'capsule-in .38s cubic-bezier(.16,.86,.32,1.18) both',
         transformOrigin: 'center',
         willChange: 'transform, opacity',
       }}
