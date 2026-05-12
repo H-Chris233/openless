@@ -667,6 +667,7 @@ export const en: typeof zhCN = {
     title: 'Models',
     desc: 'Manage on-device ASR models. Windows can use Microsoft Foundry Local Whisper; Qwen3-ASR model management stays separate.',
     qwenTitle: 'Qwen3-ASR model manager',
+    qwenExperimentalBadge: 'Experimental',
     engineUnavailable: 'The Qwen3-ASR inference engine is not bundled on this platform. You can still download models, but Qwen3-ASR cannot be activated here yet.',
     qwenUnavailableOnWindows: 'Qwen3-ASR is not supported on Windows yet. Please use Foundry Local Whisper above instead.',
     foundryTitle: 'Windows Foundry Local Whisper',
