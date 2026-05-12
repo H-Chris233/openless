@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::coordinator_state::request_stop_during_starting_state;
 use crate::correction::apply_correction_rules;
-use crate::types::HotkeyMode;
+use crate::types::{CorrectionRule, HotkeyMode};
 
 use super::qa::handle_qa_option_edge;
 use super::resources::*;
@@ -38,6 +38,50 @@ const HOTKEY_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(25
 /// **不在流式路径里做**：`apply_chinese_script_preference` / `apply_correction_rules`
 /// 这两步在 v1 跳过 —— 字符已经一边流一边落出去了，不好回退。需要的话只能关 toggle 走
 /// 一次性路径。
+fn append_typed_prefix(typed_text: &mut String, delta: &str, typed_chars: usize) {
+    typed_text.extend(delta.chars().take(typed_chars));
+}
+
+fn finalize_dictation_text(
+    mut text: String,
+    already_streamed: bool,
+    translation_active: bool,
+    mode: PolishMode,
+    polish_failed: bool,
+    chinese_script_preference: crate::types::ChineseScriptPreference,
+    correction_rules: &[CorrectionRule],
+) -> String {
+    if already_streamed {
+        return text;
+    }
+
+    // 仅在“ASR 直出文本”场景做强制简繁收敛，避免误伤成功的翻译/常规 LLM 输出：
+    // - 非翻译模式：mode=Raw（本来就不走润色）或润色失败回退 raw
+    // - 翻译模式：仅翻译失败回退 raw 时才收敛
+    let should_force_script = if translation_active {
+        polish_failed
+    } else {
+        mode == PolishMode::Raw || polish_failed
+    };
+    if should_force_script {
+        text = apply_chinese_script_preference(&text, chinese_script_preference);
+    }
+
+    if correction_rules.is_empty() {
+        return text;
+    }
+
+    let corrected = apply_correction_rules(&text, correction_rules);
+    if corrected != text {
+        log::info!(
+            "[coord] correction rules adjusted final text ({} → {} chars)",
+            text.chars().count(),
+            corrected.chars().count()
+        );
+    }
+    corrected
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_streaming_polish(
     inner: &Arc<Inner>,
@@ -120,10 +164,12 @@ async fn run_streaming_polish(
                 continue;
             }
             match crate::unicode_keystroke::type_unicode_chunk(&delta) {
-                Ok(()) => {
-                    typed_text.push_str(&delta);
+                Ok(typed_chars) => {
+                    append_typed_prefix(&mut typed_text, &delta, typed_chars);
                 }
                 Err(e) => {
+                    let typed_chars = e.typed_chars();
+                    append_typed_prefix(&mut typed_text, &delta, typed_chars);
                     log::error!(
                         "[coord] streaming_insert: type_unicode_chunk failed at typed={} chars: {e}; \
                          dropping remaining deltas",
@@ -202,10 +248,7 @@ async fn run_streaming_polish(
             // pr-agent #412 反馈 \"Clipboard Mismatch\"：之前先写 text 到剪贴板再
             // 决定 typer 是否中途失败，导致 Cmd+V 粘出用户屏幕上没见过的内容。
             let (final_text, polish_err) = match typer_failure {
-                Some(e) => (
-                    typed_text,
-                    Some(format!("typing partially failed: {e}")),
-                ),
+                Some(e) => (typed_text, Some(format!("typing partially failed: {e}"))),
                 None => (text, None),
             };
             // 把 final_text 写回剪贴板（默认 on，可关）。一次性路径天然走剪贴板，
@@ -217,23 +260,23 @@ async fn run_streaming_polish(
                             "[coord] streaming_insert: final text written to clipboard ({} chars)",
                             final_text.chars().count()
                         ),
-                        Err(e) => log::warn!(
-                            "[coord] streaming_insert: clipboard set_text failed: {e}"
-                        ),
+                        Err(e) => {
+                            log::warn!("[coord] streaming_insert: clipboard set_text failed: {e}")
+                        }
                     },
-                    Err(e) => log::warn!(
-                        "[coord] streaming_insert: clipboard handle init failed: {e}"
-                    ),
+                    Err(e) => {
+                        log::warn!("[coord] streaming_insert: clipboard handle init failed: {e}")
+                    }
                 }
             } else {
-                log::info!(
-                    "[coord] streaming_insert: clipboard save skipped (pref off)"
-                );
+                log::info!("[coord] streaming_insert: clipboard save skipped (pref off)");
             }
             (final_text, polish_err, true)
         }
         super::StreamingPolishOutcome::UnsupportedFallback => {
-            log::info!("[coord] streaming_insert: dispatch reported unsupported, fall back to one-shot");
+            log::info!(
+                "[coord] streaming_insert: dispatch reported unsupported, fall back to one-shot"
+            );
             let (p, e) = polish_or_passthrough(
                 raw,
                 mode,
@@ -1304,32 +1347,15 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         (p, e, false)
     };
 
-    // 仅在“ASR 直出文本”场景做强制简繁收敛，避免误伤成功的翻译/常规 LLM 输出：
-    // - 非翻译模式：mode=Raw（本来就不走润色）或润色失败回退 raw
-    // - 翻译模式：仅翻译失败回退 raw 时才收敛
-    let should_force_script = if translation_active {
-        polish_error.is_some()
-    } else {
-        mode == PolishMode::Raw || polish_error.is_some()
-    };
-    let polished = if should_force_script {
-        apply_chinese_script_preference(&polished, chinese_script_preference)
-    } else {
-        polished
-    };
-    let polished = if correction_rules.is_empty() {
-        polished
-    } else {
-        let corrected = apply_correction_rules(&polished, &correction_rules);
-        if corrected != polished {
-            log::info!(
-                "[coord] correction rules adjusted final text ({} → {} chars)",
-                polished.chars().count(),
-                corrected.chars().count()
-            );
-        }
-        corrected
-    };
+    let polished = finalize_dictation_text(
+        polished,
+        already_streamed,
+        translation_active,
+        mode,
+        polish_error.is_some(),
+        chinese_script_preference,
+        &correction_rules,
+    );
 
     // 原子化最后一次 cancel 检查 + 转 Inserting：
     // 在同一 lock 内决定「丢弃」还是「进入 Inserting」。一旦设到 Inserting，
@@ -1539,4 +1565,70 @@ pub(super) fn cancel_session(inner: &Arc<Inner>) {
     emit_capsule(inner, CapsuleState::Cancelled, 0.0, 0, None, None);
     log::info!("[coord] session cancelled (was {:?})", decision.phase);
     schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{append_typed_prefix, finalize_dictation_text};
+    use crate::types::PolishMode;
+
+    #[test]
+    fn append_typed_prefix_truncates_by_chars_not_bytes() {
+        let mut typed = String::from("已");
+        append_typed_prefix(&mut typed, "你好🙂abc", 3);
+        assert_eq!(typed, "已你好🙂");
+    }
+
+    #[test]
+    fn append_typed_prefix_ignores_overlarge_count() {
+        let mut typed = String::new();
+        append_typed_prefix(&mut typed, "好", 99);
+        assert_eq!(typed, "好");
+    }
+
+    #[test]
+    fn streamed_text_skips_mutating_final_postprocess() {
+        let rules = vec![crate::types::CorrectionRule {
+            id: "r1".into(),
+            pattern: "错词".into(),
+            replacement: "正词".into(),
+            enabled: true,
+            created_at: "2026-01-01T00:00:00Z".into(),
+        }];
+
+        let text = finalize_dictation_text(
+            "錯詞".to_string(),
+            true,
+            false,
+            PolishMode::Raw,
+            true,
+            crate::types::ChineseScriptPreference::Simplified,
+            &rules,
+        );
+
+        assert_eq!(text, "錯詞");
+    }
+
+    #[test]
+    fn non_streamed_text_still_applies_final_postprocess() {
+        let rules = vec![crate::types::CorrectionRule {
+            id: "r1".into(),
+            pattern: "错词".into(),
+            replacement: "正词".into(),
+            enabled: true,
+            created_at: "2026-01-01T00:00:00Z".into(),
+        }];
+
+        let text = finalize_dictation_text(
+            "錯詞".to_string(),
+            false,
+            false,
+            PolishMode::Raw,
+            false,
+            crate::types::ChineseScriptPreference::Simplified,
+            &rules,
+        );
+
+        assert_eq!(text, "正词");
+    }
 }

@@ -587,12 +587,15 @@ impl OpenAICompatibleLLMProvider {
         // 一个 chunk() 可能包含半帧或多帧；用 buffer 累积后再按 `\n\n` 切。
         let mut response = response;
         let mut buffer = String::new();
+        let mut utf8_pending: Vec<u8> = Vec::new();
         let mut full_text = String::new();
+        let mut cancelled = false;
         loop {
             // 取消旗标：用户取消 / 关浮窗时立即 break，不再 drain HTTP body。
             // 否则 reqwest 会读完整个流（包括 LLM 后续 token）烧 quota。详见 issue #161。
             if should_cancel() {
                 log::info!("[llm] stream cancelled by caller; breaking SSE loop");
+                cancelled = true;
                 break;
             }
             let chunk_opt = response
@@ -600,9 +603,7 @@ impl OpenAICompatibleLLMProvider {
                 .await
                 .map_err(|e| LLMError::Network(e.to_string()))?;
             let Some(chunk) = chunk_opt else { break };
-            let s = std::str::from_utf8(&chunk)
-                .map_err(|e| LLMError::Network(format!("non-utf8 SSE chunk: {e}")))?;
-            buffer.push_str(s);
+            append_utf8_sse_chunk(&mut buffer, &mut utf8_pending, &chunk)?;
 
             while let Some(idx) = buffer.find("\n\n") {
                 let event = buffer[..idx].to_string();
@@ -636,6 +637,9 @@ impl OpenAICompatibleLLMProvider {
                     }
                 }
             }
+        }
+        if !cancelled {
+            finish_utf8_sse_chunks(&mut buffer, &mut utf8_pending)?;
         }
 
         log::info!(
@@ -709,8 +713,10 @@ impl OpenAICompatibleLLMProvider {
 
         let mut response = response;
         let mut buffer = String::new();
+        let mut utf8_pending: Vec<u8> = Vec::new();
         let mut full_text = String::new();
         let mut delta_count: u64 = 0;
+        let mut cancelled = false;
         loop {
             if should_cancel() {
                 log::info!(
@@ -718,6 +724,7 @@ impl OpenAICompatibleLLMProvider {
                     delta_count,
                     full_text.chars().count()
                 );
+                cancelled = true;
                 break;
             }
             let chunk_opt = response
@@ -725,9 +732,7 @@ impl OpenAICompatibleLLMProvider {
                 .await
                 .map_err(|e| LLMError::Network(e.to_string()))?;
             let Some(chunk) = chunk_opt else { break };
-            let s = std::str::from_utf8(&chunk)
-                .map_err(|e| LLMError::Network(format!("non-utf8 SSE chunk: {e}")))?;
-            buffer.push_str(s);
+            append_utf8_sse_chunk(&mut buffer, &mut utf8_pending, &chunk)?;
 
             while let Some(idx) = buffer.find("\n\n") {
                 let event = buffer[..idx].to_string();
@@ -762,6 +767,9 @@ impl OpenAICompatibleLLMProvider {
                     }
                 }
             }
+        }
+        if !cancelled {
+            finish_utf8_sse_chunks(&mut buffer, &mut utf8_pending)?;
         }
 
         log::info!(
@@ -1065,11 +1073,14 @@ impl CodexOAuthLLMProvider {
 
         let mut response = response;
         let mut buffer = String::new();
+        let mut utf8_pending: Vec<u8> = Vec::new();
         let mut full_text = String::new();
         let mut final_text = String::new();
+        let mut cancelled = false;
         loop {
             if should_cancel() {
                 log::info!("[llm] codex stream cancelled by caller; breaking SSE loop");
+                cancelled = true;
                 break;
             }
             let chunk_opt = response
@@ -1077,15 +1088,16 @@ impl CodexOAuthLLMProvider {
                 .await
                 .map_err(|e| LLMError::Network(e.to_string()))?;
             let Some(chunk) = chunk_opt else { break };
-            let s = std::str::from_utf8(&chunk)
-                .map_err(|e| LLMError::Network(format!("non-utf8 SSE chunk: {e}")))?;
-            buffer.push_str(s);
+            append_utf8_sse_chunk(&mut buffer, &mut utf8_pending, &chunk)?;
 
             while let Some(idx) = buffer.find("\n\n") {
                 let event = buffer[..idx].to_string();
                 buffer.drain(..idx + 2);
                 handle_codex_sse_event(&event, &mut full_text, &mut final_text, &on_delta);
             }
+        }
+        if !cancelled {
+            finish_utf8_sse_chunks(&mut buffer, &mut utf8_pending)?;
         }
         if !buffer.trim().is_empty() {
             handle_codex_sse_event(&buffer, &mut full_text, &mut final_text, &on_delta);
@@ -1105,6 +1117,51 @@ impl CodexOAuthLLMProvider {
             });
         }
         Ok(clean_polish_output(&full_text))
+    }
+}
+
+fn append_utf8_sse_chunk(
+    buffer: &mut String,
+    pending: &mut Vec<u8>,
+    chunk: &[u8],
+) -> Result<(), LLMError> {
+    pending.extend_from_slice(chunk);
+    drain_complete_utf8(buffer, pending)
+}
+
+fn finish_utf8_sse_chunks(buffer: &mut String, pending: &mut Vec<u8>) -> Result<(), LLMError> {
+    drain_complete_utf8(buffer, pending)?;
+    if pending.is_empty() {
+        Ok(())
+    } else {
+        Err(LLMError::Network(
+            "non-utf8 SSE chunk: stream ended in the middle of a UTF-8 codepoint".to_string(),
+        ))
+    }
+}
+
+fn drain_complete_utf8(buffer: &mut String, pending: &mut Vec<u8>) -> Result<(), LLMError> {
+    loop {
+        match std::str::from_utf8(pending) {
+            Ok(s) => {
+                buffer.push_str(s);
+                pending.clear();
+                return Ok(());
+            }
+            Err(e) => {
+                let valid_up_to = e.valid_up_to();
+                if valid_up_to > 0 {
+                    let valid = std::str::from_utf8(&pending[..valid_up_to]).expect("valid prefix");
+                    buffer.push_str(valid);
+                    pending.drain(..valid_up_to);
+                    continue;
+                }
+                if e.error_len().is_none() {
+                    return Ok(());
+                }
+                return Err(LLMError::Network(format!("non-utf8 SSE chunk: {e}")));
+            }
+        }
     }
 }
 
@@ -2145,6 +2202,136 @@ mod tests {
         format!("{}.{}.sig", header, payload)
     }
 
+    #[test]
+    fn utf8_sse_decoder_preserves_multibyte_split_across_chunks() {
+        let mut buffer = String::new();
+        let mut pending = Vec::new();
+        let event = "data: {\"choices\":[{\"delta\":{\"content\":\"你好🙂\"}}]}\n\n";
+        let bytes = event.as_bytes();
+        let split = event.find("好").expect("contains CJK char") + 1;
+
+        append_utf8_sse_chunk(&mut buffer, &mut pending, &bytes[..split]).unwrap();
+        assert!(!pending.is_empty());
+        assert!(!buffer.contains('好'));
+
+        append_utf8_sse_chunk(&mut buffer, &mut pending, &bytes[split..]).unwrap();
+        finish_utf8_sse_chunks(&mut buffer, &mut pending).unwrap();
+        assert_eq!(buffer, event);
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn utf8_sse_decoder_rejects_invalid_byte() {
+        let mut buffer = String::new();
+        let mut pending = Vec::new();
+        let err = append_utf8_sse_chunk(&mut buffer, &mut pending, b"data: \xff\n\n")
+            .expect_err("invalid byte should fail");
+        assert!(err.to_string().contains("non-utf8 SSE chunk"));
+    }
+
+    #[test]
+    fn utf8_sse_decoder_rejects_unfinished_codepoint_on_finish() {
+        let mut buffer = String::new();
+        let mut pending = Vec::new();
+        append_utf8_sse_chunk(&mut buffer, &mut pending, &[0xE4]).unwrap();
+        let err = finish_utf8_sse_chunks(&mut buffer, &mut pending)
+            .expect_err("unfinished codepoint should fail at EOF");
+        assert!(err.to_string().contains("middle of a UTF-8 codepoint"));
+    }
+
+    #[tokio::test]
+    async fn polish_streaming_handles_multibyte_split_in_http_chunk() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let event = "data: {\"choices\":[{\"delta\":{\"content\":\"你🙂好\"}}]}\n\n";
+        let split = split_inside(event, "🙂");
+        let first = event.as_bytes()[..split].to_vec();
+        let second = event.as_bytes()[split..].to_vec();
+
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut stream);
+            let request_text = String::from_utf8_lossy(&request);
+            assert!(request_text.starts_with("POST /chat/completions HTTP/1.1"));
+            write_chunked_sse_response(&mut stream, &[&first, &second]);
+        });
+
+        let provider = OpenAICompatibleLLMProvider::new(OpenAICompatibleConfig::new(
+            "ark",
+            "Ark",
+            format!("http://{}", addr),
+            "",
+            "test-model",
+        ));
+        let deltas = StdMutex::new(String::new());
+        let output = provider
+            .polish_streaming(
+                "原文",
+                PolishMode::Raw,
+                &[],
+                &[],
+                ChineseScriptPreference::Auto,
+                OutputLanguagePreference::Auto,
+                None,
+                &[],
+                |delta| deltas.lock().unwrap().push_str(delta),
+                || false,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(output, "你🙂好");
+        assert_eq!(*deltas.lock().unwrap(), "你🙂好");
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn qa_streaming_handles_multibyte_split_in_http_chunk() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let event = "data: {\"choices\":[{\"delta\":{\"content\":\"答🙂案\"}}]}\n\n";
+        let split = split_inside(event, "🙂");
+        let first = event.as_bytes()[..split].to_vec();
+        let second = event.as_bytes()[split..].to_vec();
+
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut stream);
+            let request_text = String::from_utf8_lossy(&request);
+            assert!(request_text.starts_with("POST /chat/completions HTTP/1.1"));
+            write_chunked_sse_response(&mut stream, &[&first, &second]);
+        });
+
+        let provider = OpenAICompatibleLLMProvider::new(OpenAICompatibleConfig::new(
+            "ark",
+            "Ark",
+            format!("http://{}", addr),
+            "",
+            "test-model",
+        ));
+        let messages = vec![QaChatMessage {
+            role: "user".into(),
+            content: "问题".into(),
+        }];
+        let deltas = StdMutex::new(String::new());
+        let output = provider
+            .answer_chat_streaming(
+                &messages,
+                &[],
+                ChineseScriptPreference::Auto,
+                OutputLanguagePreference::Auto,
+                None,
+                |delta| deltas.lock().unwrap().push_str(delta),
+                || false,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(output, "答🙂案");
+        assert_eq!(*deltas.lock().unwrap(), "答🙂案");
+        server.join().unwrap();
+    }
+
     fn base64_url_no_pad(input: &str) -> String {
         const TABLE: &[u8; 64] =
             b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -2194,6 +2381,24 @@ mod tests {
             }
         }
         request
+    }
+
+    fn write_chunked_sse_response(stream: &mut std::net::TcpStream, chunks: &[&[u8]]) {
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        for chunk in chunks {
+            write!(stream, "{:X}\r\n", chunk.len()).unwrap();
+            stream.write_all(chunk).unwrap();
+            stream.write_all(b"\r\n").unwrap();
+        }
+        stream.write_all(b"0\r\n\r\n").unwrap();
+    }
+
+    fn split_inside(haystack: &str, needle: &str) -> usize {
+        haystack.find(needle).expect("needle exists") + 1
     }
 
     // ──────────────── 对话感知 polish 的 chat 消息构造 ────────────────
@@ -2690,16 +2895,15 @@ mod tests {
             assert!(!request_text.contains(r#""temperature":"#));
 
             let body = concat!(
-                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"最终\"}\n\n",
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"最终🙂\"}\n\n",
                 "data: {\"type\":\"response.output_text.delta\",\"delta\":\"文本。\"}\n\n",
                 "data: {\"type\":\"response.completed\",\"response\":{\"output\":[]}}\n\n"
             );
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
+            let split = split_inside(body, "🙂");
+            write_chunked_sse_response(
+                &mut stream,
+                &[&body.as_bytes()[..split], &body.as_bytes()[split..]],
             );
-            stream.write_all(response.as_bytes()).unwrap();
         });
 
         let provider = CodexOAuthLLMProvider::new(
@@ -2721,7 +2925,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(output, "最终文本。");
+        assert_eq!(output, "最终🙂文本。");
         server.join().unwrap();
         let _ = std::fs::remove_file(auth_path);
     }
