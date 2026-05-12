@@ -668,6 +668,7 @@ export const en: typeof zhCN = {
     desc: 'Manage on-device ASR models. Windows can use Microsoft Foundry Local Whisper; Qwen3-ASR model management stays separate.',
     qwenTitle: 'Qwen3-ASR model manager',
     engineUnavailable: 'The Qwen3-ASR inference engine is not bundled on this platform. You can still download models, but Qwen3-ASR cannot be activated here yet.',
+    qwenUnavailableOnWindows: 'Qwen3-ASR is not supported on Windows yet. Please use Foundry Local Whisper above instead.',
     foundryTitle: 'Windows Foundry Local Whisper',
     foundryDesc: 'Windows uses Microsoft Foundry Local Whisper to recognize speech on this device with no ASR API key. First prepare downloads local runtime components and a model, then loads it. LLM polishing still uses your configured LLM provider; if none is configured, the existing raw transcript fallback still applies.',
     foundryAvailable: 'Available on Windows',

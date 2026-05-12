@@ -285,15 +285,29 @@ function Pill({ os, state, level, insertedChars, message, onCancel, onConfirm }:
   );
 }
 
+// 与 @keyframes capsule-out 的 0.24s 时长一致——必须同步，否则定时器先于
+// 动画结束就 unmount → 用户看到半截动画被截断。
+const EXIT_ANIM_MS = 240;
+// 初始可见 state：Tauri 内运行从 idle 开始（等后端 capsule:state 事件），
+// 浏览器 dev 模式从 recording 开始以便直接看到胶囊。
+const INITIAL_VISIBLE_STATE: CapsuleState = isTauri ? 'idle' : 'recording';
+
 export function Capsule() {
   const { t } = useTranslation();
   const os = detectOS();
   const metrics = getCapsulePillMetrics(os);
-  const [state, setState] = useState<CapsuleState>(isTauri ? 'idle' : 'recording');
+  const [state, setState] = useState<CapsuleState>(INITIAL_VISIBLE_STATE);
   const [level, setLevel] = useState<number>(isTauri ? 0 : 0.6);
   const [insertedChars, setInsertedChars] = useState<number>(0);
   const [message, setMessage] = useState<string | undefined>();
   const [translation, setTranslation] = useState<boolean>(false);
+  // `leaving` 与 `lastVisibleState` 协同实现「退出动画」：
+  // - 当 state 从非 idle 变成 idle 时，不立即卸载，而是把 leaving 置为 true 并保留
+  //   最后一帧的可见 state（lastVisibleState），让胶囊用 capsule-out 动画收缩淡出。
+  // - 动画结束（EXIT_ANIM_MS）后再把 leaving 置回 false，组件回到「真正未挂载」分支。
+  // - 若期间 state 又切回非 idle（例如用户连按热键），立刻中止 leaving 并恢复显示。
+  const [leaving, setLeaving] = useState<boolean>(false);
+  const [lastVisibleState, setLastVisibleState] = useState<CapsuleState>(INITIAL_VISIBLE_STATE);
   // Windows 端 host 在翻译模式从 84 长到 118；macOS / Linux 上 capsuleLayout 已固定 42 忽略此参数。
   const hostMetrics = getCapsuleHostMetrics(os, translation);
 
@@ -320,6 +334,31 @@ export function Capsule() {
     };
   }, []);
 
+  // 退出动画调度：在 state 真正进入 idle 时，先用 capsule-out 播放 EXIT_ANIM_MS，再卸载。
+  // 设计要点：
+  // 1. 进入非 idle：清掉 leaving，记录最新可见 state；
+  // 2. 进入 idle 且之前可见：开启 leaving 并启动定时器；
+  // 3. 期间又被打回非 idle：cleanup 直接 clearTimeout，定时器不会触发，
+  //    新一轮 effect 会立即恢复可见态，避免错误地把可见状态切到 idle。
+  useEffect(() => {
+    if (state !== 'idle') {
+      // 立即恢复可见，并取消上一轮可能挂着的离场。
+      if (leaving) setLeaving(false);
+      setLastVisibleState(state);
+      return undefined;
+    }
+    // state === 'idle'：判断是不是从可见态过渡过来。
+    if (lastVisibleState === 'idle') return undefined;
+    setLeaving(true);
+    const timer = setTimeout(() => {
+      setLeaving(false);
+      setLastVisibleState('idle');
+    }, EXIT_ANIM_MS);
+    return () => clearTimeout(timer);
+    // 故意只依赖 state —— lastVisibleState / leaving 是内部派生量，
+    // 把它们加进依赖会让定时器被反复重建。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state]);
 
   const onCancel = () => {
     void invokeOrMock<void>('cancel_dictation', undefined, () => undefined);
@@ -329,9 +368,13 @@ export function Capsule() {
     void invokeOrMock<void>('stop_dictation', undefined, () => undefined);
   };
 
-  if (state === 'idle') {
+  // 真正卸载：state 已是 idle，且不在离场动画中。
+  if (state === 'idle' && !leaving) {
     return <div style={{ width: 0, height: 0 }} />;
   }
+
+  // 离场时用 lastVisibleState 渲染最后一帧内容，避免把 idle 当作 fallback 走到 AudioBars(0)。
+  const renderedState: CapsuleState = state === 'idle' ? lastVisibleState : state;
 
   return (
     <div
@@ -350,7 +393,15 @@ export function Capsule() {
           : 0,
         paddingBottom: os === 'win' ? hostMetrics.bottomInset : 0,
         background: 'transparent',
-        animation: os === 'win' ? 'none' : 'capsule-in .22s cubic-bezier(.2,.9,.3,1.1)',
+        // 入场：中央 scaleX 由 0.18 长到 1（视觉上像从中心向两端展开）+ 淡入。
+        // 离场：scaleX 由 1 收缩回 0.18 + 向下偏移 8px + 淡出。
+        // 三平台一致 —— 旧版 Windows 走 animation:'none' 的分支已删除。
+        // transformOrigin 默认就是 50% 50%，所以 scaleX 天然以中央为锚点。
+        animation: leaving
+          ? 'capsule-out .24s cubic-bezier(.4,0,.7,.2) forwards'
+          : 'capsule-in .26s cubic-bezier(.2,.9,.3,1.1) both',
+        transformOrigin: 'center',
+        willChange: 'transform, opacity',
       }}
     >
       {/* "正在翻译" 徽章 — 嵌套两层：
@@ -401,17 +452,26 @@ export function Capsule() {
       </div>
       <Pill
         os={os}
-        state={state}
-        level={level}
+        state={renderedState}
+        level={leaving ? 0 : level}
         insertedChars={insertedChars}
         message={message}
         onCancel={onCancel}
         onConfirm={onConfirm}
       />
       <style>{`
+        /* 入场：从中央很窄的一小条（scaleX 0.18）+ 略压扁（scaleY 0.95）+ 透明，
+           长出到 scaleX 1 / scaleY 1 / 不透明。配合 wrapper 的 transformOrigin:center，
+           视觉上是「从中心向左右展开」。 */
         @keyframes capsule-in {
-          from { opacity: 0; transform: translateY(6px) scale(.96); }
-          to   { opacity: 1; transform: translateY(0) scale(1); }
+          from { opacity: 0; transform: scaleX(.18) scaleY(.95); }
+          to   { opacity: 1; transform: scaleX(1)   scaleY(1); }
+        }
+        /* 离场：scaleX 由 1 收回 0.18 + 整体向下偏移 8px + 淡出。
+           forwards 让最终帧（opacity:0、scaleX:.18）保持到组件被卸载。 */
+        @keyframes capsule-out {
+          from { opacity: 1; transform: scaleX(1)   translateY(0); }
+          to   { opacity: 0; transform: scaleX(.18) translateY(8px); }
         }
         @keyframes cap-shine {
           0%   { background-position: 200% center; }
