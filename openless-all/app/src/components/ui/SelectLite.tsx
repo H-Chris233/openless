@@ -5,12 +5,12 @@
 // - 触发器是一个 button（chevron + 当前值标签），样式可被 `style` 覆盖
 // - popover 用 portal 渲染到 document.body，避开父容器 overflow:hidden
 // - 键盘：ArrowDown/ArrowUp 切换高亮，Enter 确认，Esc 关闭
-// - 点击外部 / 滚动 / resize 都会关闭或重定位
+// - 点击外部 / 滚动外部容器都会关闭（popover 内部 scroll 不关闭）
+// - 关闭有 .14s exit 动画；mount 时 callback ref + RAF 二次定位防 first-paint 错位
 
 import {
   useCallback,
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -55,6 +55,8 @@ const DEFAULT_TRIGGER_STYLE: CSSProperties = {
   minWidth: 160,
 };
 
+const EXIT_ANIM_MS = 140;
+
 export function SelectLite({
   value,
   onChange,
@@ -65,9 +67,11 @@ export function SelectLite({
   ariaLabel,
 }: SelectLiteProps) {
   const [open, setOpen] = useState(false);
+  // leaving 让 popover 在卸载前播完 exit keyframe（用户报"没有收缩动画"——之前直接 unmount）
+  const [leaving, setLeaving] = useState(false);
   const [highlight, setHighlight] = useState<number>(-1);
   const triggerRef = useRef<HTMLButtonElement>(null);
-  const popoverRef = useRef<HTMLDivElement>(null);
+  const popoverRef = useRef<HTMLDivElement | null>(null);
   const [anchor, setAnchor] = useState<{ left: number; top: number; width: number } | null>(null);
 
   const selected = useMemo(
@@ -82,33 +86,35 @@ export function SelectLite({
     const rect = trigger.getBoundingClientRect();
     const popoverRect = popoverRef.current?.getBoundingClientRect();
     const popoverHeight = popoverRect?.height ?? 280;
-    const popoverWidth = popoverRect?.width ?? rect.width;
-    // 纵向：默认在触发器下方；若下方空间放不下 popover，翻转向上以避免被视口裁剪。
+    // popover 宽度优先用真实测量值（>= trigger 宽），fallback 才用 trigger 宽。
+    const popoverWidth = Math.max(popoverRect?.width ?? 0, rect.width);
+    // 纵向：默认在触发器下方；若下方空间放不下 popover，翻转向上避免被视口裁剪。
     const spaceBelow = window.innerHeight - rect.bottom;
     const flipUp = spaceBelow < popoverHeight + 8 && rect.top > popoverHeight + 8;
     const top = flipUp ? rect.top - popoverHeight - 4 : rect.bottom + 4;
-    // 横向：在窗口右边的 select 可能让 popover 溢出屏幕；clamp 到 [8, viewport - width - 8] 区间。
+    // 横向：窗口右边的 select 可能让 popover 溢出屏幕；clamp 到 [8, viewport-width-8]。
     const minLeft = 8;
     const maxLeft = Math.max(minLeft, window.innerWidth - popoverWidth - 8);
     const left = Math.min(Math.max(rect.left, minLeft), maxLeft);
     setAnchor({ left, top, width: rect.width });
   }, []);
 
-  useLayoutEffect(() => {
-    if (!open) return;
-    positionPopover();
-    const handleReflow = () => positionPopover();
-    window.addEventListener('resize', handleReflow);
-    window.addEventListener('scroll', handleReflow, true);
-    return () => {
-      window.removeEventListener('resize', handleReflow);
-      window.removeEventListener('scroll', handleReflow, true);
-    };
-  }, [open, positionPopover]);
+  // popover ref callback：每次 popover DOM mount/unmount 调一次。
+  // 关键：mount 时拿到真实 popover 宽（content 撑大），requestAnimationFrame
+  // 推到下一帧 paint 前再重算 anchor —— 修复"first paint 用 trigger 宽 fallback 后
+  // popover 位置漂掉"的 bug。
+  const setPopoverRef = useCallback(
+    (node: HTMLDivElement | null) => {
+      popoverRef.current = node;
+      if (node) {
+        requestAnimationFrame(() => positionPopover());
+      }
+    },
+    [positionPopover],
+  );
 
   // 键盘 ArrowUp/Down 改 highlight 后把高亮项 scroll into view —— 长 dropdown 超过
-  // maxHeight 280 时键盘用户能看到当前高亮。{ block: 'nearest' } 避免把已经可见的项
-  // 强行滚到顶部，符合 listbox 滚动惯例。
+  // maxHeight 280 时键盘用户能看到当前高亮。
   useEffect(() => {
     if (!open || highlight < 0) return;
     const target = popoverRef.current?.querySelector(
@@ -117,6 +123,7 @@ export function SelectLite({
     target?.scrollIntoView({ block: 'nearest' });
   }, [highlight, open]);
 
+  // 点击外部 / 滚动外部 → 关闭。popover 内部 scroll 保持打开。
   useEffect(() => {
     if (!open) return;
     const handlePointerDown = (event: MouseEvent) => {
@@ -124,22 +131,49 @@ export function SelectLite({
       if (!target) return;
       if (triggerRef.current?.contains(target)) return;
       if (popoverRef.current?.contains(target)) return;
-      setOpen(false);
+      closeMenu();
     };
+    // 用户在 popover 外部任何位置滚动（wheel 或 scroll 事件）→ 关闭。
+    // popover 内部滚动（长列表 scroll）popover.contains(target) → 保留打开。
+    const handleScrollOutside = (event: Event) => {
+      const target = event.target as Node | null;
+      if (target && popoverRef.current?.contains(target)) return;
+      closeMenu();
+    };
+    // window resize 强制关闭：重算位置成本高且大多数 resize 表明 user 不再想看 popover。
+    const handleResize = () => closeMenu();
+
     document.addEventListener('mousedown', handlePointerDown);
-    return () => document.removeEventListener('mousedown', handlePointerDown);
+    window.addEventListener('scroll', handleScrollOutside, { capture: true, passive: true });
+    window.addEventListener('wheel', handleScrollOutside, { capture: true, passive: true });
+    window.addEventListener('resize', handleResize);
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown);
+      window.removeEventListener('scroll', handleScrollOutside, true);
+      window.removeEventListener('wheel', handleScrollOutside, true);
+      window.removeEventListener('resize', handleResize);
+    };
+    // closeMenu 是稳定引用（无 React state 依赖），不放 deps。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   const openMenu = () => {
     if (disabled) return;
     const initial = options.findIndex(opt => opt.value === value && !opt.disabled);
     setHighlight(initial >= 0 ? initial : options.findIndex(opt => !opt.disabled));
+    setLeaving(false);
     setOpen(true);
   };
 
   const closeMenu = () => {
-    setOpen(false);
-    setHighlight(-1);
+    if (!open) return;
+    setLeaving(true);
+    window.setTimeout(() => {
+      setOpen(false);
+      setLeaving(false);
+      setHighlight(-1);
+      setAnchor(null);
+    }, EXIT_ANIM_MS);
   };
 
   const selectIndex = (index: number) => {
@@ -227,7 +261,7 @@ export function SelectLite({
       </button>
       {open && anchor && createPortal(
         <div
-          ref={popoverRef}
+          ref={setPopoverRef}
           role="listbox"
           style={{
             position: 'fixed',
@@ -246,7 +280,10 @@ export function SelectLite({
             zIndex: 9999,
             fontFamily: 'inherit',
             fontSize: 12.5,
-            animation: 'ol-select-pop .14s var(--ol-motion-quick) both',
+            animation: leaving
+              ? 'ol-select-pop-out .14s cubic-bezier(.4,.0,.7,.2) forwards'
+              : 'ol-select-pop .14s var(--ol-motion-quick) both',
+            transformOrigin: 'top center',
           }}
         >
           {options.map((option, index) => {
