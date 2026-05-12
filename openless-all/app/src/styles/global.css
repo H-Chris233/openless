@@ -27,6 +27,18 @@ button {
   padding: 0;
 }
 
+@keyframes ol-select-pop {
+  from { opacity: 0; transform: translateY(-4px) scale(.98); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* 键盘焦点指示：鼠标点击 (:focus) 不显示，键盘 Tab (:focus-visible) 才显示。
+   用 box-shadow 而非 outline 是因为组件内联 style 可能用 outline:none
+   把默认 ring 干掉，box-shadow 不受影响仍能上色。配合 pr-agent #407 的 a11y 要求。 */
+.ol-focus-ring:focus-visible {
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.45);
+}
+
 input, textarea {
   font-family: inherit;
   user-select: text;

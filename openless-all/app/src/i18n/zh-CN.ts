@@ -598,7 +598,6 @@ export const zhCN = {
       appearanceSystem: '跟随系统',
       appearanceLight: '浅色',
       appearanceDark: '深色',
-      language: '界面语言',
       font: '字体大小',
       fontDesc: '整体缩放界面字号，立即生效。',
       fontSmall: '小',

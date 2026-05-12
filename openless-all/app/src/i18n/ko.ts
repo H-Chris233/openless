@@ -602,7 +602,6 @@ export const ko: typeof zhCN = {
       appearanceSystem: '시스템 따라가기',
       appearanceLight: '라이트',
       appearanceDark: '다크',
-      language: '인터페이스 언어',
       font: '글꼴 크기',
       fontDesc: 'UI 글꼴 크기를 전체 스케일. 즉시 반영.',
       fontSmall: '소',

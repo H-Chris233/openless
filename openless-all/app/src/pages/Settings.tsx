@@ -37,6 +37,7 @@ import type {
 } from '../lib/types';
 import { emitSaved } from '../lib/savedEvent';
 import { useHotkeySettings } from '../state/HotkeySettingsContext';
+import { SelectLite } from '../components/ui/SelectLite';
 import { Btn, Card, Collapsible, PageHeader, Pill } from './_atoms';
 import {
   deleteLocalAsrModel,
@@ -454,15 +455,17 @@ function RecordingSection() {
           label={t('settings.recording.pasteShortcutLabel')}
           desc={t('settings.recording.pasteShortcutDesc')}
         >
-          <select
+          <SelectLite
             value={prefs.pasteShortcut}
-            onChange={e => onPasteShortcutChange(e.target.value as PasteShortcut)}
+            onChange={next => onPasteShortcutChange(next as PasteShortcut)}
+            options={[
+              { value: 'ctrlV', label: t('settings.recording.pasteShortcutCtrlV') },
+              { value: 'ctrlShiftV', label: t('settings.recording.pasteShortcutCtrlShiftV') },
+              { value: 'shiftInsert', label: t('settings.recording.pasteShortcutShiftInsert') },
+            ]}
+            ariaLabel={t('settings.recording.pasteShortcutLabel')}
             style={{ ...inputStyle, maxWidth: 220 }}
-          >
-            <option value="ctrlV">{t('settings.recording.pasteShortcutCtrlV')}</option>
-            <option value="ctrlShiftV">{t('settings.recording.pasteShortcutCtrlShiftV')}</option>
-            <option value="shiftInsert">{t('settings.recording.pasteShortcutShiftInsert')}</option>
-          </select>
+          />
         </SettingRow>
       )}
       {capability.adapter === 'windowsLowLevel' && (
@@ -1386,15 +1389,16 @@ function ProvidersSection() {
         {/* desc 已去掉——'选择后将自动填入 Base URL 默认值' 在 180px label 列必换行成两行，
             视觉上 label 区出现"字体单独占一行"。下拉自身已经表达了"切换"含义，desc 冗余。 */}
         <SettingRow label={t('settings.providers.providerLabel')}>
-          <select
+          <SelectLite
             value={llmProvider}
-            onChange={e => onLlmProviderChange(e.target.value as LlmPresetId)}
+            onChange={next => onLlmProviderChange(next as LlmPresetId)}
+            options={LLM_PRESETS.map(p => ({
+              value: p.id,
+              label: t(`settings.providers.presets.${p.nameKey}`),
+            }))}
+            ariaLabel={t('settings.providers.providerLabel')}
             style={{ ...inputStyle, maxWidth: 200 }}
-          >
-            {LLM_PRESETS.map(p => (
-              <option key={p.id} value={p.id}>{t(`settings.providers.presets.${p.nameKey}`)}</option>
-            ))}
-          </select>
+          />
         </SettingRow>
         {codexOAuthSelected ? (
           <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.6, margin: '2px 0 10px' }}>
@@ -1455,30 +1459,33 @@ function ProvidersSection() {
                 : null;
             return (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-start', minWidth: 0 }}>
-                <select
+                <SelectLite
                   value={selectedValue}
                   disabled={isLocked}
-                  onChange={e => onAsrProviderChange(e.target.value as AsrPresetId)}
-                  style={{
-                    ...inputStyle,
-                    maxWidth: 200,
-                    ...(isLocked ? { opacity: 0.65, cursor: 'not-allowed' } : {}),
-                  }}
-                >
-                  {visibleAsrPresets.map(p => (
-                    <option key={p.id} value={p.id}>{t(`settings.providers.presets.${p.nameKey}`)}</option>
-                  ))}
-                  {platformLocalAsr && platformLocalNameKey && (
-                    <option key={platformLocalAsr} value={platformLocalAsr} disabled>
-                      {t(`settings.providers.presets.${platformLocalNameKey}`)}
-                    </option>
-                  )}
-                  {anomalousLocal && anomalousNameKey && (
-                    <option key={anomalousLocal} value={anomalousLocal} disabled>
-                      {t(`settings.providers.presets.${anomalousNameKey}`)}
-                    </option>
-                  )}
-                </select>
+                  onChange={next => onAsrProviderChange(next as AsrPresetId)}
+                  options={[
+                    ...visibleAsrPresets.map(p => ({
+                      value: p.id,
+                      label: t(`settings.providers.presets.${p.nameKey}`),
+                    })),
+                    ...(platformLocalAsr && platformLocalNameKey
+                      ? [{
+                          value: platformLocalAsr,
+                          label: t(`settings.providers.presets.${platformLocalNameKey}`),
+                          disabled: true,
+                        }]
+                      : []),
+                    ...(anomalousLocal && anomalousNameKey
+                      ? [{
+                          value: anomalousLocal,
+                          label: t(`settings.providers.presets.${anomalousNameKey}`),
+                          disabled: true,
+                        }]
+                      : []),
+                  ]}
+                  ariaLabel={t('settings.providers.providerLabel')}
+                  style={{ ...inputStyle, maxWidth: 200 }}
+                />
                 {platformLocalAsr && platformLocalNameKey && (
                   <div style={{ fontSize: 11, color: 'var(--ol-ink-4)', lineHeight: 1.5, maxWidth: 320 }}>
                     {t('settings.providers.localAsrTakeoverHint', {
@@ -1623,15 +1630,15 @@ function ProviderTools({ kind, modelAccount, onModelSelected }: { kind: 'llm' | 
           <button onClick={validate} style={miniBtnStyle} disabled={status === 'loading'}>{t('settings.providers.validate')}</button>
           <button onClick={loadModels} style={miniBtnStyle} disabled={status === 'loading'}>{t('settings.providers.fetchModels')}</button>
           {models.length > 0 && (
-            <select
+            <SelectLite
               value={selectedModel}
-              onChange={e => applyModel(e.target.value)}
+              onChange={applyModel}
               disabled={status === 'loading'}
+              options={models.map(model => ({ value: model, label: model }))}
+              placeholder={t('settings.providers.selectModel')}
+              ariaLabel={t('settings.providers.selectModel')}
               style={{ ...inputStyle, maxWidth: 220 }}
-            >
-              <option value="" disabled>{t('settings.providers.selectModel')}</option>
-              {models.map(model => <option key={model} value={model}>{model}</option>)}
-            </select>
+            />
           )}
         </div>
         {message && (
