@@ -2,7 +2,7 @@
 //!
 //! 公开 API 三件套：
 //! - `type_unicode_chunk(text)` —— 阻塞地把一段文字逐 codepoint 当作键盘事件发出去，
-//!   不动剪贴板。各平台用各自的原语。
+//!   不动剪贴板。各平台用各自的原语；返回确认成功发送的字符数。
 //! - `switch_to_ascii(app)` —— 仅 macOS 有效；切到 ABC 输入源以绕过 CJK / 日文 IME
 //!   对 Unicode 字符串事件的拦截。Windows / Linux 上是 no-op。
 //! - `restore_input_source(app, prev)` —— 配对调用，恢复 macOS 上的原输入源。
@@ -41,6 +41,13 @@ use tauri::{AppHandle, Runtime};
 
 #[derive(Debug, thiserror::Error)]
 pub enum TypeError {
+    #[allow(dead_code)]
+    #[error("{source} after {typed_chars} chars were sent")]
+    Partial {
+        typed_chars: usize,
+        #[source]
+        source: Box<TypeError>,
+    },
     #[cfg(target_os = "macos")]
     #[error("CGEventSourceCreate returned null")]
     SourceAllocFailed,
@@ -59,6 +66,15 @@ pub enum TypeError {
     #[cfg(target_os = "linux")]
     #[error("enigo text input failed: {0}")]
     EnigoText(String),
+}
+
+impl TypeError {
+    pub fn typed_chars(&self) -> usize {
+        match self {
+            TypeError::Partial { typed_chars, .. } => *typed_chars,
+            _ => 0,
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -91,18 +107,33 @@ mod macos_impl {
     unsafe impl Send for PreviousInputSource {}
     unsafe impl Sync for PreviousInputSource {}
 
-    pub fn type_unicode_chunk(text: &str) -> Result<(), TypeError> {
+    pub fn type_unicode_chunk(text: &str) -> Result<usize, TypeError> {
         if text.is_empty() {
-            return Ok(());
+            return Ok(0);
         }
         if is_secure_input_enabled() {
             return Err(TypeError::SecureInputActive);
         }
+        let mut typed_chars = 0;
         for ch in text.chars() {
-            send_one_codepoint(ch)?;
+            if let Err(e) = send_one_codepoint(ch) {
+                return Err(partial_or_original(typed_chars, e));
+            }
+            typed_chars += 1;
             std::thread::sleep(INTER_KEYSTROKE_DELAY);
         }
-        Ok(())
+        Ok(typed_chars)
+    }
+
+    fn partial_or_original(typed_chars: usize, source: TypeError) -> TypeError {
+        if typed_chars == 0 {
+            source
+        } else {
+            TypeError::Partial {
+                typed_chars,
+                source: Box::new(source),
+            }
+        }
     }
 
     fn send_one_codepoint(ch: char) -> Result<(), TypeError> {
@@ -299,16 +330,36 @@ mod windows_impl {
     /// 兜底跟 macOS 对齐。
     const INTER_KEYSTROKE_DELAY: Duration = Duration::from_millis(1);
 
-    pub fn type_unicode_chunk(text: &str) -> Result<(), TypeError> {
+    pub fn type_unicode_chunk(text: &str) -> Result<usize, TypeError> {
         if text.is_empty() {
-            return Ok(());
+            return Ok(0);
         }
-        for unit in text.encode_utf16() {
-            send_utf16_unit(unit, false)?;
-            send_utf16_unit(unit, true)?;
+        let mut typed_chars = 0;
+        for ch in text.chars() {
+            let mut buf = [0u16; 2];
+            for unit in ch.encode_utf16(&mut buf) {
+                if let Err(e) = send_utf16_unit(*unit, false) {
+                    return Err(partial_or_original(typed_chars, e));
+                }
+                if let Err(e) = send_utf16_unit(*unit, true) {
+                    return Err(partial_or_original(typed_chars, e));
+                }
+            }
+            typed_chars += 1;
             std::thread::sleep(INTER_KEYSTROKE_DELAY);
         }
-        Ok(())
+        Ok(typed_chars)
+    }
+
+    fn partial_or_original(typed_chars: usize, source: TypeError) -> TypeError {
+        if typed_chars == 0 {
+            source
+        } else {
+            TypeError::Partial {
+                typed_chars,
+                source: Box::new(source),
+            }
+        }
     }
 
     fn send_utf16_unit(unit: u16, key_up: bool) -> Result<(), TypeError> {
@@ -366,21 +417,34 @@ mod linux_impl {
 
     pub struct PreviousInputSource;
 
-    /// 用 enigo 一次 `text()` 把整段 chunk 发出去。X11 上走 XTest 稳定；Wayland 上
-    /// 看 compositor 是否给 libei 权限，stock GNOME-Wayland 通常拒绝 —— 此处
-    /// 失败返回 `EnigoInit` / `EnigoText`，调用方应回落到一次性。
+    /// 用 enigo 逐字符发出 chunk。X11 上走 XTest 稳定；Wayland 上看 compositor 是否
+    /// 给 libei 权限，stock GNOME-Wayland 通常拒绝 —— 失败时尽量返回已成功字符数，
+    /// 让调用方的 history / clipboard 与实际落屏内容一致。
     ///
     /// 不处理 fcitx / ibus 输入法切换 —— Linux 输入法栈与 X11 合成事件的交互非常
     /// 碎片化，v1 实验阶段直接交给用户保证当前输入源是英文键盘。
-    pub fn type_unicode_chunk(text: &str) -> Result<(), TypeError> {
+    pub fn type_unicode_chunk(text: &str) -> Result<usize, TypeError> {
         if text.is_empty() {
-            return Ok(());
+            return Ok(0);
         }
         let mut enigo =
             Enigo::new(&Settings::default()).map_err(|e| TypeError::EnigoInit(e.to_string()))?;
-        enigo
-            .text(text)
-            .map_err(|e| TypeError::EnigoText(e.to_string()))
+        let mut typed_chars = 0;
+        for ch in text.chars() {
+            if let Err(e) = enigo.text(&ch.to_string()) {
+                let source = TypeError::EnigoText(e.to_string());
+                return if typed_chars == 0 {
+                    Err(source)
+                } else {
+                    Err(TypeError::Partial {
+                        typed_chars,
+                        source: Box::new(source),
+                    })
+                };
+            }
+            typed_chars += 1;
+        }
+        Ok(typed_chars)
     }
 
     pub async fn switch_to_ascii<R: Runtime>(
@@ -397,17 +461,58 @@ mod linux_impl {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::TypeError;
+
+    #[test]
+    fn type_error_partial_reports_typed_chars() {
+        let err = TypeError::Partial {
+            typed_chars: 2,
+            source: Box::new(platform_error()),
+        };
+
+        assert_eq!(err.typed_chars(), 2);
+    }
+
+    #[test]
+    fn plain_type_error_reports_zero_typed_chars() {
+        assert_eq!(platform_error().typed_chars(), 0);
+    }
+
+    #[cfg(target_os = "macos")]
+    fn platform_error() -> TypeError {
+        TypeError::EventAllocFailed
+    }
+
+    #[cfg(target_os = "windows")]
+    fn platform_error() -> TypeError {
+        TypeError::SendInputFailed("fail".into())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn platform_error() -> TypeError {
+        TypeError::EnigoText("fail".into())
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // 公共导出（按 cfg 分发到对应实现）
 // ═══════════════════════════════════════════════════════════════════════════
 #[cfg(target_os = "macos")]
 #[allow(unused_imports)]
-pub use macos_impl::{restore_input_source, switch_to_ascii, type_unicode_chunk, PreviousInputSource};
+pub use macos_impl::{
+    restore_input_source, switch_to_ascii, type_unicode_chunk, PreviousInputSource,
+};
 
 #[cfg(target_os = "windows")]
 #[allow(unused_imports)]
-pub use windows_impl::{restore_input_source, switch_to_ascii, type_unicode_chunk, PreviousInputSource};
+pub use windows_impl::{
+    restore_input_source, switch_to_ascii, type_unicode_chunk, PreviousInputSource,
+};
 
 #[cfg(target_os = "linux")]
 #[allow(unused_imports)]
-pub use linux_impl::{restore_input_source, switch_to_ascii, type_unicode_chunk, PreviousInputSource};
+pub use linux_impl::{
+    restore_input_source, switch_to_ascii, type_unicode_chunk, PreviousInputSource,
+};
