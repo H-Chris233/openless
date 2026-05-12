@@ -146,13 +146,14 @@ pub fn run() {
                 {
                     use window_vibrancy::apply_mica;
                     // Windows 走 Tauri decorations:true 原生 Win11 标题栏 / 关闭按钮 /
-                    // 拖动 / 圆角 / resize border。PR #419 删除自定义 WinTitleBar 后，
-                    // 早先的 set_decorations(false) + apply_windows_rounded_frame 链路
-                    // 会让窗口完全无 chrome，用户无法拖/关/最小化（只能 tray 退出）。
-                    // 保留 apply_mica 给原生 chrome 提供磨砂材质。
+                    // 拖动 / 圆角 / resize border。保留 apply_mica 给原生 chrome 提供
+                    // 磨砂材质，配合 WindowChrome 半透明 background 让 sidebar 透出玻璃感。
                     if let Err(e) = apply_mica(&main, None) {
                         log::warn!("[main] mica failed: {e}");
                     }
+                    // Win11 22H2+: 把原生标题栏底色调成白色，与应用 sidebar 视觉统一。
+                    // 老版 Windows 静默失败，不阻塞。
+                    apply_windows_caption_color(&main);
                 }
                 // 静默启动开关：prefs.start_minimized = true → 不弹主窗口，
                 // 用户从菜单栏 / 托盘点击访问。开机自启时尤其有用，避免每次
@@ -602,6 +603,42 @@ fn handle_style_tray_menu_event(app: &AppHandle, id: &str) -> bool {
         log::warn!("[tray] refresh style menu after polish mode change failed: {err}");
     }
     true
+}
+
+/// 把 Win11 原生标题栏底色刷成白色，与应用 sidebar 视觉统一。需要 Win11 22H2+
+/// (Build 22621+) 才支持 `DWMWA_CAPTION_COLOR`(35)；老 Windows 上 DwmSetWindowAttribute
+/// 返回错误，仅打 warn 不阻塞启动。
+#[cfg(target_os = "windows")]
+fn apply_windows_caption_color<R: Runtime>(window: &tauri::WebviewWindow<R>) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CAPTION_COLOR};
+
+    let handle = match window.window_handle().map(|h| h.as_raw()) {
+        Ok(RawWindowHandle::Win32(handle)) => handle,
+        Ok(other) => {
+            log::warn!("[main] unexpected raw window handle for caption color: {other:?}");
+            return;
+        }
+        Err(e) => {
+            log::warn!("[main] read raw window handle for caption color failed: {e}");
+            return;
+        }
+    };
+    let hwnd = HWND(handle.hwnd.get() as *mut core::ffi::c_void);
+
+    // COLORREF 0x00BBGGRR 编码——白色就是 0x00FFFFFF。
+    let white: u32 = 0x00FFFFFF;
+    unsafe {
+        if let Err(e) = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_CAPTION_COLOR,
+            &white as *const _ as *const core::ffi::c_void,
+            std::mem::size_of_val(&white) as u32,
+        ) {
+            log::warn!("[main] set caption color failed (likely pre-22H2 Win): {e}");
+        }
+    }
 }
 
 #[tauri::command]
