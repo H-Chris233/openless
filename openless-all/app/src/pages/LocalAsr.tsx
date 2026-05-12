@@ -758,12 +758,26 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
       </Card>
       )}
 
-      {/* Qwen3 模型管理区——只在 macOS 渲染（后端 #[cfg(target_os = "macos")] 独占）。
-          Windows / Linux 看见镜像源 / 下载 / 模型列表都是 dead UI。Foundry 块自身已经
-          被上方 IS_WINDOWS 守卫，错误 Card（共享 setError，被 Foundry handler 也写）
-          保持无条件露出。 */}
-      {IS_MAC && (<>
-      {!engineAvailable && (
+      {/* Qwen3 模型管理区——macOS 是实体后端（#[cfg(target_os = "macos")]），Windows
+          上 backend 永远 unavailable，但 PO 要求 Windows 用户仍能看见这块，整体
+          灰显 + 禁用交互 + 顶部横幅说明不可用，引导他们使用上方 Foundry Local Whisper。
+          Linux 当前没有任何本地 ASR 提供，沿用 IS_MAC 隐藏（dead UI 仍然要藏）。 */}
+      {(IS_MAC || IS_WINDOWS) && (<>
+      {IS_WINDOWS && (
+        <Card style={{ marginBottom: 16, background: 'rgba(255, 235, 200, 0.4)' }}>
+          <div role="alert" style={{ fontSize: 13, color: 'var(--ol-ink-2)' }}>
+            {t('localAsr.qwenUnavailableOnWindows')}
+          </div>
+        </Card>
+      )}
+      <div
+        aria-disabled={IS_WINDOWS || undefined}
+        style={
+          IS_WINDOWS
+            ? { opacity: 0.5, filter: 'grayscale(0.4)', pointerEvents: 'none' as const }
+            : undefined
+        }>
+      {IS_MAC && !engineAvailable && (
         <Card style={{ marginBottom: 16, background: 'rgba(255, 235, 200, 0.4)' }}>
           <div style={{ fontSize: 13, color: 'var(--ol-ink-2)' }}>
             {t('localAsr.engineUnavailable')}
@@ -851,6 +865,7 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
           </div>
         </Card>
       )}
+      </div>
       </>)}
 
       {error && (
@@ -859,26 +874,43 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
         </Card>
       )}
 
-      {IS_MAC && (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-        {models.map(model => (
-          <ModelRow
-            key={model.id}
-            model={model}
-            remoteSize={remoteSizes[model.id]}
-            progress={progress[model.id]}
-            isActive={settings?.activeModel === model.id}
-            engineAvailable={engineAvailable}
-            disabled={busyModelId !== null && busyModelId !== model.id}
-            testing={testingModelId === model.id}
-            testResult={testResults[model.id]}
-            onDownload={() => void handleDownload(model.id)}
-            onCancel={() => void handleCancel(model.id)}
-            onDelete={() => void handleDelete(model.id)}
-            onSetActive={() => void handleSetActiveModel(model.id)}
-            onTest={() => void handleTest(model.id)}
-          />
-        ))}
+      {(IS_MAC || IS_WINDOWS) && (
+      <div
+        aria-disabled={IS_WINDOWS || undefined}
+        style={
+          IS_WINDOWS
+            ? { opacity: 0.5, filter: 'grayscale(0.4)', pointerEvents: 'none' as const }
+            : undefined
+        }>
+        {IS_MAC ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            {models.map(model => (
+              <ModelRow
+                key={model.id}
+                model={model}
+                remoteSize={remoteSizes[model.id]}
+                progress={progress[model.id]}
+                isActive={settings?.activeModel === model.id}
+                engineAvailable={engineAvailable}
+                disabled={busyModelId !== null && busyModelId !== model.id}
+                testing={testingModelId === model.id}
+                testResult={testResults[model.id]}
+                onDownload={() => void handleDownload(model.id)}
+                onCancel={() => void handleCancel(model.id)}
+                onDelete={() => void handleDelete(model.id)}
+                onSetActive={() => void handleSetActiveModel(model.id)}
+                onTest={() => void handleTest(model.id)}
+              />
+            ))}
+          </div>
+        ) : (
+          /* Windows 灰显占位：后端列表为空，给一个静态 Card 表明这里"本该是模型列表"。 */
+          <Card>
+            <div style={{ fontSize: 13, color: 'var(--ol-ink-3)' }}>
+              {t('localAsr.qwenUnavailableOnWindows')}
+            </div>
+          </Card>
+        )}
       </div>
       )}
     </Wrapper>

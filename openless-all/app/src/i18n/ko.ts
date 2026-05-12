@@ -670,6 +670,7 @@ export const ko: typeof zhCN = {
     desc: '기기 내 ASR 모델을 관리합니다. Windows 에서는 Microsoft Foundry Local Whisper 를 사용할 수 있으며, Qwen3-ASR 모델 관리는 별도로 유지됩니다.',
     qwenTitle: 'Qwen3-ASR 모델 관리',
     engineUnavailable: '현재 플랫폼에는 Qwen3-ASR 추론 엔진이 포함되어 있지 않습니다. 모델은 다운로드할 수 있지만 여기서는 아직 Qwen3-ASR 을 활성화할 수 없습니다.',
+    qwenUnavailableOnWindows: 'Windows 에서는 아직 Qwen3-ASR 을 지원하지 않습니다. 위의 Foundry Local Whisper 를 사용해 주세요.',
     foundryTitle: 'Windows Foundry Local Whisper',
     foundryDesc: 'Windows 는 Microsoft Foundry Local Whisper 로 이 기기에서 음성을 인식하며 ASR API Key 가 필요 없습니다. 첫 준비 시 로컬 런타임 구성 요소와 모델을 다운로드한 뒤 로드합니다. LLM 정리는 계속 설정된 LLM 공급자를 사용하며, 설정되지 않은 경우 기존 원문 전사 폴백을 그대로 사용합니다.',
     foundryAvailable: 'Windows 에서 사용 가능',
