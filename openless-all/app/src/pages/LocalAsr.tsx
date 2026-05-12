@@ -763,13 +763,9 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
           灰显 + 禁用交互 + 顶部横幅说明不可用，引导他们使用上方 Foundry Local Whisper。
           Linux 当前没有任何本地 ASR 提供，沿用 IS_MAC 隐藏（dead UI 仍然要藏）。 */}
       {(IS_MAC || IS_WINDOWS) && (<>
-      {IS_WINDOWS && (
-        <Card style={{ marginBottom: 16, background: 'rgba(255, 235, 200, 0.4)' }}>
-          <div role="alert" style={{ fontSize: 13, color: 'var(--ol-ink-2)' }}>
-            {t('localAsr.qwenUnavailableOnWindows')}
-          </div>
-        </Card>
-      )}
+      {/* v1.3.1-6 用户反馈：Windows 顶部"暂不支持"banner 白底太显眼。已经整段 opacity/grayscale
+          + inert 灰显 + 不可交互了，banner 是 noise，直接删。AT 仍可通过区域 aria-disabled
+          + 灰显视觉判断不可用。 */}
       <div
         aria-disabled={IS_WINDOWS || undefined}
         // @ts-expect-error — `inert` 是 HTML5 标准属性（React 19+ 一类型，TS lib.dom 旧版未收录）。
@@ -789,8 +785,17 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
         </Card>
       )}
 
-      <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--ol-ink)', margin: '4px 0 10px' }}>
-        {t('localAsr.qwenTitle')}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '4px 0 10px' }}>
+        {/* v1.3.1-6 用户拍板：千问3 ASR 改为「实验性」分组，独立于 Foundry/云端 ASR。
+            浅 amber badge 跟 thinking 扫光暖色调一致。 */}
+        <span style={{
+          fontSize: 10.5, fontWeight: 600, padding: '2px 7px', borderRadius: 4,
+          background: 'rgba(245, 158, 11, 0.15)', color: '#B45309',
+          letterSpacing: '0.02em', textTransform: 'uppercase',
+        }}>{t('localAsr.qwenExperimentalBadge')}</span>
+        <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--ol-ink)' }}>
+          {t('localAsr.qwenTitle')}
+        </div>
       </div>
 
       <Card style={{ marginBottom: 16 }}>
@@ -912,12 +917,9 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
             ))}
           </div>
         ) : (
-          /* Windows 灰显占位：后端列表为空，给一个静态 Card 表明这里"本该是模型列表"。 */
-          <Card>
-            <div style={{ fontSize: 13, color: 'var(--ol-ink-3)' }}>
-              {t('localAsr.qwenUnavailableOnWindows')}
-            </div>
-          </Card>
+          /* v1.3.1-6: Windows 列表为空时不再画白底 banner Card（用户反馈"白色显眼"），
+              留个低调的灰色 placeholder 维持容器高度。整段已 inert + 灰显，AT 用户感知到的也是"不可用"。 */
+          <div style={{ minHeight: 60 }} />
         )}
       </div>
       )}
