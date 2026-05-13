@@ -745,6 +745,22 @@ impl Coordinator {
         cancel_session(&self.inner);
     }
 
+    /// 返回当前听写阶段（read-only 快照），供 CLI 入口在 dispatch toggle 时决策。
+    /// 与原热键边沿走的 `handle_pressed` 分支完全相同的判定逻辑：Idle → start，
+    /// Listening → stop。Linux/Wayland 下桌面快捷键 → CLI 转发是唯一触发路径，
+    /// 必须复用这套语义。
+    pub fn dictation_phase_for_cli(&self) -> SessionPhase {
+        self.inner.state.lock().phase
+    }
+
+    /// CLI 入口的 QA toggle：直接复用 modifier-only QA 热键边沿的处理函数。
+    /// 与 `handle_qa_hotkey_pressed` 同语义 — Idle → 开浮窗 / Recording → 收尾 /
+    /// Processing → 忽略。Wayland 下没有 modifier-only / global-hotkey 监听，CLI
+    /// 是唯一进入点。
+    pub async fn cli_toggle_qa_panel(&self) {
+        handle_qa_hotkey_pressed(&self.inner).await;
+    }
+
     pub fn set_shortcut_recording_active(&self, active: bool) {
         self.inner
             .shortcut_recording_active

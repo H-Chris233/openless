@@ -12,6 +12,7 @@
 
 mod asr;
 mod audio_mute;
+mod cli;
 mod combo_hotkey;
 mod commands;
 mod coordinator;
@@ -70,7 +71,18 @@ pub fn run() {
         // 单实例锁：第二个进程启动时立即退出，激活信号转给已运行实例的主窗口。
         // 否则两份 OpenLess（如 /Applications/ + dev build）会各自抓全局热键，
         // 导致按一次键、两个进程同时跑流水线、文本被插入两遍。见 issue #50。
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        //
+        // 第二个进程的 argv 还有一个用处：作为 Linux/Wayland 下的「触发器入口」。
+        // 桌面环境快捷键执行 `openless --toggle-dictation` 时，第二个进程被本插件
+        // 拦截 → argv 直接转给主实例 coordinator。详见 issue #420 / `cli.rs`。
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            if let Some(intent) = cli::parse_cli_intent(&argv) {
+                log::info!(
+                    "[single-instance] another instance launched with intent={intent:?}, dispatching"
+                );
+                dispatch_cli_intent(app, intent);
+                return;
+            }
             log::info!(
                 "[single-instance] another instance launched, focusing existing main window"
             );
@@ -233,6 +245,22 @@ pub fn run() {
                 show_main_window(app.handle());
             }
 
+            // Wayland 下没有可用的全局键盘监听（issue #420）。Coordinator 已通过 stub adapter
+            // 把 hotkey 状态标记为 Installed，整个应用照常起来。前端走 pull 模型：RecordingSection
+            // mount 时调 `is_wayland_cli_mode` 取状态再渲染 CLI 引导 callout。原本用一次性 event 通知
+            // 行不通——Settings 模态是按需 mount，事件不缓冲不 replay，listener 几乎必然错过。
+            if hotkey::is_wayland_session() {
+                log::info!("[startup] Wayland session — frontend will pull via is_wayland_cli_mode");
+            }
+
+            // 首次启动也可能带 CLI flag（用户双击 .desktop 之前先用 CLI 起一遍）。
+            // 等 coordinator 准备好后再 dispatch；GUI 仍然照常起来。
+            let first_run_args: Vec<String> = std::env::args().collect();
+            if let Some(intent) = cli::parse_cli_intent(&first_run_args) {
+                log::info!("[startup] first-run CLI intent={intent:?}, dispatching");
+                dispatch_cli_intent(app.handle(), intent);
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -243,6 +271,7 @@ pub fn run() {
             commands::fetch_latest_beta_release,
             commands::get_hotkey_status,
             commands::get_hotkey_capability,
+            commands::is_wayland_cli_mode,
             commands::set_shortcut_recording_active,
             commands::get_windows_ime_status,
             commands::list_microphone_devices,
@@ -753,6 +782,70 @@ pub(crate) fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
         let _ = w.set_focus();
     }
     activate_app(app);
+}
+
+/// 把 CLI intent 路由到 coordinator。两个入口共用：
+/// 1. 首次启动（lib.rs setup 末尾）
+/// 2. single-instance 回调（第二个进程被拦截后转发 argv）
+///
+/// 异步动作（start_dictation / stop_dictation 是 async）通过 tauri 自带 runtime spawn，
+/// 不阻塞回调线程。所有动作都按 coordinator 当前状态自检：
+/// - ToggleDictation 在 Idle → start，在 Listening → stop，Starting/Processing/Inserting 忽略并记日志
+/// - ToggleQa 直接转发到 handle_qa_hotkey_pressed（语义等同于按一次 QA 热键）
+/// - CancelDictation 直接调 cancel（cancel 本身在非 Listening 时也安全）
+fn dispatch_cli_intent<R: Runtime>(app: &AppHandle<R>, intent: cli::CliIntent) {
+    let coordinator = app
+        .try_state::<Arc<coordinator::Coordinator>>()
+        .map(|s| Arc::clone(&*s));
+    let Some(coordinator) = coordinator else {
+        log::warn!("[cli] coordinator not yet managed; dropping intent={intent:?}");
+        return;
+    };
+    match intent {
+        cli::CliIntent::ToggleDictation => {
+            let coord = Arc::clone(&coordinator);
+            tauri::async_runtime::spawn(async move {
+                let phase = coord.dictation_phase_for_cli();
+                use coordinator_state::SessionPhase;
+                match phase {
+                    SessionPhase::Idle => {
+                        log::info!("[cli] toggle-dictation: Idle → start_dictation");
+                        if let Err(e) = coord.start_dictation().await {
+                            log::warn!("[cli] start_dictation failed: {e}");
+                        }
+                    }
+                    SessionPhase::Listening => {
+                        log::info!("[cli] toggle-dictation: Listening → stop_dictation");
+                        if let Err(e) = coord.stop_dictation().await {
+                            log::warn!("[cli] stop_dictation failed: {e}");
+                        }
+                    }
+                    SessionPhase::Starting => {
+                        // 复用 stop_dictation 自身的 Starting → pending_stop 处理，
+                        // 与按一次主热键的行为对齐（issue #51）。
+                        log::info!("[cli] toggle-dictation: Starting → stop_dictation (pending)");
+                        if let Err(e) = coord.stop_dictation().await {
+                            log::warn!("[cli] stop_dictation failed: {e}");
+                        }
+                    }
+                    other => {
+                        log::info!("[cli] toggle-dictation ignored (phase={other:?})");
+                    }
+                }
+            });
+        }
+        cli::CliIntent::ToggleQa => {
+            let coord = Arc::clone(&coordinator);
+            tauri::async_runtime::spawn(async move {
+                log::info!("[cli] toggle-qa: dispatching to qa hotkey handler");
+                coord.cli_toggle_qa_panel().await;
+            });
+        }
+        cli::CliIntent::CancelDictation => {
+            log::info!("[cli] cancel-dictation: invoking cancel");
+            coordinator.cancel_dictation();
+        }
+    }
 }
 
 pub(crate) fn request_microphone_from_foreground<R: Runtime>(
