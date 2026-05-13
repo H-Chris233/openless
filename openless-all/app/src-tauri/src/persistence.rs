@@ -24,8 +24,9 @@ use uuid::Uuid;
 
 use crate::types::{
     builtin_style_pack_for_mode, builtin_style_pack_id, builtin_style_packs,
-    default_active_style_pack_id, CorrectionRule, DictationSession, DictionaryEntry, PolishMode,
-    StylePack, StylePackExample, StylePackKind, UserPreferences, VocabPresetStore,
+    default_active_style_pack_id, CorrectionRule, CustomStylePrompts, DictationSession,
+    DictionaryEntry, PolishMode, StylePack, StylePackExample, StylePackKind, UserPreferences,
+    VocabPresetStore,
     BUILTIN_STYLE_PACK_LIGHT_ID,
 };
 
@@ -1407,6 +1408,10 @@ pub fn sync_style_pack_preferences(prefs: &mut UserPreferences, packs: &[StylePa
         changed = true;
     }
 
+    if sync_builtin_style_prompt_preferences(prefs, packs) {
+        changed = true;
+    }
+
     if changed {
         log::info!(
             "[style-pack] sync_prefs active:{}->{} default_mode:{:?}->{:?} enabled_modes:{:?}->{:?}",
@@ -1417,6 +1422,44 @@ pub fn sync_style_pack_preferences(prefs: &mut UserPreferences, packs: &[StylePa
             previous_enabled_modes,
             prefs.enabled_modes
         );
+    }
+
+    changed
+}
+
+fn sync_builtin_style_prompt_preferences(prefs: &mut UserPreferences, packs: &[StylePack]) -> bool {
+    let mut changed = false;
+    let mut saw_builtin = false;
+    for mode in [
+        PolishMode::Raw,
+        PolishMode::Light,
+        PolishMode::Structured,
+        PolishMode::Formal,
+    ] {
+        let Some(pack) = packs
+            .iter()
+            .find(|pack| pack.kind == StylePackKind::Builtin && pack.base_mode == mode)
+        else {
+            continue;
+        };
+        saw_builtin = true;
+        let next_prompt = pack.prompt.clone();
+        let current_prompt = prefs.style_system_prompts.for_mode(mode);
+        if current_prompt == next_prompt {
+            continue;
+        }
+        match mode {
+            PolishMode::Raw => prefs.style_system_prompts.raw = next_prompt,
+            PolishMode::Light => prefs.style_system_prompts.light = next_prompt,
+            PolishMode::Structured => prefs.style_system_prompts.structured = next_prompt,
+            PolishMode::Formal => prefs.style_system_prompts.formal = next_prompt,
+        }
+        changed = true;
+    }
+
+    if saw_builtin && prefs.custom_style_prompts != CustomStylePrompts::default() {
+        prefs.custom_style_prompts = CustomStylePrompts::default();
+        changed = true;
     }
 
     changed
@@ -2013,10 +2056,10 @@ impl CredentialsVault {
 #[cfg(test)]
 mod tests {
     use super::{
-        chunk_json_payload, list_vocab_presets, save_vocab_presets,
+        chunk_json_payload, list_vocab_presets, save_vocab_presets, sync_style_pack_preferences,
         validate_correction_rule_syntax, KEYRING_CHUNK_MAX_UTF16_UNITS,
     };
-    use crate::types::{VocabPreset, VocabPresetStore};
+    use crate::types::{builtin_style_packs, CustomStylePrompts, VocabPreset, VocabPresetStore};
     use std::fs;
     use std::path::PathBuf;
 
@@ -2074,5 +2117,37 @@ mod tests {
         assert!(validate_correction_rule_syntax("{num}", "{num}例").is_err());
         assert!(validate_correction_rule_syntax("{num}到{num}粒", "{num}例").is_err());
         assert!(validate_correction_rule_syntax("几粒", "{num}例").is_err());
+    }
+
+    #[test]
+    fn sync_style_pack_preferences_uses_builtin_store_prompts_as_source_of_truth() {
+        let mut prefs = crate::types::UserPreferences {
+            style_system_prompts: crate::types::StyleSystemPrompts {
+                raw: "stale raw".into(),
+                light: "stale light".into(),
+                structured: "stale structured".into(),
+                formal: "stale formal".into(),
+            },
+            custom_style_prompts: CustomStylePrompts {
+                raw: String::new(),
+                light: "legacy extra instruction".into(),
+                structured: String::new(),
+                formal: String::new(),
+            },
+            ..Default::default()
+        };
+        let mut packs = builtin_style_packs();
+        let light = packs
+            .iter_mut()
+            .find(|pack| pack.id == "builtin.light")
+            .expect("builtin light pack");
+        light.prompt = "fresh light prompt from store".into();
+
+        assert!(sync_style_pack_preferences(&mut prefs, &packs));
+        assert_eq!(prefs.style_system_prompts.raw, packs[0].prompt);
+        assert_eq!(prefs.style_system_prompts.light, "fresh light prompt from store");
+        assert_eq!(prefs.style_system_prompts.structured, packs[2].prompt);
+        assert_eq!(prefs.style_system_prompts.formal, packs[3].prompt);
+        assert_eq!(prefs.custom_style_prompts, CustomStylePrompts::default());
     }
 }

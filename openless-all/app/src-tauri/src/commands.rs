@@ -28,6 +28,7 @@ use crate::types::{
     builtin_style_pack_id, default_active_style_pack_id, ChineseScriptPreference, ComboBinding,
     CorrectionRule, CredentialsStatus, DictationSession, DictionaryEntry, HotkeyCapability,
     HotkeyStatus, OutputLanguagePreference, PolishMode, ShortcutBinding, StylePack,
+    StylePackKind,
     StylePackRuntimeDiagnostics, StyleSystemPrompts, UpdateChannel, UserPreferences,
     VocabPresetStore, WindowsImeStatus,
 };
@@ -157,8 +158,10 @@ pub fn set_settings(
     coord: CoordinatorState<'_>,
     app: AppHandle,
     tray_microphones: State<'_, TrayMicrophoneMenuState>,
-    prefs: UserPreferences,
+    mut prefs: UserPreferences,
 ) -> Result<(), String> {
+    let packs = coord.style_packs().list().map_err(|e| e.to_string())?;
+    sync_style_pack_preferences(&mut prefs, &packs);
     // 广播给所有 webview。issue #205：QaPanel 跑在独立 webview，
     // 没有 HotkeySettingsContext，必须靠事件感知录音键变化，否则面板可见时
     // 用户改键会让浮窗里的 "{recordHotkey}" 文案一直停留在旧值。
@@ -1257,6 +1260,7 @@ pub fn list_style_packs(coord: CoordinatorState<'_>) -> Result<Vec<StylePack>, S
 #[tauri::command]
 pub fn save_style_pack(
     coord: CoordinatorState<'_>,
+    app: AppHandle,
     style_pack: StylePack,
 ) -> Result<StylePack, String> {
     log::info!(
@@ -1265,10 +1269,15 @@ pub fn save_style_pack(
         style_pack.kind,
         style_pack.base_mode
     );
-    coord
+    let saved = coord
         .style_packs()
         .upsert(style_pack)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    if saved.kind == StylePackKind::Builtin {
+        let prefs = coord.prefs().get();
+        let _ = sync_style_pack_prefs_and_persist(&*coord, &app, prefs)?;
+    }
+    Ok(saved)
 }
 
 #[tauri::command]
@@ -1324,13 +1333,17 @@ pub fn set_style_pack_enabled(
 #[tauri::command]
 pub fn reset_builtin_style_pack(
     coord: CoordinatorState<'_>,
+    app: AppHandle,
     id: String,
 ) -> Result<StylePack, String> {
     log::info!("[style-pack] command reset_builtin requested id={id}");
-    coord
+    let saved = coord
         .style_packs()
         .reset_builtin(&id)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    let prefs = coord.prefs().get();
+    let _ = sync_style_pack_prefs_and_persist(&*coord, &app, prefs)?;
+    Ok(saved)
 }
 
 #[tauri::command]
