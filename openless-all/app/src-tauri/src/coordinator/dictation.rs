@@ -1120,10 +1120,18 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         #[cfg(target_os = "macos")]
         ActiveAsr::Local(local) => {
             debug_assert!(uses_global_timeout);
-            // 与 Volcengine/Whisper 一致包一层 global timeout（来自 origin/main）。
-            // 注：缓存命中时 transcribe 不含 load 时间；冷启动 load 已在 build_local_qwen3
-            // 提前完成，所以 15s 给 transcribe 本身足够。
-            let timeout_duration = std::time::Duration::from_secs(COORDINATOR_GLOBAL_TIMEOUT_SECS);
+            // 缓存命中时 transcribe 不含 load 时间；冷启动 load 已在 build_local_qwen3
+            // 提前完成。但 transcribe 本身受音频长度影响：用户实测 RTF ≈ 0.3，慢机
+            // 可达 0.5；15s 固定超时在 ≥ 30s 录音上会把整段结果丢掉。改用动态
+            // 超时 max(15, ceil(audio_s × 0.6) + 10)，公式与单测见
+            // `local_qwen_transcribe_timeout`。
+            let audio_secs = (local.buffer_duration_ms() as f64) / 1000.0;
+            let timeout_duration = local_qwen_transcribe_timeout(audio_secs);
+            log::info!(
+                "[coord] local Qwen3-ASR transcribe: audio={:.2}s timeout={}s",
+                audio_secs,
+                timeout_duration.as_secs()
+            );
             let result = tokio::time::timeout(timeout_duration, local.transcribe()).await;
             inner.local_asr_cache.touch();
             schedule_local_asr_release(inner);
@@ -1146,8 +1154,9 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                 }
                 Err(_) => {
                     log::error!(
-                        "[coord] local Qwen3-ASR 全局超时 {} 秒",
-                        COORDINATOR_GLOBAL_TIMEOUT_SECS
+                        "[coord] local Qwen3-ASR 动态超时 {}s（音频 {:.2}s）",
+                        timeout_duration.as_secs(),
+                        audio_secs
                     );
                     emit_capsule(
                         inner,

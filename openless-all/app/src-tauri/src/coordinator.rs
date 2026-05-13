@@ -3096,6 +3096,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn local_qwen_timeout_floors_at_global_timeout_for_short_audio() {
+        // 5s 录音：5 × 0.6 = 3, +10 = 13, max(15) = 15。短录音保留 15s 兜底。
+        assert_eq!(
+            local_qwen_transcribe_timeout(5.0),
+            std::time::Duration::from_secs(COORDINATOR_GLOBAL_TIMEOUT_SECS)
+        );
+    }
+
+    #[test]
+    fn local_qwen_timeout_scales_with_audio_duration() {
+        // 60s 录音：60 × 0.6 = 36, +10 = 46s。覆盖 RTF ≈ 0.5 的边界。
+        assert_eq!(
+            local_qwen_transcribe_timeout(60.0),
+            std::time::Duration::from_secs(46)
+        );
+    }
+
+    #[test]
+    fn local_qwen_timeout_ceils_partial_seconds() {
+        // 10.1s 录音：10.1 × 0.6 = 6.06, ceil = 7, +10 = 17, max(15) = 17。
+        assert_eq!(
+            local_qwen_transcribe_timeout(10.1),
+            std::time::Duration::from_secs(17)
+        );
+    }
+
+    #[test]
+    fn local_qwen_timeout_handles_zero_duration() {
+        // 0 时长（空 buffer 边界）：0 × 0.6 = 0, +10 = 10, max(15) = 15。
+        assert_eq!(
+            local_qwen_transcribe_timeout(0.0),
+            std::time::Duration::from_secs(COORDINATOR_GLOBAL_TIMEOUT_SECS)
+        );
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn foundry_release_uses_foundry_keep_loaded_preference() {
@@ -3595,6 +3631,17 @@ const COORDINATOR_GLOBAL_TIMEOUT_SECS: u64 = 15;
 #[cfg(target_os = "windows")]
 fn foundry_audio_transcribe_timeout_duration() -> std::time::Duration {
     std::time::Duration::from_secs(COORDINATOR_GLOBAL_TIMEOUT_SECS)
+}
+
+/// 本地 Qwen3-ASR 的动态转写超时。固定 15 秒在长录音（≥ 30s）+ 慢机器
+/// （RTF ≈ 0.3–0.5）上必然超时把整段内容丢掉。改用 max(15, ceil(audio_s
+/// × 0.6) + 10)：基础保留 15s 兜住短录音；长录音按音频长度的 0.6 倍 +
+/// 10s 余量，覆盖 RTF ≤ 0.5 的机器。
+fn local_qwen_transcribe_timeout(audio_secs: f64) -> std::time::Duration {
+    let secs = ((audio_secs * 0.6).ceil() as u64)
+        .saturating_add(10)
+        .max(COORDINATOR_GLOBAL_TIMEOUT_SECS);
+    std::time::Duration::from_secs(secs)
 }
 
 /// 检查 begin_session 的 await 间隙是否被 cancel_session 打断。
