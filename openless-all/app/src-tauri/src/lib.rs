@@ -476,7 +476,12 @@ fn build_style_tray_menu<M: Manager<tauri::Wry>>(
     app: &M,
     coordinator: &Arc<coordinator::Coordinator>,
 ) -> tauri::Result<StyleTrayMenu> {
-    let selected = coordinator.prefs().get().default_mode;
+    let prefs = coordinator.prefs().get();
+    let selected = coordinator
+        .style_packs()
+        .get_or_default_active(&prefs.active_style_pack_id)
+        .map(|pack| pack.base_mode)
+        .unwrap_or(prefs.default_mode);
     let mut submenu = SubmenuBuilder::with_id(app, "style", "输出风格");
     for entry in tray_polish_mode_menu_entries(selected) {
         let item = CheckMenuItemBuilder::with_id(&entry.id, entry.label)
@@ -630,14 +635,10 @@ fn handle_style_tray_menu_event(app: &AppHandle, id: &str) -> bool {
         return false;
     };
     let coord = app.state::<Arc<coordinator::Coordinator>>();
-    let mut prefs = coord.prefs().get();
-    prefs.default_mode = mode;
-    if let Err(err) = coord.prefs().set(prefs.clone()) {
-        log::warn!("[tray] save polish mode preference failed: {err}");
+    if let Err(err) = commands::activate_builtin_style_mode(&coord, app, mode) {
+        log::warn!("[tray] activate builtin style mode failed: {err}");
         return true;
     }
-    let _ = app.emit("prefs:changed", &prefs);
-    let _ = app.emit_to("main", "prefs:changed", &prefs);
     if let Err(err) = refresh_tray_microphone_menu(app) {
         log::warn!("[tray] refresh style menu after polish mode change failed: {err}");
     }

@@ -1012,7 +1012,7 @@ impl StylePackStore {
         }
         if let Some(pack) = packs
             .iter()
-            .find(|pack| pack.id == BUILTIN_STYLE_PACK_LIGHT_ID)
+            .find(|pack| pack.id == BUILTIN_STYLE_PACK_LIGHT_ID && pack.enabled)
             .cloned()
         {
             return Ok(pack);

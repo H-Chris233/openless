@@ -195,6 +195,7 @@ impl StyleSystemPrompts {
     }
 
     pub fn with_legacy_custom_prompts(mut self, legacy: &CustomStylePrompts) -> Self {
+        const LEGACY_CUSTOM_PROMPT_MARKER: &str = "\n\n# 用户自定义附加要求\n";
         for mode in [
             PolishMode::Raw,
             PolishMode::Light,
@@ -203,6 +204,9 @@ impl StyleSystemPrompts {
         ] {
             let legacy_prompt = legacy.for_mode(mode).trim();
             if legacy_prompt.is_empty() {
+                continue;
+            }
+            if self.for_mode(mode).contains(LEGACY_CUSTOM_PROMPT_MARKER) {
                 continue;
             }
             let merged = format!(
@@ -1592,6 +1596,21 @@ mod tests {
         assert_eq!(prefs.custom_style_prompts.structured, "按项目符号整理");
         assert_eq!(prefs.custom_style_prompts.formal, "像正式周报");
         assert!(prefs.custom_style_prompts.has_for_mode(PolishMode::Formal));
+    }
+
+    #[test]
+    fn legacy_custom_style_prompts_are_not_appended_twice() {
+        let base = StyleSystemPrompts::default();
+        let legacy = CustomStylePrompts {
+            light: "更像微信消息".into(),
+            ..CustomStylePrompts::default()
+        };
+
+        let once = base.clone().with_legacy_custom_prompts(&legacy);
+        let twice = once.clone().with_legacy_custom_prompts(&legacy);
+
+        assert_eq!(once.light, twice.light);
+        assert_eq!(twice.light.matches("# 用户自定义附加要求").count(), 1);
     }
 
     /// issue #360: 默认值必须是 CtrlV，跟历史行为一致；老配置文件没有

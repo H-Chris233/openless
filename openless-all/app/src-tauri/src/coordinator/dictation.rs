@@ -273,6 +273,44 @@ async fn run_streaming_polish(
     }
 }
 
+fn finalize_polished_text(
+    polished: String,
+    translation_active: bool,
+    raw_uses_llm: bool,
+    mode: PolishMode,
+    polish_error: &Option<String>,
+    chinese_script_preference: crate::types::ChineseScriptPreference,
+    correction_rules: &[crate::types::CorrectionRule],
+    already_streamed: bool,
+) -> String {
+    if already_streamed {
+        return polished;
+    }
+    let should_force_script = if translation_active {
+        polish_error.is_some()
+    } else {
+        (!raw_uses_llm && mode == PolishMode::Raw) || polish_error.is_some()
+    };
+    let polished = if should_force_script {
+        apply_chinese_script_preference(&polished, chinese_script_preference)
+    } else {
+        polished
+    };
+    if correction_rules.is_empty() {
+        polished
+    } else {
+        let corrected = apply_correction_rules(&polished, correction_rules);
+        if corrected != polished {
+            log::info!(
+                "[coord] correction rules adjusted final text ({} → {} chars)",
+                polished.chars().count(),
+                corrected.chars().count()
+            );
+        }
+        corrected
+    }
+}
+
 pub(super) async fn handle_pressed_edge(inner: &Arc<Inner>) {
     let was_held = inner.hotkey_trigger_held.swap(true, Ordering::SeqCst);
     if !was_held {
@@ -1334,32 +1372,16 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         (p, e, false)
     };
 
-    // 仅在“ASR 直出文本”场景做强制简繁收敛，避免误伤成功的翻译/常规 LLM 输出：
-    // - 非翻译模式：mode=Raw（本来就不走润色）或润色失败回退 raw
-    // - 翻译模式：仅翻译失败回退 raw 时才收敛
-    let should_force_script = if translation_active {
-        polish_error.is_some()
-    } else {
-        (!raw_uses_llm && mode == PolishMode::Raw) || polish_error.is_some()
-    };
-    let polished = if should_force_script {
-        apply_chinese_script_preference(&polished, chinese_script_preference)
-    } else {
-        polished
-    };
-    let polished = if correction_rules.is_empty() {
-        polished
-    } else {
-        let corrected = apply_correction_rules(&polished, &correction_rules);
-        if corrected != polished {
-            log::info!(
-                "[coord] correction rules adjusted final text ({} → {} chars)",
-                polished.chars().count(),
-                corrected.chars().count()
-            );
-        }
-        corrected
-    };
+    let polished = finalize_polished_text(
+        polished,
+        translation_active,
+        raw_uses_llm,
+        mode,
+        &polish_error,
+        chinese_script_preference,
+        &correction_rules,
+        already_streamed,
+    );
     // 原子化最后一次 cancel 检查 + 转 Inserting：
     // 在同一 lock 内决定「丢弃」还是「进入 Inserting」。一旦设到 Inserting，
     // cancel_session 就拒绝介入（Cmd+V 已发出，撤销不掉）。这是 audit HIGH #2 的修复，
@@ -1569,4 +1591,56 @@ pub(super) fn cancel_session(inner: &Arc<Inner>) {
     emit_capsule(inner, CapsuleState::Cancelled, 0.0, 0, None, None);
     log::info!("[coord] session cancelled (was {:?})", decision.phase);
     schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::finalize_polished_text;
+    use crate::types::{ChineseScriptPreference, CorrectionRule, PolishMode};
+
+    fn correction_rule(pattern: &str, replacement: &str) -> CorrectionRule {
+        CorrectionRule {
+            id: "test".into(),
+            pattern: pattern.into(),
+            replacement: replacement.into(),
+            enabled: true,
+            created_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn streamed_output_skips_postprocessing_mutations() {
+        let rules = vec![correction_rule("Open AI", "OpenAI")];
+
+        let result = finalize_polished_text(
+            "Open AI".into(),
+            false,
+            false,
+            PolishMode::Raw,
+            &None,
+            ChineseScriptPreference::Auto,
+            &rules,
+            true,
+        );
+
+        assert_eq!(result, "Open AI");
+    }
+
+    #[test]
+    fn non_streamed_output_still_applies_correction_rules() {
+        let rules = vec![correction_rule("Open AI", "OpenAI")];
+
+        let result = finalize_polished_text(
+            "Open AI".into(),
+            false,
+            false,
+            PolishMode::Raw,
+            &None,
+            ChineseScriptPreference::Auto,
+            &rules,
+            false,
+        );
+
+        assert_eq!(result, "OpenAI");
+    }
 }

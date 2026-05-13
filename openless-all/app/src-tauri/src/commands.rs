@@ -200,7 +200,7 @@ fn emit_prefs_changed(app: &AppHandle, prefs: &UserPreferences) {
     let _ = app.emit_to("main", "prefs:changed", prefs);
 }
 
-fn sync_style_pack_prefs_and_persist(
+pub(crate) fn sync_style_pack_prefs_and_persist(
     coord: &Coordinator,
     app: &AppHandle,
     mut prefs: UserPreferences,
@@ -214,6 +214,54 @@ fn sync_style_pack_prefs_and_persist(
     emit_prefs_changed(app, &prefs);
     refresh_tray_menu_async(app);
     Ok(prefs)
+}
+
+pub(crate) fn activate_style_pack_by_id(
+    coord: &Coordinator,
+    app: &AppHandle,
+    id: &str,
+) -> Result<StylePack, String> {
+    let mut prefs = coord.prefs().get();
+    let pack = coord.style_packs().get(id).map_err(|e| e.to_string())?;
+    log::info!(
+        "[style-pack] activate helper requested id={} kind={:?} base_mode={:?} enabled={}",
+        pack.id,
+        pack.kind,
+        pack.base_mode,
+        pack.enabled
+    );
+    if !pack.enabled {
+        coord
+            .style_packs()
+            .set_enabled(id, true)
+            .map_err(|e| e.to_string())?;
+    }
+    prefs.active_style_pack_id = id.to_string();
+    sync_style_pack_prefs_and_persist(coord, app, prefs)?;
+    log::info!("[style-pack] activate helper applied id={id}");
+    coord
+        .style_packs()
+        .get(id)
+        .map(|mut pack| {
+            pack.active = true;
+            pack
+        })
+        .map_err(|e| e.to_string())
+}
+
+pub(crate) fn activate_builtin_style_mode(
+    coord: &Coordinator,
+    app: &AppHandle,
+    mode: PolishMode,
+) -> Result<(), String> {
+    let pack_id = builtin_style_pack_id(mode).to_string();
+    log::info!(
+        "[style-pack] activate builtin mode helper mode={:?} pack_id={}",
+        mode,
+        pack_id
+    );
+    let _ = activate_style_pack_by_id(coord, app, &pack_id)?;
+    Ok(())
 }
 
 // ─────────────────────────── release channel (Beta opt-in) ───────────────────────────
@@ -1243,32 +1291,7 @@ pub fn set_active_style_pack(
     app: AppHandle,
     id: String,
 ) -> Result<StylePack, String> {
-    let mut prefs = coord.prefs().get();
-    let pack = coord.style_packs().get(&id).map_err(|e| e.to_string())?;
-    log::info!(
-        "[style-pack] command activate requested id={} kind={:?} base_mode={:?} enabled={}",
-        pack.id,
-        pack.kind,
-        pack.base_mode,
-        pack.enabled
-    );
-    if !pack.enabled {
-        coord
-            .style_packs()
-            .set_enabled(&id, true)
-            .map_err(|e| e.to_string())?;
-    }
-    prefs.active_style_pack_id = id.clone();
-    sync_style_pack_prefs_and_persist(&*coord, &app, prefs)?;
-    log::info!("[style-pack] command activate applied id={id}");
-    coord
-        .style_packs()
-        .get(&id)
-        .map(|mut pack| {
-            pack.active = true;
-            pack
-        })
-        .map_err(|e| e.to_string())
+    activate_style_pack_by_id(&coord, &app, &id)
 }
 
 #[tauri::command]
@@ -1369,20 +1392,7 @@ pub fn set_default_polish_mode(
     app: AppHandle,
     mode: PolishMode,
 ) -> Result<(), String> {
-    let mut prefs = coord.prefs().get();
-    let pack_id = builtin_style_pack_id(mode).to_string();
-    log::info!(
-        "[style-pack] compat set_default_polish_mode mode={:?} pack_id={}",
-        mode,
-        pack_id
-    );
-    coord
-        .style_packs()
-        .set_enabled(&pack_id, true)
-        .map_err(|e| e.to_string())?;
-    prefs.active_style_pack_id = pack_id;
-    let _ = sync_style_pack_prefs_and_persist(&*coord, &app, prefs)?;
-    Ok(())
+    activate_builtin_style_mode(&coord, &app, mode)
 }
 
 #[tauri::command]
