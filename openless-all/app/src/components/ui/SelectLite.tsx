@@ -1,13 +1,20 @@
-// SelectLite — Win/Linux 用自定义 popover 替代 native <select> 避开 Win32 ComboBox
-// 的直角丑框（issue #418）。macOS 走原生 <select>（NSPopUpButton），WKWebView 里
-// portal+position:fixed 的自定义 popover 位置漂移反复修不干净。
+// SelectLite — 三平台统一的自定义下拉，替代 native <select>，避开 Win32 ComboBox
+// 直角丑框（issue #418）以及 WKWebView 上原生 NSPopUpButton 的视觉割裂。
 //
-// Win/Linux 自定义分支设计：
+// 设计：
 // - 触发器是 button（chevron + 当前值），样式可被 `style` 覆盖
 // - popover 用 portal 渲染到 document.body，避开父容器 overflow:hidden
 // - 键盘：ArrowDown/ArrowUp 切换高亮，Enter 确认，Esc 关闭
 // - 点击外部 / 滚动外部容器都会关闭（popover 内部 scroll 不关闭）
-// - 关闭有 .14s exit 动画；mount 时 callback ref + RAF 二次定位防 first-paint 错位
+// - 关闭有 .14s exit 动画
+// - 二次定位走 popoverMounted state + useLayoutEffect 同步完成，整轮在 paint 前
+//   收敛成最终 anchor，避免「兜底位置 paint 一次 + 真实位置再 paint 一次」的闪动
+// - CSS `zoom` 补偿（关键）：fontScale.ts 通过 `html.style.zoom` 整体缩放页面。
+//   WKWebView 在 zoom 下双标：getBoundingClientRect 返回 post-zoom（视觉）坐标，
+//   而 position:fixed 的 left/top/width 被当 pre-zoom（布局）坐标处理。直接
+//   `left=rect.left` 会让 popover 视觉位置 = rect.left × zoom，右偏
+//   rect.left × (zoom-1) 像素。修法是 setAnchor 时把视觉坐标除以 zoom 转回布局
+//   坐标，让浏览器渲染时 ×zoom 后回到正确视觉位置。详见 positionPopover。
 
 import {
   useCallback,
@@ -21,7 +28,6 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import { Icon } from '../Icon';
-import { detectOS } from '../WindowChrome';
 
 export interface SelectOption {
   value: string;
@@ -76,6 +82,9 @@ export function SelectLite({
   const triggerRef = useRef<HTMLButtonElement>(null);
   const popoverRef = useRef<HTMLDivElement | null>(null);
   const [anchor, setAnchor] = useState<{ left: number; top: number; width: number } | null>(null);
+  // popoverMounted 让 useLayoutEffect 在 popover 实际进入 DOM 后再触发一次 positionPopover，
+  // 而且整轮发生在 paint 之前——见下方 useLayoutEffect 注释。
+  const [popoverMounted, setPopoverMounted] = useState(false);
 
   const selected = useMemo(
     () => options.find(opt => opt.value === value),
@@ -92,39 +101,48 @@ export function SelectLite({
     // 纵向：默认在触发器下方；若下方空间放不下 popover，翻转向上避免被视口裁剪。
     const spaceBelow = window.innerHeight - rect.bottom;
     const flipUp = spaceBelow < popoverHeight + 8 && rect.top > popoverHeight + 8;
-    const top = flipUp ? rect.top - popoverHeight - 4 : rect.bottom + 4;
+    const visualTop = flipUp ? rect.top - popoverHeight - 4 : rect.bottom + 4;
     // popover 强制 width=trigger.width（见下方 style），所以 maxLeft 用 rect.width 算；
     // popover 没挂载和挂载后两帧 left 一致，避免 first-paint 跳位。
     const minLeft = 8;
     const maxLeft = Math.max(minLeft, window.innerWidth - rect.width - 8);
-    const left = Math.min(Math.max(rect.left, minLeft), maxLeft);
-    setAnchor({ left, top, width: rect.width });
+    const visualLeft = Math.min(Math.max(rect.left, minLeft), maxLeft);
+    // ── CSS zoom 补偿（root cause of 位置偏移） ──
+    // fontScale 通过 `document.documentElement.style.zoom` 整体缩放页面（见 fontScale.ts）。
+    // WKWebView 在 zoom 下双标：getBoundingClientRect 返回 post-zoom（视觉）坐标，
+    // 而 position:fixed 的 left/top/width 被当 pre-zoom（布局）坐标处理，渲染时再 × zoom。
+    // 如果直接 set left=rect.left，popover 视觉会偏到 rect.left × zoom 处（右移 rect.left×(zoom-1)）。
+    // 这里把视觉坐标除以 zoom 转回布局坐标，让 position:fixed 渲染回到正确视觉位置。
+    const zoomStr = document.documentElement.style.zoom;
+    const zoom = zoomStr ? parseFloat(zoomStr) || 1 : 1;
+    setAnchor({
+      left: visualLeft / zoom,
+      top: visualTop / zoom,
+      width: rect.width / zoom,
+    });
   }, []);
 
-  // popover ref callback：每次 popover DOM mount/unmount 调一次。
-  // 关键：mount 时拿到真实 popover 宽（content 撑大），requestAnimationFrame
-  // 推到下一帧 paint 前再重算 anchor —— 修复"first paint 用 trigger 宽 fallback 后
-  // popover 位置漂掉"的 bug。
-  const setPopoverRef = useCallback(
-    (node: HTMLDivElement | null) => {
-      popoverRef.current = node;
-      if (node) {
-        requestAnimationFrame(() => positionPopover());
-      }
-    },
-    [positionPopover],
-  );
+  // popover ref callback：每次 popover DOM mount/unmount 调一次，只翻 popoverMounted。
+  // 真正的二次定位由下方 useLayoutEffect 拿 popoverMounted 的依赖触发——这样第二次
+  // positionPopover 同步发生在 paint 之前，而不是之前的 requestAnimationFrame（RAF 已
+  // 在 paint 之后），避免「先用 280 高度兜底 paint 一次，再校正成真实位置 paint 一次」
+  // 的双 paint 闪动（flipUp 决策在 280 fallback vs. 真实高度间可能反转）。
+  const setPopoverRef = useCallback((node: HTMLDivElement | null) => {
+    popoverRef.current = node;
+    setPopoverMounted(!!node);
+  }, []);
 
-  // v1.3.1-8 hotfix: open=true 时立即设 anchor（用 trigger 宽 fallback），不再依赖
-  // popover mount 触发 callback ref。之前的死锁：anchor 初始 null → portal 条件
-  // `open && anchor` 不通过 → popover DOM 永不挂载 → callback ref 永不 fire →
-  // anchor 永远 null。结果所有 dropdown 点击后什么都不发生。
-  // 现在 open=true 立即 setAnchor，popover 渲染挂载后 callback ref 再 RAF 重定位
-  // 拿真实 popover 宽。
+  // 两阶段定位都同步在 paint 前完成：
+  // 1) open 由 false→true：popoverRef 还是 null，positionPopover 用 280 高度兜底设
+  //    一次 anchor，让 portal 条件 `open && anchor` 通过、popover 进 DOM（避免 v1.3.1-8
+  //    之前 anchor=null 永不渲染的死锁）。
+  // 2) popoverMounted 由 false→true：popoverRef 已经指向真实 DOM，positionPopover
+  //    用真实高度算出最终 anchor。整轮 commit→layoutEffect→re-commit→layoutEffect
+  //    都在浏览器 paint 之前完成，用户只看到一帧最终位置，没有闪动。
   useLayoutEffect(() => {
     if (!open) return;
     positionPopover();
-  }, [open, positionPopover]);
+  }, [open, popoverMounted, positionPopover]);
 
   // 键盘 ArrowUp/Down 改 highlight 后把高亮项 scroll into view —— 长 dropdown 超过
   // maxHeight 280 时键盘用户能看到当前高亮。
@@ -241,37 +259,6 @@ export function SelectLite({
     opacity: disabled ? 0.5 : 1,
     cursor: disabled ? 'not-allowed' : 'default',
   };
-
-  // macOS 走原生 select（理由见文件头）。继承 triggerStyle 视觉，paddingRight 22 给
-  // 系统 chevron 留位；appearance:auto 关掉全局 button reset 让原生外观回来。
-  if (detectOS() === 'mac') {
-    return (
-      <select
-        className="ol-focus-ring"
-        aria-label={ariaLabel}
-        value={value}
-        disabled={disabled}
-        onChange={e => onChange(e.target.value)}
-        style={{
-          ...triggerStyle,
-          appearance: 'auto',
-          WebkitAppearance: 'menulist',
-          paddingRight: 22,
-        }}
-      >
-        {placeholder && !selected && (
-          <option value="" disabled>
-            {placeholder}
-          </option>
-        )}
-        {options.map(opt => (
-          <option key={opt.value || `__opt_${opt.label}`} value={opt.value} disabled={opt.disabled}>
-            {opt.label}
-          </option>
-        ))}
-      </select>
-    );
-  }
 
   return (
     <>
