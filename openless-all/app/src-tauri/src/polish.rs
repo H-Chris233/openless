@@ -100,6 +100,7 @@ impl ActiveLLMProvider {
         raw_text: &str,
         mode: PolishMode,
         hotwords: &[String],
+        style_system_prompt: &str,
         working_languages: &[String],
         chinese_script_preference: ChineseScriptPreference,
         output_language_preference: OutputLanguagePreference,
@@ -119,6 +120,7 @@ impl ActiveLLMProvider {
                         raw_text,
                         mode,
                         hotwords,
+                        style_system_prompt,
                         working_languages,
                         chinese_script_preference,
                         output_language_preference,
@@ -140,6 +142,7 @@ impl ActiveLLMProvider {
         raw_text: &str,
         mode: PolishMode,
         hotwords: &[String],
+        style_system_prompt: &str,
         working_languages: &[String],
         chinese_script_preference: ChineseScriptPreference,
         output_language_preference: OutputLanguagePreference,
@@ -153,6 +156,7 @@ impl ActiveLLMProvider {
                         raw_text,
                         mode,
                         hotwords,
+                        style_system_prompt,
                         working_languages,
                         chinese_script_preference,
                         output_language_preference,
@@ -167,6 +171,7 @@ impl ActiveLLMProvider {
                         raw_text,
                         mode,
                         hotwords,
+                        style_system_prompt,
                         working_languages,
                         chinese_script_preference,
                         output_language_preference,
@@ -285,6 +290,7 @@ impl OpenAICompatibleLLMProvider {
         raw_text: &str,
         mode: PolishMode,
         hotwords: &[String],
+        style_system_prompt: &str,
         working_languages: &[String],
         chinese_script_preference: ChineseScriptPreference,
         output_language_preference: OutputLanguagePreference,
@@ -295,6 +301,7 @@ impl OpenAICompatibleLLMProvider {
             raw_text,
             mode,
             hotwords,
+            style_system_prompt,
             working_languages,
             chinese_script_preference,
             output_language_preference,
@@ -318,6 +325,7 @@ impl OpenAICompatibleLLMProvider {
         raw_text: &str,
         mode: PolishMode,
         hotwords: &[String],
+        style_system_prompt: &str,
         working_languages: &[String],
         chinese_script_preference: ChineseScriptPreference,
         output_language_preference: OutputLanguagePreference,
@@ -334,6 +342,7 @@ impl OpenAICompatibleLLMProvider {
             raw_text,
             mode,
             hotwords,
+            style_system_prompt,
             working_languages,
             chinese_script_preference,
             output_language_preference,
@@ -912,29 +921,24 @@ impl CodexOAuthLLMProvider {
         raw_text: &str,
         mode: PolishMode,
         hotwords: &[String],
+        style_system_prompt: &str,
         working_languages: &[String],
         chinese_script_preference: ChineseScriptPreference,
         output_language_preference: OutputLanguagePreference,
         front_app: Option<&str>,
         prior_turns: &[(String, String)],
     ) -> Result<String, LLMError> {
-        let mut system_prompt = compose_system_prompt(mode, hotwords);
-        if let Some(premise) = context_premise(
+        let (system_prompt, user_prompt) = compose_polish_prompts(
+            raw_text,
+            mode,
+            hotwords,
+            style_system_prompt,
             working_languages,
             chinese_script_preference,
             output_language_preference,
             front_app,
-        ) {
-            system_prompt = format!("{}\n\n{}", premise, system_prompt);
-        }
-        if !prior_turns.is_empty() {
-            system_prompt = format!(
-                "{}\n\n{}",
-                system_prompt,
-                prompts::polish_context_instruction()
-            );
-        }
-        let user_prompt = prompts::user_prompt(raw_text);
+            !prior_turns.is_empty(),
+        );
         let messages = build_polish_history_messages(&system_prompt, prior_turns, &user_prompt);
         self.codex_responses(messages, |_| {}, || false).await
     }
@@ -1580,15 +1584,16 @@ fn context_premise(
 /// polish_context_instruction 追加条件上慢慢漂移。
 pub(crate) fn compose_polish_prompts(
     raw_text: &str,
-    mode: PolishMode,
+    _mode: PolishMode,
     hotwords: &[String],
+    style_system_prompt: &str,
     working_languages: &[String],
     chinese_script_preference: ChineseScriptPreference,
     output_language_preference: OutputLanguagePreference,
     front_app: Option<&str>,
     has_prior_turns: bool,
 ) -> (String, String) {
-    let mut system_prompt = compose_system_prompt(mode, hotwords);
+    let mut system_prompt = compose_system_prompt(style_system_prompt, hotwords);
     if let Some(premise) = context_premise(
         working_languages,
         chinese_script_preference,
@@ -1652,8 +1657,8 @@ pub(crate) fn compose_qa_system_prompt(
     system_prompt
 }
 
-fn compose_system_prompt(mode: PolishMode, hotwords: &[String]) -> String {
-    let base = prompts::system_prompt(mode);
+fn compose_system_prompt(style_system_prompt: &str, hotwords: &[String]) -> String {
+    let base = style_system_prompt.trim_end().to_string();
     let cleaned: Vec<String> = hotwords
         .iter()
         .map(|h| h.trim().to_string())
@@ -2790,13 +2795,22 @@ mod tests {
 
     #[test]
     fn compose_system_prompt_prefers_correct_spelling_for_hotwords() {
-        let prompt =
-            compose_system_prompt(PolishMode::Light, &["GitHub".into(), "OpenLess".into()]);
+        let prompt = compose_system_prompt(
+            &prompts::system_prompt(PolishMode::Light),
+            &["GitHub".into(), "OpenLess".into()],
+        );
 
         assert!(prompt.contains("用户希望以下写法在输出中保持准确"));
         assert!(prompt.contains("同音 / 近形误识别时，优先按上述写法输出"));
         assert!(prompt.contains("- GitHub"));
         assert!(prompt.contains("- OpenLess"));
+    }
+
+    #[test]
+    fn compose_system_prompt_uses_user_style_system_prompt_as_base() {
+        let prompt = compose_system_prompt("像正式邮件，但结尾不要客套话", &[]);
+
+        assert_eq!(prompt, "像正式邮件，但结尾不要客套话");
     }
 
     #[test]
@@ -2957,6 +2971,7 @@ mod tests {
                 "原文",
                 PolishMode::Raw,
                 &[],
+                "",
                 &[],
                 ChineseScriptPreference::Auto,
                 OutputLanguagePreference::Auto,
@@ -3015,6 +3030,7 @@ mod tests {
                 "原文",
                 PolishMode::Raw,
                 &[],
+                "",
                 &[],
                 ChineseScriptPreference::Auto,
                 OutputLanguagePreference::Auto,

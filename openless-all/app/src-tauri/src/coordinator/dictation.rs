@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::coordinator_state::request_stop_during_starting_state;
 use crate::correction::apply_correction_rules;
-use crate::types::{CorrectionRule, HotkeyMode};
+use crate::types::HotkeyMode;
 
 use super::qa::handle_qa_option_edge;
 use super::resources::*;
@@ -38,56 +38,13 @@ const HOTKEY_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(25
 /// **不在流式路径里做**：`apply_chinese_script_preference` / `apply_correction_rules`
 /// 这两步在 v1 跳过 —— 字符已经一边流一边落出去了，不好回退。需要的话只能关 toggle 走
 /// 一次性路径。
-fn append_typed_prefix(typed_text: &mut String, delta: &str, typed_chars: usize) {
-    typed_text.extend(delta.chars().take(typed_chars));
-}
-
-fn finalize_dictation_text(
-    mut text: String,
-    already_streamed: bool,
-    translation_active: bool,
-    mode: PolishMode,
-    polish_failed: bool,
-    chinese_script_preference: crate::types::ChineseScriptPreference,
-    correction_rules: &[CorrectionRule],
-) -> String {
-    if already_streamed {
-        return text;
-    }
-
-    // 仅在“ASR 直出文本”场景做强制简繁收敛，避免误伤成功的翻译/常规 LLM 输出：
-    // - 非翻译模式：mode=Raw（本来就不走润色）或润色失败回退 raw
-    // - 翻译模式：仅翻译失败回退 raw 时才收敛
-    let should_force_script = if translation_active {
-        polish_failed
-    } else {
-        mode == PolishMode::Raw || polish_failed
-    };
-    if should_force_script {
-        text = apply_chinese_script_preference(&text, chinese_script_preference);
-    }
-
-    if correction_rules.is_empty() {
-        return text;
-    }
-
-    let corrected = apply_correction_rules(&text, correction_rules);
-    if corrected != text {
-        log::info!(
-            "[coord] correction rules adjusted final text ({} → {} chars)",
-            text.chars().count(),
-            corrected.chars().count()
-        );
-    }
-    corrected
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn run_streaming_polish(
     inner: &Arc<Inner>,
     raw: &RawTranscript,
     mode: PolishMode,
     hotwords: &[String],
+    style_system_prompt: &str,
     working_languages: &[String],
     chinese_script_preference: crate::types::ChineseScriptPreference,
     output_language_preference: crate::types::OutputLanguagePreference,
@@ -107,6 +64,7 @@ async fn run_streaming_polish(
             raw,
             mode,
             hotwords,
+            style_system_prompt,
             working_languages,
             chinese_script_preference,
             output_language_preference,
@@ -136,6 +94,7 @@ async fn run_streaming_polish(
                 raw,
                 mode,
                 hotwords,
+                style_system_prompt,
                 working_languages,
                 chinese_script_preference,
                 output_language_preference,
@@ -164,12 +123,10 @@ async fn run_streaming_polish(
                 continue;
             }
             match crate::unicode_keystroke::type_unicode_chunk(&delta) {
-                Ok(typed_chars) => {
-                    append_typed_prefix(&mut typed_text, &delta, typed_chars);
+                Ok(()) => {
+                    typed_text.push_str(&delta);
                 }
                 Err(e) => {
-                    let typed_chars = e.typed_chars();
-                    append_typed_prefix(&mut typed_text, &delta, typed_chars);
                     log::error!(
                         "[coord] streaming_insert: type_unicode_chunk failed at typed={} chars: {e}; \
                          dropping remaining deltas",
@@ -189,6 +146,7 @@ async fn run_streaming_polish(
         raw,
         mode,
         hotwords,
+        style_system_prompt,
         working_languages,
         chinese_script_preference,
         output_language_preference,
@@ -281,6 +239,7 @@ async fn run_streaming_polish(
                 raw,
                 mode,
                 hotwords,
+                style_system_prompt,
                 working_languages,
                 chinese_script_preference,
                 output_language_preference,
@@ -1239,6 +1198,7 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
             Vec::new()
         }
     };
+    let front_app = inner.state.lock().front_app.clone();
     if !correction_rules.is_empty() {
         let corrected = apply_correction_rules(&raw.text, &correction_rules);
         if corrected != raw.text {
@@ -1250,26 +1210,51 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
             raw.text = corrected;
         }
     }
-
     emit_capsule(inner, CapsuleState::Polishing, 0.0, elapsed, None, None);
 
     let prefs = inner.prefs.get();
-    let mode = prefs.default_mode;
+    let pack = match inner
+        .style_packs
+        .get_or_default_active(&prefs.active_style_pack_id)
+    {
+        Ok(pack) => pack,
+        Err(error) => {
+            log::warn!(
+                "[coord] active style pack unavailable, falling back to builtin light: {error}"
+            );
+            crate::types::builtin_style_pack_for_mode(PolishMode::Light)
+        }
+    };
+    let mode = pack.base_mode;
     let hotword_strs = enabled_phrases(inner);
     let working_languages = prefs.working_languages.clone();
     let chinese_script_preference = prefs.chinese_script_preference;
     let output_language_preference = prefs.output_language_preference;
     let llm_thinking_enabled = prefs.llm_thinking_enabled;
-    let front_app = inner.state.lock().front_app.clone();
+    let style_system_prompt = pack.prompt.clone();
+    let raw_uses_llm = mode == PolishMode::Raw && super::raw_style_pack_uses_llm(&pack);
     let translation_target = prefs.translation_target_language.trim().to_string();
     let translation_active =
         inner.translation_modifier_seen.load(Ordering::SeqCst) && !translation_target.is_empty();
+    log::info!(
+        "[style-pack] runtime dispatch session_id={} active_pack={} kind={:?} mode={:?} raw_chars={} prompt_chars={} raw_uses_llm={} translation_active={} hotwords={} working_languages={:?}",
+        current_session_id,
+        pack.id,
+        pack.kind,
+        mode,
+        raw.text.chars().count(),
+        style_system_prompt.chars().count(),
+        raw_uses_llm,
+        translation_active,
+        hotword_strs.len(),
+        working_languages
+    );
     // 对话感知 polish：拉最近 N 分钟的会话作为 LLM 上下文。仅在非翻译路径且非 Raw mode
     // 才有意义（Raw 不走 LLM、翻译走单轮独立 prompt）。窗口=0 时 prior_turns 是空 Vec，
     // polish 路径自动退化成单轮单消息——跟历史行为一致。
     let polish_context_window_minutes = prefs.polish_context_window_minutes;
     let prior_turns: Vec<(String, String)> = if !translation_active
-        && mode != PolishMode::Raw
+        && (mode != PolishMode::Raw || raw_uses_llm)
         && polish_context_window_minutes > 0
     {
         match inner
@@ -1294,7 +1279,7 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
     // 流式插入 opt-in 路径：开关打开 + 非翻译 + 非 Raw 模式 → 进入流式分支。
     // 任何不满足都走原一次性 polish_or_passthrough 路径，行为跟历史完全一致。
     let streaming_eligible =
-        prefs.streaming_insert && !translation_active && mode != PolishMode::Raw;
+        prefs.streaming_insert && !translation_active && (mode != PolishMode::Raw || raw_uses_llm);
     log::info!(
         "[coord] polish dispatch: translation={translation_active} mode={mode:?} streaming_eligible={streaming_eligible}"
     );
@@ -1323,6 +1308,7 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
             &raw,
             mode,
             &hotword_strs,
+            &style_system_prompt,
             &working_languages,
             chinese_script_preference,
             output_language_preference,
@@ -1336,6 +1322,7 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
             &raw,
             mode,
             &hotword_strs,
+            &style_system_prompt,
             &working_languages,
             chinese_script_preference,
             output_language_preference,
@@ -1347,16 +1334,32 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         (p, e, false)
     };
 
-    let polished = finalize_dictation_text(
-        polished,
-        already_streamed,
-        translation_active,
-        mode,
-        polish_error.is_some(),
-        chinese_script_preference,
-        &correction_rules,
-    );
-
+    // 仅在“ASR 直出文本”场景做强制简繁收敛，避免误伤成功的翻译/常规 LLM 输出：
+    // - 非翻译模式：mode=Raw（本来就不走润色）或润色失败回退 raw
+    // - 翻译模式：仅翻译失败回退 raw 时才收敛
+    let should_force_script = if translation_active {
+        polish_error.is_some()
+    } else {
+        (!raw_uses_llm && mode == PolishMode::Raw) || polish_error.is_some()
+    };
+    let polished = if should_force_script {
+        apply_chinese_script_preference(&polished, chinese_script_preference)
+    } else {
+        polished
+    };
+    let polished = if correction_rules.is_empty() {
+        polished
+    } else {
+        let corrected = apply_correction_rules(&polished, &correction_rules);
+        if corrected != polished {
+            log::info!(
+                "[coord] correction rules adjusted final text ({} → {} chars)",
+                polished.chars().count(),
+                corrected.chars().count()
+            );
+        }
+        corrected
+    };
     // 原子化最后一次 cancel 检查 + 转 Inserting：
     // 在同一 lock 内决定「丢弃」还是「进入 Inserting」。一旦设到 Inserting，
     // cancel_session 就拒绝介入（Cmd+V 已发出，撤销不掉）。这是 audit HIGH #2 的修复，
@@ -1460,9 +1463,11 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
     .map(str::to_string);
     let tsf_required_insert_failed = error_code.as_deref() == Some("windowsImeTsfRequired");
 
+    let history_session_id = Uuid::new_v4().to_string();
+    let history_created_at = Utc::now().to_rfc3339();
     let session = DictationSession {
-        id: Uuid::new_v4().to_string(),
-        created_at: Utc::now().to_rfc3339(),
+        id: history_session_id.clone(),
+        created_at: history_created_at.clone(),
         raw_transcript: raw.text.clone(),
         final_text: polished.clone(),
         mode,
@@ -1481,7 +1486,6 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
     {
         log::error!("[coord] history append failed: {e}");
     }
-
     let done_message = if tsf_required_insert_failed {
         Some("TSF 未上屏，已禁止非 TSF 兜底".to_string())
     } else if polish_error.is_some() {
@@ -1565,70 +1569,4 @@ pub(super) fn cancel_session(inner: &Arc<Inner>) {
     emit_capsule(inner, CapsuleState::Cancelled, 0.0, 0, None, None);
     log::info!("[coord] session cancelled (was {:?})", decision.phase);
     schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{append_typed_prefix, finalize_dictation_text};
-    use crate::types::PolishMode;
-
-    #[test]
-    fn append_typed_prefix_truncates_by_chars_not_bytes() {
-        let mut typed = String::from("已");
-        append_typed_prefix(&mut typed, "你好🙂abc", 3);
-        assert_eq!(typed, "已你好🙂");
-    }
-
-    #[test]
-    fn append_typed_prefix_ignores_overlarge_count() {
-        let mut typed = String::new();
-        append_typed_prefix(&mut typed, "好", 99);
-        assert_eq!(typed, "好");
-    }
-
-    #[test]
-    fn streamed_text_skips_mutating_final_postprocess() {
-        let rules = vec![crate::types::CorrectionRule {
-            id: "r1".into(),
-            pattern: "错词".into(),
-            replacement: "正词".into(),
-            enabled: true,
-            created_at: "2026-01-01T00:00:00Z".into(),
-        }];
-
-        let text = finalize_dictation_text(
-            "錯詞".to_string(),
-            true,
-            false,
-            PolishMode::Raw,
-            true,
-            crate::types::ChineseScriptPreference::Simplified,
-            &rules,
-        );
-
-        assert_eq!(text, "錯詞");
-    }
-
-    #[test]
-    fn non_streamed_text_still_applies_final_postprocess() {
-        let rules = vec![crate::types::CorrectionRule {
-            id: "r1".into(),
-            pattern: "错词".into(),
-            replacement: "正词".into(),
-            enabled: true,
-            created_at: "2026-01-01T00:00:00Z".into(),
-        }];
-
-        let text = finalize_dictation_text(
-            "錯詞".to_string(),
-            false,
-            false,
-            PolishMode::Raw,
-            false,
-            crate::types::ChineseScriptPreference::Simplified,
-            &rules,
-        );
-
-        assert_eq!(text, "正词");
-    }
 }

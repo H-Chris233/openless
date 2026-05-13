@@ -147,6 +147,276 @@ pub struct VocabPresetStore {
     pub disabled_builtin_preset_ids: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct CustomStylePrompts {
+    pub raw: String,
+    pub light: String,
+    pub structured: String,
+    pub formal: String,
+}
+
+impl CustomStylePrompts {
+    pub fn for_mode(&self, mode: PolishMode) -> &str {
+        match mode {
+            PolishMode::Raw => &self.raw,
+            PolishMode::Light => &self.light,
+            PolishMode::Structured => &self.structured,
+            PolishMode::Formal => &self.formal,
+        }
+    }
+
+    pub fn has_for_mode(&self, mode: PolishMode) -> bool {
+        !self.for_mode(mode).trim().is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct StyleSystemPrompts {
+    pub raw: String,
+    pub light: String,
+    pub structured: String,
+    pub formal: String,
+}
+
+impl StyleSystemPrompts {
+    pub fn for_mode(&self, mode: PolishMode) -> &str {
+        match mode {
+            PolishMode::Raw => &self.raw,
+            PolishMode::Light => &self.light,
+            PolishMode::Structured => &self.structured,
+            PolishMode::Formal => &self.formal,
+        }
+    }
+
+    pub fn is_default_for_mode(&self, mode: PolishMode) -> bool {
+        self.for_mode(mode) == StyleSystemPrompts::default().for_mode(mode)
+    }
+
+    pub fn with_legacy_custom_prompts(mut self, legacy: &CustomStylePrompts) -> Self {
+        for mode in [
+            PolishMode::Raw,
+            PolishMode::Light,
+            PolishMode::Structured,
+            PolishMode::Formal,
+        ] {
+            let legacy_prompt = legacy.for_mode(mode).trim();
+            if legacy_prompt.is_empty() {
+                continue;
+            }
+            let merged = format!(
+                "{}\n\n# 用户自定义附加要求\n{}",
+                self.for_mode(mode).trim_end(),
+                legacy_prompt
+            );
+            match mode {
+                PolishMode::Raw => self.raw = merged,
+                PolishMode::Light => self.light = merged,
+                PolishMode::Structured => self.structured = merged,
+                PolishMode::Formal => self.formal = merged,
+            }
+        }
+        self
+    }
+}
+
+impl Default for StyleSystemPrompts {
+    fn default() -> Self {
+        Self {
+            raw: default_raw_style_system_prompt(),
+            light: default_light_style_system_prompt(),
+            structured: default_structured_style_system_prompt(),
+            formal: default_formal_style_system_prompt(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum StylePackKind {
+    Builtin,
+    Imported,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct StylePackExample {
+    pub title: Option<String>,
+    pub input: String,
+    pub output: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct StylePack {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub author: Option<String>,
+    pub version: String,
+    pub kind: StylePackKind,
+    pub base_mode: PolishMode,
+    pub prompt: String,
+    pub examples: Vec<StylePackExample>,
+    pub tags: Vec<String>,
+    pub icon_path: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+    pub enabled: bool,
+    pub active: bool,
+    pub recommended_model: Option<String>,
+    pub compatible_app_version: Option<String>,
+}
+
+impl Default for StylePack {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            description: String::new(),
+            author: None,
+            version: "1.0.0".into(),
+            kind: StylePackKind::Imported,
+            base_mode: PolishMode::Light,
+            prompt: String::new(),
+            examples: Vec::new(),
+            tags: Vec::new(),
+            icon_path: None,
+            created_at: None,
+            updated_at: None,
+            enabled: true,
+            active: false,
+            recommended_model: None,
+            compatible_app_version: None,
+        }
+    }
+}
+
+pub const BUILTIN_STYLE_PACK_RAW_ID: &str = "builtin.raw";
+pub const BUILTIN_STYLE_PACK_LIGHT_ID: &str = "builtin.light";
+pub const BUILTIN_STYLE_PACK_STRUCTURED_ID: &str = "builtin.structured";
+pub const BUILTIN_STYLE_PACK_FORMAL_ID: &str = "builtin.formal";
+
+pub fn builtin_style_pack_id(mode: PolishMode) -> &'static str {
+    match mode {
+        PolishMode::Raw => BUILTIN_STYLE_PACK_RAW_ID,
+        PolishMode::Light => BUILTIN_STYLE_PACK_LIGHT_ID,
+        PolishMode::Structured => BUILTIN_STYLE_PACK_STRUCTURED_ID,
+        PolishMode::Formal => BUILTIN_STYLE_PACK_FORMAL_ID,
+    }
+}
+
+pub fn default_active_style_pack_id() -> String {
+    BUILTIN_STYLE_PACK_LIGHT_ID.to_string()
+}
+
+pub fn builtin_style_pack_for_mode(mode: PolishMode) -> StylePack {
+    match mode {
+        PolishMode::Raw => StylePack {
+            id: BUILTIN_STYLE_PACK_RAW_ID.into(),
+            name: "原文".into(),
+            description: "尽量保留原话的顺序、语气和信息密度，只做必要断句与标点整理。".into(),
+            author: Some("OpenLess".into()),
+            version: "1.0.0".into(),
+            kind: StylePackKind::Builtin,
+            base_mode: PolishMode::Raw,
+            prompt: default_raw_style_system_prompt(),
+            examples: vec![StylePackExample {
+                title: Some("最小整理".into()),
+                input: "今天下午那个会先别取消我晚点再确认一下然后把下周二也先空出来".into(),
+                output: "今天下午那个会先别取消，我晚点再确认一下。然后把下周二也先空出来。".into(),
+            }],
+            tags: vec!["原文".into(), "最小改写".into()],
+            icon_path: None,
+            created_at: None,
+            updated_at: None,
+            enabled: true,
+            active: false,
+            recommended_model: None,
+            compatible_app_version: Some(env!("CARGO_PKG_VERSION").into()),
+        },
+        PolishMode::Light => StylePack {
+            id: BUILTIN_STYLE_PACK_LIGHT_ID.into(),
+            name: "轻度润色".into(),
+            description: "把口语整理成顺畅、自然、可直接发送的文字，但不扩写事实。".into(),
+            author: Some("OpenLess".into()),
+            version: "1.0.0".into(),
+            kind: StylePackKind::Builtin,
+            base_mode: PolishMode::Light,
+            prompt: default_light_style_system_prompt(),
+            examples: vec![StylePackExample {
+                title: Some("聊天消息".into()),
+                input: "你帮我跟设计那边说一下这个首页先别上线我晚上再过一遍".into(),
+                output: "你帮我跟设计那边说一下，这个首页先别上线，我今晚再过一遍。".into(),
+            }],
+            tags: vec!["日常沟通".into(), "顺滑".into()],
+            icon_path: None,
+            created_at: None,
+            updated_at: None,
+            enabled: true,
+            active: false,
+            recommended_model: None,
+            compatible_app_version: Some(env!("CARGO_PKG_VERSION").into()),
+        },
+        PolishMode::Structured => StylePack {
+            id: BUILTIN_STYLE_PACK_STRUCTURED_ID.into(),
+            name: "清晰结构".into(),
+            description: "适合多事项、多主题口述，自动整理为层次清晰的结构化输出。".into(),
+            author: Some("OpenLess".into()),
+            version: "1.0.0".into(),
+            kind: StylePackKind::Builtin,
+            base_mode: PolishMode::Structured,
+            prompt: default_structured_style_system_prompt(),
+            examples: vec![StylePackExample {
+                title: Some("任务整理".into()),
+                input: "这周要做三件事一个是把登录页 bug 修掉第二个是补 README 第三个是把发版脚本再走一遍".into(),
+                output: "这周要完成以下三件事：\n1. 登录页修复\n(a) 修复登录页相关 bug。\n2. 文档补充\n(a) 补充 README。\n3. 发版准备\n(a) 再完整走一遍发版脚本。".into(),
+            }],
+            tags: vec!["结构化".into(), "条理".into()],
+            icon_path: None,
+            created_at: None,
+            updated_at: None,
+            enabled: true,
+            active: false,
+            recommended_model: None,
+            compatible_app_version: Some(env!("CARGO_PKG_VERSION").into()),
+        },
+        PolishMode::Formal => StylePack {
+            id: BUILTIN_STYLE_PACK_FORMAL_ID.into(),
+            name: "正式表达".into(),
+            description: "适合邮件、周报、跨团队同步等场景，语气更完整、专业、克制。".into(),
+            author: Some("OpenLess".into()),
+            version: "1.0.0".into(),
+            kind: StylePackKind::Builtin,
+            base_mode: PolishMode::Formal,
+            prompt: default_formal_style_system_prompt(),
+            examples: vec![StylePackExample {
+                title: Some("工作同步".into()),
+                input: "你帮我发个消息说一下这个需求今天先不上了等测试和产品都确认完我们再一起推进".into(),
+                output: "麻烦帮我同步一下：这个需求今天先不上线，待测试和产品都确认完成后，我们再统一推进。".into(),
+            }],
+            tags: vec!["正式".into(), "工作沟通".into()],
+            icon_path: None,
+            created_at: None,
+            updated_at: None,
+            enabled: true,
+            active: false,
+            recommended_model: None,
+            compatible_app_version: Some(env!("CARGO_PKG_VERSION").into()),
+        },
+    }
+}
+
+pub fn builtin_style_packs() -> Vec<StylePack> {
+    vec![
+        builtin_style_pack_for_mode(PolishMode::Raw),
+        builtin_style_pack_for_mode(PolishMode::Light),
+        builtin_style_pack_for_mode(PolishMode::Structured),
+        builtin_style_pack_for_mode(PolishMode::Formal),
+    ]
+}
+
 fn default_true() -> bool {
     true
 }
@@ -158,6 +428,12 @@ pub struct UserPreferences {
     pub dictation_hotkey: ShortcutBinding,
     pub default_mode: PolishMode,
     pub enabled_modes: Vec<PolishMode>,
+    #[serde(default = "default_active_style_pack_id")]
+    pub active_style_pack_id: String,
+    #[serde(default)]
+    pub style_system_prompts: StyleSystemPrompts,
+    #[serde(default)]
+    pub custom_style_prompts: CustomStylePrompts,
     pub launch_at_login: bool,
     pub show_capsule: bool,
     /// 录音期间临时静音系统输出，停止/取消/出错后恢复原静音状态。
@@ -338,6 +614,12 @@ struct UserPreferencesWire {
     dictation_hotkey: Option<ShortcutBinding>,
     default_mode: PolishMode,
     enabled_modes: Vec<PolishMode>,
+    #[serde(default = "default_active_style_pack_id")]
+    active_style_pack_id: String,
+    #[serde(default)]
+    style_system_prompts: StyleSystemPrompts,
+    #[serde(default)]
+    custom_style_prompts: CustomStylePrompts,
     launch_at_login: bool,
     show_capsule: bool,
     #[serde(default)]
@@ -399,6 +681,9 @@ impl Default for UserPreferencesWire {
             dictation_hotkey: None,
             default_mode: prefs.default_mode,
             enabled_modes: prefs.enabled_modes,
+            active_style_pack_id: prefs.active_style_pack_id,
+            style_system_prompts: prefs.style_system_prompts,
+            custom_style_prompts: prefs.custom_style_prompts,
             launch_at_login: prefs.launch_at_login,
             show_capsule: prefs.show_capsule,
             mute_during_recording: prefs.mute_during_recording,
@@ -452,6 +737,15 @@ impl<'de> Deserialize<'de> for UserPreferences {
             dictation_hotkey,
             default_mode: wire.default_mode,
             enabled_modes: wire.enabled_modes,
+            active_style_pack_id: if wire.active_style_pack_id.trim().is_empty() {
+                builtin_style_pack_id(wire.default_mode).to_string()
+            } else {
+                wire.active_style_pack_id
+            },
+            style_system_prompts: wire
+                .style_system_prompts
+                .with_legacy_custom_prompts(&wire.custom_style_prompts),
+            custom_style_prompts: wire.custom_style_prompts,
             launch_at_login: wire.launch_at_login,
             show_capsule: wire.show_capsule,
             mute_during_recording: wire.mute_during_recording,
@@ -556,6 +850,42 @@ fn default_working_languages() -> Vec<String> {
     vec!["简体中文".into()]
 }
 
+fn style_prompt_role_block() -> &'static str {
+    "# 角色\n\
+你是一个语音输入后的文本整理器。\n\
+你的输出会被直接插入到用户当前光标所在的输入框里。"
+}
+
+fn style_prompt_common_rules() -> &'static str {
+    "# 通用规则\n\
+1) 保留用户原意，不补充用户没说过的事实，不替用户回答问题。\n\
+2) 人名、地名、品牌名、产品名、代码、命令、路径、URL、数字、单位、emoji 原样保留。\n\
+3) 可以修正常见 ASR 同音字、形近字和明显口误，但不要把不确定的专有名词强行改错。\n\
+4) 只输出最终正文，不要加“以下是整理结果”“优化如下”之类的说明。\n\
+5) 不要输出 markdown 代码围栏。"
+}
+
+fn style_prompt_output_block() -> &'static str {
+    "# 输出\n\
+直接输出最终文本正文。需要结构化时，直接从标题、段落、编号或列表开始。"
+}
+
+fn default_raw_style_system_prompt() -> String {
+    crate::polish::prompts::system_prompt(PolishMode::Raw)
+}
+
+fn default_light_style_system_prompt() -> String {
+    crate::polish::prompts::system_prompt(PolishMode::Light)
+}
+
+fn default_structured_style_system_prompt() -> String {
+    crate::polish::prompts::system_prompt(PolishMode::Structured)
+}
+
+fn default_formal_style_system_prompt() -> String {
+    crate::polish::prompts::system_prompt(PolishMode::Formal)
+}
+
 impl Default for UserPreferences {
     fn default() -> Self {
         Self {
@@ -572,6 +902,9 @@ impl Default for UserPreferences {
                 PolishMode::Structured,
                 PolishMode::Formal,
             ],
+            active_style_pack_id: default_active_style_pack_id(),
+            style_system_prompts: StyleSystemPrompts::default(),
+            custom_style_prompts: CustomStylePrompts::default(),
             launch_at_login: false,
             show_capsule: true,
             mute_during_recording: false,
@@ -1204,6 +1537,35 @@ mod tests {
         let prefs: UserPreferences = serde_json::from_str("{}").unwrap();
 
         assert!(prefs.allow_non_tsf_insertion_fallback);
+    }
+
+    #[test]
+    fn missing_custom_style_prompts_defaults_to_empty() {
+        let prefs: UserPreferences = serde_json::from_str("{}").unwrap();
+
+        assert_eq!(prefs.custom_style_prompts, CustomStylePrompts::default());
+        assert!(!prefs.custom_style_prompts.has_for_mode(PolishMode::Raw));
+    }
+
+    #[test]
+    fn custom_style_prompts_round_trip_explicit_values() {
+        let prefs: UserPreferences = serde_json::from_str(
+            r#"{
+                "customStylePrompts": {
+                    "raw": "保留我的口头禅",
+                    "light": "更像微信消息",
+                    "structured": "按项目符号整理",
+                    "formal": "像正式周报"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(prefs.custom_style_prompts.raw, "保留我的口头禅");
+        assert_eq!(prefs.custom_style_prompts.light, "更像微信消息");
+        assert_eq!(prefs.custom_style_prompts.structured, "按项目符号整理");
+        assert_eq!(prefs.custom_style_prompts.formal, "像正式周报");
+        assert!(prefs.custom_style_prompts.has_for_mode(PolishMode::Formal));
     }
 
     /// issue #360: 默认值必须是 CtrlV，跟历史行为一致；老配置文件没有

@@ -265,6 +265,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_settings,
+            commands::get_default_style_system_prompts,
             commands::set_settings,
             commands::get_update_channel,
             commands::set_update_channel,
@@ -299,6 +300,14 @@ pub fn run() {
             #[cfg(debug_assertions)]
             commands::inject_hotkey_click_for_dev,
             commands::repolish,
+            commands::list_style_packs,
+            commands::save_style_pack,
+            commands::set_active_style_pack,
+            commands::set_style_pack_enabled,
+            commands::reset_builtin_style_pack,
+            commands::delete_style_pack,
+            commands::import_style_pack_from_zip,
+            commands::export_style_pack_to_zip,
             commands::set_default_polish_mode,
             commands::set_style_enabled,
             commands::check_accessibility_permission,
