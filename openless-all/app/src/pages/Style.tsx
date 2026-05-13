@@ -573,19 +573,28 @@ export function Style() {
                         {pack.description}
                       </div>
                     </div>
-                    <div
-                      style={{
-                        width: 36,
-                        height: 36,
-                        borderRadius: 12,
-                        display: 'grid',
-                        placeItems: 'center',
-                        background: pack.active ? 'rgba(37,99,235,0.12)' : 'rgba(15,23,42,0.05)',
-                        color: pack.active ? 'var(--ol-blue)' : 'var(--ol-ink-3)',
-                        flexShrink: 0,
-                      }}
-                    >
-                      <Icon name={pack.kind === 'builtin' ? 'sparkle' : 'archive'} size={16} />
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 8, flexShrink: 0 }}>
+                      <div
+                        style={{
+                          width: 36,
+                          height: 36,
+                          borderRadius: 12,
+                          display: 'grid',
+                          placeItems: 'center',
+                          background: pack.active ? 'rgba(37,99,235,0.12)' : 'rgba(15,23,42,0.05)',
+                          color: pack.active ? 'var(--ol-blue)' : 'var(--ol-ink-3)',
+                        }}
+                      >
+                        <Icon name={pack.kind === 'builtin' ? 'sparkle' : 'archive'} size={16} />
+                      </div>
+                      <Btn
+                        size="sm"
+                        variant={selected ? 'blue' : 'ghost'}
+                        icon="expand"
+                        onClick={() => openEditorForPack(pack)}
+                      >
+                        {copy.edit}
+                      </Btn>
                     </div>
                   </div>
 
@@ -597,27 +606,16 @@ export function Style() {
                     ))}
                   </div>
 
-                  <div
-                    style={{
-                      display: 'grid',
-                      gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
-                      gap: 8,
-                      marginBottom: 14,
-                    }}
-                  >
-                    <MetaItem label={copy.metaSource} value={pack.kind === 'builtin' ? copy.builtin : copy.imported} />
-                    <MetaItem label={copy.metaStatus} value={pack.enabled ? copy.enabled : copy.disabled} />
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 14 }}>
+                    <Pill tone="outline" size="sm">
+                      {copy.metaSource}: {pack.kind === 'builtin' ? copy.builtin : copy.imported}
+                    </Pill>
+                    <Pill tone="outline" size="sm">
+                      {copy.metaStatus}: {pack.enabled ? copy.enabled : copy.disabled}
+                    </Pill>
                   </div>
 
                   <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                    <Btn
-                      size="sm"
-                      variant={selected ? 'blue' : 'ghost'}
-                      icon="expand"
-                      onClick={() => openEditorForPack(pack)}
-                    >
-                      {copy.edit}
-                    </Btn>
                     <Btn
                       size="sm"
                       variant={pack.active ? 'soft' : 'ghost'}
