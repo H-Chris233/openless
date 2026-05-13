@@ -556,19 +556,30 @@ function RecordingSection() {
 function WaylandHotkeyCallout() {
   const { t } = useTranslation();
   const [helpOpen, setHelpOpen] = useState(false);
-  const [copied, setCopied] = useState(false);
-  const command = 'openless --toggle-dictation';
+  // 三条命令各自独立的"已复制"反馈。用 string 而非 boolean 数组，
+  // 避免 stale state（重复点击不同按钮时旧 timer 把别人擦掉）。
+  const [copiedCommand, setCopiedCommand] = useState<string | null>(null);
 
-  const onCopy = useCallback(async () => {
+  const onCopy = useCallback(async (command: string) => {
     try {
       await navigator.clipboard.writeText(command);
-      setCopied(true);
-      // 1.5s 后还原按钮文案。用户可重复点击；状态机简单到不必上 useRef cleanup。
-      setTimeout(() => setCopied(false), 1500);
+      setCopiedCommand(command);
+      // 1.5s 后还原按钮文案；同时校验仍是这条命令，避免被后点的覆盖。
+      setTimeout(() => {
+        setCopiedCommand(prev => (prev === command ? null : prev));
+      }, 1500);
     } catch (err) {
       console.warn('[wayland-callout] clipboard write failed', err);
     }
   }, []);
+
+  // 三条 CLI 命令 + 用途短标签。aeoform 在 #420 反馈 1.3.1-19 没提
+  // --toggle-qa / --cancel-dictation，本次补全。
+  const commandRows: Array<readonly [string, string]> = [
+    ['openless --toggle-dictation', t('settings.recording.wayland.commandToggleDictationLabel')],
+    ['openless --toggle-qa', t('settings.recording.wayland.commandToggleQaLabel')],
+    ['openless --cancel-dictation', t('settings.recording.wayland.commandCancelDictationLabel')],
+  ];
 
   const helpEntries: Array<readonly [string, string]> = [
     [t('settings.recording.wayland.gnomeTitle'), t('settings.recording.wayland.gnomeSteps')],
@@ -594,48 +605,73 @@ function WaylandHotkeyCallout() {
       <div style={{ fontSize: 11.5, color: 'var(--ol-ink-3)', lineHeight: 1.55, marginBottom: 8 }}>
         {t('settings.recording.wayland.calloutBody')}
       </div>
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-          padding: '8px 10px',
-          borderRadius: 8,
-          background: 'rgba(255,255,255,0.7)',
-          border: '0.5px solid rgba(0,0,0,0.08)',
-          marginBottom: 8,
-        }}
-      >
-        <code
-          style={{
-            flex: 1,
-            fontSize: 12,
-            fontFamily: 'ui-monospace, SF Mono, Menlo, Consolas, monospace',
-            color: 'var(--ol-ink)',
-            userSelect: 'all',
-          }}
-        >
-          {command}
-        </code>
-        <button
-          type="button"
-          onClick={onCopy}
-          style={{
-            padding: '4px 10px',
-            fontSize: 11,
-            fontWeight: 500,
-            border: '0.5px solid rgba(0,0,0,0.12)',
-            borderRadius: 6,
-            background: '#fff',
-            color: 'var(--ol-ink-2)',
-            cursor: 'pointer',
-            fontFamily: 'inherit',
-          }}
-        >
-          {copied
-            ? t('settings.recording.wayland.copyButtonCopied')
-            : t('settings.recording.wayland.copyButton')}
-        </button>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 8 }}>
+        {commandRows.map(([command, label]) => (
+          <div
+            key={command}
+            style={{ display: 'flex', alignItems: 'center', gap: 10 }}
+          >
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                padding: '8px 10px',
+                borderRadius: 8,
+                background: 'rgba(255,255,255,0.7)',
+                border: '0.5px solid rgba(0,0,0,0.08)',
+                flex: 1,
+                minWidth: 0,
+              }}
+            >
+              <code
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  fontSize: 12,
+                  fontFamily: 'ui-monospace, SF Mono, Menlo, Consolas, monospace',
+                  color: 'var(--ol-ink)',
+                  userSelect: 'all',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {command}
+              </code>
+              <button
+                type="button"
+                onClick={() => onCopy(command)}
+                style={{
+                  padding: '4px 10px',
+                  fontSize: 11,
+                  fontWeight: 500,
+                  border: '0.5px solid rgba(0,0,0,0.12)',
+                  borderRadius: 6,
+                  background: '#fff',
+                  color: 'var(--ol-ink-2)',
+                  cursor: 'pointer',
+                  fontFamily: 'inherit',
+                  flexShrink: 0,
+                }}
+              >
+                {copiedCommand === command
+                  ? t('settings.recording.wayland.copyButtonCopied')
+                  : t('settings.recording.wayland.copyButton')}
+              </button>
+            </div>
+            <span
+              style={{
+                fontSize: 11,
+                color: 'var(--ol-ink-3)',
+                whiteSpace: 'nowrap',
+                flexShrink: 0,
+              }}
+            >
+              {label}
+            </span>
+          </div>
+        ))}
       </div>
       <button
         type="button"
@@ -661,7 +697,14 @@ function WaylandHotkeyCallout() {
               <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--ol-ink-2)', marginBottom: 2 }}>
                 {title}
               </div>
-              <div style={{ fontSize: 11, color: 'var(--ol-ink-3)', lineHeight: 1.55 }}>
+              <div
+                style={{
+                  fontSize: 11,
+                  color: 'var(--ol-ink-3)',
+                  lineHeight: 1.55,
+                  whiteSpace: 'pre-line',
+                }}
+              >
                 {body}
               </div>
             </div>
