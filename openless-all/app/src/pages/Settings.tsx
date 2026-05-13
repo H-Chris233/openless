@@ -1388,11 +1388,6 @@ function ProvidersSection() {
   const asrSwitchSeqRef = useRef(0);
   const [llmModelRevision, setLlmModelRevision] = useState(0);
   const [asrModelRevision, setAsrModelRevision] = useState(0);
-  const [promptDrafts, setPromptDrafts] = useState<StyleSystemPrompts | null>(null);
-  const [defaultPrompts, setDefaultPrompts] = useState<StyleSystemPrompts | null>(null);
-  const [savingPromptMode, setSavingPromptMode] = useState<StyleSystemPromptMode | null>(null);
-  const [savedPromptMode, setSavedPromptMode] = useState<StyleSystemPromptMode | null>(null);
-  const [promptError, setPromptError] = useState<string | null>(null);
   const os = detectOS();
   // 主 ASR 下拉只列云端选项；本地推理（local-qwen3 / foundry-local-whisper）
   // 移到「高级」标签页，防止新手误开 CPU 推理。详见 AdvancedSection。
@@ -1414,30 +1409,6 @@ function ProvidersSection() {
     setAsrProvider(asrId);
     setCommittedAsrProvider(asrId);
   }, [prefs, os]);
-
-  useEffect(() => {
-    if (!prefs) return;
-    setPromptDrafts(cloneStyleSystemPrompts(prefs.styleSystemPrompts));
-    setSavingPromptMode(null);
-    setSavedPromptMode(null);
-    setPromptError(null);
-  }, [prefs]);
-
-  useEffect(() => {
-    let cancelled = false;
-    void getDefaultStyleSystemPrompts()
-      .then(prompts => {
-        if (!cancelled) setDefaultPrompts(prompts);
-      })
-      .catch(error => {
-        if (!cancelled) {
-          console.warn('[settings] failed to load default style system prompts', error);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   // issue #219 / #220 P2：
   //   1. 立刻 setLlmProvider —— 受控 <select> 必须反映用户最新选择。
@@ -1494,49 +1465,6 @@ function ProvidersSection() {
     });
   };
 
-  const onPromptDraftChange = (mode: StyleSystemPromptMode, value: string) => {
-    setPromptDrafts(current => (current ? { ...current, [mode]: value } : current));
-    if (savedPromptMode === mode) setSavedPromptMode(null);
-    if (promptError) setPromptError(null);
-  };
-
-  const onSaveSystemPrompt = async (mode: StyleSystemPromptMode) => {
-    if (!prefs || !promptDrafts) return;
-    const nextValue = promptDrafts[mode];
-    if (nextValue === prefs.styleSystemPrompts[mode]) {
-      setSavedPromptMode(mode);
-      return;
-    }
-    setSavingPromptMode(mode);
-    setSavedPromptMode(null);
-    setPromptError(null);
-    try {
-      const nextPrefs: UserPreferences = {
-        ...prefs,
-        styleSystemPrompts: {
-          ...prefs.styleSystemPrompts,
-          [mode]: nextValue,
-        },
-      };
-      await updatePrefs(nextPrefs);
-      setSavedPromptMode(mode);
-    } catch (error) {
-      console.error('[settings] failed to save style system prompt', error);
-      setPromptError(t('settings.providers.styleSystemPromptSaveFailed', {
-        error: error instanceof Error ? error.message : String(error),
-      }));
-    } finally {
-      setSavingPromptMode(current => (current === mode ? null : current));
-    }
-  };
-
-  const onResetSystemPrompt = (mode: StyleSystemPromptMode) => {
-    if (!defaultPrompts) return;
-    setPromptDrafts(current => (current ? { ...current, [mode]: defaultPrompts[mode] } : current));
-    if (savedPromptMode === mode) setSavedPromptMode(null);
-    if (promptError) setPromptError(null);
-  };
-
   const onAsrProviderChange = async (id: AsrPresetId) => {
     setAsrProvider(id);
     const seq = ++asrSwitchSeqRef.current;
@@ -1587,8 +1515,6 @@ function ProvidersSection() {
   const preset = LLM_PRESETS.find(p => p.id === committedLlmProvider) ?? LLM_PRESETS[LLM_PRESETS.length - 1];
   const codexOAuthSelected = committedLlmProvider === 'codex_oauth';
   const asrPreset = visibleAsrPresets.find(p => p.id === committedAsrProvider);
-  const promptDraftValues = promptDrafts ?? cloneStyleSystemPrompts(prefs?.styleSystemPrompts);
-
   return (
     <>
       <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.6, marginBottom: 10 }}>

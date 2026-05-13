@@ -123,7 +123,7 @@ async fn run_streaming_polish(
                 continue;
             }
             match crate::unicode_keystroke::type_unicode_chunk(&delta) {
-                Ok(()) => {
+                Ok(_) => {
                     typed_text.push_str(&delta);
                 }
                 Err(e) => {
