@@ -1438,6 +1438,16 @@ fn switch_to_previous_style(inner: &Arc<Inner>) {
             "[coord] switch style hotkey changed active style pack to {}",
             prefs.active_style_pack_id
         );
+        if let Some(app) = inner.app.lock().clone() {
+            let _ = app.emit("prefs:changed", &prefs);
+            let _ = app.emit_to("main", "prefs:changed", &prefs);
+            let app_for_main = app.clone();
+            let _ = app.run_on_main_thread(move || {
+                if let Err(err) = crate::refresh_tray_microphone_menu(&app_for_main) {
+                    log::warn!("[tray] refresh style menu after switch style hotkey failed: {err}");
+                }
+            });
+        }
     }
 }
 

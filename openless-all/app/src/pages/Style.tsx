@@ -112,6 +112,7 @@ export function Style() {
     importFailed: (message: string) => (isEnglish ? `Failed to import ZIP: ${message}` : `导入 ZIP 失败：${message}`),
     exportSuccess: (path: string) => (isEnglish ? `Exported to ${path}` : `已导出到 ${path}`),
     exportFailed: (message: string) => (isEnglish ? `Failed to export ZIP: ${message}` : `导出 ZIP 失败：${message}`),
+    exportDirtyFirst: isEnglish ? 'Save this pack before exporting ZIP.' : '请先保存当前风格包，再导出 ZIP。',
     resetBuiltin: isEnglish ? 'Reset' : '重置',
     resetSuccess: (name: string) => (isEnglish ? `Reset "${name}".` : `已重置“${name}”`),
     resetFailed: (message: string) => (isEnglish ? `Failed to reset pack: ${message}` : `重置风格包失败：${message}`),
@@ -468,6 +469,11 @@ export function Style() {
 
   const handleExportZip = async (pack = selectedPack) => {
     if (!pack) return;
+    if (editorOpen && dirty && selectedPack && pack.id === selectedPack.id) {
+      setError(copy.exportDirtyFirst);
+      setNotice(null);
+      return;
+    }
     setBusy('exporting');
     try {
       const defaultName = `${sanitizeZipFileName(pack.name)}.zip`;
