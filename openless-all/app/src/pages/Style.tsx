@@ -77,45 +77,45 @@ export function Style() {
     kicker: 'STYLE PACKS',
     title: isEnglish ? 'Style Packs' : '风格包',
     desc: isEnglish
-      ? 'Manage output styles as pluggable Style Packs. Built-in and imported packs share the same runtime prompt, ZIP exchange format, and repolish path.'
-      : '把输出风格作为可插拔的 Style Pack 来管理。内置风格和导入风格共用同一套运行时 prompt、ZIP 交换格式和 repolish 链路。',
+      ? 'Manage local style packs.'
+      : '管理本地风格包。',
     loadFailed: (message: string) => (isEnglish ? `Failed to load style packs: ${message}` : `加载风格包失败：${message}`),
     importZip: isEnglish ? 'Import ZIP' : '导入 ZIP',
     exportZip: isEnglish ? 'Export ZIP' : '导出 ZIP',
     exportShort: isEnglish ? 'Export' : '导出',
     builtin: isEnglish ? 'Built-in' : '内置',
     imported: isEnglish ? 'Imported' : '导入',
-    active: isEnglish ? 'Active' : '当前启用',
-    enabled: isEnglish ? 'Enabled' : '已启用',
-    disabled: isEnglish ? 'Disabled' : '已停用',
-    activate: isEnglish ? 'Activate' : '启用',
-    enable: isEnglish ? 'Enable' : '启用',
-    disable: isEnglish ? 'Disable' : '停用',
+    active: isEnglish ? 'Active' : '当前',
+    enabled: isEnglish ? 'In Rotation' : '已加入轮换',
+    disabled: isEnglish ? 'Out of Rotation' : '未加入轮换',
+    activate: isEnglish ? 'Activate' : '激活',
+    enable: isEnglish ? 'Rotation ON' : '轮换 ON',
+    disable: isEnglish ? 'Rotation OFF' : '轮换 OFF',
     edit: isEnglish ? 'Edit' : '编辑',
     closeEditor: isEnglish ? 'Close' : '关闭',
     unsaved: isEnglish ? 'Unsaved' : '未保存',
     listTitle: isEnglish ? 'Local Packs' : '本地风格包',
     listDesc: isEnglish
-      ? 'Browse and manage packs like a local storefront. Keep this page focused on cards, then open a dedicated editor only when you need to change prompt details.'
-      : '像本地商店一样浏览和管理风格包。主页面只保留卡片浏览，真正修改 prompt 和示例时再打开独立编辑面板。',
+      ? 'Browse and switch packs.'
+      : '浏览和切换风格包。',
     listCount: (count: number) => (isEnglish ? `${count} packs` : `${count} 个风格包`),
-    save: isEnglish ? 'Save Pack' : '保存风格包',
-    revert: isEnglish ? 'Discard Changes' : '放弃修改',
+    save: isEnglish ? 'Save' : '保存',
+    revert: isEnglish ? 'Revert' : '撤销',
     saveSuccess: isEnglish ? 'Style pack saved.' : '风格包已保存',
     saveFailed: (message: string) => (isEnglish ? `Failed to save style pack: ${message}` : `保存风格包失败：${message}`),
-    activateSuccess: (name: string) => (isEnglish ? `Activated "${name}".` : `已启用“${name}”`),
-    activateFailed: (message: string) => (isEnglish ? `Failed to activate style pack: ${message}` : `启用风格包失败：${message}`),
-    enableSuccess: (name: string) => (isEnglish ? `Enabled "${name}".` : `已启用“${name}”`),
-    disableSuccess: (name: string) => (isEnglish ? `Disabled "${name}".` : `已停用“${name}”`),
-    toggleFailed: (message: string) => (isEnglish ? `Failed to change pack status: ${message}` : `切换启用状态失败：${message}`),
+    activateSuccess: (name: string) => (isEnglish ? `Set "${name}" as current.` : `已将“${name}”设为当前风格`),
+    activateFailed: (message: string) => (isEnglish ? `Failed to set current style pack: ${message}` : `设为当前风格失败：${message}`),
+    enableSuccess: (name: string) => (isEnglish ? `Added "${name}" to rotation.` : `已将“${name}”加入轮换`),
+    disableSuccess: (name: string) => (isEnglish ? `Removed "${name}" from rotation.` : `已将“${name}”移出轮换`),
+    toggleFailed: (message: string) => (isEnglish ? `Failed to change rotation status: ${message}` : `切换轮换状态失败：${message}`),
     importSuccess: (name: string) => (isEnglish ? `Imported "${name}".` : `已导入“${name}”`),
     importFailed: (message: string) => (isEnglish ? `Failed to import ZIP: ${message}` : `导入 ZIP 失败：${message}`),
     exportSuccess: (path: string) => (isEnglish ? `Exported to ${path}` : `已导出到 ${path}`),
     exportFailed: (message: string) => (isEnglish ? `Failed to export ZIP: ${message}` : `导出 ZIP 失败：${message}`),
-    resetBuiltin: isEnglish ? 'Reset Built-in Pack' : '重置内置风格',
+    resetBuiltin: isEnglish ? 'Reset' : '重置',
     resetSuccess: (name: string) => (isEnglish ? `Reset "${name}".` : `已重置“${name}”`),
     resetFailed: (message: string) => (isEnglish ? `Failed to reset pack: ${message}` : `重置风格包失败：${message}`),
-    deleteImported: isEnglish ? 'Delete Imported Pack' : '删除导入风格',
+    deleteImported: isEnglish ? 'Delete' : '删除',
     deleteConfirm: (name: string) => (isEnglish
       ? `Delete "${name}"? This cannot be undone.`
       : `确定删除“${name}”吗？删除后无法恢复。`),
@@ -125,18 +125,17 @@ export function Style() {
     summaryBuiltinHint: isEnglish ? 'Default product semantics with one-click reset.' : '跟随产品默认语义，可一键重置到官方基线。',
     summaryImported: isEnglish ? 'Imported Packs' : '导入风格',
     summaryImportedHint: isEnglish ? 'Installed from ZIP and fully portable.' : '来自 ZIP 包，可启用、编辑、导出和删除。',
-    summaryEnabled: isEnglish ? 'Rotation Ready' : '当前可轮换',
+    summaryEnabled: isEnglish ? 'In Rotation' : '已加入轮换',
     summaryCurrent: (name: string) => (isEnglish ? `Current: ${name}` : `当前启用：${name}`),
     summaryCurrentEmpty: isEnglish ? 'No pack selected yet' : '还没有选中风格包',
-    summaryFocused: (name: string) => (isEnglish ? `Focused: ${name}` : `当前浏览：${name}`),
-    editorTitle: isEnglish ? 'Style Pack Editor' : '风格包编辑面板',
+    editorTitle: isEnglish ? 'Edit Pack' : '编辑风格',
     editorDesc: isEnglish
-      ? 'Edit the full runtime prompt, examples, tags, export, reset, and metadata here without crowding the main store view.'
-      : '在这里集中编辑完整运行时 prompt、示例、标签、导入导出和重置操作，不再占满主列表空间。',
+      ? 'Edit this pack.'
+      : '编辑当前风格包。',
     metaTitle: isEnglish ? 'Installation Info' : '安装信息',
     metaSource: isEnglish ? 'Source' : '来源',
     metaBaseMode: isEnglish ? 'Base Mode' : '基础模式',
-    metaStatus: isEnglish ? 'Status' : '状态',
+    metaStatus: isEnglish ? 'Rotation' : '轮换状态',
     metaUpdatedAt: isEnglish ? 'Updated' : '更新时间',
     fieldName: isEnglish ? 'Name' : '名称',
     fieldAuthor: isEnglish ? 'Author' : '作者',
@@ -148,53 +147,39 @@ export function Style() {
     fieldModel: isEnglish ? 'Recommended Model (Metadata)' : '推荐模型（仅元数据）',
     fieldModelPlaceholder: isEnglish ? 'Optional, e.g. gpt-4.1 / deepseek-v3' : '可选，例如 gpt-4.1 / deepseek-v3',
     fieldModelHint: isEnglish
-      ? 'Advisory metadata only. It is exported in the pack manifest for humans, but it never switches the actual LLM provider or model.'
-      : '这是给人看的建议元数据，会写入风格包 manifest，方便分享时说明适配模型；它不会自动切换实际使用的 LLM provider 或 model。',
+      ? 'Metadata only. Does not switch model.'
+      : '仅作说明，不会切换实际模型。',
     fieldCompatibility: isEnglish ? 'Compatible App Version' : '兼容版本',
     fieldCompatibilityPlaceholder: isEnglish ? 'Optional, e.g. >=1.3.0' : '可选，例如 >=1.3.0',
-    fullPromptTitle: isEnglish ? 'Style Pack Prompt Body' : 'Style Pack Prompt 主体',
+    fullPromptTitle: isEnglish ? 'System Prompt' : 'System Prompt',
     fullPromptHint: isEnglish
-      ? 'This textarea owns the pack’s full style definition. OpenLess no longer swaps in a hidden built-in mode prompt and then appends your text.'
-      : '这里编辑的是这套风格包自己拥有的完整风格定义。OpenLess 不再走“隐藏内置 prompt + 末尾追加文本”的旧语义。',
-    runtimeTitle: isEnglish ? 'Runtime Assembly' : '运行时组装说明',
+      ? 'The prompt owned by this pack.'
+      : '这就是这套风格包自己的 Prompt。',
+    runtimeTitle: isEnglish ? 'OpenLess Runtime Directives' : 'OpenLess 运行时附加指令',
     runtimeDesc: isEnglish
-      ? 'At runtime the pack prompt stays as the style body. OpenLess may only prepend context premises and append helper guardrails for the current session.'
-      : '运行时仍以这段 pack prompt 作为风格主体；OpenLess 只会按当前会话额外注入上下文前提与辅助约束，不会再替换成另一套隐藏风格 prompt。',
-    runtimePackStageTitle: isEnglish ? 'Pack-owned prompt body' : 'Pack 自有 prompt 主体',
-    runtimePackStageDesc: isEnglish
-      ? 'This editable text is the style definition that both polish and repolish share.'
-      : '你在上面编辑的文本就是这套风格包拥有的风格主体，polish 和 repolish 共用它。',
-    runtimeContextStageTitle: isEnglish ? 'Context premise' : '上下文前提',
-    runtimeContextStageDesc: isEnglish
-      ? 'Prepended when working-language or output-language preferences are available. This is session context, not another style prompt.'
-      : '当工作语言、字形偏好或输出语言偏好存在时，会前置注入这一段。这是会话上下文，不是另一套风格 prompt。',
-    runtimeHotwordStageTitle: isEnglish ? 'Hotword spelling hints' : '热词拼写提示',
-    runtimeHotwordStageDesc: isEnglish
-      ? 'Appended when enabled vocabulary entries exist so names and terms keep the expected spelling.'
-      : '当用户词库里存在已启用热词时，会追加这一段，帮助专名和术语保持预期写法。',
-    runtimeHistoryStageTitle: isEnglish ? 'Multi-turn history guardrail' : '多轮历史保护段',
-    runtimeHistoryStageDesc: isEnglish
-      ? 'Only added for live polish when prior turns are present. Repolish does not use this segment.'
-      : '只有实时 polish 在存在 prior turns 时才会追加这段；History 里的 repolish 不会带它。',
-    runtimePreviewTitle: isEnglish ? 'Current Runtime Preview' : '当前运行时预览',
-    runtimePreviewDesc: isEnglish
-      ? 'Preview generated from the current app preferences and enabled hotwords. It intentionally omits the frontmost-app label so the editor window itself does not pollute the result.'
-      : '这个预览按当前应用设置和已启用热词生成。为了避免把编辑器窗口本身误当成真实输入目标，预览会刻意省略前台 app 名称。',
-    runtimePreviewSingle: isEnglish ? 'Single-turn polish / repolish' : '单轮 polish / repolish',
-    runtimePreviewMulti: isEnglish ? 'Live polish with prior turns' : '带上下文的实时 polish',
+      ? 'Read-only runtime helpers.'
+      : '只读的运行时辅助项。',
+    runtimeDirectiveContextTitle: isEnglish ? 'Context premise' : '上下文前提',
+    runtimeDirectiveContextDesc: isEnglish ? 'From language and app context' : '来自语言与应用上下文',
+    runtimeDirectiveContextEmpty: isEnglish ? 'Not added in the current preview.' : '当前不会附加',
+    runtimeDirectiveHotwordTitle: isEnglish ? 'Hotword block' : '热词提示段',
+    runtimeDirectiveHotwordDesc: isEnglish ? 'From enabled hotwords' : '来自已启用热词',
+    runtimeDirectiveHotwordEmpty: isEnglish ? 'Not added in the current preview.' : '当前不会附加',
+    runtimeDirectiveHistoryTitle: isEnglish ? 'Multi-turn history guardrail' : '多轮历史保护段',
+    runtimeDirectiveHistoryDesc: isEnglish ? 'Only for live multi-turn polish' : '仅用于实时多轮 polish',
+    runtimeDirectiveHistoryEmpty: isEnglish ? 'Only added when prior turns exist.' : '只有存在 prior turns 时才会附加',
+    runtimeDirectiveActive: isEnglish ? 'Active' : '当前生效',
+    runtimeDirectiveInactive: isEnglish ? 'Inactive' : '当前未生效',
     runtimePreviewFailed: (message: string) => (isEnglish ? `Failed to build runtime preview: ${message}` : `生成运行时预览失败：${message}`),
-    runtimePreviewOmittedFrontApp: isEnglish ? 'Front-app label omitted in preview.' : '预览已省略前台 app 标签。',
-    runtimePromptChars: (count: number) => (isEnglish ? `${count} chars` : `${count} 字符`),
-    runtimeHotwordCount: (count: number) => (isEnglish ? `${count} hotwords` : `${count} 个热词`),
-    runtimeContextWindow: (minutes: number) => (isEnglish ? `${minutes} min context window` : `${minutes} 分钟上下文窗口`),
+    runtimePreviewOmittedFrontApp: isEnglish ? 'Preview omits the front-app label.' : '预览已省略前台 app 标签。',
     examplesTitle: isEnglish ? 'Effect Examples' : '效果示例',
     examplesDesc: isEnglish
-      ? 'Present input/output pairs like a product detail page. They will be exported into examples.json.'
-      : '像商品详情页一样展示输入和输出。导出 ZIP 时会一起写入 examples.json。',
+      ? 'Exported with the pack.'
+      : '会随风格包一起导出。',
     addExample: isEnglish ? 'Add Example' : '新增示例',
     examplesEmpty: isEnglish
-      ? 'This pack has no examples yet. Add at least one input/output pair before sharing it.'
-      : '这个风格包还没有示例。建议至少补一组输入/输出，方便导出后被别人理解和复用。',
+      ? 'No examples yet.'
+      : '还没有示例。',
     exampleTitlePlaceholder: (index: number) => (isEnglish ? `Example ${index} title` : `示例 ${index} 标题`),
     exampleInput: isEnglish ? 'Input' : '输入',
     exampleOutput: isEnglish ? 'Output' : '输出',
@@ -579,7 +564,6 @@ export function Style() {
               <div style={{ fontSize: 12, color: 'var(--ol-ink-3)', marginTop: 4, maxWidth: 760 }}>{copy.listDesc}</div>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-              {selectedPack && <Pill tone="default">{copy.summaryFocused(selectedPack.name)}</Pill>}
               <Pill tone="outline">{copy.listCount(packs.length)}</Pill>
             </div>
           </div>
@@ -592,6 +576,8 @@ export function Style() {
                 <div
                   key={pack.id}
                   style={{
+                    display: 'flex',
+                    flexDirection: 'column',
                     textAlign: 'left',
                     border: '0.5px solid',
                     borderColor: selected || pack.active ? 'var(--ol-blue)' : 'var(--ol-line)',
@@ -603,18 +589,24 @@ export function Style() {
                     boxShadow: selected || pack.active ? '0 0 0 3px var(--ol-blue-ring)' : 'none',
                     cursor: 'default',
                     opacity: pack.enabled ? 1 : 0.72,
+                    minHeight: 204,
                     transition: 'border-color 0.16s var(--ol-motion-quick), box-shadow 0.18s var(--ol-motion-soft), opacity 0.18s var(--ol-motion-soft)',
                   }}
                 >
-                  <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10, marginBottom: 12 }}>
+                  <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10, marginBottom: 10 }}>
                     <div style={{ minWidth: 0 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 6 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                         <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--ol-ink)' }}>{pack.name}</div>
                         <Pill tone={pack.kind === 'builtin' ? 'outline' : 'blue'} size="sm">
                           {pack.kind === 'builtin' ? copy.builtin : copy.imported}
                         </Pill>
-                        {pack.active && <Pill tone="dark" size="sm">{copy.active}</Pill>}
-                        {!pack.enabled && <Pill tone="default" size="sm">{copy.disabled}</Pill>}
+                        <div style={{ minWidth: 42, minHeight: 24, display: 'flex', alignItems: 'center' }}>
+                          {pack.active ? (
+                            <Pill tone="dark" size="sm">{copy.active}</Pill>
+                          ) : !pack.enabled ? (
+                            <Pill tone="default" size="sm">{copy.disabled}</Pill>
+                          ) : null}
+                        </div>
                       </div>
                       <div
                         style={{
@@ -625,6 +617,8 @@ export function Style() {
                           WebkitBoxOrient: 'vertical',
                           WebkitLineClamp: 3,
                           overflow: 'hidden',
+                          marginTop: 8,
+                          minHeight: 60,
                         }}
                       >
                         {pack.description}
@@ -655,24 +649,14 @@ export function Style() {
                     </div>
                   </div>
 
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', minHeight: 24, marginBottom: 12 }}>
                     <Pill tone={modeTone(pack.baseMode)} size="sm">{t(`style.modes.${pack.baseMode}.name`)}</Pill>
-                    <Pill tone="default" size="sm">{copy.examplesCount(pack.examples.length)}</Pill>
-                    {pack.tags.slice(0, 2).map(tag => (
+                    {pack.tags.slice(0, 1).map(tag => (
                       <Pill key={`${pack.id}-${tag}`} tone="default" size="sm">{tag}</Pill>
                     ))}
                   </div>
 
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 14 }}>
-                    <Pill tone="outline" size="sm">
-                      {copy.metaSource}: {pack.kind === 'builtin' ? copy.builtin : copy.imported}
-                    </Pill>
-                    <Pill tone="outline" size="sm">
-                      {copy.metaStatus}: {pack.enabled ? copy.enabled : copy.disabled}
-                    </Pill>
-                  </div>
-
-                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 'auto' }}>
                     <Btn
                       size="sm"
                       variant={pack.active ? 'soft' : 'ghost'}
@@ -790,6 +774,13 @@ export function Style() {
                         {copy.exportZip}
                       </Btn>
                       <Btn
+                        variant="ghost"
+                        disabled={busy === 'toggling'}
+                        onClick={() => void handleToggleEnabled(draft)}
+                      >
+                        {draft.enabled ? copy.disable : copy.enable}
+                      </Btn>
+                      <Btn
                         variant={draft.active ? 'soft' : 'blue'}
                         icon="check"
                         disabled={draft.active || busy === 'activating'}
@@ -871,7 +862,7 @@ export function Style() {
                   <label style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
                       <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink)' }}>{copy.fullPromptTitle}</span>
-                      <Pill tone="default" size="sm">{copy.runtimePromptChars(draft.prompt.length)}</Pill>
+                      <Pill tone="default" size="sm">{isEnglish ? `${draft.prompt.length} chars` : `${draft.prompt.length} 字符`}</Pill>
                     </div>
                     <span style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.55 }}>{copy.fullPromptHint}</span>
                     <textarea
@@ -893,37 +884,36 @@ export function Style() {
                         <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--ol-ink)' }}>{copy.runtimeTitle}</div>
                         <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', marginTop: 4, lineHeight: 1.6 }}>{copy.runtimeDesc}</div>
                       </div>
-                      {runtimePreview && (
-                        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                          <Pill tone="default" size="sm">{copy.runtimePromptChars(runtimePreview.singleTurnPromptChars)}</Pill>
-                          <Pill tone="outline" size="sm">{copy.runtimeHotwordCount(runtimePreview.hotwords.length)}</Pill>
-                        </div>
-                      )}
                     </div>
 
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: 10, marginBottom: 14 }}>
-                      <RuntimeStageCard title={copy.runtimePackStageTitle} desc={copy.runtimePackStageDesc} tone="default" />
-                      <RuntimeStageCard title={copy.runtimeContextStageTitle} desc={copy.runtimeContextStageDesc} tone={runtimePreview?.includesContextPremise ? 'blue' : 'outline'} />
-                      <RuntimeStageCard title={copy.runtimeHotwordStageTitle} desc={copy.runtimeHotwordStageDesc} tone={runtimePreview?.includesHotwordBlock ? 'blue' : 'outline'} />
-                      <RuntimeStageCard title={copy.runtimeHistoryStageTitle} desc={copy.runtimeHistoryStageDesc} tone={runtimePreview?.includesHistoryInstruction ? 'blue' : 'outline'} />
-                    </div>
-
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 12 }}>
-                      <ReadonlyPromptPanel
-                        title={copy.runtimePreviewSingle}
-                        body={runtimePreview?.singleTurnPrompt ?? ''}
-                        countLabel={copy.runtimePromptChars(runtimePreview?.singleTurnPromptChars ?? 0)}
-                        footer={runtimePreview?.previewOmitsFrontApp ? copy.runtimePreviewOmittedFrontApp : ''}
+                    <div style={{ display: 'grid', gap: 8, marginBottom: 8 }}>
+                      <DirectiveRow
+                        title={copy.runtimeDirectiveContextTitle}
+                        detail={copy.runtimeDirectiveContextDesc}
+                        active={Boolean(runtimePreview?.contextPremise)}
+                        activeLabel={copy.runtimeDirectiveActive}
+                        inactiveLabel={copy.runtimeDirectiveInactive}
+                        inactiveHint={copy.runtimeDirectiveContextEmpty}
                       />
-                      <ReadonlyPromptPanel
-                        title={copy.runtimePreviewMulti}
-                        body={runtimePreview?.multiTurnPrompt ?? ''}
-                        countLabel={copy.runtimePromptChars(runtimePreview?.multiTurnPromptChars ?? 0)}
-                        footer={runtimePreview ? copy.runtimeContextWindow(runtimePreview.contextWindowMinutes) : ''}
+                      <DirectiveRow
+                        title={copy.runtimeDirectiveHotwordTitle}
+                        detail={copy.runtimeDirectiveHotwordDesc}
+                        active={Boolean(runtimePreview?.hotwordBlock)}
+                        activeLabel={copy.runtimeDirectiveActive}
+                        inactiveLabel={copy.runtimeDirectiveInactive}
+                        inactiveHint={copy.runtimeDirectiveHotwordEmpty}
+                      />
+                      <DirectiveRow
+                        title={copy.runtimeDirectiveHistoryTitle}
+                        detail={copy.runtimeDirectiveHistoryDesc}
+                        active={Boolean(runtimePreview?.historyInstruction)}
+                        activeLabel={copy.runtimeDirectiveActive}
+                        inactiveLabel={copy.runtimeDirectiveInactive}
+                        inactiveHint={copy.runtimeDirectiveHistoryEmpty}
                       />
                     </div>
                     <div style={{ fontSize: 11.5, color: runtimePreviewError ? 'var(--ol-red, #b91c1c)' : 'var(--ol-ink-4)', marginTop: 10, lineHeight: 1.55 }}>
-                      {runtimePreviewError ? copy.runtimePreviewFailed(runtimePreviewError) : copy.runtimePreviewDesc}
+                      {runtimePreviewError ? copy.runtimePreviewFailed(runtimePreviewError) : copy.runtimePreviewOmittedFrontApp}
                     </div>
                   </Card>
 
@@ -1074,58 +1064,41 @@ function MetaItem({ label, value }: { label: string; value: string }) {
   );
 }
 
-function RuntimeStageCard({
+function DirectiveRow({
   title,
-  desc,
-  tone,
+  detail,
+  active,
+  activeLabel,
+  inactiveLabel,
+  inactiveHint,
 }: {
   title: string;
-  desc: string;
-  tone: 'default' | 'blue' | 'outline';
+  detail: string;
+  active: boolean;
+  activeLabel: string;
+  inactiveLabel: string;
+  inactiveHint: string;
 }) {
   return (
     <div
       style={{
-        borderRadius: 14,
-        border: tone === 'blue' ? '0.5px solid rgba(37,99,235,0.18)' : '0.5px solid rgba(148,163,184,0.22)',
-        background: tone === 'blue' ? 'rgba(239,246,255,0.88)' : 'rgba(255,255,255,0.92)',
-        padding: 12,
-      }}
-    >
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-        <Pill tone={tone} size="sm">{title}</Pill>
-      </div>
-      <div style={{ fontSize: 12, color: 'var(--ol-ink-3)', lineHeight: 1.6 }}>{desc}</div>
-    </div>
-  );
-}
-
-function ReadonlyPromptPanel({
-  title,
-  body,
-  footer,
-  countLabel,
-}: {
-  title: string;
-  body: string;
-  footer?: string;
-  countLabel: string;
-}) {
-  return (
-    <div
-      style={{
-        borderRadius: 14,
-        border: '0.5px solid rgba(148,163,184,0.22)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: 12,
+        padding: '10px 12px',
+        borderRadius: 12,
+        border: '0.5px solid rgba(148,163,184,0.2)',
         background: 'rgba(255,255,255,0.92)',
-        padding: 12,
       }}
     >
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
-        <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink)' }}>{title}</div>
-        <Pill tone="default" size="sm">{countLabel}</Pill>
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--ol-ink)' }}>{title}</div>
+        <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.5, marginTop: 2 }}>
+          {active ? detail : inactiveHint}
+        </div>
       </div>
-      <textarea readOnly value={body} style={{ ...textareaStyle, minHeight: 150, background: 'rgba(248,250,252,0.96)' }} />
-      {footer && <div style={{ marginTop: 8, fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.5 }}>{footer}</div>}
+      <Pill tone={active ? 'blue' : 'outline'} size="sm">{active ? activeLabel : inactiveLabel}</Pill>
     </div>
   );
 }

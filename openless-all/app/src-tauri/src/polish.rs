@@ -272,6 +272,9 @@ pub struct OpenAICompatibleLLMProvider {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PolishSystemPromptAssembly {
+    pub context_premise: String,
+    pub hotword_block: String,
+    pub history_instruction: String,
     pub effective_system_prompt: String,
     pub includes_context_premise: bool,
     pub includes_hotword_block: bool,
@@ -1667,15 +1670,25 @@ pub(crate) fn assemble_polish_system_prompt(
         front_app,
         has_prior_turns,
     );
-    let includes_hotword_block = !hotwords.iter().all(|value| value.trim().is_empty());
-    let includes_context_premise = context_premise(
+    let context_premise = context_premise(
         working_languages,
         chinese_script_preference,
         output_language_preference,
         front_app,
     )
-    .is_some();
+    .unwrap_or_default();
+    let hotword_block = compose_hotword_block_preview(hotwords);
+    let history_instruction = if has_prior_turns {
+        prompts::polish_context_instruction().to_string()
+    } else {
+        String::new()
+    };
+    let includes_hotword_block = !hotword_block.is_empty();
+    let includes_context_premise = !context_premise.is_empty();
     PolishSystemPromptAssembly {
+        context_premise,
+        hotword_block,
+        history_instruction,
         effective_system_prompt,
         includes_context_premise,
         includes_hotword_block,
@@ -1740,6 +1753,26 @@ fn compose_system_prompt(style_system_prompt: &str, hotwords: &[String]) -> Stri
     format!(
         "{}\n\n热词（用户希望以下写法在输出中保持准确；当转写中出现这些词的同音 / 近形误识别时，优先按上述写法输出，不做无关词的机械替换）：\n{}",
         base, bullets
+    )
+}
+
+fn compose_hotword_block_preview(hotwords: &[String]) -> String {
+    let cleaned: Vec<String> = hotwords
+        .iter()
+        .map(|h| h.trim().to_string())
+        .filter(|h| !h.is_empty())
+        .collect();
+    if cleaned.is_empty() {
+        return String::new();
+    }
+    let bullets = cleaned
+        .iter()
+        .map(|h| format!("- {}", h))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "热词（用户希望以下写法在输出中保持准确；当转写中出现这些词的同音 / 近形词识别时，优先按上述写法输出，不做无关词的机械替换）：\n{}",
+        bullets
     )
 }
 

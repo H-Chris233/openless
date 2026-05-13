@@ -292,15 +292,14 @@ function cloneMockStylePacks(): StylePack[] {
 
 function composeMockStylePackRuntimeDiagnostics(stylePack: StylePack): StylePackRuntimeDiagnostics {
   const trimmedPrompt = stylePack.prompt.trimEnd();
-  const contextLines = mockSettings.workingLanguages.length
-    ? [`# Context`, `Working languages: ${mockSettings.workingLanguages.join(', ')}`]
-    : [];
+  const contextPremise = mockSettings.workingLanguages.length
+    ? ['# Context', `Working languages: ${mockSettings.workingLanguages.join(', ')}`].join('\n')
+    : '';
   const hotwordLines = [`GitHub`, `OpenLess`];
-  const hotwordBlock =
-    hotwordLines.length > 0
-      ? ['', 'Hotwords (keep the spelling below when they appear in the transcript):', ...hotwordLines.map(word => `- ${word}`)]
-      : [];
-  const singleTurnPrompt = [...contextLines, trimmedPrompt, ...hotwordBlock].filter(Boolean).join('\n\n');
+  const hotwordBlock = hotwordLines.length > 0
+    ? ['Hotwords (keep the spelling below when they appear in the transcript):', ...hotwordLines.map(word => `- ${word}`)].join('\n')
+    : '';
+  const singleTurnPrompt = [contextPremise, trimmedPrompt, hotwordBlock].filter(Boolean).join('\n\n');
   const historyInstruction = 'When prior turns exist, do not repeat previous assistant outputs. Only polish the current transcript.';
   const multiTurnPrompt = `${singleTurnPrompt}\n\n${historyInstruction}`;
   return {
@@ -308,6 +307,12 @@ function composeMockStylePackRuntimeDiagnostics(stylePack: StylePack): StylePack
     packName: stylePack.name,
     packPrompt: stylePack.prompt,
     packPromptChars: stylePack.prompt.length,
+    contextPremise,
+    contextPremiseChars: contextPremise.length,
+    hotwordBlock,
+    hotwordBlockChars: hotwordBlock.length,
+    historyInstruction,
+    historyInstructionChars: historyInstruction.length,
     singleTurnPrompt,
     singleTurnPromptChars: singleTurnPrompt.length,
     multiTurnPrompt,
@@ -315,7 +320,7 @@ function composeMockStylePackRuntimeDiagnostics(stylePack: StylePack): StylePack
     workingLanguages: [...mockSettings.workingLanguages],
     hotwords: [...hotwordLines],
     contextWindowMinutes: mockSettings.polishContextWindowMinutes,
-    includesContextPremise: contextLines.length > 0,
+    includesContextPremise: Boolean(contextPremise),
     includesHotwordBlock: hotwordLines.length > 0,
     includesHistoryInstruction: true,
     previewOmitsFrontApp: true,

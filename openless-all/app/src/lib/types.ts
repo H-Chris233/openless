@@ -181,6 +181,12 @@ export interface StylePackRuntimeDiagnostics {
   packName: string;
   packPrompt: string;
   packPromptChars: number;
+  contextPremise: string;
+  contextPremiseChars: number;
+  hotwordBlock: string;
+  hotwordBlockChars: number;
+  historyInstruction: string;
+  historyInstructionChars: number;
   singleTurnPrompt: string;
   singleTurnPromptChars: number;
   multiTurnPrompt: string;
