@@ -25,6 +25,21 @@ mod asr {
     }
 }
 
+mod polish {
+    pub mod prompts {
+        use crate::types::PolishMode;
+
+        pub fn system_prompt(mode: PolishMode) -> String {
+            match mode {
+                PolishMode::Raw => "builtin raw style prompt".to_string(),
+                PolishMode::Light => "builtin light style prompt".to_string(),
+                PolishMode::Structured => "builtin structured style prompt".to_string(),
+                PolishMode::Formal => "builtin formal style prompt".to_string(),
+            }
+        }
+    }
+}
+
 #[path = "../../src/coordinator_state.rs"]
 mod coordinator_state;
 #[path = "../../src/hotkey.rs"]
