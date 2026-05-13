@@ -270,6 +270,14 @@ pub struct OpenAICompatibleLLMProvider {
     client: reqwest::Client,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PolishSystemPromptAssembly {
+    pub effective_system_prompt: String,
+    pub includes_context_premise: bool,
+    pub includes_hotword_block: bool,
+    pub includes_history_instruction: bool,
+}
+
 impl OpenAICompatibleLLMProvider {
     pub fn new(config: OpenAICompatibleConfig) -> Self {
         // Build reqwest client with the configured timeout. If client construction
@@ -307,6 +315,17 @@ impl OpenAICompatibleLLMProvider {
             output_language_preference,
             front_app,
             !prior_turns.is_empty(),
+        );
+        log::info!(
+            "[style-pack] llm polish assembled provider={} model={} mode={:?} base_prompt_chars={} effective_prompt_chars={} hotwords={} front_app={} prior_turns={}",
+            self.config.provider_id,
+            self.config.model,
+            mode,
+            style_system_prompt.chars().count(),
+            system_prompt.chars().count(),
+            hotwords.len(),
+            front_app.is_some(),
+            prior_turns.len()
         );
         if prior_turns.is_empty() {
             self.chat_completion(&system_prompt, &user_prompt).await
@@ -938,6 +957,16 @@ impl CodexOAuthLLMProvider {
             output_language_preference,
             front_app,
             !prior_turns.is_empty(),
+        );
+        log::info!(
+            "[style-pack] llm polish assembled provider=codex-oauth model={} mode={:?} base_prompt_chars={} effective_prompt_chars={} hotwords={} front_app={} prior_turns={}",
+            self.config.model,
+            mode,
+            style_system_prompt.chars().count(),
+            system_prompt.chars().count(),
+            hotwords.len(),
+            front_app.is_some(),
+            prior_turns.len()
         );
         let messages = build_polish_history_messages(&system_prompt, prior_turns, &user_prompt);
         self.codex_responses(messages, |_| {}, || false).await
@@ -1618,6 +1647,42 @@ pub(crate) fn compose_polish_prompts(
 /// 翻译路径的 `(system_prompt, user_prompt)` 装配——和 polish 一样供两路 LLM 客户端共用。
 /// 翻译模式以 `target_language` 为唯一输出语言约束，OutputLanguagePreference 在这里被
 /// 强制设为 Auto 以避免 UI 偏好（如 ja）与 target_language（如 en）冲突。
+pub(crate) fn assemble_polish_system_prompt(
+    style_system_prompt: &str,
+    hotwords: &[String],
+    working_languages: &[String],
+    chinese_script_preference: ChineseScriptPreference,
+    output_language_preference: OutputLanguagePreference,
+    front_app: Option<&str>,
+    has_prior_turns: bool,
+) -> PolishSystemPromptAssembly {
+    let (effective_system_prompt, _) = compose_polish_prompts(
+        "",
+        PolishMode::Light,
+        hotwords,
+        style_system_prompt,
+        working_languages,
+        chinese_script_preference,
+        output_language_preference,
+        front_app,
+        has_prior_turns,
+    );
+    let includes_hotword_block = !hotwords.iter().all(|value| value.trim().is_empty());
+    let includes_context_premise = context_premise(
+        working_languages,
+        chinese_script_preference,
+        output_language_preference,
+        front_app,
+    )
+    .is_some();
+    PolishSystemPromptAssembly {
+        effective_system_prompt,
+        includes_context_premise,
+        includes_hotword_block,
+        includes_history_instruction: has_prior_turns,
+    }
+}
+
 pub(crate) fn compose_translate_prompts(
     raw_text: &str,
     target_language: &str,

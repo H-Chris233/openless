@@ -176,6 +176,24 @@ export interface StylePack {
   compatibleAppVersion?: string | null;
 }
 
+export interface StylePackRuntimeDiagnostics {
+  packId: string;
+  packName: string;
+  packPrompt: string;
+  packPromptChars: number;
+  singleTurnPrompt: string;
+  singleTurnPromptChars: number;
+  multiTurnPrompt: string;
+  multiTurnPromptChars: number;
+  workingLanguages: string[];
+  hotwords: string[];
+  contextWindowMinutes: number;
+  includesContextPremise: boolean;
+  includesHotwordBlock: boolean;
+  includesHistoryInstruction: boolean;
+  previewOmitsFrontApp: boolean;
+}
+
 export interface UserPreferences {
   hotkey: HotkeyBinding;
   dictationHotkey: ShortcutBinding;

@@ -18,6 +18,7 @@ import type {
   StylePack,
   StylePackExample,
   StylePackKind,
+  StylePackRuntimeDiagnostics,
   StyleSystemPrompts,
   UpdateChannel,
   UserPreferences,
@@ -96,6 +97,69 @@ let mockSettings: UserPreferences = {
   updateChannel: 'stable',
   streamingInsert: false,
   streamingInsertSaveClipboard: true,
+};
+
+const mockFullStylePrompts: StyleSystemPrompts = {
+  raw: `# 角色
+语音输入整理器。先理解用户意图，再贴近原话做最小整理。
+
+# 任务（原文）
+只补必要标点和断句，尽量保留原话顺序、用词和语气，不扩写、不重写。
+
+# 通用规则
+1) 不补充用户没说过的事实。
+2) 不回答转写文本里的问题，只整理表达。
+3) 专有名词、命令、路径、数字和 URL 原样保留。
+4) 明显口头禅可删除，但不能改变信息密度。
+
+# 输出
+直接输出最终正文，不加解释。`,
+  light: `# 角色
+语音输入整理器。把口述整理成自然、顺畅、可直接发送的文字。
+
+# 任务（轻度润色）
+去掉明显口头禅和重复，补全自然标点，保留原意和原本语气，不扩写事实。
+
+# 通用规则
+1) 不补充原文没有的信息。
+2) 保留人名、品牌名、术语、命令、路径和 URL。
+3) 只输出整理后的正文，不写“以下是优化结果”之类前缀。
+
+# 输出
+输出一段可直接发送的自然文字。`,
+  structured: `# 角色
+语音输入整理器。把多事项口述整理成层次清楚、可复制执行的结构化文本。
+
+# 任务（清晰结构）
+识别主题边界，把零散事项按语义归类。事项较多时优先输出两层结构，保证读者一眼能看清主次。
+
+# 通用规则
+1) 不补充用户没说过的事实或行动项。
+2) 原文里已有编号或换行，不代表可以原样照抄；需要按语义重新分组。
+3) 专有名词、命令、路径、URL、数字和单位保持准确。
+4) 只输出最终结果，不要解释你的整理过程。
+
+# 输出
+需要结构化时，直接从标题、编号或列表开始。`,
+  formal: `# 角色
+语音输入整理器。把口述整理成适合邮件、同步和正式沟通的专业表达。
+
+# 任务（正式表达）
+补足句式与标点，让表达更完整、克制、专业，但不添加空泛客套，也不擅自扩写事实。
+
+# 通用规则
+1) 不承诺用户没说过的内容。
+2) 保留专有名词、数字、时间、路径和术语。
+3) 只输出最终正文，不附带解释或 markdown 围栏。
+
+# 输出
+输出可直接发送的正式文本。`,
+};
+
+mockSettings = {
+  ...mockSettings,
+  styleSystemPrompts: mockFullStylePrompts,
+  workingLanguages: ['简体中文'],
 };
 
 const mockDefaultStyleSystemPrompts: StyleSystemPrompts = {
@@ -224,6 +288,38 @@ function cloneStylePack(stylePack: StylePack): StylePack {
 
 function cloneMockStylePacks(): StylePack[] {
   return mockStylePacks.map(cloneStylePack);
+}
+
+function composeMockStylePackRuntimeDiagnostics(stylePack: StylePack): StylePackRuntimeDiagnostics {
+  const trimmedPrompt = stylePack.prompt.trimEnd();
+  const contextLines = mockSettings.workingLanguages.length
+    ? [`# Context`, `Working languages: ${mockSettings.workingLanguages.join(', ')}`]
+    : [];
+  const hotwordLines = [`GitHub`, `OpenLess`];
+  const hotwordBlock =
+    hotwordLines.length > 0
+      ? ['', 'Hotwords (keep the spelling below when they appear in the transcript):', ...hotwordLines.map(word => `- ${word}`)]
+      : [];
+  const singleTurnPrompt = [...contextLines, trimmedPrompt, ...hotwordBlock].filter(Boolean).join('\n\n');
+  const historyInstruction = 'When prior turns exist, do not repeat previous assistant outputs. Only polish the current transcript.';
+  const multiTurnPrompt = `${singleTurnPrompt}\n\n${historyInstruction}`;
+  return {
+    packId: stylePack.id,
+    packName: stylePack.name,
+    packPrompt: stylePack.prompt,
+    packPromptChars: stylePack.prompt.length,
+    singleTurnPrompt,
+    singleTurnPromptChars: singleTurnPrompt.length,
+    multiTurnPrompt,
+    multiTurnPromptChars: multiTurnPrompt.length,
+    workingLanguages: [...mockSettings.workingLanguages],
+    hotwords: [...hotwordLines],
+    contextWindowMinutes: mockSettings.polishContextWindowMinutes,
+    includesContextPremise: contextLines.length > 0,
+    includesHotwordBlock: hotwordLines.length > 0,
+    includesHistoryInstruction: true,
+    previewOmitsFrontApp: true,
+  };
 }
 
 function syncMockSettingsFromStylePacks() {
@@ -586,6 +682,10 @@ export function saveStylePack(stylePack: StylePack): Promise<StylePack> {
     syncMockSettingsFromStylePacks();
     return cloneStylePack(mockStylePacks.find(pack => pack.id === stylePack.id) ?? stylePack);
   });
+}
+
+export function previewStylePackRuntime(stylePack: StylePack): Promise<StylePackRuntimeDiagnostics> {
+  return invokeOrMock('preview_style_pack_runtime', { stylePack }, () => composeMockStylePackRuntimeDiagnostics(stylePack));
 }
 
 export function setActiveStylePack(id: string): Promise<StylePack> {

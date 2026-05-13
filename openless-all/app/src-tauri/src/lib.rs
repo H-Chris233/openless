@@ -302,6 +302,7 @@ pub fn run() {
             commands::repolish,
             commands::list_style_packs,
             commands::save_style_pack,
+            commands::preview_style_pack_runtime,
             commands::set_active_style_pack,
             commands::set_style_pack_enabled,
             commands::reset_builtin_style_pack,

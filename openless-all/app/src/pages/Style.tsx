@@ -6,12 +6,13 @@ import {
   importStylePackFromZip,
   isTauri,
   listStylePacks,
+  previewStylePackRuntime,
   resetBuiltinStylePack,
   saveStylePack,
   setActiveStylePack,
   setStylePackEnabled,
 } from '../lib/ipc';
-import type { PolishMode, StylePack, StylePackExample } from '../lib/types';
+import type { PolishMode, StylePack, StylePackExample, StylePackRuntimeDiagnostics } from '../lib/types';
 import { Btn, Card, PageHeader, Pill } from './_atoms';
 import { Icon } from '../components/Icon';
 
@@ -144,14 +145,48 @@ export function Style() {
     fieldTags: isEnglish ? 'Tags' : '标签',
     fieldTagsPlaceholder: isEnglish ? 'Comma-separated tags, e.g. community, voiceover, formal' : '用英文逗号分隔，例如 community, voiceover, formal',
     fieldDescription: isEnglish ? 'Description' : '描述',
-    fieldModel: isEnglish ? 'Recommended Model' : '推荐模型',
+    fieldModel: isEnglish ? 'Recommended Model (Metadata)' : '推荐模型（仅元数据）',
     fieldModelPlaceholder: isEnglish ? 'Optional, e.g. gpt-4.1 / deepseek-v3' : '可选，例如 gpt-4.1 / deepseek-v3',
+    fieldModelHint: isEnglish
+      ? 'Advisory metadata only. It is exported in the pack manifest for humans, but it never switches the actual LLM provider or model.'
+      : '这是给人看的建议元数据，会写入风格包 manifest，方便分享时说明适配模型；它不会自动切换实际使用的 LLM provider 或 model。',
     fieldCompatibility: isEnglish ? 'Compatible App Version' : '兼容版本',
     fieldCompatibilityPlaceholder: isEnglish ? 'Optional, e.g. >=1.3.0' : '可选，例如 >=1.3.0',
-    fullPromptTitle: isEnglish ? 'Full System Prompt' : '完整 System Prompt',
+    fullPromptTitle: isEnglish ? 'Style Pack Prompt Body' : 'Style Pack Prompt 主体',
     fullPromptHint: isEnglish
-      ? 'This is the full runtime prompt for the pack, not a suffix appended to a hardcoded prompt.'
-      : '这里编辑的是该风格包的完整运行时 prompt，不是在旧 prompt 末尾追加一句话。',
+      ? 'This textarea owns the pack’s full style definition. OpenLess no longer swaps in a hidden built-in mode prompt and then appends your text.'
+      : '这里编辑的是这套风格包自己拥有的完整风格定义。OpenLess 不再走“隐藏内置 prompt + 末尾追加文本”的旧语义。',
+    runtimeTitle: isEnglish ? 'Runtime Assembly' : '运行时组装说明',
+    runtimeDesc: isEnglish
+      ? 'At runtime the pack prompt stays as the style body. OpenLess may only prepend context premises and append helper guardrails for the current session.'
+      : '运行时仍以这段 pack prompt 作为风格主体；OpenLess 只会按当前会话额外注入上下文前提与辅助约束，不会再替换成另一套隐藏风格 prompt。',
+    runtimePackStageTitle: isEnglish ? 'Pack-owned prompt body' : 'Pack 自有 prompt 主体',
+    runtimePackStageDesc: isEnglish
+      ? 'This editable text is the style definition that both polish and repolish share.'
+      : '你在上面编辑的文本就是这套风格包拥有的风格主体，polish 和 repolish 共用它。',
+    runtimeContextStageTitle: isEnglish ? 'Context premise' : '上下文前提',
+    runtimeContextStageDesc: isEnglish
+      ? 'Prepended when working-language or output-language preferences are available. This is session context, not another style prompt.'
+      : '当工作语言、字形偏好或输出语言偏好存在时，会前置注入这一段。这是会话上下文，不是另一套风格 prompt。',
+    runtimeHotwordStageTitle: isEnglish ? 'Hotword spelling hints' : '热词拼写提示',
+    runtimeHotwordStageDesc: isEnglish
+      ? 'Appended when enabled vocabulary entries exist so names and terms keep the expected spelling.'
+      : '当用户词库里存在已启用热词时，会追加这一段，帮助专名和术语保持预期写法。',
+    runtimeHistoryStageTitle: isEnglish ? 'Multi-turn history guardrail' : '多轮历史保护段',
+    runtimeHistoryStageDesc: isEnglish
+      ? 'Only added for live polish when prior turns are present. Repolish does not use this segment.'
+      : '只有实时 polish 在存在 prior turns 时才会追加这段；History 里的 repolish 不会带它。',
+    runtimePreviewTitle: isEnglish ? 'Current Runtime Preview' : '当前运行时预览',
+    runtimePreviewDesc: isEnglish
+      ? 'Preview generated from the current app preferences and enabled hotwords. It intentionally omits the frontmost-app label so the editor window itself does not pollute the result.'
+      : '这个预览按当前应用设置和已启用热词生成。为了避免把编辑器窗口本身误当成真实输入目标，预览会刻意省略前台 app 名称。',
+    runtimePreviewSingle: isEnglish ? 'Single-turn polish / repolish' : '单轮 polish / repolish',
+    runtimePreviewMulti: isEnglish ? 'Live polish with prior turns' : '带上下文的实时 polish',
+    runtimePreviewFailed: (message: string) => (isEnglish ? `Failed to build runtime preview: ${message}` : `生成运行时预览失败：${message}`),
+    runtimePreviewOmittedFrontApp: isEnglish ? 'Front-app label omitted in preview.' : '预览已省略前台 app 标签。',
+    runtimePromptChars: (count: number) => (isEnglish ? `${count} chars` : `${count} 字符`),
+    runtimeHotwordCount: (count: number) => (isEnglish ? `${count} hotwords` : `${count} 个热词`),
+    runtimeContextWindow: (minutes: number) => (isEnglish ? `${minutes} min context window` : `${minutes} 分钟上下文窗口`),
     examplesTitle: isEnglish ? 'Effect Examples' : '效果示例',
     examplesDesc: isEnglish
       ? 'Present input/output pairs like a product detail page. They will be exported into examples.json.'
@@ -179,6 +214,8 @@ export function Style() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
+  const [runtimePreview, setRuntimePreview] = useState<StylePackRuntimeDiagnostics | null>(null);
+  const [runtimePreviewError, setRuntimePreviewError] = useState<string | null>(null);
 
   const loadPacks = async (preferredId?: string | null) => {
     setBusy('loading');
@@ -236,6 +273,26 @@ export function Style() {
     }
     setDraft(clonePack(selectedPack));
   }, [selectedPack?.id, selectedPack?.updatedAt, selectedPack?.active, selectedPack?.enabled]);
+
+  useEffect(() => {
+    if (!editorOpen || !draft) {
+      setRuntimePreview(null);
+      setRuntimePreviewError(null);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      void previewStylePackRuntime(draft)
+        .then(preview => {
+          setRuntimePreview(preview);
+          setRuntimePreviewError(null);
+        })
+        .catch(previewError => {
+          setRuntimePreview(null);
+          setRuntimePreviewError(String(previewError));
+        });
+    }, 140);
+    return () => window.clearTimeout(timer);
+  }, [editorOpen, draft]);
 
   const dirty = editableFingerprint(selectedPack) !== editableFingerprint(draft);
 
@@ -798,6 +855,7 @@ export function Style() {
                         style={inputStyle}
                         placeholder={copy.fieldModelPlaceholder}
                       />
+                      <span style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.55 }}>{copy.fieldModelHint}</span>
                     </label>
                     <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                       <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink)' }}>{copy.fieldCompatibility}</span>
@@ -811,7 +869,10 @@ export function Style() {
                   </div>
 
                   <label style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                    <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink)' }}>{copy.fullPromptTitle}</span>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+                      <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink)' }}>{copy.fullPromptTitle}</span>
+                      <Pill tone="default" size="sm">{copy.runtimePromptChars(draft.prompt.length)}</Pill>
+                    </div>
                     <span style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.55 }}>{copy.fullPromptHint}</span>
                     <textarea
                       value={draft.prompt}
@@ -819,6 +880,52 @@ export function Style() {
                       style={{ ...textareaStyle, minHeight: 210 }}
                     />
                   </label>
+
+                  <Card
+                    padding={16}
+                    style={{
+                      background: 'linear-gradient(180deg, rgba(255,255,255,0.98), rgba(246,248,252,0.95))',
+                      border: '0.5px solid rgba(148,163,184,0.24)',
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+                      <div>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--ol-ink)' }}>{copy.runtimeTitle}</div>
+                        <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', marginTop: 4, lineHeight: 1.6 }}>{copy.runtimeDesc}</div>
+                      </div>
+                      {runtimePreview && (
+                        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                          <Pill tone="default" size="sm">{copy.runtimePromptChars(runtimePreview.singleTurnPromptChars)}</Pill>
+                          <Pill tone="outline" size="sm">{copy.runtimeHotwordCount(runtimePreview.hotwords.length)}</Pill>
+                        </div>
+                      )}
+                    </div>
+
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: 10, marginBottom: 14 }}>
+                      <RuntimeStageCard title={copy.runtimePackStageTitle} desc={copy.runtimePackStageDesc} tone="default" />
+                      <RuntimeStageCard title={copy.runtimeContextStageTitle} desc={copy.runtimeContextStageDesc} tone={runtimePreview?.includesContextPremise ? 'blue' : 'outline'} />
+                      <RuntimeStageCard title={copy.runtimeHotwordStageTitle} desc={copy.runtimeHotwordStageDesc} tone={runtimePreview?.includesHotwordBlock ? 'blue' : 'outline'} />
+                      <RuntimeStageCard title={copy.runtimeHistoryStageTitle} desc={copy.runtimeHistoryStageDesc} tone={runtimePreview?.includesHistoryInstruction ? 'blue' : 'outline'} />
+                    </div>
+
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 12 }}>
+                      <ReadonlyPromptPanel
+                        title={copy.runtimePreviewSingle}
+                        body={runtimePreview?.singleTurnPrompt ?? ''}
+                        countLabel={copy.runtimePromptChars(runtimePreview?.singleTurnPromptChars ?? 0)}
+                        footer={runtimePreview?.previewOmitsFrontApp ? copy.runtimePreviewOmittedFrontApp : ''}
+                      />
+                      <ReadonlyPromptPanel
+                        title={copy.runtimePreviewMulti}
+                        body={runtimePreview?.multiTurnPrompt ?? ''}
+                        countLabel={copy.runtimePromptChars(runtimePreview?.multiTurnPromptChars ?? 0)}
+                        footer={runtimePreview ? copy.runtimeContextWindow(runtimePreview.contextWindowMinutes) : ''}
+                      />
+                    </div>
+                    <div style={{ fontSize: 11.5, color: runtimePreviewError ? 'var(--ol-red, #b91c1c)' : 'var(--ol-ink-4)', marginTop: 10, lineHeight: 1.55 }}>
+                      {runtimePreviewError ? copy.runtimePreviewFailed(runtimePreviewError) : copy.runtimePreviewDesc}
+                    </div>
+                  </Card>
 
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
                     <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
@@ -963,6 +1070,62 @@ function MetaItem({ label, value }: { label: string; value: string }) {
         {label}
       </div>
       <div style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--ol-ink-2)', wordBreak: 'break-word' }}>{value}</div>
+    </div>
+  );
+}
+
+function RuntimeStageCard({
+  title,
+  desc,
+  tone,
+}: {
+  title: string;
+  desc: string;
+  tone: 'default' | 'blue' | 'outline';
+}) {
+  return (
+    <div
+      style={{
+        borderRadius: 14,
+        border: tone === 'blue' ? '0.5px solid rgba(37,99,235,0.18)' : '0.5px solid rgba(148,163,184,0.22)',
+        background: tone === 'blue' ? 'rgba(239,246,255,0.88)' : 'rgba(255,255,255,0.92)',
+        padding: 12,
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+        <Pill tone={tone} size="sm">{title}</Pill>
+      </div>
+      <div style={{ fontSize: 12, color: 'var(--ol-ink-3)', lineHeight: 1.6 }}>{desc}</div>
+    </div>
+  );
+}
+
+function ReadonlyPromptPanel({
+  title,
+  body,
+  footer,
+  countLabel,
+}: {
+  title: string;
+  body: string;
+  footer?: string;
+  countLabel: string;
+}) {
+  return (
+    <div
+      style={{
+        borderRadius: 14,
+        border: '0.5px solid rgba(148,163,184,0.22)',
+        background: 'rgba(255,255,255,0.92)',
+        padding: 12,
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink)' }}>{title}</div>
+        <Pill tone="default" size="sm">{countLabel}</Pill>
+      </div>
+      <textarea readOnly value={body} style={{ ...textareaStyle, minHeight: 150, background: 'rgba(248,250,252,0.96)' }} />
+      {footer && <div style={{ marginTop: 8, fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.5 }}>{footer}</div>}
     </div>
   );
 }

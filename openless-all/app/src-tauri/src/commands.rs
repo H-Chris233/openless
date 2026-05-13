@@ -28,7 +28,8 @@ use crate::types::{
     builtin_style_pack_id, default_active_style_pack_id, ChineseScriptPreference, ComboBinding,
     CorrectionRule, CredentialsStatus, DictationSession, DictionaryEntry, HotkeyCapability,
     HotkeyStatus, OutputLanguagePreference, PolishMode, ShortcutBinding, StylePack,
-    StyleSystemPrompts, UpdateChannel, UserPreferences, VocabPresetStore, WindowsImeStatus,
+    StylePackRuntimeDiagnostics, StyleSystemPrompts, UpdateChannel, UserPreferences,
+    VocabPresetStore, WindowsImeStatus,
 };
 
 type CoordinatorState<'a> = State<'a, Arc<Coordinator>>;
@@ -1220,6 +1221,20 @@ pub fn save_style_pack(
         .style_packs()
         .upsert(style_pack)
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn preview_style_pack_runtime(
+    coord: CoordinatorState<'_>,
+    style_pack: StylePack,
+) -> Result<StylePackRuntimeDiagnostics, String> {
+    log::info!(
+        "[style-pack] command preview_runtime id={} base_mode={:?} prompt_chars={}",
+        style_pack.id,
+        style_pack.base_mode,
+        style_pack.prompt.chars().count()
+    );
+    Ok(coord.preview_style_pack_runtime(&style_pack))
 }
 
 #[tauri::command]

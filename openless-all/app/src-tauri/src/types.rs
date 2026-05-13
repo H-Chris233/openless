@@ -269,6 +269,26 @@ pub struct StylePack {
     pub compatible_app_version: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct StylePackRuntimeDiagnostics {
+    pub pack_id: String,
+    pub pack_name: String,
+    pub pack_prompt: String,
+    pub pack_prompt_chars: usize,
+    pub single_turn_prompt: String,
+    pub single_turn_prompt_chars: usize,
+    pub multi_turn_prompt: String,
+    pub multi_turn_prompt_chars: usize,
+    pub working_languages: Vec<String>,
+    pub hotwords: Vec<String>,
+    pub context_window_minutes: u32,
+    pub includes_context_premise: bool,
+    pub includes_hotword_block: bool,
+    pub includes_history_instruction: bool,
+    pub preview_omits_front_app: bool,
+}
+
 impl Default for StylePack {
     fn default() -> Self {
         Self {
