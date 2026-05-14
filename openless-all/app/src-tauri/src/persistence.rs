@@ -26,8 +26,7 @@ use crate::types::{
     builtin_style_pack_for_mode, builtin_style_pack_id, builtin_style_packs,
     default_active_style_pack_id, CorrectionRule, CustomStylePrompts, DictationSession,
     DictionaryEntry, PolishMode, StylePack, StylePackExample, StylePackKind, UserPreferences,
-    VocabPresetStore,
-    BUILTIN_STYLE_PACK_LIGHT_ID,
+    VocabPresetStore, BUILTIN_STYLE_PACK_LIGHT_ID,
 };
 
 const HISTORY_CAP: usize = 200;
@@ -2145,7 +2144,10 @@ mod tests {
 
         assert!(sync_style_pack_preferences(&mut prefs, &packs));
         assert_eq!(prefs.style_system_prompts.raw, packs[0].prompt);
-        assert_eq!(prefs.style_system_prompts.light, "fresh light prompt from store");
+        assert_eq!(
+            prefs.style_system_prompts.light,
+            "fresh light prompt from store"
+        );
         assert_eq!(prefs.style_system_prompts.structured, packs[2].prompt);
         assert_eq!(prefs.style_system_prompts.formal, packs[3].prompt);
         assert_eq!(prefs.custom_style_prompts, CustomStylePrompts::default());

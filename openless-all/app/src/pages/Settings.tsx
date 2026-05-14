@@ -1580,14 +1580,14 @@ function ProvidersSection() {
           }}
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
-            <Pill tone="blue">已迁移</Pill>
+            <Pill tone="blue">{t('settings.providers.styleSystemPromptMovedBadge')}</Pill>
             <Pill tone="outline">{t('settings.providers.styleSystemPromptTitle')}</Pill>
           </div>
           <div style={{ fontSize: 12.5, color: 'var(--ol-ink-2)', lineHeight: 1.7, marginBottom: 10 }}>
-            完整 system prompt 不再在设置页里按模式硬编码编辑，而是统一收敛到「风格」页的 Style Pack 详情面板。
+            {t('settings.providers.styleSystemPromptMovedDesc')}
           </div>
           <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.6 }}>
-            如果你要改运行时 prompt、示例、标签或导入导出 ZIP，请去「风格」页操作。
+            {t('settings.providers.styleSystemPromptMovedHint')}
           </div>
         </div>
       </Card>

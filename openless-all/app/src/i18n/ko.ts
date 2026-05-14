@@ -394,6 +394,9 @@ export const ko: typeof zhCN = {
       styleSystemPromptReset: 'Reset to default',
       styleSystemPromptDirty: 'Unsaved',
       styleSystemPromptSaveFailed: 'Failed to save system prompt: {{error}}',
+      styleSystemPromptMovedBadge: '마이그레이션됨',
+      styleSystemPromptMovedDesc: '전체 system prompt는 더 이상 설정 페이지에서 모드별로 직접 편집하지 않고, 스타일 페이지의 Style Pack 상세 패널로 통합되었습니다.',
+      styleSystemPromptMovedHint: '런타임 prompt, 예시, 태그 또는 ZIP 가져오기/내보내기를 변경하려면 스타일 페이지에서 작업하세요.',
       presets: {
         ark: 'ARK (Volcengine Ark)',
         deepseek: 'DeepSeek',
