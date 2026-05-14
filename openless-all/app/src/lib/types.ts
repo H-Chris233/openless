@@ -134,11 +134,80 @@ export interface WindowsImeStatus {
  *  手动下载 Beta 的入口。不影响 plugin-updater 的自动检查路径。 */
 export type UpdateChannel = 'stable' | 'beta';
 
+export interface CustomStylePrompts {
+  raw: string;
+  light: string;
+  structured: string;
+  formal: string;
+}
+
+export interface StyleSystemPrompts {
+  raw: string;
+  light: string;
+  structured: string;
+  formal: string;
+}
+
+export type StylePackKind = 'builtin' | 'imported';
+
+export interface StylePackExample {
+  title?: string | null;
+  input: string;
+  output: string;
+}
+
+export interface StylePack {
+  id: string;
+  name: string;
+  description: string;
+  author?: string | null;
+  version: string;
+  kind: StylePackKind;
+  baseMode: PolishMode;
+  prompt: string;
+  examples: StylePackExample[];
+  tags: string[];
+  iconPath?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+  enabled: boolean;
+  active: boolean;
+  recommendedModel?: string | null;
+  compatibleAppVersion?: string | null;
+}
+
+export interface StylePackRuntimeDiagnostics {
+  packId: string;
+  packName: string;
+  packPrompt: string;
+  packPromptChars: number;
+  contextPremise: string;
+  contextPremiseChars: number;
+  hotwordBlock: string;
+  hotwordBlockChars: number;
+  historyInstruction: string;
+  historyInstructionChars: number;
+  singleTurnPrompt: string;
+  singleTurnPromptChars: number;
+  multiTurnPrompt: string;
+  multiTurnPromptChars: number;
+  workingLanguages: string[];
+  hotwords: string[];
+  contextWindowMinutes: number;
+  includesContextPremise: boolean;
+  includesHotwordBlock: boolean;
+  includesHistoryInstruction: boolean;
+  previewOmitsFrontApp: boolean;
+}
+
 export interface UserPreferences {
   hotkey: HotkeyBinding;
   dictationHotkey: ShortcutBinding;
   defaultMode: PolishMode;
   enabledModes: PolishMode[];
+  activeStylePackId: string;
+  styleSystemPrompts: StyleSystemPrompts;
+  customStylePrompts: CustomStylePrompts;
   launchAtLogin: boolean;
   showCapsule: boolean;
   /** 录音期间临时静音系统输出，停止/取消/出错后恢复原静音状态。 */

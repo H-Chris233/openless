@@ -450,6 +450,10 @@ function VocabChip({ entry, onRemove, onToggle }: VocabChipProps) {
   return (
     <span
       style={{
+        // 父 flex 容器 minHeight: 80 会让 flex item 在 align-self 默认 stretch 下被拉到
+        // 80px 高，chip borderRadius: 999 把高度变大渲染成"超大椭圆"。alignSelf:flex-start
+        // 阻止拉伸，chip 始终保持 content 高度。
+        alignSelf: 'flex-start',
         display: 'inline-flex', alignItems: 'center', gap: 6,
         padding: '5px 10px 5px 12px',
         borderRadius: 999,

@@ -15,10 +15,15 @@ import type {
   PolishMode,
   QaHotkeyBinding,
   ShortcutBinding,
+  StylePack,
+  StylePackExample,
+  StylePackKind,
+  StylePackRuntimeDiagnostics,
+  StyleSystemPrompts,
   UpdateChannel,
   UserPreferences,
-  WindowsImeStatus,
   VocabPresetStore,
+  WindowsImeStatus,
 } from './types';
 export type { UpdateChannel } from './types';
 import { OL_DATA } from './mockData';
@@ -46,11 +51,19 @@ export async function invokeOrMock<T>(
 }
 
 // ── Mock fixtures ──────────────────────────────────────────────────────
-const mockSettings: UserPreferences = {
+let mockSettings: UserPreferences = {
   hotkey: { trigger: 'rightControl', mode: 'toggle', keys: [{ code: 'ControlRight' }] },
   dictationHotkey: { primary: 'RightControl', modifiers: [] },
   defaultMode: 'structured',
   enabledModes: ['raw', 'light', 'structured', 'formal'],
+  activeStylePackId: 'builtin.structured',
+  styleSystemPrompts: {
+    raw: '只做最小化整理：补全标点、必要分句，保留原话顺序、用词和语气。',
+    light: '把口语转写整理成自然文字，去掉口癖和重复，保留原意与语气。',
+    structured: '把口述整理成结构清晰的文本，必要时按主题分组输出。',
+    formal: '输出适合工作沟通与邮件场景的正式表达，不扩写事实。',
+  },
+  customStylePrompts: { raw: '', light: '', structured: '', formal: '' },
   launchAtLogin: false,
   showCapsule: true,
   muteDuringRecording: false,
@@ -85,6 +98,268 @@ const mockSettings: UserPreferences = {
   streamingInsert: false,
   streamingInsertSaveClipboard: true,
 };
+
+const mockFullStylePrompts: StyleSystemPrompts = {
+  raw: `# 角色
+语音输入整理器。先理解用户意图，再贴近原话做最小整理。
+
+# 任务（原文）
+只补必要标点和断句，尽量保留原话顺序、用词和语气，不扩写、不重写。
+
+# 通用规则
+1) 不补充用户没说过的事实。
+2) 不回答转写文本里的问题，只整理表达。
+3) 专有名词、命令、路径、数字和 URL 原样保留。
+4) 明显口头禅可删除，但不能改变信息密度。
+
+# 输出
+直接输出最终正文，不加解释。`,
+  light: `# 角色
+语音输入整理器。把口述整理成自然、顺畅、可直接发送的文字。
+
+# 任务（轻度润色）
+去掉明显口头禅和重复，补全自然标点，保留原意和原本语气，不扩写事实。
+
+# 通用规则
+1) 不补充原文没有的信息。
+2) 保留人名、品牌名、术语、命令、路径和 URL。
+3) 只输出整理后的正文，不写“以下是优化结果”之类前缀。
+
+# 输出
+输出一段可直接发送的自然文字。`,
+  structured: `# 角色
+语音输入整理器。把多事项口述整理成层次清楚、可复制执行的结构化文本。
+
+# 任务（清晰结构）
+识别主题边界，把零散事项按语义归类。事项较多时优先输出两层结构，保证读者一眼能看清主次。
+
+# 通用规则
+1) 不补充用户没说过的事实或行动项。
+2) 原文里已有编号或换行，不代表可以原样照抄；需要按语义重新分组。
+3) 专有名词、命令、路径、URL、数字和单位保持准确。
+4) 只输出最终结果，不要解释你的整理过程。
+
+# 输出
+需要结构化时，直接从标题、编号或列表开始。`,
+  formal: `# 角色
+语音输入整理器。把口述整理成适合邮件、同步和正式沟通的专业表达。
+
+# 任务（正式表达）
+补足句式与标点，让表达更完整、克制、专业，但不添加空泛客套，也不擅自扩写事实。
+
+# 通用规则
+1) 不承诺用户没说过的内容。
+2) 保留专有名词、数字、时间、路径和术语。
+3) 只输出最终正文，不附带解释或 markdown 围栏。
+
+# 输出
+输出可直接发送的正式文本。`,
+};
+
+mockSettings = {
+  ...mockSettings,
+  styleSystemPrompts: mockFullStylePrompts,
+  workingLanguages: ['简体中文'],
+};
+
+const mockDefaultStyleSystemPrompts: StyleSystemPrompts = {
+  ...mockSettings.styleSystemPrompts,
+};
+
+const mockBuiltinExamples: Record<PolishMode, StylePackExample[]> = {
+  raw: [
+    {
+      title: '最小整理',
+      input: '今天下午那个会先别取消我晚点再确认一下然后把下周二也先空出来',
+      output: '今天下午那个会先别取消，我晚点再确认一下。然后把下周二也先空出来。',
+    },
+  ],
+  light: [
+    {
+      title: '聊天消息',
+      input: '你帮我跟设计那边说一下这个首页先别上线我晚上再过一遍',
+      output: '你帮我跟设计那边说一下，这个首页先别上线，我今晚再过一遍。',
+    },
+  ],
+  structured: [
+    {
+      title: '任务整理',
+      input: '这周要做三件事一个是把登录页 bug 修掉第二个是补 README 第三个是把发版脚本再走一遍',
+      output: '这周要完成以下三件事：\n1. 修复登录页相关 bug。\n2. 补充 README 文档。\n3. 重新走一遍发版脚本。',
+    },
+  ],
+  formal: [
+    {
+      title: '工作同步',
+      input: '你帮我发个消息说这个需求今天先不上了等测试和产品都确认完我们再一起推进',
+      output: '麻烦帮我同步一下：这个需求今天先不上线，待测试和产品都确认完成后，我们再统一推进。',
+    },
+  ],
+};
+
+function makeMockStylePack(
+  id: string,
+  kind: StylePackKind,
+  baseMode: PolishMode,
+  name: string,
+  description: string,
+  prompt: string,
+  tags: string[],
+): StylePack {
+  return {
+    id,
+    name,
+    description,
+    author: 'OpenLess',
+    version: '1.0.0',
+    kind,
+    baseMode,
+    prompt,
+    examples: mockBuiltinExamples[baseMode].map(example => ({ ...example })),
+    tags,
+    iconPath: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    enabled: true,
+    active: false,
+    recommendedModel: null,
+    compatibleAppVersion: '1.0.0',
+  };
+}
+
+let mockStylePacks: StylePack[] = [
+  makeMockStylePack(
+    'builtin.raw',
+    'builtin',
+    'raw',
+    '原文',
+    '尽量保留原话顺序和语气，只做必要的断句与标点整理。',
+    mockSettings.styleSystemPrompts.raw,
+    ['原文', '最小改写'],
+  ),
+  makeMockStylePack(
+    'builtin.light',
+    'builtin',
+    'light',
+    '轻度润色',
+    '把口述整理成顺畅、自然、可直接发送的文字，不扩写事实。',
+    mockSettings.styleSystemPrompts.light,
+    ['沟通', '自然'],
+  ),
+  makeMockStylePack(
+    'builtin.structured',
+    'builtin',
+    'structured',
+    '清晰结构',
+    '适合多事项和多主题口述，自动整理为层次清楚的结构化输出。',
+    mockSettings.styleSystemPrompts.structured,
+    ['结构化', '条理'],
+  ),
+  makeMockStylePack(
+    'builtin.formal',
+    'builtin',
+    'formal',
+    '正式表达',
+    '适合邮件、同步和工作沟通场景，语气更完整、专业、克制。',
+    mockSettings.styleSystemPrompts.formal,
+    ['正式', '工作沟通'],
+  ),
+  {
+    ...makeMockStylePack(
+      'imported.creator-note',
+      'imported',
+      'light',
+      '创作者口播',
+      '给短视频口播和社区帖文使用，句子更紧凑，保留情绪和节奏。',
+      '你是一个负责整理创作者口播稿的编辑。请把输入整理成适合发帖和口播的自然文本，保留节奏感，不要补充原文没有的信息。',
+      ['社区', '口播', '节奏感'],
+    ),
+    author: 'Demo Community',
+  },
+];
+
+function cloneStylePack(stylePack: StylePack): StylePack {
+  return {
+    ...stylePack,
+    tags: [...stylePack.tags],
+    examples: stylePack.examples.map(example => ({ ...example })),
+  };
+}
+
+function cloneMockStylePacks(): StylePack[] {
+  return mockStylePacks.map(cloneStylePack);
+}
+
+function composeMockStylePackRuntimeDiagnostics(stylePack: StylePack): StylePackRuntimeDiagnostics {
+  const trimmedPrompt = stylePack.prompt.trimEnd();
+  const contextPremise = mockSettings.workingLanguages.length
+    ? ['# Context', `Working languages: ${mockSettings.workingLanguages.join(', ')}`].join('\n')
+    : '';
+  const hotwordLines = [`GitHub`, `OpenLess`];
+  const hotwordBlock = hotwordLines.length > 0
+    ? ['Hotwords (keep the spelling below when they appear in the transcript):', ...hotwordLines.map(word => `- ${word}`)].join('\n')
+    : '';
+  const singleTurnPrompt = [contextPremise, trimmedPrompt, hotwordBlock].filter(Boolean).join('\n\n');
+  const historyInstruction = 'When prior turns exist, do not repeat previous assistant outputs. Only polish the current transcript.';
+  const multiTurnPrompt = `${singleTurnPrompt}\n\n${historyInstruction}`;
+  return {
+    packId: stylePack.id,
+    packName: stylePack.name,
+    packPrompt: stylePack.prompt,
+    packPromptChars: stylePack.prompt.length,
+    contextPremise,
+    contextPremiseChars: contextPremise.length,
+    hotwordBlock,
+    hotwordBlockChars: hotwordBlock.length,
+    historyInstruction,
+    historyInstructionChars: historyInstruction.length,
+    singleTurnPrompt,
+    singleTurnPromptChars: singleTurnPrompt.length,
+    multiTurnPrompt,
+    multiTurnPromptChars: multiTurnPrompt.length,
+    workingLanguages: [...mockSettings.workingLanguages],
+    hotwords: [...hotwordLines],
+    contextWindowMinutes: mockSettings.polishContextWindowMinutes,
+    includesContextPremise: Boolean(contextPremise),
+    includesHotwordBlock: hotwordLines.length > 0,
+    includesHistoryInstruction: true,
+    previewOmitsFrontApp: true,
+  };
+}
+
+function syncMockSettingsFromStylePacks() {
+  const enabled = mockStylePacks.filter(pack => pack.enabled);
+  const active =
+    mockStylePacks.find(pack => pack.id === mockSettings.activeStylePackId && pack.enabled) ??
+    enabled[0] ??
+    mockStylePacks[0];
+  mockStylePacks = mockStylePacks.map(pack => ({
+    ...pack,
+    active: pack.id === active.id,
+  }));
+  mockSettings = {
+    ...mockSettings,
+    activeStylePackId: active.id,
+    defaultMode: active.baseMode,
+    enabledModes: ['raw', 'light', 'structured', 'formal'].filter(mode =>
+      mockStylePacks.some(pack => pack.enabled && pack.baseMode === mode),
+    ) as PolishMode[],
+    styleSystemPrompts: {
+      raw: mockStylePacks.find(pack => pack.id === 'builtin.raw')?.prompt ?? mockSettings.styleSystemPrompts.raw,
+      light:
+        mockStylePacks.find(pack => pack.id === 'builtin.light')?.prompt ??
+        mockSettings.styleSystemPrompts.light,
+      structured:
+        mockStylePacks.find(pack => pack.id === 'builtin.structured')?.prompt ??
+        mockSettings.styleSystemPrompts.structured,
+      formal:
+        mockStylePacks.find(pack => pack.id === 'builtin.formal')?.prompt ??
+        mockSettings.styleSystemPrompts.formal,
+    },
+  };
+}
+
+syncMockSettingsFromStylePacks();
 
 const mockHotkeyCapability: HotkeyCapability = {
   adapter: 'windowsLowLevel',
@@ -167,11 +442,29 @@ const mockCorrectionRules: CorrectionRule[] = [
 
 // ── Settings ───────────────────────────────────────────────────────────
 export function getSettings(): Promise<UserPreferences> {
-  return invokeOrMock('get_settings', undefined, () => mockSettings);
+  return invokeOrMock('get_settings', undefined, () => ({ ...mockSettings }));
+}
+
+export function getDefaultStyleSystemPrompts(): Promise<StyleSystemPrompts> {
+  return invokeOrMock('get_default_style_system_prompts', undefined, () => ({ ...mockDefaultStyleSystemPrompts }));
 }
 
 export function setSettings(prefs: UserPreferences): Promise<void> {
-  return invokeOrMock('set_settings', { prefs }, () => undefined);
+  return invokeOrMock('set_settings', { prefs }, () => {
+    mockSettings = { ...prefs };
+    mockStylePacks = mockStylePacks.map(pack => {
+      if (pack.kind === 'builtin') {
+        return {
+          ...pack,
+          enabled: prefs.enabledModes.includes(pack.baseMode),
+          prompt: prefs.styleSystemPrompts[pack.baseMode],
+        };
+      }
+      return { ...pack };
+    });
+    syncMockSettingsFromStylePacks();
+    return undefined;
+  });
 }
 
 // ── Release channel (Beta opt-in) ──────────────────────────────────────
@@ -204,6 +497,12 @@ export function getHotkeyStatus(): Promise<HotkeyStatus> {
 
 export function getHotkeyCapability(): Promise<HotkeyCapability> {
   return invokeOrMock('get_hotkey_capability', undefined, () => mockHotkeyCapability);
+}
+
+// Linux/Wayland 检测：rdev 监听在 Wayland 协议层面失败（issue #420），需引导用户
+// 把 `openless --toggle-dictation` 绑到桌面环境快捷键。浏览器 / 非 Tauri 环境下永远 false。
+export function isWaylandCliMode(): Promise<boolean> {
+  return invokeOrMock('is_wayland_cli_mode', undefined, () => false);
 }
 
 export function getWindowsImeStatus(): Promise<WindowsImeStatus> {
@@ -354,11 +653,159 @@ export function repolish(rawText: string, mode: PolishMode): Promise<string> {
 }
 
 export function setDefaultPolishMode(mode: PolishMode): Promise<void> {
-  return invokeOrMock('set_default_polish_mode', { mode }, () => undefined);
+  return invokeOrMock('set_default_polish_mode', { mode }, () => {
+    const packId = `builtin.${mode}`;
+    mockStylePacks = mockStylePacks.map(pack => ({
+      ...pack,
+      enabled: pack.id === packId ? true : pack.enabled,
+      active: pack.id === packId,
+    }));
+    mockSettings = { ...mockSettings, activeStylePackId: packId };
+    syncMockSettingsFromStylePacks();
+    return undefined;
+  });
 }
 
 export function setStyleEnabled(mode: PolishMode, enabled: boolean): Promise<void> {
-  return invokeOrMock('set_style_enabled', { mode, enabled }, () => undefined);
+  return invokeOrMock('set_style_enabled', { mode, enabled }, () => {
+    const packId = `builtin.${mode}`;
+    mockStylePacks = mockStylePacks.map(pack =>
+      pack.id === packId ? { ...pack, enabled } : { ...pack },
+    );
+    syncMockSettingsFromStylePacks();
+    return undefined;
+  });
+}
+
+export function listStylePacks(): Promise<StylePack[]> {
+  return invokeOrMock('list_style_packs', undefined, () => cloneMockStylePacks());
+}
+
+export function saveStylePack(stylePack: StylePack): Promise<StylePack> {
+  return invokeOrMock('save_style_pack', { stylePack }, () => {
+    mockStylePacks = mockStylePacks.map(pack => (pack.id === stylePack.id ? cloneStylePack(stylePack) : pack));
+    syncMockSettingsFromStylePacks();
+    return cloneStylePack(mockStylePacks.find(pack => pack.id === stylePack.id) ?? stylePack);
+  });
+}
+
+export function previewStylePackRuntime(stylePack: StylePack): Promise<StylePackRuntimeDiagnostics> {
+  return invokeOrMock('preview_style_pack_runtime', { stylePack }, () => composeMockStylePackRuntimeDiagnostics(stylePack));
+}
+
+export function setActiveStylePack(id: string): Promise<StylePack> {
+  return invokeOrMock('set_active_style_pack', { id }, () => {
+    mockStylePacks = mockStylePacks.map(pack => ({
+      ...pack,
+      enabled: pack.id === id ? true : pack.enabled,
+      active: pack.id === id,
+    }));
+    mockSettings = { ...mockSettings, activeStylePackId: id };
+    syncMockSettingsFromStylePacks();
+    return cloneStylePack(mockStylePacks.find(pack => pack.id === id)!);
+  });
+}
+
+export function setStylePackEnabled(id: string, enabled: boolean): Promise<StylePack[]> {
+  return invokeOrMock('set_style_pack_enabled', { id, enabled }, () => {
+    mockStylePacks = mockStylePacks.map(pack =>
+      pack.id === id ? { ...pack, enabled } : { ...pack },
+    );
+    syncMockSettingsFromStylePacks();
+    return cloneMockStylePacks();
+  });
+}
+
+export function resetBuiltinStylePack(id: string): Promise<StylePack> {
+  return invokeOrMock('reset_builtin_style_pack', { id }, () => {
+    const builtinDefaults: Record<string, StylePack> = {
+      'builtin.raw': makeMockStylePack(
+        'builtin.raw',
+        'builtin',
+        'raw',
+        '原文',
+        '尽量保留原话顺序和语气，只做必要的断句与标点整理。',
+        mockDefaultStyleSystemPrompts.raw,
+        ['原文', '最小改写'],
+      ),
+      'builtin.light': makeMockStylePack(
+        'builtin.light',
+        'builtin',
+        'light',
+        '轻度润色',
+        '把口述整理成顺畅、自然、可直接发送的文字，不扩写事实。',
+        '把口述整理成自然、顺畅、可直接发送的文字，去掉口头禅和重复，保留原意与语气。',
+        ['沟通', '自然'],
+      ),
+      'builtin.structured': makeMockStylePack(
+        'builtin.structured',
+        'builtin',
+        'structured',
+        '清晰结构',
+        '适合多事项和多主题口述，自动整理为层次清楚的结构化输出。',
+        '把口述整理成结构清楚的文本，必要时按主题分组或分点输出。',
+        ['结构化', '条理'],
+      ),
+      'builtin.formal': makeMockStylePack(
+        'builtin.formal',
+        'builtin',
+        'formal',
+        '正式表达',
+        '适合邮件、同步和工作沟通场景，语气更完整、专业、克制。',
+        '输出适合工作沟通、邮件和汇报场景的正式表达，不扩写事实。',
+        ['正式', '工作沟通'],
+      ),
+    };
+    const current = mockStylePacks.find(pack => pack.id === id);
+    const reset = builtinDefaults[id];
+    if (!current || !reset) {
+      throw new Error(`style pack not found: ${id}`);
+    }
+    mockStylePacks = mockStylePacks.map(pack =>
+      pack.id === id
+        ? {
+            ...reset,
+            enabled: current.enabled,
+            active: current.active,
+          }
+        : pack,
+    );
+    syncMockSettingsFromStylePacks();
+    return cloneStylePack(mockStylePacks.find(pack => pack.id === id)!);
+  });
+}
+
+export function deleteStylePack(id: string): Promise<void> {
+  return invokeOrMock('delete_style_pack', { id }, () => {
+    mockStylePacks = mockStylePacks.filter(pack => pack.id !== id);
+    syncMockSettingsFromStylePacks();
+    return undefined;
+  });
+}
+
+export function importStylePackFromZip(zipPath: string): Promise<StylePack> {
+  return invokeOrMock('import_style_pack_from_zip', { zipPath }, () => {
+    const seed = Date.now();
+    const pack = {
+      ...makeMockStylePack(
+        `imported.mock-${seed}`,
+        'imported',
+        'light',
+        '导入风格包',
+        `从 ${zipPath.split(/[\\\\/]/).pop() || 'ZIP'} 导入的风格包`,
+        '你是一个负责把口述整理成清晰、利落、适合社区分享文本的编辑，请完整保留事实，不要补充原文没有的信息。',
+        ['导入', 'ZIP'],
+      ),
+      author: 'Imported ZIP',
+    };
+    mockStylePacks = [pack, ...mockStylePacks];
+    syncMockSettingsFromStylePacks();
+    return cloneStylePack(pack);
+  });
+}
+
+export function exportStylePackToZip(id: string, targetPath: string): Promise<string> {
+  return invokeOrMock('export_style_pack_to_zip', { id, targetPath }, () => targetPath);
 }
 
 // ── Permissions ────────────────────────────────────────────────────────
