@@ -131,7 +131,7 @@ export function Btn({ children, variant = 'ghost', size = 'md', icon, style, onC
         borderRadius: 8,
         boxShadow: v.sh,
         fontFamily: 'inherit', fontWeight: 500,
-        cursor: disabled ? 'not-allowed' : 'default',
+        cursor: disabled ? 'not-allowed' : 'pointer',
         opacity: disabled ? 0.55 : 1,
         transition: 'background 0.16s var(--ol-motion-quick), color 0.16s var(--ol-motion-quick), border-color 0.16s var(--ol-motion-quick), box-shadow 0.18s var(--ol-motion-soft), transform 0.12s var(--ol-motion-quick)',
         ...sizes[size],

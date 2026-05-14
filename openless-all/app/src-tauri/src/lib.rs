@@ -265,6 +265,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_settings,
+            commands::get_default_style_system_prompts,
             commands::set_settings,
             commands::get_update_channel,
             commands::set_update_channel,
@@ -299,6 +300,15 @@ pub fn run() {
             #[cfg(debug_assertions)]
             commands::inject_hotkey_click_for_dev,
             commands::repolish,
+            commands::list_style_packs,
+            commands::save_style_pack,
+            commands::preview_style_pack_runtime,
+            commands::set_active_style_pack,
+            commands::set_style_pack_enabled,
+            commands::reset_builtin_style_pack,
+            commands::delete_style_pack,
+            commands::import_style_pack_from_zip,
+            commands::export_style_pack_to_zip,
             commands::set_default_polish_mode,
             commands::set_style_enabled,
             commands::check_accessibility_permission,
@@ -466,7 +476,12 @@ fn build_style_tray_menu<M: Manager<tauri::Wry>>(
     app: &M,
     coordinator: &Arc<coordinator::Coordinator>,
 ) -> tauri::Result<StyleTrayMenu> {
-    let selected = coordinator.prefs().get().default_mode;
+    let prefs = coordinator.prefs().get();
+    let selected = coordinator
+        .style_packs()
+        .get_or_default_active(&prefs.active_style_pack_id)
+        .map(|pack| pack.base_mode)
+        .unwrap_or(prefs.default_mode);
     let mut submenu = SubmenuBuilder::with_id(app, "style", "输出风格");
     for entry in tray_polish_mode_menu_entries(selected) {
         let item = CheckMenuItemBuilder::with_id(&entry.id, entry.label)
@@ -620,14 +635,10 @@ fn handle_style_tray_menu_event(app: &AppHandle, id: &str) -> bool {
         return false;
     };
     let coord = app.state::<Arc<coordinator::Coordinator>>();
-    let mut prefs = coord.prefs().get();
-    prefs.default_mode = mode;
-    if let Err(err) = coord.prefs().set(prefs.clone()) {
-        log::warn!("[tray] save polish mode preference failed: {err}");
+    if let Err(err) = commands::activate_builtin_style_mode(&coord, app, mode) {
+        log::warn!("[tray] activate builtin style mode failed: {err}");
         return true;
     }
-    let _ = app.emit("prefs:changed", &prefs);
-    let _ = app.emit_to("main", "prefs:changed", &prefs);
     if let Err(err) = refresh_tray_microphone_menu(app) {
         log::warn!("[tray] refresh style menu after polish mode change failed: {err}");
     }

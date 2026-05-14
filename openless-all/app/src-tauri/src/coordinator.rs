@@ -32,8 +32,8 @@ use crate::coordinator_state::{
 use crate::hotkey::{HotkeyEvent, HotkeyMonitor};
 use crate::insertion::TextInserter;
 use crate::persistence::{
-    CorrectionRuleStore, CredentialAccount, CredentialsVault, DictionaryStore, HistoryStore,
-    PreferencesStore,
+    sync_style_pack_preferences, CorrectionRuleStore, CredentialAccount, CredentialsVault,
+    DictionaryStore, HistoryStore, PreferencesStore, StylePackStore,
 };
 
 use crate::llm_gemini::{GeminiConfig, GeminiProvider};
@@ -100,6 +100,7 @@ struct Inner {
     app: Mutex<Option<AppHandle>>,
     history: HistoryStore,
     prefs: PreferencesStore,
+    style_packs: StylePackStore,
     vocab: DictionaryStore,
     correction_rules: CorrectionRuleStore,
     inserter: TextInserter,
@@ -186,6 +187,7 @@ impl Coordinator {
                 HistoryStore::new().expect("history store init")
             });
             let prefs = PreferencesStore::new().expect("preferences store init");
+            let style_packs = StylePackStore::new(&prefs).expect("style pack store init");
             let vocab = DictionaryStore::new().expect("dictionary store init");
             let correction_rules = CorrectionRuleStore::new().expect("correction rule store init");
 
@@ -194,6 +196,7 @@ impl Coordinator {
                     app: Mutex::new(None),
                     history,
                     prefs,
+                    style_packs,
                     vocab,
                     correction_rules,
                     inserter: TextInserter::new(),
@@ -231,6 +234,7 @@ impl Coordinator {
             HistoryStore::new().expect("history store init")
         });
         let prefs = PreferencesStore::new().expect("preferences store init");
+        let style_packs = StylePackStore::new(&prefs).expect("style pack store init");
         let vocab = DictionaryStore::new().expect("dictionary store init");
         let correction_rules = CorrectionRuleStore::new().expect("correction rule store init");
 
@@ -239,6 +243,7 @@ impl Coordinator {
                 app: Mutex::new(None),
                 history,
                 prefs,
+                style_packs,
                 vocab,
                 correction_rules,
                 inserter: TextInserter::new(),
@@ -656,6 +661,9 @@ impl Coordinator {
     pub fn prefs(&self) -> &PreferencesStore {
         &self.inner.prefs
     }
+    pub fn style_packs(&self) -> &StylePackStore {
+        &self.inner.style_packs
+    }
     pub fn vocab(&self) -> &DictionaryStore {
         &self.inner.vocab
     }
@@ -793,10 +801,35 @@ impl Coordinator {
     pub async fn repolish(&self, raw_text: String, mode: PolishMode) -> Result<String, String> {
         let hotwords = enabled_phrases(&self.inner);
         let prefs = self.inner.prefs.get();
+        let pack = self
+            .inner
+            .style_packs
+            .get_or_default_active(&prefs.active_style_pack_id)
+            .map_err(|e| e.to_string())?;
+        let style_system_prompt = pack.prompt.clone();
         let working_languages = prefs.working_languages;
         let chinese_script_preference = prefs.chinese_script_preference;
         let output_language_preference = prefs.output_language_preference;
         let llm_thinking_enabled = prefs.llm_thinking_enabled;
+        let effective_mode = pack.base_mode;
+        log::info!(
+            "[style-pack] repolish dispatch active_pack={} kind={:?} effective_mode={:?} legacy_mode={:?} raw_chars={} prompt_chars={} hotwords={} thinking={}",
+            pack.id,
+            pack.kind,
+            effective_mode,
+            mode,
+            raw_text.chars().count(),
+            style_system_prompt.chars().count(),
+            hotwords.len(),
+            llm_thinking_enabled
+        );
+        if effective_mode == PolishMode::Raw && !raw_style_pack_uses_llm(&pack) {
+            log::info!(
+                "[style-pack] repolish bypass llm active_pack={} reason=default_builtin_raw",
+                pack.id
+            );
+            return Ok(raw_text);
+        }
         // repolish 是历史记录里手动重新润色，不再绑定原 session 的前台 app；
         // 当下用户调起的 app 才是相关上下文（如果可拿）。
         let front_app = capture_frontmost_app();
@@ -804,8 +837,9 @@ impl Coordinator {
         // 用户改的就是这一条本身，不要把别的会话拿进来。所以始终走单轮路径。
         polish_text(
             &raw_text,
-            mode,
+            effective_mode,
             &hotwords,
+            &style_system_prompt,
             &working_languages,
             chinese_script_preference,
             output_language_preference,
@@ -816,6 +850,65 @@ impl Coordinator {
         .await
         .map_err(|e| e.to_string())
     }
+
+    pub fn preview_style_pack_runtime(
+        &self,
+        style_pack: &crate::types::StylePack,
+    ) -> crate::types::StylePackRuntimeDiagnostics {
+        let prefs = self.inner.prefs.get();
+        let hotwords = enabled_phrases(&self.inner);
+        let single_turn = crate::polish::assemble_polish_system_prompt(
+            &style_pack.prompt,
+            &hotwords,
+            &prefs.working_languages,
+            prefs.chinese_script_preference,
+            prefs.output_language_preference,
+            None,
+            false,
+        );
+        let multi_turn = crate::polish::assemble_polish_system_prompt(
+            &style_pack.prompt,
+            &hotwords,
+            &prefs.working_languages,
+            prefs.chinese_script_preference,
+            prefs.output_language_preference,
+            None,
+            true,
+        );
+        crate::types::StylePackRuntimeDiagnostics {
+            pack_id: style_pack.id.clone(),
+            pack_name: style_pack.name.clone(),
+            pack_prompt: style_pack.prompt.clone(),
+            pack_prompt_chars: style_pack.prompt.chars().count(),
+            context_premise: single_turn.context_premise.clone(),
+            context_premise_chars: single_turn.context_premise.chars().count(),
+            hotword_block: single_turn.hotword_block.clone(),
+            hotword_block_chars: single_turn.hotword_block.chars().count(),
+            history_instruction: multi_turn.history_instruction.clone(),
+            history_instruction_chars: multi_turn.history_instruction.chars().count(),
+            single_turn_prompt: single_turn.effective_system_prompt.clone(),
+            single_turn_prompt_chars: single_turn.effective_system_prompt.chars().count(),
+            multi_turn_prompt: multi_turn.effective_system_prompt.clone(),
+            multi_turn_prompt_chars: multi_turn.effective_system_prompt.chars().count(),
+            working_languages: prefs.working_languages,
+            hotwords,
+            context_window_minutes: prefs.polish_context_window_minutes,
+            includes_context_premise: single_turn.includes_context_premise,
+            includes_hotword_block: single_turn.includes_hotword_block,
+            includes_history_instruction: multi_turn.includes_history_instruction,
+            preview_omits_front_app: true,
+        }
+    }
+}
+
+fn raw_style_pack_uses_llm(pack: &crate::types::StylePack) -> bool {
+    !(pack.kind == crate::types::StylePackKind::Builtin
+        && pack.id == crate::types::BUILTIN_STYLE_PACK_RAW_ID
+        && pack.prompt == crate::types::StyleSystemPrompts::default().raw)
+}
+
+fn raw_mode_uses_llm(style_system_prompt: &str) -> bool {
+    style_system_prompt != crate::types::StyleSystemPrompts::default().raw
 }
 
 // ─────────────────────────── hotkey bridging ───────────────────────────
@@ -1314,37 +1407,47 @@ fn handle_action_hotkey_pressed(inner: &Arc<Inner>, kind: ActionHotkeyKind) {
 
 fn switch_to_previous_style(inner: &Arc<Inner>) {
     let mut prefs = inner.prefs.get();
-    let order = [
-        PolishMode::Raw,
-        PolishMode::Light,
-        PolishMode::Structured,
-        PolishMode::Formal,
-    ];
-    let enabled: Vec<PolishMode> = order
-        .into_iter()
-        .filter(|mode| prefs.enabled_modes.contains(mode))
-        .collect();
+    let packs = match inner.style_packs.list() {
+        Ok(packs) => packs,
+        Err(error) => {
+            log::warn!("[coord] switch style hotkey failed to load style packs: {error}");
+            return;
+        }
+    };
+    let enabled: Vec<crate::types::StylePack> =
+        packs.into_iter().filter(|pack| pack.enabled).collect();
     if enabled.len() <= 1 {
         log::info!("[coord] switch style hotkey ignored: enabled style count <= 1");
         return;
     }
     let current_index = enabled
         .iter()
-        .position(|mode| *mode == prefs.default_mode)
+        .position(|pack| pack.id == prefs.active_style_pack_id)
         .unwrap_or(0);
     let next_index = if current_index == 0 {
         enabled.len() - 1
     } else {
         current_index - 1
     };
-    prefs.default_mode = enabled[next_index];
+    prefs.active_style_pack_id = enabled[next_index].id.clone();
+    sync_style_pack_preferences(&mut prefs, &enabled);
     if let Err(e) = inner.prefs.set(prefs.clone()) {
         log::warn!("[coord] switch style hotkey 保存失败: {e}");
     } else {
         log::info!(
-            "[coord] switch style hotkey changed default mode to {}",
-            prefs.default_mode.display_name()
+            "[coord] switch style hotkey changed active style pack to {}",
+            prefs.active_style_pack_id
         );
+        if let Some(app) = inner.app.lock().clone() {
+            let _ = app.emit("prefs:changed", &prefs);
+            let _ = app.emit_to("main", "prefs:changed", &prefs);
+            let app_for_main = app.clone();
+            let _ = app.run_on_main_thread(move || {
+                if let Err(err) = crate::refresh_tray_microphone_menu(&app_for_main) {
+                    log::warn!("[tray] refresh style menu after switch style hotkey failed: {err}");
+                }
+            });
+        }
     }
 }
 
@@ -2057,6 +2160,7 @@ pub async fn polish_or_passthrough_streaming<F, C>(
     raw: &RawTranscript,
     mode: PolishMode,
     hotwords: &[String],
+    style_system_prompt: &str,
     working_languages: &[String],
     chinese_script_preference: ChineseScriptPreference,
     output_language_preference: OutputLanguagePreference,
@@ -2070,7 +2174,7 @@ where
     F: Fn(&str) + Send + Sync,
     C: Fn() -> bool + Send + Sync,
 {
-    if mode == PolishMode::Raw {
+    if mode == PolishMode::Raw && !raw_mode_uses_llm(style_system_prompt) {
         log::info!("[coord] streaming polish skipped: mode=Raw, fall back to one-shot");
         return StreamingPolishOutcome::UnsupportedFallback;
     }
@@ -2105,6 +2209,7 @@ where
             &raw.text,
             mode,
             hotwords,
+            style_system_prompt,
             working_languages,
             chinese_script_preference,
             output_language_preference,
@@ -2134,6 +2239,7 @@ async fn polish_or_passthrough(
     raw: &RawTranscript,
     mode: PolishMode,
     hotwords: &[String],
+    style_system_prompt: &str,
     working_languages: &[String],
     chinese_script_preference: ChineseScriptPreference,
     output_language_preference: OutputLanguagePreference,
@@ -2141,13 +2247,14 @@ async fn polish_or_passthrough(
     front_app: Option<&str>,
     prior_turns: &[(String, String)],
 ) -> (String, Option<String>) {
-    if mode == PolishMode::Raw {
+    if mode == PolishMode::Raw && !raw_mode_uses_llm(style_system_prompt) {
         return (raw.text.clone(), None);
     }
     match polish_text(
         &raw.text,
         mode,
         hotwords,
+        style_system_prompt,
         working_languages,
         chinese_script_preference,
         output_language_preference,
@@ -2170,6 +2277,7 @@ async fn polish_text(
     raw: &str,
     mode: PolishMode,
     hotwords: &[String],
+    style_system_prompt: &str,
     working_languages: &[String],
     chinese_script_preference: ChineseScriptPreference,
     output_language_preference: OutputLanguagePreference,
@@ -2191,6 +2299,7 @@ async fn polish_text(
                 raw,
                 mode,
                 hotwords,
+                style_system_prompt,
                 working_languages,
                 chinese_script_preference,
                 output_language_preference,
@@ -2206,6 +2315,7 @@ async fn polish_text(
             raw,
             mode,
             hotwords,
+            style_system_prompt,
             working_languages,
             chinese_script_preference,
             output_language_preference,

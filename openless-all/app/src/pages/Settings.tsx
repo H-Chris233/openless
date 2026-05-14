@@ -1558,7 +1558,6 @@ function ProvidersSection() {
   const preset = LLM_PRESETS.find(p => p.id === committedLlmProvider) ?? LLM_PRESETS[LLM_PRESETS.length - 1];
   const codexOAuthSelected = committedLlmProvider === 'codex_oauth';
   const asrPreset = visibleAsrPresets.find(p => p.id === committedAsrProvider);
-
   return (
     <>
       <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.6, marginBottom: 10 }}>
@@ -1606,6 +1605,34 @@ function ProvidersSection() {
           )}
         />
         <ProviderTools key={committedLlmProvider} kind="llm" modelAccount="ark.model_id" onModelSelected={() => setLlmModelRevision(v => v + 1)} />
+      </Card>
+
+      <Card>
+        <div style={{ marginBottom: 10 }}>
+          <div style={{ fontSize: 13, fontWeight: 600 }}>{t('settings.providers.styleSystemPromptTitle')}</div>
+          <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', marginTop: 2 }}>
+            {t('settings.providers.styleSystemPromptDesc')}
+          </div>
+        </div>
+        <div
+          style={{
+            padding: 16,
+            borderRadius: 14,
+            border: '0.5px solid var(--ol-line)',
+            background: 'linear-gradient(180deg, rgba(248,250,252,0.95), rgba(255,255,255,0.98))',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
+            <Pill tone="blue">{t('settings.providers.styleSystemPromptMovedBadge')}</Pill>
+            <Pill tone="outline">{t('settings.providers.styleSystemPromptTitle')}</Pill>
+          </div>
+          <div style={{ fontSize: 12.5, color: 'var(--ol-ink-2)', lineHeight: 1.7, marginBottom: 10 }}>
+            {t('settings.providers.styleSystemPromptMovedDesc')}
+          </div>
+          <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.6 }}>
+            {t('settings.providers.styleSystemPromptMovedHint')}
+          </div>
+        </div>
       </Card>
 
       <Card>
