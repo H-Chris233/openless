@@ -1137,9 +1137,16 @@ pub async fn read_audio_recording(session_id: String) -> Result<Vec<u8>, String>
     if !path.exists() {
         return Err("recording not found".into());
     }
-    tokio::fs::read(&path)
-        .await
-        .map_err(|e| format!("read wav failed: {e}"))
+    // TOCTOU 兜底：exists() 通过到 read 之间文件可能被 prune（条数 cap / retention
+    // 清理 / 用户手动删）。把 NotFound 标准化成跟 exists() 失败同样的错误字符串，
+    // 前端单条 'recording not found' catch 就能稳定隐藏按钮，不依赖本地化 OS 错误。
+    tokio::fs::read(&path).await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            "recording not found".into()
+        } else {
+            format!("read wav failed: {e}")
+        }
+    })
 }
 
 /// UUID-v4 字面校验：36 字符 + 5 段 `-` 分隔（8-4-4-4-12）+ 仅 ASCII 十六进制。
