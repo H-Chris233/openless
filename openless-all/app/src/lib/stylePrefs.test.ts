@@ -61,6 +61,10 @@ const previousPrefs: UserPreferences = {
   updateChannel: 'stable',
   streamingInsert: false,
   streamingInsertSaveClipboard: true,
+  autoUpdateCheck: true,
+  historyMaxEntries: null,
+  recordAudioForDebug: false,
+  audioRecordingMaxEntries: null,
 };
 
 const nextPrefs: UserPreferences = {

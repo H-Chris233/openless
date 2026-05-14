@@ -2584,7 +2584,9 @@ async fn begin_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
     let microphone_device_name = selected_microphone_device_name(inner);
     stop_microphone_preview_monitor(inner, "QA recorder");
     acquire_recording_mute(inner, "qa").await;
-    match Recorder::start(microphone_device_name, consumer, level_handler) {
+    // QA 默认不留痕（qa_save_history 默认 false），录音文件归档也跟着不开。
+    // 调试 QA 麦克风请用主听写路径。
+    match Recorder::start(microphone_device_name, consumer, level_handler, None) {
         Ok((rec, runtime_errors)) => {
             *inner.qa_recorder.lock() = Some(rec);
             // QA 也跟主听写一样监听 cpal runtime error。设备中途消失 / panic 时
@@ -2853,11 +2855,14 @@ async fn end_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
             error_code: Some("qaSession".to_string()),
             duration_ms: Some(raw.duration_ms),
             dictionary_entry_count: None,
+            has_audio_recording: None,
         };
-        if let Err(e) = inner
-            .history
-            .append_with_retention(session, inner.prefs.get().history_retention_days)
-        {
+        let prefs_snapshot = inner.prefs.get();
+        if let Err(e) = inner.history.append_with_retention(
+            session,
+            prefs_snapshot.history_retention_days,
+            prefs_snapshot.history_max_entries,
+        ) {
             log::error!("[coord] QA history append failed: {e}");
         }
     }

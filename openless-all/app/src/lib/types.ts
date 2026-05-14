@@ -18,6 +18,9 @@ export interface DictationSession {
   errorCode: string | null;
   durationMs: number | null;
   dictionaryEntryCount: number | null;
+  /** 该会话是否在录音时归档了原始 wav（取决于当时 prefs.recordAudioForDebug）。
+   *  true 时前端在 History 渲染播放按钮，凭 id 通过 read_audio_recording IPC 拿字节流。 */
+  hasAudioRecording: boolean | null;
 }
 
 export interface DictionaryEntry {
@@ -278,6 +281,17 @@ export interface UserPreferences {
   /** 流式输入成功后是否把最终润色文本写回剪贴板。开启后 Cmd+V 还能重复粘贴该次输出，
    *  与一次性路径行为对齐。默认 true。 */
   streamingInsertSaveClipboard: boolean;
+  /** 主窗口启动 + 后台每 60 分钟自动检查云端新版本。默认 true。
+   *  关闭后仅 Settings → 关于 的「检查更新」手动按钮可用。 */
+  autoUpdateCheck: boolean;
+  /** 历史记录上限（条数）。null = 走默认 200；5..=200 之间为用户自定义。 */
+  historyMaxEntries: number | null;
+  /** 是否为每次会话保留原始麦克风音频文件（wav），用于排查 ASR 误识别 / 麦克风灵敏度。
+   *  默认 false。开启后会占磁盘空间，受 historyRetentionDays 同样的清理策略约束。 */
+  recordAudioForDebug: boolean;
+  /** recordings/ 里保留的最近 wav 文件数。null = 跟随 200 硬上限；1..=200 之间为用户自定义。
+   *  跟 historyMaxEntries 解耦——「文本档案多但 wav 只留最近 5 条」是合法组合。 */
+  audioRecordingMaxEntries: number | null;
 }
 
 export interface MicrophoneDevice {

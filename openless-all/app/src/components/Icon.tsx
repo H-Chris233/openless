@@ -55,6 +55,10 @@ export const ICONS: Record<string, string> = {
   info:    'M12 8h.01M11 12h1v4h1M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z',
   external:'M9 5h10v10M19 5L9 15M5 9v10h10',
   close:   'M6 6l12 12M6 18L18 6',
+  // play — 右指三角箭头，标识"播放录音"按钮（History 详情）
+  play:    'M8 5v14l11-7z',
+  // download — 向下箭头 + 底托，标识"导出录音"按钮（History 详情）
+  download:'M12 3v12M7 12l5 5 5-5M5 21h14',
 };
 
 export interface IconProps {

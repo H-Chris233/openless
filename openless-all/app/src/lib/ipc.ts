@@ -97,6 +97,10 @@ let mockSettings: UserPreferences = {
   updateChannel: 'stable',
   streamingInsert: false,
   streamingInsertSaveClipboard: true,
+  autoUpdateCheck: true,
+  historyMaxEntries: null,
+  recordAudioForDebug: false,
+  audioRecordingMaxEntries: null,
 };
 
 const mockFullStylePrompts: StyleSystemPrompts = {
@@ -419,6 +423,7 @@ const mockHistory: DictationSession[] = OL_DATA.history.map((h, i) => ({
   errorCode: null,
   durationMs: 600,
   dictionaryEntryCount: 28,
+  hasAudioRecording: null,
 }));
 
 const mockVocab: DictionaryEntry[] = OL_DATA.vocab.map((v, i) => ({
@@ -561,6 +566,22 @@ export function deleteHistoryEntry(id: string): Promise<void> {
 
 export function clearHistory(): Promise<void> {
   return invokeOrMock('clear_history', undefined, () => undefined);
+}
+
+/** 读取某次会话的原始麦克风 wav 字节流。仅当 prefs.recordAudioForDebug 当时打开
+ *  并且文件没被 retention 清理掉时才有内容；其他情况后端会返回 "recording not found" 错。
+ *  调用方应仅在 session.hasAudioRecording === true 时触发，避免无效 IPC。 */
+export function readAudioRecording(sessionId: string): Promise<Uint8Array> {
+  return invokeOrMock(
+    'read_audio_recording',
+    { sessionId },
+    () => new Uint8Array(),
+  ).then(value => {
+    // Tauri 默认把 Vec<u8> 序列化为 number[]，前端拿到的是普通数组；统一转 Uint8Array。
+    if (value instanceof Uint8Array) return value;
+    if (Array.isArray(value)) return new Uint8Array(value as number[]);
+    return new Uint8Array(value as ArrayBuffer);
+  });
 }
 
 // ── Vocab ──────────────────────────────────────────────────────────────

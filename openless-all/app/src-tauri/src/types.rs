@@ -98,6 +98,11 @@ pub struct DictationSession {
     pub error_code: Option<String>,
     pub duration_ms: Option<u64>,
     pub dictionary_entry_count: Option<u32>,
+    /// 当 `prefs.record_audio_for_debug` 开启时，本次会话的原始麦克风音频被写到
+    /// `recordings/<id>.wav`。前端凭这个字段决定是否在 History 渲染播放按钮。
+    /// `None` / `Some(false)` 都按"无录音"处理；旧 JSON 不带这字段也兼容。
+    #[serde(default)]
+    pub has_audio_recording: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -596,6 +601,25 @@ pub struct UserPreferences {
     /// 默认 true（更接近用户习惯）。
     #[serde(default = "default_true")]
     pub streaming_insert_save_clipboard: bool,
+    /// 主窗口启动 + 后台每 60 分钟自动检查云端新版本。默认 true。
+    /// 用户在 Settings → 关于 里可关。关闭后仅手动「检查更新」按钮可用。
+    #[serde(default = "default_true")]
+    pub auto_update_check: bool,
+    /// 历史记录上限（条数）。`None` = 使用代码内 200 条硬上限；
+    /// `Some(n)` 表示用户在 Settings 自定义了上限（5..=200 之间）。
+    #[serde(default)]
+    pub history_max_entries: Option<u32>,
+    /// 是否为每次会话保留原始麦克风音频文件（wav）到 `recordings/` 目录，
+    /// 用于排查 ASR 误识别 / 麦克风灵敏度问题。默认 false。开启会占磁盘空间，
+    /// 受 `history_retention_days` 同样的清理策略约束。
+    #[serde(default)]
+    pub record_audio_for_debug: bool,
+    /// `recordings/` 里保留的最近 wav 文件数（按 mtime 倒序保留最新的）。
+    /// `None` = 跟随 `HISTORY_CAP` (200)；`Some(n)` 时 clamp 到 1..=200。
+    /// 调用点：每次开新会话前裁旧。让用户在「文本历史保留 200 条但 wav 只留最近 5 条」
+    /// 这种「文本档案多 + 录音不占盘」组合下精确控制。
+    #[serde(default)]
+    pub audio_recording_max_entries: Option<u32>,
 }
 
 fn default_local_asr_model() -> String {
@@ -701,6 +725,14 @@ struct UserPreferencesWire {
     streaming_insert: bool,
     #[serde(default = "default_true")]
     streaming_insert_save_clipboard: bool,
+    #[serde(default = "default_true")]
+    auto_update_check: bool,
+    #[serde(default)]
+    history_max_entries: Option<u32>,
+    #[serde(default)]
+    record_audio_for_debug: bool,
+    #[serde(default)]
+    audio_recording_max_entries: Option<u32>,
 }
 
 impl Default for UserPreferencesWire {
@@ -747,6 +779,10 @@ impl Default for UserPreferencesWire {
             start_minimized: prefs.start_minimized,
             streaming_insert: prefs.streaming_insert,
             streaming_insert_save_clipboard: prefs.streaming_insert_save_clipboard,
+            auto_update_check: prefs.auto_update_check,
+            history_max_entries: prefs.history_max_entries,
+            record_audio_for_debug: prefs.record_audio_for_debug,
+            audio_recording_max_entries: prefs.audio_recording_max_entries,
         }
     }
 }
@@ -815,6 +851,10 @@ impl<'de> Deserialize<'de> for UserPreferences {
             start_minimized: wire.start_minimized,
             streaming_insert: wire.streaming_insert,
             streaming_insert_save_clipboard: wire.streaming_insert_save_clipboard,
+            auto_update_check: wire.auto_update_check,
+            history_max_entries: wire.history_max_entries,
+            record_audio_for_debug: wire.record_audio_for_debug,
+            audio_recording_max_entries: wire.audio_recording_max_entries,
         })
     }
 }
@@ -893,13 +933,17 @@ const ROLE_BLOCK: &str = "# 角色\n\
 
 const COMMON_RULES: &str = "# 通用规则\n\
     1) \u{4E0D}确定 / 转写明显不完整 / 断句在半截 \u{2192} 保留原话，\u{4E0D}要替用户补全或猜测。\n\
-    2) 中英混输、专有名词、产品名、代码 / 命令 / 路径 / URL、数字与单位、emoji \u{2192} 原样保留。\n\
+    2) 中英混输、专有名词、产品名、代码 / 命令 / 路径 / URL、数字与单位、emoji \u{2192} 原样保留。\
+    带次版本号的产品名（如 GPT-5.6、Claude 4.7、iOS 26.1、Python 3.13、Tauri 2.10）也算\u{201C}数字与单位\u{201D}的一部分，\
+    完整保留小数 / 次版本号，\u{4E0D}省略成主版本（GPT-5.6 \u{4E0D}写成 GPT-5、Claude 4.7 \u{4E0D}写成 Claude 4）。\
+    （例外：当转写词是 # 热词列表中某个词的同音 / 形近误识别时，按热词列表里的正确写法输出，这一条比\u{201C}原样保留\u{201D}优先。）\n\
     3) \u{4E0D}引入用户没说过的事实；中途改口以最终版本为准。在保留原意和语气的前提下，按用户的整体意图把零碎口语组织成协调、自然的书面表达。\n\
     4) 如果原始转写本身是在\u{201C}询问 / 要求别人做某事\u{201D}，只整理为清楚的问题或请求，\u{4E0D}代替对方回答。\n\
     5) 自动纠错：明显的 ASR 同音 / 形近错字按上下文纠回正确字面，常见模式包括\
     \u{201C}跟目录 / 根木鹿\u{201D}\u{2192}\u{201C}根目录\u{201D}、\u{201C}代码厂\u{201D}\u{2192}\u{201C}代码仓\u{201D}、\
     \u{201C}编一编\u{201D}\u{2192}\u{201C}编译\u{201D}、\u{201C}的 / 得 / 地\u{201D}用法、\u{201C}做 / 作\u{201D} 等常见错别字。\
-    专有名词（见 # 热词）、人名、品牌名、不在常见中文词典里的词原样保留，\u{4E0D}强行改字；改了之后含义会发生变化的不改。";
+    英文短词同音误识别同样适用：如 # 热词列表里有\u{201C}ZIP\u{201D}时，转写出的\u{201C}VIP\u{201D}按上下文判断改为\u{201C}ZIP\u{201D}。\
+    人名、品牌名、不在常见中文词典里的词原样保留，\u{4E0D}强行改字；改了之后含义会发生变化的不改。";
 
 const OUTPUT_BLOCK: &str = "# 输出\n\
     直接输出最终文本正文。需要结构化时直接从标题 / 段落 / 编号开始。\n\
@@ -945,6 +989,9 @@ pub fn default_style_system_prompt_for_mode(mode: PolishMode) -> String {
             把口述整理为脉络清晰、可直接复制走的结构化文本：保留用户的口语引子（润色后作为首行过渡），\
             主动按语义把扁平事项归类成 2\u{2013}4 个主题，用双层格式呈现，尾巴查询用自然收尾句。\n\
             \n\
+            **多条独立条目场景例外**：当输入是「多条互相独立的新闻 / 公司动态 / 产品发布 / 行业进展」拼成的播报式内容（典型如 AI 日报、行业资讯整理、多家公司发布、多个独立事件回顾），\
+            每条独立成一个主题，可以超过 4 个，\u{4E0D}强行合并到 2\u{2013}4 类。判断信号：条目之间没有共享主体、彼此互不相关、用户用\u{201C}下面是几条新闻\u{201D}\u{201C}今天的资讯\u{201D}\u{201C}最新进展\u{201D}等播报式引子。\n\
+            \n\
             **默认行为：双层 list。判断事项的标准**：\
             以下任意一种都算一个事项 \u{2192} \u{4E0D}\u{4F9D}\u{8D56}\u{7528}\u{6237}\u{662F}\u{5426}\u{660E}\u{8BF4}\u{201C}\u{7B2C}\u{4E00}\u{201D}\u{201C}\u{7B2C}\u{4E8C}\u{201D}\u{201C}\u{53E6}\u{5916}\u{201D}\u{7B49}\u{8FDE}\u{63A5}\u{8BCD}\u{3002}\n\
             \u{2003}\u{2003}1) 可独立成句的陈述（\u{4E3B}+\u{8C13}+\u{5BBE}，如\u{201C}\u{300A}\u{67D0}\u{4E1C}\u{897F}\u{300B}\u{8FD8}\u{662F}\u{767D}\u{8272}\u{201D}）\n\
@@ -968,7 +1015,10 @@ pub fn default_style_system_prompt_for_mode(mode: PolishMode) -> String {
             都必须按语义重新归类成下面定义的双层格式。\u{200D}\u{200D}照抄原结构 = 失败。\n\
             \n\
             双层格式（主清单标准写法）：\n\
-            - 第一层（主题）：行首用 \"1.\" \"2.\" \"3.\" \u{2026}，每个主题一行短标题（4\u{2013}8 字最佳）；\n\
+            - 第一层（主题）：行首用 \"1.\" \"2.\" \"3.\" \u{2026}，每个主题一行短标题（4\u{2013}8 字最佳）；\
+            主题标题应包含事项中的关键实体名（人名 / 公司名 / 产品名 / 平台名），\
+            例如\u{300C}OpenAI 模型动态\u{300D}\u{300C}苹果与欧盟监管争议\u{300D}，而非纯抽象类别如\u{300C}模型进展\u{300D}\u{300C}监管争议\u{300D}；\
+            只有当某主题包含多个不同实体且无法压缩时，才退回到抽象命名。\n\
             - 第二层（子项）：另起一行，行首用 \"(a)\" \"(b)\" \"(c)\" \u{2026}，每条一句完整陈述。\n\
             顶层\u{4E0D}使用半括号写法（如 \"1)\" \"2)\"）；不在子项内再嵌第三层。\n\
             \n\
@@ -1139,6 +1189,10 @@ impl Default for UserPreferences {
             start_minimized: false,
             streaming_insert: false,
             streaming_insert_save_clipboard: true,
+            auto_update_check: true,
+            history_max_entries: None,
+            record_audio_for_debug: false,
+            audio_recording_max_entries: None,
         }
     }
 }
