@@ -519,7 +519,7 @@ export const en: typeof zhCN = {
       streamingInsertHintWindows:
         'SendInput Unicode types directly, bypassing TSF / IME — no input-method switching needed.',
       streamingInsertHintLinux:
-        'enigo + XTest synthesize keystrokes. Stable on X11; on Wayland it depends on the compositor — failures fall back automatically.',
+        'Uses enigo + XTest on X11. On Wayland, streaming insertion is disabled and output is kept in the clipboard for manual paste.',
       streamingInsertSaveClipboardLabel: 'Copy to clipboard',
       streamingInsertSaveClipboardHint: 'After a successful insert, write the final text to the clipboard so Cmd+V can paste it again. Off = clipboard is never touched.',
       localAsrTitle: 'Local ASR models (experimental)',

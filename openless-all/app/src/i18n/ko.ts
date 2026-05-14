@@ -521,7 +521,7 @@ export const ko: typeof zhCN = {
       streamingInsertHintWindows:
         'SendInput Unicode 로 TSF / IME 를 우회. 입력 소스 전환 불필요.',
       streamingInsertHintLinux:
-        'enigo + XTest 로 키 합성. X11 안정; Wayland 는 compositor 의존이며 실패 시 자동 폴백.',
+        'X11에서는 enigo + XTest로 키를 합성합니다. Wayland에서는 스트리밍 입력을 비활성화하고 출력을 클립보드에 남겨 수동 붙여넣기를 사용합니다.',
       streamingInsertSaveClipboardLabel: '클립보드에 저장',
       streamingInsertSaveClipboardHint: '삽입 성공 후 최종 텍스트를 클립보드에 기록하여 Cmd+V 로 다시 붙여넣을 수 있게 합니다. 끄면 클립보드를 건드리지 않습니다.',
       localAsrTitle: '로컬 ASR 모델 (실험적)',
