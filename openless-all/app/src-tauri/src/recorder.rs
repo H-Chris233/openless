@@ -64,19 +64,34 @@ impl Recorder {
     /// `audio_archive_path` 不为 None 时，同样的 16 kHz/Mono/Int16-LE 旁路写入 WAV 文件，
     /// 用于 debug 麦克风灵敏度 / ASR 误识别。Drop 时自动回填 RIFF / data 长度。
     ///
+    /// 返回值第三个 `bool` = "archive 实际成功创建"：caller 写 history 时应当用这个值
+    /// 决定 `has_audio_recording`，而不是 prefs 开关。开关打开但写盘失败（路径不存在 /
+    /// 权限不足 / 磁盘满）时仍返回 false，避免前端渲染播放按钮后端却 404。
+    ///
     /// 实际的 cpal Stream 在独立线程里构造、播放、最终析构——因为它 `!Send`。
     pub fn start(
         microphone_device_name: Option<String>,
         consumer: Arc<dyn AudioConsumer>,
         level_handler: Arc<dyn Fn(f32) + Send + Sync>,
         audio_archive_path: Option<PathBuf>,
-    ) -> Result<(Self, Receiver<RecorderError>), RecorderError> {
+    ) -> Result<(Self, Receiver<RecorderError>, bool), RecorderError> {
         // 启动信号：子线程构造 Stream 完成后通过 startup_tx 报告结果。
         let (startup_tx, startup_rx) = channel::<Result<(), RecorderError>>();
         // 运行期错误：Stream 已成功启动后，cpal 通过 err_cb 异步上报。
         let (runtime_error_tx, runtime_error_rx) = channel::<RecorderError>();
         let stop_flag = Arc::new(AtomicBool::new(false));
         let stop_for_thread = Arc::clone(&stop_flag);
+
+        // 同步路径上尝试创建 WavArchiver——成功 / 失败都立刻知道，传给 caller 决定
+        // 是否在 history 标 has_audio_recording。失败仅 log::warn 不抛错，主路径继续。
+        let archiver = audio_archive_path.and_then(|path| match WavArchiver::create(&path) {
+            Ok(arch) => Some(Arc::new(Mutex::new(arch))),
+            Err(err) => {
+                log::warn!("[recorder] wav archive create failed at {path:?}: {err}");
+                None
+            }
+        });
+        let archive_active = archiver.is_some();
 
         let join_handle = thread::Builder::new()
             .name("openless-recorder".into())
@@ -85,7 +100,7 @@ impl Recorder {
                     microphone_device_name,
                     consumer,
                     level_handler,
-                    audio_archive_path,
+                    archiver,
                     stop_for_thread,
                     startup_tx,
                     runtime_error_tx,
@@ -106,6 +121,7 @@ impl Recorder {
                 join_handle: Mutex::new(Some(join_handle)),
             },
             runtime_error_rx,
+            archive_active,
         ))
     }
 
@@ -149,23 +165,17 @@ pub fn list_input_devices() -> Result<Vec<MicrophoneDevice>, RecorderError> {
 }
 
 /// 音频线程主体：构造 Stream → 通过 startup_tx 报告 → 循环到 stop_flag。
+/// `archiver` 由 caller 在同步路径上已经尝试创建好（成功 → Some / 失败 → None），
+/// 这里只负责把它穿透到 build_input_stream 给 cpal callback 用。
 fn run_audio_thread(
     microphone_device_name: Option<String>,
     consumer: Arc<dyn AudioConsumer>,
     level_handler: Arc<dyn Fn(f32) + Send + Sync>,
-    audio_archive_path: Option<PathBuf>,
+    archiver: Option<Arc<Mutex<WavArchiver>>>,
     stop_flag: Arc<AtomicBool>,
     startup_tx: Sender<Result<(), RecorderError>>,
     runtime_error_tx: Sender<RecorderError>,
 ) {
-    let archiver = audio_archive_path.and_then(|path| match WavArchiver::create(&path) {
-        Ok(arch) => Some(Arc::new(Mutex::new(arch))),
-        Err(err) => {
-            // 写盘失败不阻塞录音：debug 归档失效但听写主路径正常。
-            log::warn!("[recorder] wav archive create failed at {path:?}: {err}");
-            None
-        }
-    });
     let (stream, state) = match build_input_stream(
         microphone_device_name,
         consumer,

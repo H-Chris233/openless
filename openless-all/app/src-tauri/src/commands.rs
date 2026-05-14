@@ -436,7 +436,7 @@ pub async fn start_microphone_level_monitor(
         let level_handler: Arc<dyn Fn(f32) + Send + Sync> = Arc::new(move |level| {
             let _ = level_app.emit("microphone:level", serde_json::json!({ "level": level }));
         });
-        let (recorder, _runtime_errors) =
+        let (recorder, _runtime_errors, _archive_active) =
             Recorder::start(microphone_device_name, consumer, level_handler, None)
                 .map_err(|e| e.to_string())?;
         *state.lock() = Some(recorder);

@@ -804,7 +804,12 @@ pub(super) async fn start_recorder_for_starting(
         level_handler,
         audio_archive_path,
     ) {
-        Ok((rec, runtime_errors)) => {
+        Ok((rec, runtime_errors, archive_active)) => {
+            // 把 archive 实际创建状态存到 Inner，让 history 写入路径（含 empty-transcript
+            // 失败分支）读真实情况，而不是 prefs 开关。修 pr_agent "Wrong Flag" 反馈。
+            inner
+                .audio_archive_active
+                .store(archive_active, std::sync::atomic::Ordering::Relaxed);
             store_recorder_for_session(inner, session_id, rec);
             spawn_recorder_error_monitor(inner, runtime_errors);
             // 不在这里 emit Recording capsule。
@@ -1248,7 +1253,10 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
             error_code: Some("emptyTranscript".to_string()),
             duration_ms: Some(raw.duration_ms),
             dictionary_entry_count: Some(enabled_phrases(inner).len() as u32),
-            has_audio_recording: None,
+            // empty-transcript（ASR 没识别到任何文字）也保留 wav 标记——这是用户最想
+            // 通过原始录音定位"是不是麦克风太小声 / ASR 模型问题"的场景。修 pr_agent
+            // "Missing Audio" 反馈。
+            has_audio_recording: Some(inner.audio_archive_active.load(Ordering::Relaxed)),
         };
         let prefs_snapshot = inner.prefs.get();
         if let Err(e) = inner.history.append_with_retention(
@@ -1547,9 +1555,9 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         // 历史详情页的"X 个热词"显示：用本次实际命中次数（每个匹配实例算一次），
         // 比"启用词条总数"更能反映本段口述命中了多少。u64 → u32 截断对单段听写足够。
         dictionary_entry_count: Some(total_hits.min(u32::MAX as u64) as u32),
-        // recorder 旁路写盘开关在 begin_session 时已传给 recorder；这里只标记
-        // 该会话是否有对应录音文件供 History 渲染播放按钮。
-        has_audio_recording: Some(prefs_snapshot.record_audio_for_debug),
+        // 用 begin_session 时 Recorder::start 返回的实际写盘状态，而不是 prefs 开关——
+        // 开关打开但路径创建失败时这里是 false，避免前端渲染播放按钮后端 404。
+        has_audio_recording: Some(inner.audio_archive_active.load(Ordering::Relaxed)),
     };
     if let Err(e) = inner.history.append_with_retention(
         session,

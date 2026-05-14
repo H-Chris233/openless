@@ -116,6 +116,11 @@ struct Inner {
     #[cfg(target_os = "windows")]
     foundry_local_runtime: Arc<FoundryLocalRuntime>,
     recorder: Mutex<Option<SessionResource<Recorder>>>,
+    /// 当前 dictation / QA session 的 wav 归档是否真的被写到磁盘上。
+    /// 由 Recorder::start 返回值 (archive_active) 写入；history.append 路径读取，
+    /// 决定 DictationSession.has_audio_recording 字段。比单纯读 prefs.record_audio_for_debug
+    /// 更准确：用户开了开关但路径无法创建（权限 / 磁盘满）也算 false。
+    audio_archive_active: AtomicBool,
     recording_mute: Mutex<SharedRecordingMuteState>,
     hotkey: Mutex<Option<HotkeyMonitor>>,
     hotkey_status: Mutex<HotkeyStatus>,
@@ -203,6 +208,7 @@ impl Coordinator {
                     state: Mutex::new(SessionState::default()),
                     asr: Mutex::new(None),
                     recorder: Mutex::new(None),
+                    audio_archive_active: AtomicBool::new(false),
                     recording_mute: Mutex::new(SharedRecordingMuteState::new()),
                     hotkey: Mutex::new(None),
                     hotkey_status: Mutex::new(HotkeyStatus::default()),
@@ -252,6 +258,7 @@ impl Coordinator {
                 state: Mutex::new(SessionState::default()),
                 asr: Mutex::new(None),
                 recorder: Mutex::new(None),
+                audio_archive_active: AtomicBool::new(false),
                 recording_mute: Mutex::new(SharedRecordingMuteState::new()),
                 hotkey: Mutex::new(None),
                 hotkey_status: Mutex::new(HotkeyStatus::default()),
@@ -2587,7 +2594,12 @@ async fn begin_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
     // QA 默认不留痕（qa_save_history 默认 false），录音文件归档也跟着不开。
     // 调试 QA 麦克风请用主听写路径。
     match Recorder::start(microphone_device_name, consumer, level_handler, None) {
-        Ok((rec, runtime_errors)) => {
+        Ok((rec, runtime_errors, archive_active)) => {
+            // QA 路径不写 dictation 的 history，但仍把 archive 状态归零，避免 dictation
+            // 接力时读到上一个 QA session 的过期值。
+            inner
+                .audio_archive_active
+                .store(archive_active, std::sync::atomic::Ordering::Relaxed);
             *inner.qa_recorder.lock() = Some(rec);
             // QA 也跟主听写一样监听 cpal runtime error。设备中途消失 / panic 时
             // 不能让 QA 永远卡在 Recording 没反馈。详见 issue #168。
