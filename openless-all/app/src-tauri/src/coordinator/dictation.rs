@@ -289,7 +289,7 @@ async fn run_streaming_polish(
 fn finalize_polished_text(
     polished: String,
     translation_active: bool,
-    raw_uses_llm: bool,
+    _raw_uses_llm: bool,
     mode: PolishMode,
     polish_error: &Option<String>,
     chinese_script_preference: crate::types::ChineseScriptPreference,
@@ -302,7 +302,7 @@ fn finalize_polished_text(
     let should_force_script = if translation_active {
         polish_error.is_some()
     } else {
-        (!raw_uses_llm && mode == PolishMode::Raw) || polish_error.is_some()
+        mode == PolishMode::Raw || polish_error.is_some()
     };
     let polished = if should_force_script {
         apply_chinese_script_preference(&polished, chinese_script_preference)
@@ -1648,6 +1648,22 @@ mod tests {
         );
 
         assert_eq!(result, "Open AI");
+    }
+
+    #[test]
+    fn raw_llm_output_still_applies_script_preference() {
+        let result = finalize_polished_text(
+            "繁體".into(),
+            false,
+            true,
+            PolishMode::Raw,
+            &None,
+            ChineseScriptPreference::Simplified,
+            &[],
+            false,
+        );
+
+        assert_eq!(result, "繁体");
     }
 
     #[test]

@@ -644,8 +644,8 @@ struct UserPreferencesWire {
     dictation_hotkey: Option<ShortcutBinding>,
     default_mode: PolishMode,
     enabled_modes: Vec<PolishMode>,
-    #[serde(default = "default_active_style_pack_id")]
-    active_style_pack_id: String,
+    #[serde(default)]
+    active_style_pack_id: Option<String>,
     #[serde(default)]
     style_system_prompts: StyleSystemPrompts,
     #[serde(default)]
@@ -711,7 +711,7 @@ impl Default for UserPreferencesWire {
             dictation_hotkey: None,
             default_mode: prefs.default_mode,
             enabled_modes: prefs.enabled_modes,
-            active_style_pack_id: prefs.active_style_pack_id,
+            active_style_pack_id: Some(prefs.active_style_pack_id),
             style_system_prompts: prefs.style_system_prompts,
             custom_style_prompts: prefs.custom_style_prompts,
             launch_at_login: prefs.launch_at_login,
@@ -767,11 +767,10 @@ impl<'de> Deserialize<'de> for UserPreferences {
             dictation_hotkey,
             default_mode: wire.default_mode,
             enabled_modes: wire.enabled_modes,
-            active_style_pack_id: if wire.active_style_pack_id.trim().is_empty() {
-                builtin_style_pack_id(wire.default_mode).to_string()
-            } else {
-                wire.active_style_pack_id
-            },
+            active_style_pack_id: wire
+                .active_style_pack_id
+                .filter(|id| !id.trim().is_empty())
+                .unwrap_or_else(|| builtin_style_pack_id(wire.default_mode).to_string()),
             style_system_prompts: wire
                 .style_system_prompts
                 .with_legacy_custom_prompts(&wire.custom_style_prompts),
@@ -1768,6 +1767,33 @@ mod tests {
         assert_eq!(prefs.custom_style_prompts.structured, "按项目符号整理");
         assert_eq!(prefs.custom_style_prompts.formal, "像正式周报");
         assert!(prefs.custom_style_prompts.has_for_mode(PolishMode::Formal));
+    }
+
+    #[test]
+    fn missing_active_style_pack_id_uses_legacy_default_mode() {
+        let prefs: UserPreferences = serde_json::from_str(
+            r#"{
+                "defaultMode": "structured"
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(prefs.default_mode, PolishMode::Structured);
+        assert_eq!(prefs.active_style_pack_id, BUILTIN_STYLE_PACK_STRUCTURED_ID);
+    }
+
+    #[test]
+    fn explicit_active_style_pack_id_is_preserved() {
+        let prefs: UserPreferences = serde_json::from_str(
+            r#"{
+                "defaultMode": "formal",
+                "activeStylePackId": "custom.meeting"
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(prefs.default_mode, PolishMode::Formal);
+        assert_eq!(prefs.active_style_pack_id, "custom.meeting");
     }
 
     #[test]
