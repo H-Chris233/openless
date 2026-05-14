@@ -1751,7 +1751,7 @@ fn compose_system_prompt(style_system_prompt: &str, hotwords: &[String]) -> Stri
         .collect::<Vec<_>>()
         .join("\n");
     format!(
-        "{}\n\n热词（用户希望以下写法在输出中保持准确；当转写中出现这些词的同音 / 近形误识别时，优先按上述写法输出，不做无关词的机械替换）：\n{}",
+        "{}\n\n热词（用户希望以下写法在输出中保持准确；当转写中出现这些词的同音或形近误识别时，优先按上述写法输出，不做无关词的机械替换）：\n{}",
         base, bullets
     )
 }
@@ -1771,7 +1771,7 @@ fn compose_hotword_block_preview(hotwords: &[String]) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     format!(
-        "热词（用户希望以下写法在输出中保持准确；当转写中出现这些词的同音 / 近形误识别时，优先按上述写法输出，不做无关词的机械替换）：\n{}",
+        "热词（用户希望以下写法在输出中保持准确；当转写中出现这些词的同音或形近误识别时，优先按上述写法输出，不做无关词的机械替换）：\n{}",
         bullets
     )
 }
@@ -2715,7 +2715,7 @@ mod tests {
         );
 
         assert!(prompt.contains("用户希望以下写法在输出中保持准确"));
-        assert!(prompt.contains("同音 / 近形误识别时，优先按上述写法输出"));
+        assert!(prompt.contains("同音或形近误识别时，优先按上述写法输出"));
         assert!(prompt.contains("- GitHub"));
         assert!(prompt.contains("- OpenLess"));
     }
@@ -2724,7 +2724,7 @@ mod tests {
     fn hotword_preview_uses_correct_misrecognition_wording() {
         let preview = compose_hotword_block_preview(&["OpenLess".into()]);
 
-        assert!(preview.contains("同音 / 近形误识别时，优先按上述写法输出"));
+        assert!(preview.contains("同音或形近误识别时，优先按上述写法输出"));
         assert!(!preview.contains("近形词识别"));
     }
 
