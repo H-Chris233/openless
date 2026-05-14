@@ -122,11 +122,24 @@ async fn run_streaming_polish(
                 // 把 mpsc drain 完，避免发送端阻塞。
                 continue;
             }
+            let delta_chars = delta.chars().count();
             match crate::unicode_keystroke::type_unicode_chunk(&delta) {
-                Ok(_) => {
-                    typed_text.push_str(&delta);
+                Ok(typed_chars) => {
+                    let appended = append_typed_prefix(&mut typed_text, &delta, typed_chars);
+                    if appended < delta_chars {
+                        let reason = format!(
+                            "type_unicode_chunk typed only {appended}/{delta_chars} chars without error"
+                        );
+                        log::error!(
+                            "[coord] streaming_insert: {reason} at typed={} chars; \
+                             dropping remaining deltas",
+                            typed_text.chars().count()
+                        );
+                        first_failure = Some(reason);
+                    }
                 }
                 Err(e) => {
+                    append_typed_prefix(&mut typed_text, &delta, e.typed_chars());
                     log::error!(
                         "[coord] streaming_insert: type_unicode_chunk failed at typed={} chars: {e}; \
                          dropping remaining deltas",
@@ -1593,9 +1606,20 @@ pub(super) fn cancel_session(inner: &Arc<Inner>) {
     schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
 }
 
+fn append_typed_prefix(target: &mut String, delta: &str, typed_chars: usize) -> usize {
+    let mut end = 0;
+    let mut appended = 0;
+    for (idx, ch) in delta.char_indices().take(typed_chars) {
+        end = idx + ch.len_utf8();
+        appended += 1;
+    }
+    target.push_str(&delta[..end]);
+    appended
+}
+
 #[cfg(test)]
 mod tests {
-    use super::finalize_polished_text;
+    use super::{append_typed_prefix, finalize_polished_text};
     use crate::types::{ChineseScriptPreference, CorrectionRule, PolishMode};
 
     fn correction_rule(pattern: &str, replacement: &str) -> CorrectionRule {
@@ -1642,5 +1666,25 @@ mod tests {
         );
 
         assert_eq!(result, "OpenAI");
+    }
+
+    #[test]
+    fn append_typed_prefix_keeps_unicode_char_boundaries() {
+        let mut typed = String::from("前");
+
+        let appended = append_typed_prefix(&mut typed, "a你🙂b", 3);
+
+        assert_eq!(appended, 3);
+        assert_eq!(typed, "前a你🙂");
+    }
+
+    #[test]
+    fn append_typed_prefix_caps_at_delta_length() {
+        let mut typed = String::new();
+
+        let appended = append_typed_prefix(&mut typed, "好", 10);
+
+        assert_eq!(appended, 1);
+        assert_eq!(typed, "好");
     }
 }
