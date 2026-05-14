@@ -301,6 +301,7 @@ pub fn run() {
             commands::inject_hotkey_click_for_dev,
             commands::repolish,
             commands::list_style_packs,
+            commands::create_style_pack_from_template,
             commands::save_style_pack,
             commands::preview_style_pack_runtime,
             commands::set_active_style_pack,

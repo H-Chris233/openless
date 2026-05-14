@@ -689,6 +689,22 @@ export function saveStylePack(stylePack: StylePack): Promise<StylePack> {
   });
 }
 
+export function createStylePackFromTemplate(template: StylePack): Promise<StylePack> {
+  return invokeOrMock('create_style_pack_from_template', { template }, () => {
+    const created: StylePack = {
+      ...cloneStylePack(template),
+      id: `imported-mock-${Date.now()}`,
+      kind: 'imported',
+      active: false,
+      enabled: true,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    mockStylePacks = [...mockStylePacks, created];
+    return cloneStylePack(created);
+  });
+}
+
 export function previewStylePackRuntime(stylePack: StylePack): Promise<StylePackRuntimeDiagnostics> {
   return invokeOrMock('preview_style_pack_runtime', { stylePack }, () => composeMockStylePackRuntimeDiagnostics(stylePack));
 }

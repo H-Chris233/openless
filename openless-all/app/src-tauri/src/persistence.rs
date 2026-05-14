@@ -1023,6 +1023,37 @@ impl StylePackStore {
             .ok_or_else(|| anyhow!("no enabled style pack available"))
     }
 
+    /// 从模板新建一个 imported 风格包（"+"按钮路径）。
+    /// 跟 ZIP 导入不同：没有 manifest.json、没有 assets，纯空白模板。
+    /// 调用方负责 set `prefs.active_style_pack_id` 等高层 wiring（这里只管落盘）。
+    pub fn create_from_template(&self, template: StylePack) -> Result<StylePack> {
+        let mut packs = self.state.lock();
+        let base_id = if template.id.trim().is_empty() {
+            format!("imported-{}", Uuid::new_v4().simple())
+        } else {
+            template.id.clone()
+        };
+        let assigned_id = unique_imported_style_pack_id(&packs, &base_id);
+        let now = Utc::now().to_rfc3339();
+        let mut pack = template;
+        pack.id = assigned_id;
+        pack.kind = StylePackKind::Imported;
+        pack.created_at = Some(now.clone());
+        pack.updated_at = Some(now);
+        pack.active = false;
+        pack.enabled = true;
+        packs.push(pack.clone());
+        write_style_packs_file(&self.path, &packs)?;
+        log::info!(
+            "[style-pack] created from template id={} base_mode={:?} prompt_chars={} examples={}",
+            pack.id,
+            pack.base_mode,
+            pack.prompt.chars().count(),
+            pack.examples.len()
+        );
+        Ok(pack)
+    }
+
     pub fn upsert(&self, incoming: StylePack) -> Result<StylePack> {
         let mut packs = self.state.lock();
         let index = packs
