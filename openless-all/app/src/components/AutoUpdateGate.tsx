@@ -2,7 +2,7 @@
 // 受 prefs.autoUpdateCheck 开关控制；关闭时只走 Settings → 关于 的手动按钮。
 // 找到新版本时直接挂 UpdateDialog；不弹自定义通知，沿用既有 dialog 视觉。
 
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { isDialogStatus, UpdateDialog, useAutoUpdate } from './AutoUpdate';
 import { useHotkeySettings } from '../state/HotkeySettingsContext';
 
@@ -14,14 +14,22 @@ export function AutoUpdateGate() {
   const u = useAutoUpdate();
   const enabled = prefs?.autoUpdateCheck ?? true;
 
+  // 用 ref 保持 tick 闭包始终读到最新的 useAutoUpdate 返回值。
+  // 之前直接捕获 `u` 会让 60min interval 触发时读旧 status 闭包——例如用户已经
+  // 手动打开 UpdateDialog 后，tick 仍可能错过 busy 检查触发并发 check。
+  // 修 pr_agent "Stale closure" 反馈。
+  const uRef = useRef(u);
+  uRef.current = u;
+
   useEffect(() => {
     if (!enabled) return;
     let cancelled = false;
 
     const tick = () => {
       if (cancelled) return;
-      if (u.checking || u.busy || isDialogStatus(u.status)) return;
-      void u.checkForUpdates().catch(error => {
+      const current = uRef.current;
+      if (current.checking || current.busy || isDialogStatus(current.status)) return;
+      void current.checkForUpdates().catch(error => {
         console.warn('[auto-update] background check failed', error);
       });
     };
@@ -33,9 +41,6 @@ export function AutoUpdateGate() {
       window.clearTimeout(startupTimer);
       window.clearInterval(intervalTimer);
     };
-    // checkForUpdates / status 故意不放依赖：tick 内部已经做了忙碌态短路，
-    // 把 hook 返回值塞进依赖会让 interval 在每次 status 变化时重建，反而漏 tick。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabled]);
 
   if (!isDialogStatus(u.status)) return null;

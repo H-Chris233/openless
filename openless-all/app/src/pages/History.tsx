@@ -44,6 +44,20 @@ export function History() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [justCopied, setJustCopied] = useState(false);
+  // 录音文件 lazily-detected missing 状态：retention / 条数 cap 清理后磁盘上 wav
+  // 可能已被删，但 history 条目 hasAudioRecording 仍写 true。任一组件
+  // （播放 / 导出）首次 IPC 拿到 'recording not found' 时把 id 加进来，
+  // 之后渲染按钮的条件就转 false，避免反复点击得到同样的 error。
+  // 修 pr_agent "Missing file check" 反馈。
+  const [audioMissingIds, setAudioMissingIds] = useState<Set<string>>(() => new Set());
+  const markAudioMissing = useCallback((id: string) => {
+    setAudioMissingIds(prev => {
+      if (prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.add(id);
+      return next;
+    });
+  }, []);
   const { prefs } = useHotkeySettings();
 
   const refresh = useCallback(async () => {
@@ -139,7 +153,13 @@ export function History() {
       setActionError(null);
     } catch (error) {
       console.error('[history] failed to export recording', error);
-      setActionError(t('history.exportFailed', { err: errorMessage(error) }));
+      const msg = errorMessage(error);
+      // wav 已被 retention / 条数 cap 清理：把按钮隐藏，不显示错误（用户没干错事）。
+      if (msg.includes('recording not found') || msg.includes('not found')) {
+        markAudioMissing(item.id);
+        return;
+      }
+      setActionError(t('history.exportFailed', { err: msg }));
     }
   };
 
@@ -245,14 +265,18 @@ export function History() {
                 </div>
                 <div style={{ display: 'flex', gap: 6 }}>
                   <Btn icon={justCopied ? 'check' : 'copy'} variant="ghost" size="sm" onClick={() => void onCopy()}>{justCopied ? t('common.copied') : t('common.copy')}</Btn>
-                  {item.hasAudioRecording && (
+                  {item.hasAudioRecording && !audioMissingIds.has(item.id) && (
                     <Btn icon="download" variant="ghost" size="sm" onClick={() => void onExportAudio()}>{t('history.exportRecording')}</Btn>
                   )}
                   <Btn icon="trash" variant="ghost" size="sm" onClick={onDelete}>{t('common.delete')}</Btn>
                 </div>
               </div>
-              {item.hasAudioRecording && (
-                <AudioRecordingPlayer sessionId={item.id} key={item.id} />
+              {item.hasAudioRecording && !audioMissingIds.has(item.id) && (
+                <AudioRecordingPlayer
+                  sessionId={item.id}
+                  onMissing={() => markAudioMissing(item.id)}
+                  key={item.id}
+                />
               )}
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
                 <div style={{ padding: 14, border: '0.5px solid var(--ol-line)', borderRadius: 10, background: 'var(--ol-surface-2)' }}>
@@ -303,8 +327,16 @@ function errorMessage(error: unknown): string {
 }
 
 /** 当 session.hasAudioRecording 为 true 时渲染：一个加载按钮 + 拿到字节后切换为
- *  原生 audio controls。Blob URL 在组件 unmount 时 revoke，避免泄漏。 */
-function AudioRecordingPlayer({ sessionId }: { sessionId: string }) {
+ *  原生 audio controls。Blob URL 在组件 unmount 时 revoke，避免泄漏。
+ *  `onMissing` 在后端返回 'recording not found'（wav 已被 prune）时触发，让父组件
+ *  把按钮永久隐藏，避免用户继续点击得到同样错误。 */
+function AudioRecordingPlayer({
+  sessionId,
+  onMissing,
+}: {
+  sessionId: string;
+  onMissing?: () => void;
+}) {
   const { t } = useTranslation();
   const [url, setUrl] = useState<string | null>(null);
   const [status, setStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
@@ -331,8 +363,14 @@ function AudioRecordingPlayer({ sessionId }: { sessionId: string }) {
       setStatus('ready');
     } catch (error) {
       console.error('[history] load recording failed', error);
+      const msg = errorMessage(error);
+      // 文件被清理：通知父组件隐藏按钮组，自身不显示 error UI（用户没干错事）。
+      if (msg.includes('recording not found') || msg.includes('not found')) {
+        onMissing?.();
+        return;
+      }
       setStatus('error');
-      setErrorText(errorMessage(error));
+      setErrorText(msg);
     }
   };
 
