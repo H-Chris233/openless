@@ -1257,6 +1257,26 @@ pub fn list_style_packs(coord: CoordinatorState<'_>) -> Result<Vec<StylePack>, S
 }
 
 #[tauri::command]
+pub fn create_style_pack_from_template(
+    coord: CoordinatorState<'_>,
+    app: AppHandle,
+    template: StylePack,
+) -> Result<StylePack, String> {
+    log::info!(
+        "[style-pack] command create_from_template name={} base_mode={:?}",
+        template.name,
+        template.base_mode
+    );
+    let created = coord
+        .style_packs()
+        .create_from_template(template)
+        .map_err(|e| e.to_string())?;
+    let prefs = coord.prefs().get();
+    let _ = sync_style_pack_prefs_and_persist(&*coord, &app, prefs)?;
+    Ok(created)
+}
+
+#[tauri::command]
 pub fn save_style_pack(
     coord: CoordinatorState<'_>,
     app: AppHandle,
