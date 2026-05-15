@@ -412,39 +412,24 @@ mod windows_impl {
 #[cfg(target_os = "linux")]
 mod linux_impl {
     use super::{TisError, TypeError};
-    use enigo::{Enigo, Keyboard, Settings};
+    #[allow(unused_imports)]
     use tauri::{AppHandle, Runtime};
 
     pub struct PreviousInputSource;
 
-    /// 用 enigo 逐字符发出 chunk。X11 上走 XTest 稳定；Wayland 上看 compositor 是否
-    /// 给 libei 权限，stock GNOME-Wayland 通常拒绝 —— 失败时尽量返回已成功字符数，
-    /// 让调用方的 history / clipboard 与实际落屏内容一致。
-    ///
-    /// 不处理 fcitx / ibus 输入法切换 —— Linux 输入法栈与 X11 合成事件的交互非常
-    /// 碎片化，v1 实验阶段直接交给用户保证当前输入源是英文键盘。
+    /// 优先通过 fcitx5 插件一次性提交整段文字（支持中文、兼容 Wayland/X11）。
     pub fn type_unicode_chunk(text: &str) -> Result<usize, TypeError> {
         if text.is_empty() {
             return Ok(0);
         }
-        let mut enigo =
-            Enigo::new(&Settings::default()).map_err(|e| TypeError::EnigoInit(e.to_string()))?;
-        let mut typed_chars = 0;
-        for ch in text.chars() {
-            if let Err(e) = enigo.text(&ch.to_string()) {
-                let source = TypeError::EnigoText(e.to_string());
-                return if typed_chars == 0 {
-                    Err(source)
-                } else {
-                    Err(TypeError::Partial {
-                        typed_chars,
-                        source: Box::new(source),
-                    })
-                };
-            }
-            typed_chars += 1;
+        // fcitx5 插件能处理全部文字，且是 native 方式（不走键盘合成），
+        // 所以整个 chunk 一次性 commit 即可，返回全部字符数。
+        // 失败时不降级——enigo XTest 在 Wayland 不可用。
+        if crate::linux_fcitx::commit_text(text).is_ok() {
+            Ok(text.chars().count())
+        } else {
+            Err(TypeError::EnigoText("commit_text failed on Wayland, try clipboard fallback".into()))
         }
-        Ok(typed_chars)
     }
 
     pub async fn switch_to_ascii<R: Runtime>(

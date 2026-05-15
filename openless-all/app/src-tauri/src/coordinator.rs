@@ -150,6 +150,10 @@ struct Inner {
     /// 最近一次应用到 capsule 窗口的几何状态。避免录音 level tick 反复触发
     /// resize / reposition。
     capsule_layout: Mutex<Option<CapsuleLayoutState>>,
+    /// Linux: 胶囊窗口当前是否已 show 过。防止每次 emit_capsule 都调 window.show()
+    /// 抢走目标 app 的键盘焦点。首次 Idle→可见时 show 一次，后续可见→可见不重新 show。
+    /// 回到 Idle 时 reset 为 false，下次 session 再 show。
+    capsule_window_visible: AtomicBool,
     /// QA 用的 ASR 句柄（始终是 Volcengine 流式）。
     qa_asr: Mutex<Option<Arc<VolcengineStreamingASR>>>,
     /// QA 用的 Recorder 句柄。
@@ -223,6 +227,7 @@ impl Coordinator {
                     qa_hotkey: Mutex::new(None),
                     qa_state: Mutex::new(QaSessionState::default()),
                     capsule_layout: Mutex::new(None),
+                    capsule_window_visible: AtomicBool::new(false),
                     qa_asr: Mutex::new(None),
                     qa_recorder: Mutex::new(None),
                     qa_stream_cancelled: Arc::new(AtomicBool::new(false)),
@@ -273,6 +278,7 @@ impl Coordinator {
                 qa_hotkey: Mutex::new(None),
                 qa_state: Mutex::new(QaSessionState::default()),
                 capsule_layout: Mutex::new(None),
+                capsule_window_visible: AtomicBool::new(false),
                 qa_asr: Mutex::new(None),
                 qa_recorder: Mutex::new(None),
                 qa_stream_cancelled: Arc::new(AtomicBool::new(false)),
@@ -702,6 +708,8 @@ impl Coordinator {
             return;
         }
         let (tx, rx) = mpsc::channel::<HotkeyEvent>();
+        #[cfg(target_os = "linux")]
+        let (fcitx_tx, fcitx_binding) = (tx.clone(), binding.clone());
         match HotkeyMonitor::start(binding, tx) {
             Ok(monitor) => {
                 let adapter = monitor.kind();
@@ -717,6 +725,12 @@ impl Coordinator {
                     .name("openless-hotkey-bridge".into())
                     .spawn(move || hotkey_bridge_loop(inner_clone, rx))
                     .ok();
+                // Wayland: 启动 fcitx5 插件信号监听作为热键源（X11 走 rdev 避免双发）。
+                #[cfg(target_os = "linux")]
+                if crate::hotkey::is_wayland_session() {
+                    crate::linux_fcitx::start_dictation_signal_listener(fcitx_tx);
+                    crate::linux_fcitx::sync_binding_to_plugin(&fcitx_binding);
+                }
             }
             Err(e) => {
                 *self.inner.hotkey_status.lock() = HotkeyStatus {
@@ -938,7 +952,6 @@ fn hotkey_supervisor_loop(inner: Arc<Inner>) {
             message: Some(format!("正在安装全局快捷键监听（第 {} 次）", attempts + 1)),
             last_error: None,
         };
-        let (tx, rx) = mpsc::channel::<HotkeyEvent>();
         let trigger = crate::shortcut_binding::legacy_modifier_trigger(&prefs.dictation_hotkey)
             .unwrap_or(crate::types::HotkeyTrigger::Custom);
         let binding = crate::types::HotkeyBinding {
@@ -946,6 +959,9 @@ fn hotkey_supervisor_loop(inner: Arc<Inner>) {
             mode: prefs.hotkey.mode,
             keys: None,
         };
+        let (tx, rx) = mpsc::channel::<HotkeyEvent>();
+        #[cfg(target_os = "linux")]
+        let (fcitx_tx, fcitx_binding) = (tx.clone(), binding.clone());
         match HotkeyMonitor::start(binding, tx) {
             Ok(monitor) => {
                 let adapter = monitor.kind();
@@ -969,6 +985,12 @@ fn hotkey_supervisor_loop(inner: Arc<Inner>) {
                     .name("openless-hotkey-bridge".into())
                     .spawn(move || hotkey_bridge_loop(inner_clone, rx))
                     .ok();
+                // Wayland: 启动 fcitx5 插件信号监听作为热键源（X11 走 rdev 避免双发）。
+                #[cfg(target_os = "linux")]
+                if crate::hotkey::is_wayland_session() {
+                    crate::linux_fcitx::start_dictation_signal_listener(fcitx_tx);
+                    crate::linux_fcitx::sync_binding_to_plugin(&fcitx_binding);
+                }
                 return;
             }
             Err(e) => {
@@ -4037,7 +4059,15 @@ fn show_capsule_window_no_activate<R: tauri::Runtime>(
 // `window.show()` 直接显示，再用 restore_main_window_key_if_active 把焦点还给
 // 主窗口。这是 1.2.11 的实现 — 单独走 orderFrontRegardless 会让胶囊在 webview
 // 未完整初始化时偶发不可见。
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn show_capsule_window_no_activate<R: tauri::Runtime>(
+    _app: &AppHandle<R>,
+    _window: &tauri::WebviewWindow<R>,
+) -> bool {
+    false
+}
+
+#[cfg(target_os = "macos")]
 fn show_capsule_window_no_activate<R: tauri::Runtime>(
     _app: &AppHandle<R>,
     _window: &tauri::WebviewWindow<R>,
@@ -4129,6 +4159,17 @@ fn emit_capsule(
         maybe_position_capsule_bottom_center(&inner_for_main, &window, translation);
         if show_capsule && visible {
             if !show_capsule_window_no_activate(&app_for_main, &window) {
+                #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+                {
+                    // Linux: 仅首次 Idle→可见时 show 窗口，避免每次 emit 都抢焦点。
+                    let was_visible = inner_for_main
+                        .capsule_window_visible
+                        .swap(true, std::sync::atomic::Ordering::SeqCst);
+                    if !was_visible {
+                        let _ = window.show();
+                    }
+                }
+                #[cfg(any(target_os = "macos", target_os = "windows"))]
                 let _ = window.show();
             }
             // macOS/Windows 优先走 no-activate show，避免录音胶囊抢走主窗口点击焦点。
@@ -4136,6 +4177,10 @@ fn emit_capsule(
             #[cfg(target_os = "macos")]
             crate::restore_main_window_key_if_active(&app_for_main);
         } else {
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+            inner_for_main
+                .capsule_window_visible
+                .store(false, std::sync::atomic::Ordering::SeqCst);
             hide_capsule_window_if_present();
             let _ = window.hide();
         }

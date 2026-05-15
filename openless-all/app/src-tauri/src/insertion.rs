@@ -50,6 +50,21 @@ impl TextInserter {
         if text.is_empty() {
             return InsertStatus::CopiedFallback;
         }
+        // Linux: 使用 fcitx5 CommitText 直写（支持中文、兼容 Wayland/X11）。
+        // 失败时仅复制到剪贴板，不走 enigo XTest（Wayland 不可用）。
+        #[cfg(target_os = "linux")]
+        {
+            match crate::linux_fcitx::commit_text(text) {
+                Ok(()) => return InsertStatus::Inserted,
+                Err(e) => {
+                    log::warn!("[insertion] fcitx commit_text failed: {e}, fallback to clipboard only");
+                    if copy_to_clipboard(text) {
+                        return InsertStatus::CopiedFallback;
+                    }
+                    return InsertStatus::Failed;
+                }
+            }
+        }
         insert_with_clipboard_restore(text, restore_clipboard_after_paste, paste_shortcut)
     }
 

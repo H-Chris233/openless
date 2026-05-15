@@ -329,23 +329,21 @@ fn streaming_insert_eligible(
     translation_active: bool,
     mode: PolishMode,
     raw_uses_llm: bool,
-    wayland_session: bool,
 ) -> bool {
     streaming_insert_enabled
         && !translation_active
         && (mode != PolishMode::Raw || raw_uses_llm)
-        && !wayland_session
 }
 
-fn wayland_done_message(status: InsertStatus, polish_failed: bool) -> Option<String> {
+fn fcitx_fallback_done_message(status: InsertStatus, polish_failed: bool) -> Option<String> {
     match status {
         InsertStatus::Inserted | InsertStatus::PasteSent => None,
         InsertStatus::CopiedFallback => Some(if polish_failed {
-            "Wayland 未启用自动输入，已复制原文到剪贴板，请手动粘贴".to_string()
+            "未检测到 fcitx5，已复制原文到剪贴板，请手动粘贴".to_string()
         } else {
-            "Wayland 未启用自动输入，已复制到剪贴板，请手动粘贴".to_string()
+            "未检测到 fcitx5，已复制到剪贴板，请手动粘贴".to_string()
         }),
-        InsertStatus::Failed => Some("Wayland 未启用自动输入，剪贴板写入失败".to_string()),
+        InsertStatus::Failed => Some("fcitx5 不可用，剪贴板写入失败".to_string()),
     }
 }
 
@@ -1416,7 +1414,6 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         translation_active,
         mode,
         raw_uses_llm,
-        wayland_session,
     );
     log::info!(
         "[coord] polish dispatch: translation={translation_active} mode={mode:?} wayland_session={wayland_session} streaming_eligible={streaming_eligible}"
@@ -1524,23 +1521,40 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         );
         InsertStatus::Inserted
     } else if wayland_session {
-        log::info!(
-            "[coord] Wayland session detected; skipping synthetic paste and attempting copy-only fallback ({} chars)",
-            polished.chars().count()
-        );
-        let status = inner.inserter.copy_fallback(&polished);
-        match status {
-            InsertStatus::CopiedFallback => {
-                log::info!("[coord] Wayland copy-only fallback succeeded")
+        // Wayland: 优先用 fcitx5 插件直写（支持中文），降级到剪贴板拷贝。
+        #[cfg(target_os = "linux")]
+        {
+            if crate::linux_fcitx::commit_text(&polished).is_ok() {
+                log::info!(
+                    "[coord] Wayland fcitx5 commit succeeded ({} chars)",
+                    polished.chars().count()
+                );
+                InsertStatus::Inserted
+            } else {
+                log::info!(
+                    "[coord] Wayland fcitx5 unavailable; attempting copy-only fallback ({} chars)",
+                    polished.chars().count()
+                );
+                let status = inner.inserter.copy_fallback(&polished);
+                match status {
+                    InsertStatus::CopiedFallback => {
+                        log::info!("[coord] Wayland copy-only fallback succeeded")
+                    }
+                    InsertStatus::Failed => log::error!(
+                        "[coord] Wayland copy-only fallback failed: clipboard write failed"
+                    ),
+                    other => log::warn!(
+                        "[coord] Wayland copy-only fallback returned unexpected status: {other:?}"
+                    ),
+                }
+                status
             }
-            InsertStatus::Failed => {
-                log::error!("[coord] Wayland copy-only fallback failed: clipboard write failed")
-            }
-            other => log::warn!(
-                "[coord] Wayland copy-only fallback returned unexpected status: {other:?}"
-            ),
         }
-        status
+        #[cfg(not(target_os = "linux"))]
+        {
+            let status = inner.inserter.copy_fallback(&polished);
+            status
+        }
     } else if focus_ready_for_paste {
         #[cfg(target_os = "windows")]
         {
@@ -1637,7 +1651,7 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
     let done_message = if tsf_required_insert_failed {
         Some("TSF 未上屏，已禁止非 TSF 兜底".to_string())
     } else if wayland_session {
-        wayland_done_message(status, polish_error.is_some())
+        fcitx_fallback_done_message(status, polish_error.is_some())
     } else {
         default_done_message(status, polish_error.is_some())
     };
@@ -1726,8 +1740,8 @@ fn append_typed_prefix(target: &mut String, delta: &str, typed_chars: usize) -> 
 #[cfg(test)]
 mod tests {
     use super::{
-        append_typed_prefix, default_done_message, dictation_error_code, finalize_polished_text,
-        streaming_insert_eligible, wayland_done_message,
+        append_typed_prefix, default_done_message, dictation_error_code,
+        fcitx_fallback_done_message, finalize_polished_text, streaming_insert_eligible,
     };
     use crate::types::{ChineseScriptPreference, CorrectionRule, InsertStatus, PolishMode};
 
@@ -1814,13 +1828,12 @@ mod tests {
     }
 
     #[test]
-    fn wayland_disables_streaming_insert_even_when_pref_enabled() {
-        assert!(!streaming_insert_eligible(
+    fn streaming_insert_no_longer_blocked_by_wayland() {
+        assert!(streaming_insert_eligible(
             true,
             false,
             PolishMode::Light,
             false,
-            true
         ));
     }
 
@@ -1831,23 +1844,22 @@ mod tests {
             false,
             PolishMode::Light,
             false,
-            false
         ));
     }
 
     #[test]
-    fn wayland_done_message_tells_user_manual_paste_is_required() {
+    fn fcitx_fallback_done_message_tells_user_manual_paste_is_required() {
         assert_eq!(
-            wayland_done_message(InsertStatus::CopiedFallback, false),
-            Some("Wayland 未启用自动输入，已复制到剪贴板，请手动粘贴".to_string())
+            fcitx_fallback_done_message(InsertStatus::CopiedFallback, false),
+            Some("未检测到 fcitx5，已复制到剪贴板，请手动粘贴".to_string())
         );
         assert_eq!(
-            wayland_done_message(InsertStatus::CopiedFallback, true),
-            Some("Wayland 未启用自动输入，已复制原文到剪贴板，请手动粘贴".to_string())
+            fcitx_fallback_done_message(InsertStatus::CopiedFallback, true),
+            Some("未检测到 fcitx5，已复制原文到剪贴板，请手动粘贴".to_string())
         );
         assert_eq!(
-            wayland_done_message(InsertStatus::Failed, false),
-            Some("Wayland 未启用自动输入，剪贴板写入失败".to_string())
+            fcitx_fallback_done_message(InsertStatus::Failed, false),
+            Some("fcitx5 不可用，剪贴板写入失败".to_string())
         );
     }
 

@@ -62,6 +62,8 @@ version = "3.6.3"
 default-features = false
 features = ["windows-native"]
 
+[target.'cfg(target_os = "linux")'.dependencies]
+dbus = "0.9"
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies.keyring]
 version = "3.6.3"
 default-features = false

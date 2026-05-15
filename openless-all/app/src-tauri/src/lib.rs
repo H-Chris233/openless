@@ -21,6 +21,7 @@ mod correction;
 mod global_hotkey_runtime;
 mod hotkey;
 mod insertion;
+mod linux_fcitx;
 mod llm_gemini;
 mod permissions;
 mod persistence;
