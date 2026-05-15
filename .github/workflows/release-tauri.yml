@@ -505,6 +505,11 @@ jobs:
             - 以 `-tauri` 结尾的 tag 是**正式版**（自动推送给所有 in-app 检查更新的用户）。
             - 以 `-beta-tauri` 结尾的 tag 是 **Beta 版**（GitHub 标 pre-release，**不**通过 in-app updater 推送给正式版用户；只对在「设置 → 关于 → 加入 Beta 渠道」开关切到 Beta 的用户可见，且需要手动从此页面下载安装）。
 
+            ### 行为变更提示
+
+            - 流式输入默认开启；不兼容场景会自动回落到一次性插入。可在「设置 → 高级」关闭。
+            - 流式输入成功后默认把最终文本同步到剪贴板，方便再次粘贴；可在「设置 → 高级」关闭。
+
           append_body: true
           # Matrix jobs all upload assets to the same release. Generate notes once
           # so macOS, Windows, and Linux jobs do not duplicate the release body.

@@ -98,6 +98,7 @@ let mockSettings: UserPreferences = {
   startMinimized: false,
   updateChannel: 'stable',
   streamingInsert: true,
+  streamingInsertDefaultMigrated: true,
   streamingInsertSaveClipboard: true,
   autoUpdateCheck: true,
   historyMaxEntries: null,
