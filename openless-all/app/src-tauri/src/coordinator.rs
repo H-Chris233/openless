@@ -4151,6 +4151,15 @@ fn emit_capsule(
             return;
         };
         let show_capsule = inner_for_main.prefs.get().show_capsule;
+
+        // Wayland: 不操作胶囊窗口（不 show/hide，不 reposition），
+        // 避免抢走目标 app 键盘焦点。文字通过 fcitx5 插件直接 commit，
+        // 用户始终在目标 app 中。
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        if crate::hotkey::is_wayland_session() {
+            return;
+        }
+
         // 三平台统一：Done / Cancelled / Error 状态保留 ~1.5s toast
         // （schedule_capsule_idle 之后会回 Idle 隐藏）。
         // Windows 上 linger 的真实问题（截图选中 / 死区 / 拖拽卡顿）由 #140 加的
@@ -4161,7 +4170,7 @@ fn emit_capsule(
             if !show_capsule_window_no_activate(&app_for_main, &window) {
                 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
                 {
-                    // Linux: 仅首次 Idle→可见时 show 窗口，避免每次 emit 都抢焦点。
+                    // Linux (X11): 仅首次 Idle→可见时 show 窗口，避免每次 emit 都抢焦点。
                     let was_visible = inner_for_main
                         .capsule_window_visible
                         .swap(true, std::sync::atomic::Ordering::SeqCst);

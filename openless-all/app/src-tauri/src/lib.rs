@@ -21,6 +21,7 @@ mod correction;
 mod global_hotkey_runtime;
 mod hotkey;
 mod insertion;
+#[cfg(target_os = "linux")]
 mod linux_fcitx;
 mod llm_gemini;
 mod permissions;
