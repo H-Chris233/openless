@@ -283,6 +283,7 @@ pub fn run() {
             commands::list_history,
             commands::delete_history_entry,
             commands::clear_history,
+            commands::read_audio_recording,
             commands::list_vocab,
             commands::add_vocab,
             commands::remove_vocab,

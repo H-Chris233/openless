@@ -436,8 +436,8 @@ pub async fn start_microphone_level_monitor(
         let level_handler: Arc<dyn Fn(f32) + Send + Sync> = Arc::new(move |level| {
             let _ = level_app.emit("microphone:level", serde_json::json!({ "level": level }));
         });
-        let (recorder, _runtime_errors) =
-            Recorder::start(microphone_device_name, consumer, level_handler)
+        let (recorder, _runtime_errors, _archive_active) =
+            Recorder::start(microphone_device_name, consumer, level_handler, None)
                 .map_err(|e| e.to_string())?;
         *state.lock() = Some(recorder);
         Ok(())
@@ -1113,6 +1113,59 @@ pub fn delete_history_entry(coord: CoordinatorState<'_>, id: String) -> Result<(
 #[tauri::command]
 pub fn clear_history(coord: CoordinatorState<'_>) -> Result<(), String> {
     coord.history().clear().map_err(|e| e.to_string())
+}
+
+/// 读取某次会话的原始麦克风 wav 字节流。仅当用户开过
+/// `prefs.record_audio_for_debug` 并且这条 session 是开关打开后录的，才会有文件。
+/// 文件名规约：`<data_dir>/recordings/<session_id>.wav`，与 DictationSession.id 同名。
+///
+/// 路径校验：session_id **必须**严格匹配 UUID-v4 字面（36 字符 = 8-4-4-4-12 + 4 个 `-`，
+/// 内容仅 ASCII 十六进制 + `-`）。白名单胜过黑名单——绝对路径前缀、Windows ADS、
+/// 百分号编码、NUL 字节都不在合法字符集里，挡掉所有 Path::join 越界的可能。
+/// session_id 在仓库内由 `Uuid::new_v4()` 生成 (`dictation.rs:1531`)，前端只会回传
+/// 自己列出的合法 id，但 IPC = boundary，按 boundary 规则严格校验。
+///
+/// async fs：单条 5 分钟 wav 约 9.6MB，同步 `std::fs::read` 会阻塞 Tauri IPC 主循环。
+/// 改 `tokio::fs::read` 后让出线程给其它 IPC。
+#[tauri::command]
+pub async fn read_audio_recording(session_id: String) -> Result<Vec<u8>, String> {
+    if !is_valid_session_id(&session_id) {
+        return Err("invalid session id".into());
+    }
+    let path =
+        crate::persistence::recording_path_for_session(&session_id).map_err(|e| e.to_string())?;
+    if !path.exists() {
+        return Err("recording not found".into());
+    }
+    // TOCTOU 兜底：exists() 通过到 read 之间文件可能被 prune（条数 cap / retention
+    // 清理 / 用户手动删）。把 NotFound 标准化成跟 exists() 失败同样的错误字符串，
+    // 前端单条 'recording not found' catch 就能稳定隐藏按钮，不依赖本地化 OS 错误。
+    tokio::fs::read(&path).await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            "recording not found".into()
+        } else {
+            format!("read wav failed: {e}")
+        }
+    })
+}
+
+/// UUID-v4 字面校验：36 字符 + 5 段 `-` 分隔（8-4-4-4-12）+ 仅 ASCII 十六进制。
+fn is_valid_session_id(s: &str) -> bool {
+    if s.len() != 36 {
+        return false;
+    }
+    let bytes = s.as_bytes();
+    for (i, b) in bytes.iter().enumerate() {
+        let is_dash_position = matches!(i, 8 | 13 | 18 | 23);
+        if is_dash_position {
+            if *b != b'-' {
+                return false;
+            }
+        } else if !b.is_ascii_hexdigit() {
+            return false;
+        }
+    }
+    true
 }
 
 // ─────────────────────────── vocab ───────────────────────────
@@ -2225,9 +2278,9 @@ mod tests {
     use super::{
         active_asr_is_keyless_for_validation, active_foundry_model_from_prefs,
         asr_configured_for_provider, asr_transcriptions_url, fetch_provider_models,
-        is_gemini_base_url, llm_configured_for_provider, local_asr_release_plan_for_provider,
-        models_url, normalize_foundry_language_hint, parse_gemini_model_ids,
-        parse_latest_beta_from_atom, parse_model_ids, persist_settings,
+        is_gemini_base_url, is_valid_session_id, llm_configured_for_provider,
+        local_asr_release_plan_for_provider, models_url, normalize_foundry_language_hint,
+        parse_gemini_model_ids, parse_latest_beta_from_atom, parse_model_ids, persist_settings,
         release_foundry_runtime_if_inactive, validate_foundry_model_alias, ProviderConfig,
         SettingsWriter,
     };
@@ -2941,5 +2994,33 @@ mod tests {
 
         assert_eq!(models, vec!["m1".to_string(), "m2".to_string()]);
         server.join().unwrap();
+    }
+
+    #[test]
+    fn is_valid_session_id_accepts_canonical_uuid_v4() {
+        // canonical UUID-v4 字面：8-4-4-4-12，全小写、全大写、混合都接受。
+        assert!(is_valid_session_id("550e8400-e29b-41d4-a716-446655440000"));
+        assert!(is_valid_session_id("550E8400-E29B-41D4-A716-446655440000"));
+        assert!(is_valid_session_id("Abc12345-6789-abcd-EF01-234567890abc"));
+    }
+
+    #[test]
+    fn is_valid_session_id_rejects_path_traversal_and_garbage() {
+        assert!(!is_valid_session_id(""));
+        assert!(!is_valid_session_id("../../etc/passwd"));
+        assert!(!is_valid_session_id("..\\..\\windows\\system32"));
+        // 长度对但含 `/`：dash 位置错或非 hex 字符都不通过
+        assert!(!is_valid_session_id("550e8400-e29b-41d4-a716-44665544/000"));
+        assert!(!is_valid_session_id("550e8400_e29b_41d4_a716_446655440000")); // 用 _ 代 -
+        // 非 hex 字符
+        assert!(!is_valid_session_id("550e8400-e29b-41d4-a716-44665544000g"));
+        // 长度不对（35 / 37）
+        assert!(!is_valid_session_id("550e8400-e29b-41d4-a716-44665544000"));
+        assert!(!is_valid_session_id("550e8400-e29b-41d4-a716-4466554400000"));
+        // NUL 字节
+        assert!(!is_valid_session_id("550e8400-e29b-41d4-a716-44665544\x00000"));
+        // 百分号编码与绝对路径
+        assert!(!is_valid_session_id("%2e%2e/recordings/x"));
+        assert!(!is_valid_session_id("/Users/attacker/secret.wav"));
     }
 }

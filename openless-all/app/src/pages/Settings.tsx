@@ -315,6 +315,32 @@ function RecordingSection() {
   };
   const onStartMinimizedChange = (startMinimized: boolean) =>
     savePrefs({ ...prefs, startMinimized });
+  const onAutoUpdateCheckChange = (autoUpdateCheck: boolean) =>
+    savePrefs({ ...prefs, autoUpdateCheck });
+  const onRecordAudioForDebugChange = (recordAudioForDebug: boolean) =>
+    savePrefs({ ...prefs, recordAudioForDebug });
+  // 历史条数 200 是当前 HISTORY_CAP（persistence.rs:32），下限 5 是避免用户填 0 导致
+  // 写一条就立刻被清光；空字符串视为不限制，落回 null → 后端走 200 默认。
+  const onHistoryMaxEntriesChange = (raw: string) => {
+    const trimmed = raw.trim();
+    if (trimmed === '') {
+      void savePrefs({ ...prefs, historyMaxEntries: null });
+      return;
+    }
+    const parsed = Number.parseInt(trimmed, 10);
+    if (Number.isNaN(parsed)) return;
+    void savePrefs({ ...prefs, historyMaxEntries: clamp(parsed, 5, 200) });
+  };
+  const onAudioRecordingMaxEntriesChange = (raw: string) => {
+    const trimmed = raw.trim();
+    if (trimmed === '') {
+      void savePrefs({ ...prefs, audioRecordingMaxEntries: null });
+      return;
+    }
+    const parsed = Number.parseInt(trimmed, 10);
+    if (Number.isNaN(parsed)) return;
+    void savePrefs({ ...prefs, audioRecordingMaxEntries: clamp(parsed, 1, 200) });
+  };
 
   const choices: Array<[HotkeyMode, string]> = [
     ['toggle', t('settings.recording.modeToggle')],
@@ -517,6 +543,20 @@ function RecordingSection() {
         />
       </SettingRow>
       <SettingRow
+        label={t('settings.recording.historyMaxEntriesLabel')}
+        desc={t('settings.recording.historyMaxEntriesDesc')}
+      >
+        <input
+          type="number"
+          min={5}
+          max={200}
+          placeholder="200"
+          value={prefs.historyMaxEntries ?? ''}
+          onChange={e => onHistoryMaxEntriesChange(e.target.value)}
+          style={{ ...inputStyle, width: 80, textAlign: 'right' }}
+        />
+      </SettingRow>
+      <SettingRow
         label={t('settings.recording.polishContextWindowLabel')}
         desc={t('settings.recording.polishContextWindowDesc')}
       >
@@ -529,6 +569,27 @@ function RecordingSection() {
           style={{ ...inputStyle, width: 80, textAlign: 'right' }}
         />
       </SettingRow>
+      <SettingRow
+        label={t('settings.recording.recordAudioForDebugLabel')}
+        desc={t('settings.recording.recordAudioForDebugDesc')}
+      >
+        <Toggle on={prefs.recordAudioForDebug} onToggle={onRecordAudioForDebugChange} />
+      </SettingRow>
+      <SettingRow
+        label={t('settings.recording.audioRecordingMaxEntriesLabel')}
+        desc={t('settings.recording.audioRecordingMaxEntriesDesc')}
+      >
+        <input
+          type="number"
+          min={1}
+          max={200}
+          placeholder="200"
+          value={prefs.audioRecordingMaxEntries ?? ''}
+          onChange={e => onAudioRecordingMaxEntriesChange(e.target.value)}
+          style={{ ...inputStyle, width: 80, textAlign: 'right' }}
+          disabled={!prefs.recordAudioForDebug}
+        />
+      </SettingRow>
     </Collapsible>
 
     {/* ─── 启动（折叠） ──────────────────────────────────────────── */}
@@ -539,6 +600,12 @@ function RecordingSection() {
         desc={t('settings.recording.startMinimizedDesc')}
       >
         <Toggle on={prefs.startMinimized} onToggle={onStartMinimizedChange} />
+      </SettingRow>
+      <SettingRow
+        label={t('settings.recording.autoUpdateCheckLabel')}
+        desc={t('settings.recording.autoUpdateCheckDesc')}
+      >
+        <Toggle on={prefs.autoUpdateCheck} onToggle={onAutoUpdateCheckChange} />
       </SettingRow>
       {capability.statusHint && (
         <div style={{ marginTop: 6, fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.5 }}>

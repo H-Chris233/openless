@@ -785,8 +785,31 @@ pub(super) async fn start_recorder_for_starting(
     let microphone_device_name = selected_microphone_device_name(inner);
     stop_microphone_preview_monitor(inner, "dictation recorder");
     acquire_recording_mute(inner, "dictation").await;
-    match Recorder::start(microphone_device_name, consumer, level_handler) {
-        Ok((rec, runtime_errors)) => {
+    let audio_archive_path = if inner.prefs.get().record_audio_for_debug {
+        // 用 coordinator 的 SessionId 作为文件名，跟 history 那条记录 id 对齐（见
+        // 下游 polish 收尾时 `history_session_id = current_session_id.to_string()`）。
+        // 顺手把超龄 / 超量录音清理一下，避免 debug 开关常开时磁盘膨胀。
+        let prefs = inner.prefs.get();
+        let _ = crate::persistence::prune_recordings(
+            prefs.history_retention_days,
+            prefs.audio_recording_max_entries,
+        );
+        crate::persistence::recording_path_for_session(&session_id.to_string()).ok()
+    } else {
+        None
+    };
+    match Recorder::start(
+        microphone_device_name,
+        consumer,
+        level_handler,
+        audio_archive_path,
+    ) {
+        Ok((rec, runtime_errors, archive_active)) => {
+            // 把 archive 实际创建状态存到 Inner，让 history 写入路径（含 empty-transcript
+            // 失败分支）读真实情况，而不是 prefs 开关。修 pr_agent "Wrong Flag" 反馈。
+            inner
+                .audio_archive_active
+                .store(archive_active, std::sync::atomic::Ordering::Relaxed);
             store_recorder_for_session(inner, session_id, rec);
             spawn_recorder_error_monitor(inner, runtime_errors);
             // 不在这里 emit Recording capsule。
@@ -1230,11 +1253,17 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
             error_code: Some("emptyTranscript".to_string()),
             duration_ms: Some(raw.duration_ms),
             dictionary_entry_count: Some(enabled_phrases(inner).len() as u32),
+            // empty-transcript（ASR 没识别到任何文字）也保留 wav 标记——这是用户最想
+            // 通过原始录音定位"是不是麦克风太小声 / ASR 模型问题"的场景。修 pr_agent
+            // "Missing Audio" 反馈。
+            has_audio_recording: Some(inner.audio_archive_active.load(Ordering::Relaxed)),
         };
-        if let Err(e) = inner
-            .history
-            .append_with_retention(session, inner.prefs.get().history_retention_days)
-        {
+        let prefs_snapshot = inner.prefs.get();
+        if let Err(e) = inner.history.append_with_retention(
+            session,
+            prefs_snapshot.history_retention_days,
+            prefs_snapshot.history_max_entries,
+        ) {
             log::error!("[coord] history append failed: {e}");
         }
         emit_capsule(
@@ -1507,8 +1536,11 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
     .map(str::to_string);
     let tsf_required_insert_failed = error_code.as_deref() == Some("windowsImeTsfRequired");
 
-    let history_session_id = Uuid::new_v4().to_string();
+    // 与 coordinator 内部 SessionId 对齐：方便 recorder 旁路写盘的 `<session_id>.wav`
+    // 跟 history 这条 DictationSession.id 同名，前端凭 id 就能找到对应录音文件。
+    let history_session_id = current_session_id.to_string();
     let history_created_at = Utc::now().to_rfc3339();
+    let prefs_snapshot = inner.prefs.get();
     let session = DictationSession {
         id: history_session_id.clone(),
         created_at: history_created_at.clone(),
@@ -1523,11 +1555,15 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         // 历史详情页的"X 个热词"显示：用本次实际命中次数（每个匹配实例算一次），
         // 比"启用词条总数"更能反映本段口述命中了多少。u64 → u32 截断对单段听写足够。
         dictionary_entry_count: Some(total_hits.min(u32::MAX as u64) as u32),
+        // 用 begin_session 时 Recorder::start 返回的实际写盘状态，而不是 prefs 开关——
+        // 开关打开但路径创建失败时这里是 false，避免前端渲染播放按钮后端 404。
+        has_audio_recording: Some(inner.audio_archive_active.load(Ordering::Relaxed)),
     };
-    if let Err(e) = inner
-        .history
-        .append_with_retention(session, inner.prefs.get().history_retention_days)
-    {
+    if let Err(e) = inner.history.append_with_retention(
+        session,
+        prefs_snapshot.history_retention_days,
+        prefs_snapshot.history_max_entries,
+    ) {
         log::error!("[coord] history append failed: {e}");
     }
     let done_message = if tsf_required_insert_failed {

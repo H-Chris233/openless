@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { AutoUpdateGate } from './components/AutoUpdateGate';
 import { Capsule } from './components/Capsule';
 import { FloatingShell } from './components/FloatingShell';
 import { Onboarding } from './components/Onboarding';
@@ -150,6 +151,7 @@ export function App({ isCapsule, isQa }: AppProps) {
   return (
     <HotkeySettingsProvider>
       {gate === 'onboarding' ? <Onboarding onComplete={() => setGate('ready')} /> : <FloatingShell />}
+      {gate === 'ready' && <AutoUpdateGate />}
     </HotkeySettingsProvider>
   );
 }

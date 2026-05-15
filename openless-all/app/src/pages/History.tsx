@@ -6,7 +6,7 @@ import { useTranslation } from 'react-i18next';
 import { Icon } from '../components/Icon';
 import { detectOS } from '../components/WindowChrome';
 import { formatComboLabel } from '../lib/hotkey';
-import { clearHistory, deleteHistoryEntry, listHistory } from '../lib/ipc';
+import { clearHistory, deleteHistoryEntry, listHistory, readAudioRecording } from '../lib/ipc';
 import type { DictationSession, PolishMode } from '../lib/types';
 import { useHotkeySettings } from '../state/HotkeySettingsContext';
 import { Btn, Card, PageHeader, Pill } from './_atoms';
@@ -43,6 +43,21 @@ export function History() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [justCopied, setJustCopied] = useState(false);
+  // 录音文件 lazily-detected missing 状态：retention / 条数 cap 清理后磁盘上 wav
+  // 可能已被删，但 history 条目 hasAudioRecording 仍写 true。任一组件
+  // （播放 / 导出）首次 IPC 拿到 'recording not found' 时把 id 加进来，
+  // 之后渲染按钮的条件就转 false，避免反复点击得到同样的 error。
+  // 修 pr_agent "Missing file check" 反馈。
+  const [audioMissingIds, setAudioMissingIds] = useState<Set<string>>(() => new Set());
+  const markAudioMissing = useCallback((id: string) => {
+    setAudioMissingIds(prev => {
+      if (prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.add(id);
+      return next;
+    });
+  }, []);
   const { prefs } = useHotkeySettings();
 
   const refresh = useCallback(async () => {
@@ -102,9 +117,50 @@ export function History() {
     }
   };
 
-  const onCopy = () => {
+  const onCopy = async () => {
     if (!item) return;
-    navigator.clipboard?.writeText(item.finalText);
+    try {
+      if (!navigator.clipboard?.writeText) {
+        throw new Error('clipboard unavailable');
+      }
+      await navigator.clipboard.writeText(item.finalText);
+      setActionError(null);
+      setJustCopied(true);
+      window.setTimeout(() => setJustCopied(false), 1500);
+    } catch (error) {
+      console.error('[history] failed to copy entry', error);
+      setActionError(t('history.copyFailed', { err: errorMessage(error) }));
+    }
+  };
+
+  const onExportAudio = async () => {
+    if (!item || !item.hasAudioRecording) return;
+    try {
+      const bytes = await readAudioRecording(item.id);
+      if (bytes.byteLength === 0) throw new Error('empty recording');
+      const buffer = new ArrayBuffer(bytes.byteLength);
+      new Uint8Array(buffer).set(bytes);
+      const blob = new Blob([buffer], { type: 'audio/wav' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `openless-recording-${item.id}.wav`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      // 浏览器异步触发下载，立刻 revoke 偶尔被中断；延后 60s 兜底。
+      window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      setActionError(null);
+    } catch (error) {
+      console.error('[history] failed to export recording', error);
+      const msg = errorMessage(error);
+      // wav 已被 retention / 条数 cap 清理：把按钮隐藏，不显示错误（用户没干错事）。
+      if (msg.includes('recording not found') || msg.includes('not found')) {
+        markAudioMissing(item.id);
+        return;
+      }
+      setActionError(t('history.exportFailed', { err: msg }));
+    }
   };
 
   return (
@@ -208,10 +264,20 @@ export function History() {
                   <span style={{ fontSize: 11, color: 'var(--ol-ink-4)' }}>{formatDuration(item.durationMs, t)}</span>
                 </div>
                 <div style={{ display: 'flex', gap: 6 }}>
-                  <Btn icon="copy" variant="ghost" size="sm" onClick={onCopy}>{t('common.copy')}</Btn>
+                  <Btn icon={justCopied ? 'check' : 'copy'} variant="ghost" size="sm" onClick={() => void onCopy()}>{justCopied ? t('common.copied') : t('common.copy')}</Btn>
+                  {item.hasAudioRecording && !audioMissingIds.has(item.id) && (
+                    <Btn icon="download" variant="ghost" size="sm" onClick={() => void onExportAudio()}>{t('history.exportRecording')}</Btn>
+                  )}
                   <Btn icon="trash" variant="ghost" size="sm" onClick={onDelete}>{t('common.delete')}</Btn>
                 </div>
               </div>
+              {item.hasAudioRecording && !audioMissingIds.has(item.id) && (
+                <AudioRecordingPlayer
+                  sessionId={item.id}
+                  onMissing={() => markAudioMissing(item.id)}
+                  key={item.id}
+                />
+              )}
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
                 <div style={{ padding: 14, border: '0.5px solid var(--ol-line)', borderRadius: 10, background: 'var(--ol-surface-2)' }}>
                   <Pill size="sm" tone="outline" style={{ marginBottom: 10 }}>{t('history.rawLabel')}</Pill>
@@ -258,6 +324,79 @@ function errorMessage(error: unknown): string {
   if (typeof error === 'string') return error;
   if (error instanceof Error) return error.message;
   return String(error);
+}
+
+/** 当 session.hasAudioRecording 为 true 时渲染：一个加载按钮 + 拿到字节后切换为
+ *  原生 audio controls。Blob URL 在组件 unmount 时 revoke，避免泄漏。
+ *  `onMissing` 在后端返回 'recording not found'（wav 已被 prune）时触发，让父组件
+ *  把按钮永久隐藏，避免用户继续点击得到同样错误。 */
+function AudioRecordingPlayer({
+  sessionId,
+  onMissing,
+}: {
+  sessionId: string;
+  onMissing?: () => void;
+}) {
+  const { t } = useTranslation();
+  const [url, setUrl] = useState<string | null>(null);
+  const [status, setStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
+  const [errorText, setErrorText] = useState<string | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [url]);
+
+  const load = async () => {
+    setStatus('loading');
+    setErrorText(null);
+    try {
+      const bytes = await readAudioRecording(sessionId);
+      if (bytes.byteLength === 0) throw new Error('empty recording');
+      // typed array 在严格 TS lib 下不直接是 BlobPart；构造独立 ArrayBuffer 后 cast。
+      const buffer = new ArrayBuffer(bytes.byteLength);
+      new Uint8Array(buffer).set(bytes);
+      const blob = new Blob([buffer], { type: 'audio/wav' });
+      const objectUrl = URL.createObjectURL(blob);
+      setUrl(objectUrl);
+      setStatus('ready');
+    } catch (error) {
+      console.error('[history] load recording failed', error);
+      const msg = errorMessage(error);
+      // 文件被清理：通知父组件隐藏按钮组，自身不显示 error UI（用户没干错事）。
+      if (msg.includes('recording not found') || msg.includes('not found')) {
+        onMissing?.();
+        return;
+      }
+      setStatus('error');
+      setErrorText(msg);
+    }
+  };
+
+  if (status === 'ready' && url) {
+    return (
+      <div style={{ marginBottom: 14 }}>
+        <audio src={url} controls preload="auto" autoPlay style={{ width: '100%' }} />
+      </div>
+    );
+  }
+  return (
+    <div style={{ marginBottom: 14, display: 'flex', alignItems: 'center', gap: 10 }}>
+      <Btn
+        icon="play"
+        variant="ghost"
+        size="sm"
+        onClick={() => void load()}
+        disabled={status === 'loading'}
+      >
+        {status === 'loading' ? t('history.audioLoading') : t('history.playRecording')}
+      </Btn>
+      {status === 'error' && (
+        <span style={{ fontSize: 11, color: 'var(--ol-err)' }}>{errorText}</span>
+      )}
+    </div>
+  );
 }
 
 function formatTime(iso: string): string {
