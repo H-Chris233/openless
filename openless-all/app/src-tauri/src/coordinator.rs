@@ -704,7 +704,15 @@ impl Coordinator {
 
     fn ensure_modifier_hotkey_monitor(&self, binding: crate::types::HotkeyBinding) {
         if let Some(monitor) = self.inner.hotkey.lock().as_ref() {
+            // 先 clone 再 move，确保 fcitx5 插件也能同步到新热键。
+            #[cfg(target_os = "linux")]
+            let plugin_binding = binding.clone();
             monitor.update_binding(binding);
+            // Wayland: 同步新热键到 fcitx5 插件（rdev 路径已由 update_binding 更新）。
+            #[cfg(target_os = "linux")]
+            if crate::hotkey::is_wayland_session() {
+                crate::linux_fcitx::sync_binding_to_plugin(&plugin_binding);
+            }
             return;
         }
         let (tx, rx) = mpsc::channel::<HotkeyEvent>();
