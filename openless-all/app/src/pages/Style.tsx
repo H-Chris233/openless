@@ -643,16 +643,21 @@ export function Style() {
         title={copy.title}
         desc={copy.desc}
         titleRight={(
+          // 风格市场暂时未开放（云端服务尚未上线）—— 入口保留可见但灰色 + 点击 toast 提示。
+          // 真正功能（Marketplace 组件 / IPC / backend client）保留，等云端就绪可一行恢复 onClick。
           <button
             type="button"
-            onClick={() => setMarketplaceOpen(true)}
-            title={isEnglish ? 'Browse Style Marketplace' : '浏览风格市场'}
+            onClick={() => showSaveStatus(
+              'failed',
+              isEnglish ? 'Style Marketplace is not yet available' : '风格市场暂时未开放',
+            )}
+            title={isEnglish ? 'Style Marketplace is not yet available' : '风格市场暂时未开放'}
             style={{
               display: 'inline-flex', alignItems: 'center', gap: 6,
               padding: '6px 12px', borderRadius: 999,
-              border: '0.5px solid rgba(37,99,235,0.32)',
-              background: 'rgba(37,99,235,0.08)',
-              color: 'var(--ol-blue)',
+              border: '0.5px solid var(--ol-line)',
+              background: 'rgba(120,120,128,0.10)',
+              color: 'var(--ol-ink-4)',
               fontSize: 12, fontWeight: 500,
               cursor: 'default',
               transition: 'background 0.16s var(--ol-motion-quick)',
