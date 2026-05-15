@@ -91,10 +91,22 @@ public:
                     auto &keyEvent = static_cast<KeyEvent &>(event);
                     // 保存当前输入上下文：快捷键按下时用户在目标 app 中，
                     // 此后胶囊窗口可能抢走焦点，但 commitText 仍能用此 IC 提交文字。
+                    // 同时监听 IC 销毁信号，自动清空指针避免野指针。
                     if (!keyEvent.isRelease()) {
                         auto *ic = keyEvent.inputContext();
-                        if (ic) {
+                        if (ic != savedIc_) {
                             savedIc_ = ic;
+                            savedIcDestroyedConnection_.reset();
+                            if (ic) {
+                                savedIcDestroyedConnection_ =
+                                    std::make_unique<ScopedConnection>(
+                                        ic->connect(
+                                            ic->destroyed, [this]() {
+                                                FCITX_LOGC(openless, Debug)
+                                                    << "savedIc_ destroyed, clearing";
+                                                savedIc_ = nullptr;
+                                            }));
+                            }
                         }
                     }
                     // 先检查 raw sym/states（修饰键专用路径，绕过 Key::parse 限制）
@@ -247,7 +259,9 @@ private:
     uint32_t triggerRawStates_;
     /// 快捷键按下时保存的输入上下文指针，用于 commitText 在失焦后仍能提交文字。
     /// 事件处理线程和 DBus 处理线程都是 fcitx5 主事件循环，无竞态。
+    /// 通过 savedIcDestroyedConnection_ 监听 IC 销毁信号自动清空，避免野指针。
     InputContext *savedIc_;
+    std::unique_ptr<ScopedConnection> savedIcDestroyedConnection_;
     std::vector<std::unique_ptr<HandlerTableEntry<EventHandler>>>
         eventHandlers_;
 };
