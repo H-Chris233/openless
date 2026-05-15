@@ -2273,6 +2273,246 @@ pub fn export_error_log(target_path: String) -> Result<(), String> {
 #[allow(dead_code)]
 fn _ensure_snapshot_used(_: CredentialsSnapshot) {}
 
+// ─────────────────────────── marketplace (Phase A) ───────────────────────────
+//
+// 客户端跟 marketplace backend 的 HTTP 客户端封装。Backend URL 走 prefs
+// `marketplace_base_url`（默认 http://127.0.0.1:8090 开发；生产用户填 https://api.<domain>）。
+// dev-mode auth：用户在 Settings 填 `marketplace_dev_login`（GitHub 风格 username），
+// 后续 OAuth 接入时换成 token 字段。
+//
+// 5 个 IPC：
+// - marketplace_list      列表 + 搜索 + 排序
+// - marketplace_detail    详情（含完整 prompt）
+// - marketplace_install   下载 ZIP + 直接调 import_from_zip 装到本地
+// - marketplace_upload    把本地某个 style pack export ZIP → multipart 上传
+// - marketplace_like      点赞
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketplaceListItem {
+    pub id: String,
+    pub slug: String,
+    pub name: String,
+    pub description: String,
+    #[serde(default)]
+    pub author_login: String,
+    pub version: String,
+    pub base_mode: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub like_count: i64,
+    pub download_count: i64,
+    pub published_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketplaceDetail {
+    #[serde(flatten)]
+    pub summary: MarketplaceListItem,
+    pub prompt: String,
+    pub state: String,
+}
+
+fn marketplace_url_from_prefs(prefs: &UserPreferences) -> String {
+    let base = prefs.marketplace_base_url.trim();
+    if base.is_empty() {
+        "http://127.0.0.1:8090".to_string()
+    } else {
+        base.trim_end_matches('/').to_string()
+    }
+}
+
+fn marketplace_dev_user(prefs: &UserPreferences) -> String {
+    let login = prefs.marketplace_dev_login.trim();
+    if login.is_empty() {
+        "anonymous".to_string()
+    } else {
+        login.to_string()
+    }
+}
+
+#[tauri::command]
+pub async fn marketplace_list(
+    coord: CoordinatorState<'_>,
+    query: Option<String>,
+    sort: Option<String>,
+    limit: Option<u32>,
+) -> Result<Vec<MarketplaceListItem>, String> {
+    let prefs = coord.prefs().get();
+    let base = marketplace_url_from_prefs(&prefs);
+    let mut url = reqwest::Url::parse(&format!("{base}/packs"))
+        .map_err(|e| format!("invalid marketplace url: {e}"))?;
+    if let Some(q) = query.as_deref() {
+        if !q.trim().is_empty() {
+            url.query_pairs_mut().append_pair("q", q.trim());
+        }
+    }
+    if let Some(s) = sort.as_deref() {
+        if !s.trim().is_empty() {
+            url.query_pairs_mut().append_pair("sort", s.trim());
+        }
+    }
+    if let Some(n) = limit {
+        url.query_pairs_mut().append_pair("limit", &n.to_string());
+    }
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(url)
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| format!("marketplace request failed: {e}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("marketplace HTTP {status}: {body}"));
+    }
+    let items: Vec<MarketplaceListItem> =
+        resp.json().await.map_err(|e| format!("parse failed: {e}"))?;
+    Ok(items)
+}
+
+#[tauri::command]
+pub async fn marketplace_detail(
+    coord: CoordinatorState<'_>,
+    pack_id: String,
+) -> Result<MarketplaceDetail, String> {
+    if !is_valid_session_id(&pack_id) {
+        return Err("invalid pack id".into());
+    }
+    let prefs = coord.prefs().get();
+    let base = marketplace_url_from_prefs(&prefs);
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{base}/packs/{pack_id}"))
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| format!("marketplace request failed: {e}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        return Err(format!("marketplace HTTP {status}"));
+    }
+    resp.json::<MarketplaceDetail>()
+        .await
+        .map_err(|e| format!("parse failed: {e}"))
+}
+
+#[tauri::command]
+pub async fn marketplace_install(
+    coord: CoordinatorState<'_>,
+    pack_id: String,
+) -> Result<StylePack, String> {
+    // 安全校验：pack_id 来自远端 backend，可能含路径遍历 segment。
+    // 用跟 read_audio_recording 同样的 UUID-v4 白名单挡住 ../ / 绝对路径等。
+    // backend 当前用 Uuid::new_v4 生成所有 id，合法 id 必然匹配。
+    if !is_valid_session_id(&pack_id) {
+        return Err("invalid pack id".into());
+    }
+    let prefs = coord.prefs().get();
+    let base = marketplace_url_from_prefs(&prefs);
+    let client = reqwest::Client::new();
+    let bytes = client
+        .get(format!("{base}/packs/{pack_id}/download"))
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| format!("marketplace download failed: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("marketplace HTTP error: {e}"))?
+        .bytes()
+        .await
+        .map_err(|e| format!("read body failed: {e}"))?;
+
+    // pack_id 已经过 UUID 白名单，拼临时文件路径安全。
+    let tmp = std::env::temp_dir().join(format!("openless-marketplace-{pack_id}.zip"));
+    std::fs::write(&tmp, &bytes).map_err(|e| format!("write tmp zip: {e}"))?;
+    let result = coord
+        .style_packs()
+        .import_from_zip(&tmp)
+        .map_err(|e| e.to_string());
+    let _ = std::fs::remove_file(&tmp);
+    result
+}
+
+#[tauri::command]
+pub async fn marketplace_upload(
+    coord: CoordinatorState<'_>,
+    pack_id: String,
+) -> Result<serde_json::Value, String> {
+    // 本地 style pack id 也是 Uuid::new_v4 字面，跟远端同形态。挡 path traversal。
+    if !is_valid_session_id(&pack_id) {
+        return Err("invalid pack id".into());
+    }
+    let prefs = coord.prefs().get();
+    let base = marketplace_url_from_prefs(&prefs);
+    let dev_user = marketplace_dev_user(&prefs);
+
+    // 先 export 本地 pack → 临时 ZIP
+    let tmp = std::env::temp_dir().join(format!("openless-marketplace-upload-{pack_id}.zip"));
+    coord
+        .style_packs()
+        .export_to_zip(&pack_id, &tmp)
+        .map_err(|e| format!("export local pack failed: {e}"))?;
+    let bytes = std::fs::read(&tmp).map_err(|e| format!("read exported zip: {e}"))?;
+    let _ = std::fs::remove_file(&tmp);
+
+    let client = reqwest::Client::new();
+    let part = reqwest::multipart::Part::bytes(bytes)
+        .file_name(format!("{pack_id}.zip"))
+        .mime_str("application/zip")
+        .map_err(|e| format!("multipart build failed: {e}"))?;
+    let form = reqwest::multipart::Form::new().part("file", part);
+    let resp = client
+        .post(format!("{base}/packs"))
+        .header("X-Dev-User", dev_user)
+        .timeout(std::time::Duration::from_secs(30))
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| format!("upload request failed: {e}"))?;
+    let status = resp.status();
+    let body = resp
+        .text()
+        .await
+        .unwrap_or_else(|e| format!("read body failed: {e}"))
+        .clone();
+    if !status.is_success() {
+        return Err(format!("upload HTTP {status}: {body}"));
+    }
+    serde_json::from_str::<serde_json::Value>(&body)
+        .map_err(|e| format!("parse upload response failed: {e}"))
+}
+
+#[tauri::command]
+pub async fn marketplace_like(
+    coord: CoordinatorState<'_>,
+    pack_id: String,
+) -> Result<serde_json::Value, String> {
+    if !is_valid_session_id(&pack_id) {
+        return Err("invalid pack id".into());
+    }
+    let prefs = coord.prefs().get();
+    let base = marketplace_url_from_prefs(&prefs);
+    let dev_user = marketplace_dev_user(&prefs);
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{base}/packs/{pack_id}/like"))
+        .header("X-Dev-User", dev_user)
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| format!("like request failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("like HTTP {}", resp.status()));
+    }
+    resp.json::<serde_json::Value>()
+        .await
+        .map_err(|e| format!("parse failed: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

@@ -11,7 +11,9 @@ import {
   resetBuiltinStylePack,
   saveStylePack,
   setActiveStylePack,
+  uploadMarketplacePack,
 } from '../lib/ipc';
+import { useHotkeySettings } from '../state/HotkeySettingsContext';
 import type { PolishMode, StylePack, StylePackExample, StylePackRuntimeDiagnostics } from '../lib/types';
 import { Btn, Card, PageHeader, Pill } from './_atoms';
 import { Icon } from '../components/Icon';
@@ -118,6 +120,8 @@ function sanitizeZipFileName(name: string) {
 export function Style() {
   const { t, i18n } = useTranslation();
   const isEnglish = i18n.language.toLowerCase().startsWith('en');
+  const { prefs: marketplacePrefs } = useHotkeySettings();
+  const canPublish = (marketplacePrefs?.marketplaceDevLogin ?? '').trim().length > 0;
   const copy = {
     kicker: 'STYLE PACKS',
     title: isEnglish ? 'Style Packs' : '风格包',
@@ -128,6 +132,15 @@ export function Style() {
     importZip: isEnglish ? 'Import ZIP' : '导入 ZIP',
     exportZip: isEnglish ? 'Export ZIP' : '导出 ZIP',
     exportShort: isEnglish ? 'Export' : '导出',
+    publishMarketplace: isEnglish ? 'Publish to Marketplace' : '发布到风格市场',
+    publishDisabledHint: isEnglish
+      ? 'Configure your GitHub login in Settings → Marketplace first'
+      : '请先在 设置 → 风格市场 配置 GitHub 用户名',
+    publishSuccess: isEnglish
+      ? 'Published — pending review on marketplace'
+      : '发布成功，等待 marketplace 审核',
+    publishFailed: (msg: string) =>
+      isEnglish ? `Publish failed: ${msg}` : `发布失败：${msg}`,
     builtin: isEnglish ? 'Built-in' : '内置',
     imported: isEnglish ? 'Imported' : '导入',
     active: isEnglish ? 'Active' : '当前',
@@ -560,6 +573,23 @@ export function Style() {
     }
   };
 
+  const handlePublishToMarketplace = async (pack = selectedPack) => {
+    if (!pack) return;
+    if (editorOpen && dirty && selectedPack && pack.id === selectedPack.id) {
+      showSaveStatus('failed', copy.exportDirtyFirst);
+      return;
+    }
+    setBusy('exporting');
+    try {
+      await uploadMarketplacePack(pack.id);
+      showSaveStatus('saved', copy.publishSuccess, true);
+    } catch (publishError) {
+      showSaveStatus('failed', copy.publishFailed(String(publishError)));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const handleExportZip = async (pack = selectedPack) => {
     if (!pack) return;
     if (editorOpen && dirty && selectedPack && pack.id === selectedPack.id) {
@@ -909,6 +939,16 @@ export function Style() {
                       <Btn variant="ghost" icon="archive" onClick={() => void handleExportZip()} disabled={busy === 'exporting'}>
                         {copy.exportZip}
                       </Btn>
+                      <span title={canPublish ? '' : copy.publishDisabledHint}>
+                        <Btn
+                          variant="ghost"
+                          icon="cloud"
+                          onClick={() => void handlePublishToMarketplace()}
+                          disabled={!canPublish || busy === 'exporting'}
+                        >
+                          {copy.publishMarketplace}
+                        </Btn>
+                      </span>
                       <Btn
                         variant={draft.active ? 'soft' : 'blue'}
                         icon="check"

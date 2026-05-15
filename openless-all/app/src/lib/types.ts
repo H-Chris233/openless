@@ -292,6 +292,30 @@ export interface UserPreferences {
   /** recordings/ 里保留的最近 wav 文件数。null = 跟随 200 硬上限；1..=200 之间为用户自定义。
    *  跟 historyMaxEntries 解耦——「文本档案多但 wav 只留最近 5 条」是合法组合。 */
   audioRecordingMaxEntries: number | null;
+  /** Marketplace HTTP 基地址。空 = 本地开发默认 http://127.0.0.1:8090；生产填 https://api.<domain>。 */
+  marketplaceBaseUrl: string;
+  /** Marketplace dev-mode 模拟登录用户名（GitHub login 风格）。生产换 OAuth token 后此字段废弃。 */
+  marketplaceDevLogin: string;
+}
+
+export interface MarketplaceListItem {
+  id: string;
+  slug: string;
+  name: string;
+  description: string;
+  authorLogin: string;
+  version: string;
+  baseMode: PolishMode;
+  tags: string[];
+  likeCount: number;
+  downloadCount: number;
+  publishedAt: string;
+  updatedAt: string;
+}
+
+export interface MarketplaceDetail extends MarketplaceListItem {
+  prompt: string;
+  state: 'pending' | 'approved' | 'rejected';
 }
 
 export interface MicrophoneDevice {

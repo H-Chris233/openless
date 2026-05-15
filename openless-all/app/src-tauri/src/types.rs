@@ -622,6 +622,14 @@ pub struct UserPreferences {
     /// 这种「文本档案多 + 录音不占盘」组合下精确控制。
     #[serde(default)]
     pub audio_recording_max_entries: Option<u32>,
+    /// Style Pack Marketplace HTTP 基地址。空 = 本地开发默认 http://127.0.0.1:8090；
+    /// 用户在 Settings 里填生产 URL (如 https://api.openless-marketplace.com)。
+    #[serde(default)]
+    pub marketplace_base_url: String,
+    /// Marketplace dev-mode 模拟登录用户名（GitHub login 风格）。生产换 OAuth token 后此字段废弃。
+    /// 上传 / 点赞需要带这个 header；空时上传被后端 401。
+    #[serde(default)]
+    pub marketplace_dev_login: String,
 }
 
 fn default_local_asr_model() -> String {
@@ -735,6 +743,10 @@ struct UserPreferencesWire {
     record_audio_for_debug: bool,
     #[serde(default)]
     audio_recording_max_entries: Option<u32>,
+    #[serde(default)]
+    marketplace_base_url: String,
+    #[serde(default)]
+    marketplace_dev_login: String,
 }
 
 impl Default for UserPreferencesWire {
@@ -785,6 +797,8 @@ impl Default for UserPreferencesWire {
             history_max_entries: prefs.history_max_entries,
             record_audio_for_debug: prefs.record_audio_for_debug,
             audio_recording_max_entries: prefs.audio_recording_max_entries,
+            marketplace_base_url: prefs.marketplace_base_url,
+            marketplace_dev_login: prefs.marketplace_dev_login,
         }
     }
 }
@@ -857,6 +871,8 @@ impl<'de> Deserialize<'de> for UserPreferences {
             history_max_entries: wire.history_max_entries,
             record_audio_for_debug: wire.record_audio_for_debug,
             audio_recording_max_entries: wire.audio_recording_max_entries,
+            marketplace_base_url: wire.marketplace_base_url,
+            marketplace_dev_login: wire.marketplace_dev_login,
         })
     }
 }
@@ -1210,6 +1226,8 @@ impl Default for UserPreferences {
             history_max_entries: None,
             record_audio_for_debug: false,
             audio_recording_max_entries: None,
+            marketplace_base_url: String::new(),
+            marketplace_dev_login: String::new(),
         }
     }
 }

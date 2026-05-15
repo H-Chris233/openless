@@ -15,6 +15,7 @@ import { Vocab } from '../pages/Vocab';
 import { Style } from '../pages/Style';
 import { Translation } from '../pages/Translation';
 import { SelectionAsk } from '../pages/SelectionAsk';
+import { Marketplace } from '../pages/Marketplace';
 // LocalAsr 不再作为主 nav tab——本地 ASR 模型管理已合并到 Settings → Advanced 中
 // 通过 <LocalAsr embedded /> 渲染。这里之前的 import 与 NAV_BASE 条目都已移除。
 import { APP_VERSION_LABEL, IS_BETA_BUILD } from '../lib/appVersion';
@@ -44,6 +45,7 @@ const NAV_BASE: Array<Omit<NavItem, 'name'>> = [
   { id: 'history', icon: 'history', cmp: History },
   { id: 'vocab', icon: 'vocab', cmp: Vocab },
   { id: 'style', icon: 'style', cmp: Style },
+  { id: 'marketplace', icon: 'cloud', cmp: Marketplace },
   { id: 'translation', icon: 'translate', cmp: Translation },
   { id: 'selectionAsk', icon: 'selectionAsk', cmp: SelectionAsk },
 ];
