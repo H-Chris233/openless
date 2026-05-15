@@ -50,6 +50,12 @@ pub enum VolcengineASRError {
     CredentialsMissing,
     #[error("connection failed: {0}")]
     ConnectionFailed(String),
+    /// WebSocket 握手阶段服务端返回 401 / 403：凭据被拒。
+    /// 区分自 `ConnectionFailed`（DNS/TLS/网络层失败）—— 前者通常是 App ID / Access
+    /// Token / Resource ID 错或账号没开通 bigmodel；后者是网络断 / 防火墙 / DNS。
+    /// 显式 variant 让 coordinator 在 capsule 给用户中文「检查凭据」提示，不是 raw HTTP error。
+    #[error("Volcengine 凭据被拒（HTTP {0}）：请检查 Settings → 凭据 → Volcengine 的 App ID 和 Access Token，或确认账号已开通 SAUC bigmodel 资源")]
+    AuthRejected(u16),
     #[error("authentication failed")]
     AuthenticationFailed,
     #[error("no final result")]
@@ -155,9 +161,7 @@ impl VolcengineStreamingASR {
                 .map_err(|e| VolcengineASRError::ConnectionFailed(e.to_string()))?,
         );
 
-        let (ws, _resp) = connect_async(request)
-            .await
-            .map_err(|e| VolcengineASRError::ConnectionFailed(e.to_string()))?;
+        let (ws, _resp) = connect_async(request).await.map_err(classify_connect_error)?;
         let (write, read) = ws.split();
 
         let (tx, rx) = oneshot::channel();
@@ -635,6 +639,20 @@ fn normalized_result(json: &Value) -> Option<&Value> {
         return Some(json);
     }
     None
+}
+
+/// 把 tokio-tungstenite 的 connect 错误分类：握手收到 HTTP 401 / 403 → `AuthRejected`
+/// （凭据被拒，要 user 检查 App ID / Access Token / 账号资源开通状态）；其它 → 通用
+/// `ConnectionFailed`（DNS / TLS / 网络层）。让 capsule 文案能跟泛泛 HTTP error 区分。
+fn classify_connect_error(err: tokio_tungstenite::tungstenite::Error) -> VolcengineASRError {
+    use tokio_tungstenite::tungstenite::Error as WsError;
+    if let WsError::Http(resp) = &err {
+        let status = resp.status().as_u16();
+        if status == 401 || status == 403 {
+            return VolcengineASRError::AuthRejected(status);
+        }
+    }
+    VolcengineASRError::ConnectionFailed(err.to_string())
 }
 
 fn hotword_context(entries: &[DictionaryHotword]) -> Option<String> {
