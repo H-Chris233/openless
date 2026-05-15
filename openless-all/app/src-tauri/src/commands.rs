@@ -1150,6 +1150,7 @@ pub async fn read_audio_recording(session_id: String) -> Result<Vec<u8>, String>
 }
 
 /// UUID-v4 字面校验：36 字符 + 5 段 `-` 分隔（8-4-4-4-12）+ 仅 ASCII 十六进制。
+/// 用于 install/detail/like —— pack_id 来自远端服务器，必须是它发的 UUID。
 fn is_valid_session_id(s: &str) -> bool {
     if s.len() != 36 {
         return false;
@@ -1166,6 +1167,16 @@ fn is_valid_session_id(s: &str) -> bool {
         }
     }
     true
+}
+
+/// 本地 style pack id 白名单：`[A-Za-z0-9._-]`、长度 1..=128。
+/// 上传走本地 id（`builtin.light` / 用户自取 slug / UUID 都可），不是远端 UUID。
+/// 仍阻断 `..` / `/` / `\` / 控制字符，避免 path traversal 进临时 zip 文件名。
+fn is_valid_local_pack_id(s: &str) -> bool {
+    if s.is_empty() || s.len() > 128 {
+        return false;
+    }
+    s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b'_')
 }
 
 // ─────────────────────────── vocab ───────────────────────────
@@ -2414,6 +2425,26 @@ pub async fn marketplace_install(
     let prefs = coord.prefs().get();
     let base = marketplace_url_from_prefs(&prefs);
     let client = reqwest::Client::new();
+
+    // 先拉 detail 拿 authorLogin —— 装好后本地写 originAuthorLogin，
+    // 后续编辑+发布时 backend 据此判 supersede（原作者）vs derivative（他人 fork）。
+    let detail_url = format!("{base}/packs/{pack_id}");
+    let detail: serde_json::Value = client
+        .get(&detail_url)
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| format!("marketplace detail failed: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("marketplace detail HTTP error: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("parse detail failed: {e}"))?;
+    let origin_author_login = detail
+        .get("authorLogin")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
     let bytes = client
         .get(format!("{base}/packs/{pack_id}/download"))
         .timeout(std::time::Duration::from_secs(30))
@@ -2429,12 +2460,18 @@ pub async fn marketplace_install(
     // pack_id 已经过 UUID 白名单，拼临时文件路径安全。
     let tmp = std::env::temp_dir().join(format!("openless-marketplace-{pack_id}.zip"));
     std::fs::write(&tmp, &bytes).map_err(|e| format!("write tmp zip: {e}"))?;
-    let result = coord
+    let imported_result = coord
         .style_packs()
         .import_from_zip(&tmp)
         .map_err(|e| e.to_string());
     let _ = std::fs::remove_file(&tmp);
-    result
+    let imported = imported_result?;
+
+    // 绑定 origin —— 后续编辑+发布走 derivative / supersede 分支。
+    coord
+        .style_packs()
+        .set_origin(&imported.id, Some(pack_id), origin_author_login)
+        .map_err(|e| format!("set origin failed: {e}"))
 }
 
 #[tauri::command]
@@ -2442,13 +2479,21 @@ pub async fn marketplace_upload(
     coord: CoordinatorState<'_>,
     pack_id: String,
 ) -> Result<serde_json::Value, String> {
-    // 本地 style pack id 也是 Uuid::new_v4 字面，跟远端同形态。挡 path traversal。
-    if !is_valid_session_id(&pack_id) {
+    // 本地 pack id 形态：`builtin.light` / 用户 slug / Uuid。用 local 白名单挡 `..` / `/` / `\`。
+    if !is_valid_local_pack_id(&pack_id) {
         return Err("invalid pack id".into());
     }
     let prefs = coord.prefs().get();
     let base = marketplace_url_from_prefs(&prefs);
     let dev_user = marketplace_dev_user(&prefs);
+
+    // 拉本地 pack 拿 origin_pack_id —— 装过的 pack 这里有值，
+    // backend 据此判同作者就 supersede 原行（新版本），他人就 derivative（独立新 row）。
+    let local_pack = coord
+        .style_packs()
+        .get(&pack_id)
+        .map_err(|e| format!("local pack not found: {e}"))?;
+    let origin_pack_id = local_pack.origin_pack_id.clone();
 
     // 先 export 本地 pack → 临时 ZIP
     let tmp = std::env::temp_dir().join(format!("openless-marketplace-upload-{pack_id}.zip"));
@@ -2464,7 +2509,10 @@ pub async fn marketplace_upload(
         .file_name(format!("{pack_id}.zip"))
         .mime_str("application/zip")
         .map_err(|e| format!("multipart build failed: {e}"))?;
-    let form = reqwest::multipart::Form::new().part("file", part);
+    let mut form = reqwest::multipart::Form::new().part("file", part);
+    if let Some(ref oid) = origin_pack_id {
+        form = form.text("origin_pack_id", oid.clone());
+    }
     let resp = client
         .post(format!("{base}/packs"))
         .header("X-Dev-User", dev_user)
@@ -2482,8 +2530,24 @@ pub async fn marketplace_upload(
     if !status.is_success() {
         return Err(format!("upload HTTP {status}: {body}"));
     }
-    serde_json::from_str::<serde_json::Value>(&body)
-        .map_err(|e| format!("parse upload response failed: {e}"))
+    let parsed = serde_json::from_str::<serde_json::Value>(&body)
+        .map_err(|e| format!("parse upload response failed: {e}"))?;
+
+    // 本地从未绑定 origin（首次上传一个本地原创 pack）→ 把 backend 分配的 pack id 写回本地，
+    // 让用户在同设备上后续编辑能继续走「同作者 supersede」分支，更新自己原创的包。
+    if origin_pack_id.is_none() {
+        if let Some(remote_id) = parsed.get("id").and_then(|v| v.as_str()) {
+            let prefs2 = coord.prefs().get();
+            let dev_user2 = marketplace_dev_user(&prefs2);
+            let _ = coord.style_packs().set_origin(
+                &pack_id,
+                Some(remote_id.to_string()),
+                Some(dev_user2),
+            );
+        }
+    }
+
+    Ok(parsed)
 }
 
 #[tauri::command]
@@ -2513,16 +2577,73 @@ pub async fn marketplace_like(
         .map_err(|e| format!("parse failed: {e}"))
 }
 
+/// 撤回自己发布的 pack（后端软删 state='withdrawn'，前端列表不再可见）。
+/// pack_id 来自远端，必须是 UUID-v4。
+#[tauri::command]
+pub async fn marketplace_delete(
+    coord: CoordinatorState<'_>,
+    pack_id: String,
+) -> Result<(), String> {
+    if !is_valid_session_id(&pack_id) {
+        return Err("invalid pack id".into());
+    }
+    let prefs = coord.prefs().get();
+    let base = marketplace_url_from_prefs(&prefs);
+    let dev_user = marketplace_dev_user(&prefs);
+    if dev_user.is_empty() {
+        return Err("未登录：先在 Settings 填发布者名字".into());
+    }
+    let client = reqwest::Client::new();
+    let resp = client
+        .delete(format!("{base}/packs/{pack_id}"))
+        .header("X-Dev-User", dev_user)
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| format!("delete request failed: {e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("delete HTTP {status}: {body}"));
+    }
+    Ok(())
+}
+
+/// 拉当前用户赞过的所有 pack id，用于客户端市场页面渲染红心 + 「我赞过的」过滤。
+#[tauri::command]
+pub async fn marketplace_my_likes(coord: CoordinatorState<'_>) -> Result<Vec<String>, String> {
+    let prefs = coord.prefs().get();
+    let base = marketplace_url_from_prefs(&prefs);
+    let dev_user = marketplace_dev_user(&prefs);
+    if dev_user.is_empty() {
+        return Ok(Vec::new()); // 未登录就空集合，UI 渲染无红心
+    }
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{base}/me/likes"))
+        .header("X-Dev-User", dev_user)
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| format!("my-likes request failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("my-likes HTTP {}", resp.status()));
+    }
+    resp.json::<Vec<String>>()
+        .await
+        .map_err(|e| format!("parse my-likes failed: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         active_asr_is_keyless_for_validation, active_foundry_model_from_prefs,
         asr_configured_for_provider, asr_transcriptions_url, fetch_provider_models,
-        is_gemini_base_url, is_valid_session_id, llm_configured_for_provider,
-        local_asr_release_plan_for_provider, models_url, normalize_foundry_language_hint,
-        parse_gemini_model_ids, parse_latest_beta_from_atom, parse_model_ids, persist_settings,
-        release_foundry_runtime_if_inactive, validate_foundry_model_alias, ProviderConfig,
-        SettingsWriter,
+        is_gemini_base_url, is_valid_local_pack_id, is_valid_session_id,
+        llm_configured_for_provider, local_asr_release_plan_for_provider, models_url,
+        normalize_foundry_language_hint, parse_gemini_model_ids, parse_latest_beta_from_atom,
+        parse_model_ids, persist_settings, release_foundry_runtime_if_inactive,
+        validate_foundry_model_alias, ProviderConfig, SettingsWriter,
     };
     use crate::persistence::CredentialsSnapshot;
     use crate::types::{
@@ -3262,5 +3383,27 @@ mod tests {
         // 百分号编码与绝对路径
         assert!(!is_valid_session_id("%2e%2e/recordings/x"));
         assert!(!is_valid_session_id("/Users/attacker/secret.wav"));
+    }
+
+    #[test]
+    fn is_valid_local_pack_id_accepts_realistic_ids() {
+        assert!(is_valid_local_pack_id("builtin.light"));
+        assert!(is_valid_local_pack_id("builtin.structured"));
+        assert!(is_valid_local_pack_id("custom.meeting"));
+        assert!(is_valid_local_pack_id("550e8400-e29b-41d4-a716-446655440000"));
+        assert!(is_valid_local_pack_id("my_pack_v2"));
+        assert!(is_valid_local_pack_id("Pack-2026.05"));
+    }
+
+    #[test]
+    fn is_valid_local_pack_id_rejects_path_traversal() {
+        assert!(!is_valid_local_pack_id(""));
+        assert!(!is_valid_local_pack_id("../etc/passwd"));
+        assert!(!is_valid_local_pack_id("..\\windows\\system32"));
+        assert!(!is_valid_local_pack_id("pack/../../etc"));
+        assert!(!is_valid_local_pack_id("/abs/path"));
+        assert!(!is_valid_local_pack_id("with space"));
+        assert!(!is_valid_local_pack_id("with\x00null"));
+        assert!(!is_valid_local_pack_id(&"a".repeat(129)));
     }
 }

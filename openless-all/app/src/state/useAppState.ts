@@ -9,7 +9,6 @@ export type AppTab =
   | 'style'
   | 'translation'
   | 'selectionAsk'
-  | 'marketplace'
   | 'localAsr';
 
 export interface AppState {

@@ -9,8 +9,10 @@ export type SaveToastState = 'idle' | 'saving' | 'saved' | 'failed';
 interface SavedToastProps {
   saveState: SaveToastState;
   message: string;
-  /** 覆盖默认 top:16 right:16 偏移，例如 SettingsModal 里要避开 28×28 的关闭按钮。 */
-  offsetStyle?: Pick<CSSProperties, 'top' | 'right' | 'left' | 'bottom'>;
+  /** 覆盖默认 position:absolute、top:16 right:16 偏移。
+   *  Style 页传 position:'fixed' 把 toast 锚到视口右上角，编辑器展开后向下滚也能看见；
+   *  SettingsModal 用默认 absolute 锚在模态内容右上角。 */
+  offsetStyle?: Pick<CSSProperties, 'top' | 'right' | 'left' | 'bottom' | 'position'>;
 }
 
 export function SavedToast({ saveState, message, offsetStyle }: SavedToastProps) {
@@ -21,7 +23,8 @@ export function SavedToast({ saveState, message, offsetStyle }: SavedToastProps)
     top: 16,
     right: 16,
     ...offsetStyle,
-    zIndex: 5,
+    // 必须高于所有 modal（backdrop zIndex 50）；失败 toast 决不能被 modal 盖住，否则用户看不到错因。
+    zIndex: 9999,
     padding: '5px 12px',
     borderRadius: 999,
     border: failed

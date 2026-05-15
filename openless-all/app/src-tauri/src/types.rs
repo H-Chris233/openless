@@ -276,6 +276,11 @@ pub struct StylePack {
     pub active: bool,
     pub recommended_model: Option<String>,
     pub compatible_app_version: Option<String>,
+    /// 衍生关系：从 marketplace 安装时记录 upstream pack id；
+    /// 后续编辑 + 发布时客户端把这两个字段带到 backend，让 backend 判 supersede vs derivative。
+    /// 全新本地创建的 pack 这两个字段为 None。
+    pub origin_pack_id: Option<String>,
+    pub origin_author_login: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -324,6 +329,8 @@ impl Default for StylePack {
             active: false,
             recommended_model: None,
             compatible_app_version: None,
+            origin_pack_id: None,
+            origin_author_login: None,
         }
     }
 }
@@ -370,6 +377,8 @@ pub fn builtin_style_pack_for_mode(mode: PolishMode) -> StylePack {
             active: false,
             recommended_model: None,
             compatible_app_version: Some(env!("CARGO_PKG_VERSION").into()),
+            origin_pack_id: None,
+            origin_author_login: None,
         },
         PolishMode::Light => StylePack {
             id: BUILTIN_STYLE_PACK_LIGHT_ID.into(),
@@ -393,6 +402,8 @@ pub fn builtin_style_pack_for_mode(mode: PolishMode) -> StylePack {
             active: false,
             recommended_model: None,
             compatible_app_version: Some(env!("CARGO_PKG_VERSION").into()),
+            origin_pack_id: None,
+            origin_author_login: None,
         },
         PolishMode::Structured => StylePack {
             id: BUILTIN_STYLE_PACK_STRUCTURED_ID.into(),
@@ -416,6 +427,8 @@ pub fn builtin_style_pack_for_mode(mode: PolishMode) -> StylePack {
             active: false,
             recommended_model: None,
             compatible_app_version: Some(env!("CARGO_PKG_VERSION").into()),
+            origin_pack_id: None,
+            origin_author_login: None,
         },
         PolishMode::Formal => StylePack {
             id: BUILTIN_STYLE_PACK_FORMAL_ID.into(),
@@ -439,6 +452,8 @@ pub fn builtin_style_pack_for_mode(mode: PolishMode) -> StylePack {
             active: false,
             recommended_model: None,
             compatible_app_version: Some(env!("CARGO_PKG_VERSION").into()),
+            origin_pack_id: None,
+            origin_author_login: None,
         },
     }
 }

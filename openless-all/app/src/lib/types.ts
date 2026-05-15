@@ -177,6 +177,9 @@ export interface StylePack {
   active: boolean;
   recommendedModel?: string | null;
   compatibleAppVersion?: string | null;
+  /** 衍生关系：null = 本地原创（或还没首发到云端）；非空 = 这份 pack 安装自云端 originPackId。 */
+  originPackId?: string | null;
+  originAuthorLogin?: string | null;
 }
 
 export interface StylePackRuntimeDiagnostics {
@@ -311,6 +314,9 @@ export interface MarketplaceListItem {
   downloadCount: number;
   publishedAt: string;
   updatedAt: string;
+  /** 衍生关系：null = 原创；非空 = 衍生自 originPackId，UI 显「衍生自 @originAuthorLogin」。 */
+  originPackId?: string | null;
+  originAuthorLogin?: string | null;
 }
 
 export interface MarketplaceDetail extends MarketplaceListItem {

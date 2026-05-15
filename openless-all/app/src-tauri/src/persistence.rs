@@ -1167,6 +1167,27 @@ impl StylePackStore {
         Ok(updated)
     }
 
+    /// 设置衍生关系；marketplace_install 安装本地包后绑定 upstream id + author。
+    /// 单独走这里是为了不让前端通用 save 路径误清这两字段。
+    pub fn set_origin(
+        &self,
+        id: &str,
+        origin_pack_id: Option<String>,
+        origin_author_login: Option<String>,
+    ) -> Result<StylePack> {
+        let mut packs = self.state.lock();
+        let index = packs
+            .iter()
+            .position(|pack| pack.id == id)
+            .ok_or_else(|| anyhow!("style pack {} not found", id))?;
+        packs[index].origin_pack_id = normalize_optional_text(origin_pack_id);
+        packs[index].origin_author_login = normalize_optional_text(origin_author_login);
+        packs[index].updated_at = Some(Utc::now().to_rfc3339());
+        let updated = packs[index].clone();
+        write_style_packs_file(&self.path, &packs)?;
+        Ok(updated)
+    }
+
     pub fn set_enabled(&self, id: &str, enabled: bool) -> Result<StylePack> {
         let mut packs = self.state.lock();
         let index = packs
@@ -1282,6 +1303,8 @@ impl StylePackStore {
             compatible_app_version: manifest
                 .compatible_app_version
                 .and_then(|value| normalize_optional_text(Some(value))),
+            origin_pack_id: None,
+            origin_author_login: None,
         };
         packs.insert(0, pack.clone());
         write_style_packs_file(&self.path, &packs)?;
@@ -1631,6 +1654,8 @@ fn merge_style_pack_update(existing: StylePack, incoming: StylePack) -> Result<S
     updated.tags = normalize_tags(&incoming.tags);
     updated.recommended_model = normalize_optional_text(incoming.recommended_model);
     updated.compatible_app_version = normalize_optional_text(incoming.compatible_app_version);
+    // origin 字段是 marketplace_install 之后的「衍生关系绑定」，**不能**走通用 save 路径覆盖
+    // ——否则前端 save 时丢失 originPackId 就会清掉关联。要写 origin 走专用的 set_origin。
     updated.updated_at = Some(Utc::now().to_rfc3339());
     Ok(updated)
 }

@@ -10,16 +10,20 @@ interface PageHeaderProps {
   title: string;
   desc?: string;
   right?: ReactNode;
+  titleRight?: ReactNode;
 }
 
-export function PageHeader({ kicker, title, desc, right }: PageHeaderProps) {
+export function PageHeader({ kicker, title, desc, right, titleRight }: PageHeaderProps) {
   return (
     <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 24, marginBottom: 24 }}>
       <div style={{ minWidth: 0 }}>
         {kicker && (
           <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: '.08em', textTransform: 'uppercase', color: 'var(--ol-ink-4)', marginBottom: 8 }}>{kicker}</div>
         )}
-        <h1 style={{ margin: 0, fontSize: 26, fontWeight: 600, letterSpacing: '-0.02em', color: 'var(--ol-ink)' }}>{title}</h1>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          <h1 style={{ margin: 0, fontSize: 26, fontWeight: 600, letterSpacing: '-0.02em', color: 'var(--ol-ink)' }}>{title}</h1>
+          {titleRight}
+        </div>
         {desc && <p style={{ margin: '8px 0 0', fontSize: 13, color: 'var(--ol-ink-3)', maxWidth: 640, lineHeight: 1.55 }}>{desc}</p>}
       </div>
       {right}

@@ -18,6 +18,7 @@ import type { PolishMode, StylePack, StylePackExample, StylePackRuntimeDiagnosti
 import { Btn, Card, PageHeader, Pill } from './_atoms';
 import { Icon } from '../components/Icon';
 import { SavedToast, type SaveToastState } from '../components/SavedToast';
+import { MarketplaceModal } from '../components/MarketplaceModal';
 
 type BusyAction =
   | 'loading'
@@ -255,6 +256,7 @@ export function Style() {
   const editorCloseTimer = useRef<number | null>(null);
   const [runtimePreview, setRuntimePreview] = useState<StylePackRuntimeDiagnostics | null>(null);
   const [runtimePreviewError, setRuntimePreviewError] = useState<string | null>(null);
+  const [marketplaceOpen, setMarketplaceOpen] = useState(false);
 
   useEffect(() => () => {
     if (statusTimer.current !== null) window.clearTimeout(statusTimer.current);
@@ -268,12 +270,15 @@ export function Style() {
     }
     setSaveState(state);
     setSaveMessage(message);
-    if (temporary) {
+    // 自动消失：success/info 默认 ~1.6s；failure 给用户更长时间读再消失（6s）。
+    // 「saving」过程态不自动消失（等真正终态覆盖）。
+    if (temporary || state === 'failed') {
+      const delay = state === 'failed' ? 6000 : 1600;
       statusTimer.current = window.setTimeout(() => {
         setSaveState('idle');
         setSaveMessage('');
         statusTimer.current = null;
-      }, 1600);
+      }, delay);
     }
   };
 
@@ -575,12 +580,21 @@ export function Style() {
 
   const handlePublishToMarketplace = async (pack = selectedPack) => {
     if (!pack) return;
-    if (editorOpen && dirty && selectedPack && pack.id === selectedPack.id) {
-      showSaveStatus('failed', copy.exportDirtyFirst);
+    // 内置 pack 是只读模板，不能直接上传 —— 改它得先「在官方上面做一份」克隆出 imported。
+    if (pack.kind === 'builtin') {
+      showSaveStatus('failed', isEnglish
+        ? 'Built-in packs cannot be published. Clone first via edit.'
+        : '内置风格包不能直接发布，请先编辑生成一份导入版。');
       return;
     }
     setBusy('exporting');
     try {
+      // 若编辑器有未保存改动且就是当前要发布的 pack，先自动保存再发布。
+      if (editorOpen && dirty && draft && selectedPack && pack.id === selectedPack.id) {
+        const saved = await saveStylePack({ ...draft, tags: draft.tags.filter(Boolean) });
+        await loadPacks(saved.id);
+        pack = saved;
+      }
       await uploadMarketplacePack(pack.id);
       showSaveStatus('saved', copy.publishSuccess, true);
     } catch (publishError) {
@@ -628,6 +642,26 @@ export function Style() {
         kicker={copy.kicker}
         title={copy.title}
         desc={copy.desc}
+        titleRight={(
+          <button
+            type="button"
+            onClick={() => setMarketplaceOpen(true)}
+            title={isEnglish ? 'Browse Style Marketplace' : '浏览风格市场'}
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 6,
+              padding: '6px 12px', borderRadius: 999,
+              border: '0.5px solid rgba(37,99,235,0.32)',
+              background: 'rgba(37,99,235,0.08)',
+              color: 'var(--ol-blue)',
+              fontSize: 12, fontWeight: 500,
+              cursor: 'default',
+              transition: 'background 0.16s var(--ol-motion-quick)',
+            }}
+          >
+            <Icon name="cloud" size={13} />
+            <span>{isEnglish ? 'Marketplace' : '风格市场'}</span>
+          </button>
+        )}
         right={(
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end', marginTop: 40 }}>
             <Btn variant="ghost" icon="refresh" onClick={() => void loadPacks(selectedId)} disabled={busy === 'loading'}>
@@ -640,7 +674,23 @@ export function Style() {
         )}
       />
 
-      <SavedToast saveState={saveState} message={saveMessage} />
+      {/* 视口锚定（position: fixed）—— 编辑器展开后滚动到下方时仍可见。
+          放在 bottom-right 避免压在「导入 ZIP」按钮上挡文字。 */}
+      <SavedToast
+        saveState={saveState}
+        message={saveMessage}
+        offsetStyle={{ position: 'fixed', bottom: 32, right: 32, top: 'auto' }}
+      />
+
+      {marketplaceOpen && (
+        <MarketplaceModal
+          onClose={() => {
+            setMarketplaceOpen(false);
+            // 用户可能在 modal 内安装过远端 pack；关闭后刷新本地列表，避免新装的看不到。
+            void loadPacks();
+          }}
+        />
+      )}
 
       <Card padding={0} style={{ overflow: 'hidden', flex: '1 1 0', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
           <div style={{ padding: 18, borderBottom: '0.5px solid var(--ol-line)', flexShrink: 0 }}>
@@ -716,6 +766,12 @@ export function Style() {
                         <Pill tone={isBuiltin ? 'outline' : 'blue'} size="sm">
                           {isBuiltin ? copy.builtin : copy.imported}
                         </Pill>
+                        {pack.originAuthorLogin
+                          && pack.originAuthorLogin !== (marketplacePrefs?.marketplaceDevLogin ?? '').trim() && (
+                          <span title={`衍生自 @${pack.originAuthorLogin}`}>
+                            <Pill tone="ok" size="sm">衍生自 @{pack.originAuthorLogin}</Pill>
+                          </span>
+                        )}
                         {pack.active && <Pill tone="dark" size="sm">{copy.active}</Pill>}
                       </div>
                       <div
@@ -939,12 +995,20 @@ export function Style() {
                       <Btn variant="ghost" icon="archive" onClick={() => void handleExportZip()} disabled={busy === 'exporting'}>
                         {copy.exportZip}
                       </Btn>
-                      <span title={canPublish ? '' : copy.publishDisabledHint}>
+                      <span
+                        title={
+                          draft?.kind === 'builtin'
+                            ? (isEnglish ? 'Built-in packs cannot be published.' : '内置风格包不能直接发布')
+                            : !canPublish
+                              ? copy.publishDisabledHint
+                              : ''
+                        }
+                      >
                         <Btn
                           variant="ghost"
                           icon="cloud"
                           onClick={() => void handlePublishToMarketplace()}
-                          disabled={!canPublish || busy === 'exporting'}
+                          disabled={!canPublish || draft?.kind === 'builtin' || busy === 'exporting'}
                         >
                           {copy.publishMarketplace}
                         </Btn>

@@ -1016,3 +1016,13 @@ export function likeMarketplacePack(
     alreadyLiked: false,
   }));
 }
+
+/** 拉当前登录用户赞过的所有 pack id（用于红心 + 「我赞过的」过滤）。 */
+export function marketplaceMyLikes(): Promise<string[]> {
+  return invokeOrMock<string[]>('marketplace_my_likes', undefined, () => []);
+}
+
+/** 撤回自己发布的 pack（后端软删 state='withdrawn'）。仅允许原作者。 */
+export function marketplaceDelete(packId: string): Promise<void> {
+  return invokeOrMock<void>('marketplace_delete', { packId }, () => undefined);
+}

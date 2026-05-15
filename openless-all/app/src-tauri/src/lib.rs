@@ -289,6 +289,8 @@ pub fn run() {
             commands::marketplace_install,
             commands::marketplace_upload,
             commands::marketplace_like,
+            commands::marketplace_my_likes,
+            commands::marketplace_delete,
             commands::list_vocab,
             commands::add_vocab,
             commands::remove_vocab,
