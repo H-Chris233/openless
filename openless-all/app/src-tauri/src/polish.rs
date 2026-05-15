@@ -1735,45 +1735,74 @@ pub(crate) fn compose_qa_system_prompt(
     system_prompt
 }
 
-fn compose_system_prompt(style_system_prompt: &str, hotwords: &[String]) -> String {
-    let base = style_system_prompt.trim_end().to_string();
+/// 构建「热词 + 错别字纠错」模块文本：agent-style 措辞，把模型当成接到一段 ASR 转写
+/// 的写作助手，明确告诉它「输入可能有错别字，按这个列表 + 上下文修正」。
+///
+/// 内置 default prompt 里的 `{{HOTWORDS}}` 占位符被这段文本替换；用户自定义 prompt
+/// 没占位符时 compose_system_prompt 兜底拼到末尾。
+///
+/// 这段文本 100% 对齐 compose_hotword_block_preview，让 Style Pack 设置页的预览跟
+/// 实际发给 LLM 的 prompt 一致。
+fn build_hotword_block(hotwords: &[String]) -> String {
     let cleaned: Vec<String> = hotwords
         .iter()
         .map(|h| h.trim().to_string())
         .filter(|h| !h.is_empty())
         .collect();
+
     if cleaned.is_empty() {
-        return base;
+        return "# 热词与纠错（系统内置）\n\
+            你接到的转写来自 ASR，可能含错别字 / 同音误识别 / 形近词。\
+            按上下文自动纠回正确字面：常见模式如「跟目录 / 根木鹿」→「根目录」、\
+            「代码厂」→「代码仓」、「编一编」→「编译」、英文短词同音（如 VIP / ZIP）按上下文判断、\
+            带次版本号产品名（GPT-5.6 不省略成 GPT-5）。\
+            人名 / 品牌名 / 含义会变化的词原样保留，不强行改字。"
+            .to_string();
     }
+
     let bullets = cleaned
         .iter()
         .map(|h| format!("- {}", h))
         .collect::<Vec<_>>()
         .join("\n");
     format!(
-        "{}\n\n热词（用户希望以下写法在输出中保持准确；当转写中出现这些词的同音或形近误识别时，优先按上述写法输出，不做无关词的机械替换）：\n{}\n\n上述热词的纠偏指令优先于通用规则 2 的「原样保留」——当转写词是热词的同音 / 形近误识别（例：转写出「VIP」而热词列表里有「ZIP」），就按热词写法输出，不要因为它看起来像英文专有名词或中英混输而保留误识别结果。",
-        base, bullets
+        "# 热词与纠错（系统内置）\n\
+         你接到的转写来自 ASR，可能含错别字。用户希望以下写法在输出中保持准确；\
+         当转写中出现这些词的同音或形近误识别时，优先按上述写法输出，不做无关词的机械替换：\n\
+         {bullets}\n\
+         \n\
+         上面热词的纠偏指令优先于通用规则 2 的「原样保留」——当转写词是热词的同音 / 形近误识别\
+         （例：转写出「VIP」而热词里有「ZIP」），就按热词写法输出，不要因为它看起来像英文专有名词\
+         或中英混输而保留误识别结果。\n\
+         \n\
+         转写中其它 ASR 错别字按上下文自动纠回正确字面：常见模式如「跟目录 / 根木鹿」→「根目录」、\
+         英文短词同音（如 VIP / ZIP）按上下文判断、带次版本号产品名（GPT-5.6 不省略成 GPT-5）。\
+         人名 / 品牌名 / 含义会变化的词原样保留。",
+        bullets = bullets
     )
 }
 
-fn compose_hotword_block_preview(hotwords: &[String]) -> String {
-    let cleaned: Vec<String> = hotwords
-        .iter()
-        .map(|h| h.trim().to_string())
-        .filter(|h| !h.is_empty())
-        .collect();
-    if cleaned.is_empty() {
-        return String::new();
+/// 系统提示词组装：先把内置 default prompt 的 `{{HOTWORDS}}` 占位符替换为实际热词块；
+/// 用户自定义 prompt 没占位符时 fallback 行为：
+/// - hotwords 非空 → 末尾追加热词块（兼容历史 prompt 仍能拿到热词）
+/// - hotwords 空 → 不附加任何东西（用户决定自己 prompt 的内容，不强行注入）
+fn compose_system_prompt(style_system_prompt: &str, hotwords: &[String]) -> String {
+    let base = style_system_prompt.trim_end();
+    if base.contains(crate::types::HOTWORDS_PLACEHOLDER) {
+        let block = build_hotword_block(hotwords);
+        return base.replace(crate::types::HOTWORDS_PLACEHOLDER, &block);
     }
-    let bullets = cleaned
-        .iter()
-        .map(|h| format!("- {}", h))
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!(
-        "热词（用户希望以下写法在输出中保持准确；当转写中出现这些词的同音或形近误识别时，优先按上述写法输出，不做无关词的机械替换）：\n{}\n\n上述热词的纠偏指令优先于通用规则 2 的「原样保留」——当转写词是热词的同音 / 形近误识别（例：转写出「VIP」而热词列表里有「ZIP」），就按热词写法输出，不要因为它看起来像英文专有名词或中英混输而保留误识别结果。",
-        bullets
-    )
+    let has_hotwords = hotwords.iter().any(|h| !h.trim().is_empty());
+    if !has_hotwords {
+        return base.to_string();
+    }
+    format!("{}\n\n{}", base, build_hotword_block(hotwords))
+}
+
+fn compose_hotword_block_preview(hotwords: &[String]) -> String {
+    // Style Pack 设置页的预览 100% 跟 system prompt 用同一段文本，避免「设置里看到一段、
+    // 实际发给 LLM 是另一段」的不一致。空热词时返回纯错别字纠错指南。
+    build_hotword_block(hotwords)
 }
 
 fn extract_assistant_content(body: &str) -> Result<String, LLMError> {

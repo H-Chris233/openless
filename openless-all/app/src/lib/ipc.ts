@@ -95,7 +95,7 @@ let mockSettings: UserPreferences = {
   polishContextWindowMinutes: 5,
   startMinimized: false,
   updateChannel: 'stable',
-  streamingInsert: false,
+  streamingInsert: true,
   streamingInsertSaveClipboard: true,
   autoUpdateCheck: true,
   historyMaxEntries: null,
