@@ -9,6 +9,8 @@ import type {
   DictationSession,
   DictionaryEntry,
   HotkeyCapability,
+  MarketplaceDetail,
+  MarketplaceListItem,
   HotkeyStatus,
   MicrophoneDevice,
   PermissionStatus,
@@ -95,8 +97,15 @@ let mockSettings: UserPreferences = {
   polishContextWindowMinutes: 5,
   startMinimized: false,
   updateChannel: 'stable',
-  streamingInsert: false,
+  streamingInsert: true,
+  streamingInsertDefaultMigrated: true,
   streamingInsertSaveClipboard: true,
+  autoUpdateCheck: true,
+  historyMaxEntries: null,
+  recordAudioForDebug: false,
+  audioRecordingMaxEntries: null,
+  marketplaceBaseUrl: '',
+  marketplaceDevLogin: '',
 };
 
 const mockFullStylePrompts: StyleSystemPrompts = {
@@ -419,6 +428,7 @@ const mockHistory: DictationSession[] = OL_DATA.history.map((h, i) => ({
   errorCode: null,
   durationMs: 600,
   dictionaryEntryCount: 28,
+  hasAudioRecording: null,
 }));
 
 const mockVocab: DictionaryEntry[] = OL_DATA.vocab.map((v, i) => ({
@@ -563,6 +573,22 @@ export function clearHistory(): Promise<void> {
   return invokeOrMock('clear_history', undefined, () => undefined);
 }
 
+/** 读取某次会话的原始麦克风 wav 字节流。仅当 prefs.recordAudioForDebug 当时打开
+ *  并且文件没被 retention 清理掉时才有内容；其他情况后端会返回 "recording not found" 错。
+ *  调用方应仅在 session.hasAudioRecording === true 时触发，避免无效 IPC。 */
+export function readAudioRecording(sessionId: string): Promise<Uint8Array> {
+  return invokeOrMock(
+    'read_audio_recording',
+    { sessionId },
+    () => new Uint8Array(),
+  ).then(value => {
+    // Tauri 默认把 Vec<u8> 序列化为 number[]，前端拿到的是普通数组；统一转 Uint8Array。
+    if (value instanceof Uint8Array) return value;
+    if (Array.isArray(value)) return new Uint8Array(value as number[]);
+    return new Uint8Array(value as ArrayBuffer);
+  });
+}
+
 // ── Vocab ──────────────────────────────────────────────────────────────
 export function listVocab(): Promise<DictionaryEntry[]> {
   return invokeOrMock('list_vocab', undefined, () => mockVocab);
@@ -686,6 +712,22 @@ export function saveStylePack(stylePack: StylePack): Promise<StylePack> {
     mockStylePacks = mockStylePacks.map(pack => (pack.id === stylePack.id ? cloneStylePack(stylePack) : pack));
     syncMockSettingsFromStylePacks();
     return cloneStylePack(mockStylePacks.find(pack => pack.id === stylePack.id) ?? stylePack);
+  });
+}
+
+export function createStylePackFromTemplate(template: StylePack): Promise<StylePack> {
+  return invokeOrMock('create_style_pack_from_template', { template }, () => {
+    const created: StylePack = {
+      ...cloneStylePack(template),
+      id: `imported-mock-${Date.now()}`,
+      kind: 'imported',
+      active: false,
+      enabled: true,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    mockStylePacks = [...mockStylePacks, created];
+    return cloneStylePack(created);
   });
 }
 
@@ -917,3 +959,71 @@ export async function exportErrorLog(suggestedFileName: string): Promise<string 
 }
 
 export { isTauri };
+
+// ── Marketplace (Phase A) ─────────────────────────────────────────────
+// 5 个 IPC wrapper —— marketplace-backend HTTP 通过 Rust IPC 转发。Mock fallback
+// 让 vite dev 在浏览器里也能预览 UI（返回空列表 / 假数据）。
+
+const MOCK_MARKETPLACE: MarketplaceListItem[] = [
+  {
+    id: '00000000-0000-0000-0000-000000000001',
+    slug: 'demo-pack',
+    name: '示范风格包',
+    description: 'Mock 数据 - vite dev 模式下显示',
+    authorLogin: 'demo',
+    version: '1.0.0',
+    baseMode: 'structured',
+    tags: ['demo'],
+    likeCount: 12,
+    downloadCount: 50,
+    publishedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  },
+];
+
+export function listMarketplace(
+  options: { query?: string; sort?: 'new' | 'popular'; limit?: number } = {},
+): Promise<MarketplaceListItem[]> {
+  return invokeOrMock('marketplace_list', options, () => MOCK_MARKETPLACE);
+}
+
+export function fetchMarketplaceDetail(packId: string): Promise<MarketplaceDetail> {
+  return invokeOrMock('marketplace_detail', { packId }, () => ({
+    ...MOCK_MARKETPLACE[0],
+    prompt: '# 角色\n你是测试用 polish 助手。\n\n# 任务\n按整体意图整理转写。',
+    state: 'approved' as const,
+  }));
+}
+
+export function installMarketplacePack(packId: string): Promise<StylePack> {
+  return invokeOrMock('marketplace_install', { packId }, () => mockStylePacks[0]);
+}
+
+export function uploadMarketplacePack(
+  packId: string,
+): Promise<{ id: string; state: string; message: string }> {
+  return invokeOrMock('marketplace_upload', { packId }, () => ({
+    id: 'mock-uploaded',
+    state: 'pending',
+    message: 'Mock 上传成功（vite dev）',
+  }));
+}
+
+export function likeMarketplacePack(
+  packId: string,
+): Promise<{ likeCount: number; alreadyLiked: boolean }> {
+  return invokeOrMock('marketplace_like', { packId }, () => ({
+    likeCount: 13,
+    alreadyLiked: false,
+  }));
+}
+
+/** 拉当前登录用户赞过的所有 pack id（用于红心 + 「我赞过的」过滤）。 */
+export function marketplaceMyLikes(): Promise<string[]> {
+  return invokeOrMock<string[]>('marketplace_my_likes', undefined, () => []);
+}
+
+/** 撤回自己发布的 pack（后端软删 state='withdrawn'）。仅允许原作者。 */
+export function marketplaceDelete(packId: string): Promise<void> {
+  return invokeOrMock<void>('marketplace_delete', { packId }, () => undefined);
+}

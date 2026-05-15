@@ -98,6 +98,11 @@ pub struct DictationSession {
     pub error_code: Option<String>,
     pub duration_ms: Option<u64>,
     pub dictionary_entry_count: Option<u32>,
+    /// 当 `prefs.record_audio_for_debug` 开启时，本次会话的原始麦克风音频被写到
+    /// `recordings/<id>.wav`。前端凭这个字段决定是否在 History 渲染播放按钮。
+    /// `None` / `Some(false)` 都按"无录音"处理；旧 JSON 不带这字段也兼容。
+    #[serde(default)]
+    pub has_audio_recording: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -271,6 +276,11 @@ pub struct StylePack {
     pub active: bool,
     pub recommended_model: Option<String>,
     pub compatible_app_version: Option<String>,
+    /// 衍生关系：从 marketplace 安装时记录 upstream pack id；
+    /// 后续编辑 + 发布时客户端把这两个字段带到 backend，让 backend 判 supersede vs derivative。
+    /// 全新本地创建的 pack 这两个字段为 None。
+    pub origin_pack_id: Option<String>,
+    pub origin_author_login: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -319,6 +329,8 @@ impl Default for StylePack {
             active: false,
             recommended_model: None,
             compatible_app_version: None,
+            origin_pack_id: None,
+            origin_author_login: None,
         }
     }
 }
@@ -365,6 +377,8 @@ pub fn builtin_style_pack_for_mode(mode: PolishMode) -> StylePack {
             active: false,
             recommended_model: None,
             compatible_app_version: Some(env!("CARGO_PKG_VERSION").into()),
+            origin_pack_id: None,
+            origin_author_login: None,
         },
         PolishMode::Light => StylePack {
             id: BUILTIN_STYLE_PACK_LIGHT_ID.into(),
@@ -388,6 +402,8 @@ pub fn builtin_style_pack_for_mode(mode: PolishMode) -> StylePack {
             active: false,
             recommended_model: None,
             compatible_app_version: Some(env!("CARGO_PKG_VERSION").into()),
+            origin_pack_id: None,
+            origin_author_login: None,
         },
         PolishMode::Structured => StylePack {
             id: BUILTIN_STYLE_PACK_STRUCTURED_ID.into(),
@@ -411,6 +427,8 @@ pub fn builtin_style_pack_for_mode(mode: PolishMode) -> StylePack {
             active: false,
             recommended_model: None,
             compatible_app_version: Some(env!("CARGO_PKG_VERSION").into()),
+            origin_pack_id: None,
+            origin_author_login: None,
         },
         PolishMode::Formal => StylePack {
             id: BUILTIN_STYLE_PACK_FORMAL_ID.into(),
@@ -434,6 +452,8 @@ pub fn builtin_style_pack_for_mode(mode: PolishMode) -> StylePack {
             active: false,
             recommended_model: None,
             compatible_app_version: Some(env!("CARGO_PKG_VERSION").into()),
+            origin_pack_id: None,
+            origin_author_login: None,
         },
     }
 }
@@ -587,15 +607,49 @@ pub struct UserPreferences {
     /// - 仅 OpenAI-compatible provider 实装（v1）；Gemini / Codex provider 走原一次性
     ///   插入路径
     ///
-    /// 默认 false 与历史行为一致。
-    #[serde(default)]
+    /// 默认 true（自 1.3.2-3 起）—— 流式落字感知延迟低，所有 fallback case 都已经接好，
+    /// 让开箱即用就能体验。CJK IME / Codex / Gemini provider 自动回落到一次性路径，
+    /// 用户无感。详见上面「限制」段。
+    #[serde(default = "default_true")]
     pub streaming_insert: bool,
+    /// issue #440 的一次性迁移标记。老版本会把默认 `streamingInsert:false`
+    /// 写进 preferences.json，升级后仅看 bool 无法区分「老默认」和「用户手动关」。
+    /// 缺少此标记的旧文件统一迁到 true；迁移后用户再关会带着标记保存，后续保留 false。
+    #[serde(default)]
+    pub streaming_insert_default_migrated: bool,
     /// 流式输入成功后是否把最终润色文本写回剪贴板。一次性路径天然走剪贴板，所以
     /// Cmd+V 可以重复粘贴；流式路径直接合成键盘事件、不动剪贴板，会让用户失去这层
     /// 兜底。开启后流式成功收尾时把 final text 写到系统剪贴板，跟一次性行为对齐。
     /// 默认 true（更接近用户习惯）。
     #[serde(default = "default_true")]
     pub streaming_insert_save_clipboard: bool,
+    /// 主窗口启动 + 后台每 60 分钟自动检查云端新版本。默认 true。
+    /// 用户在 Settings → 关于 里可关。关闭后仅手动「检查更新」按钮可用。
+    #[serde(default = "default_true")]
+    pub auto_update_check: bool,
+    /// 历史记录上限（条数）。`None` = 使用代码内 200 条硬上限；
+    /// `Some(n)` 表示用户在 Settings 自定义了上限（5..=200 之间）。
+    #[serde(default)]
+    pub history_max_entries: Option<u32>,
+    /// 是否为每次会话保留原始麦克风音频文件（wav）到 `recordings/` 目录，
+    /// 用于排查 ASR 误识别 / 麦克风灵敏度问题。默认 false。开启会占磁盘空间，
+    /// 受 `history_retention_days` 同样的清理策略约束。
+    #[serde(default)]
+    pub record_audio_for_debug: bool,
+    /// `recordings/` 里保留的最近 wav 文件数（按 mtime 倒序保留最新的）。
+    /// `None` = 跟随 `HISTORY_CAP` (200)；`Some(n)` 时 clamp 到 1..=200。
+    /// 调用点：每次开新会话前裁旧。让用户在「文本历史保留 200 条但 wav 只留最近 5 条」
+    /// 这种「文本档案多 + 录音不占盘」组合下精确控制。
+    #[serde(default)]
+    pub audio_recording_max_entries: Option<u32>,
+    /// Style Pack Marketplace HTTP 基地址。空 = 本地开发默认 http://127.0.0.1:8090；
+    /// 用户在 Settings 里填生产 URL (如 https://api.openless-marketplace.com)。
+    #[serde(default)]
+    pub marketplace_base_url: String,
+    /// Marketplace dev-mode 模拟登录用户名（GitHub login 风格）。生产换 OAuth token 后此字段废弃。
+    /// 上传 / 点赞需要带这个 header；空时上传被后端 401。
+    #[serde(default)]
+    pub marketplace_dev_login: String,
 }
 
 fn default_local_asr_model() -> String {
@@ -697,10 +751,24 @@ struct UserPreferencesWire {
     polish_context_window_minutes: u32,
     #[serde(default)]
     start_minimized: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     streaming_insert: bool,
+    #[serde(default)]
+    streaming_insert_default_migrated: bool,
     #[serde(default = "default_true")]
     streaming_insert_save_clipboard: bool,
+    #[serde(default = "default_true")]
+    auto_update_check: bool,
+    #[serde(default)]
+    history_max_entries: Option<u32>,
+    #[serde(default)]
+    record_audio_for_debug: bool,
+    #[serde(default)]
+    audio_recording_max_entries: Option<u32>,
+    #[serde(default)]
+    marketplace_base_url: String,
+    #[serde(default)]
+    marketplace_dev_login: String,
 }
 
 impl Default for UserPreferencesWire {
@@ -746,7 +814,14 @@ impl Default for UserPreferencesWire {
             polish_context_window_minutes: prefs.polish_context_window_minutes,
             start_minimized: prefs.start_minimized,
             streaming_insert: prefs.streaming_insert,
+            streaming_insert_default_migrated: prefs.streaming_insert_default_migrated,
             streaming_insert_save_clipboard: prefs.streaming_insert_save_clipboard,
+            auto_update_check: prefs.auto_update_check,
+            history_max_entries: prefs.history_max_entries,
+            record_audio_for_debug: prefs.record_audio_for_debug,
+            audio_recording_max_entries: prefs.audio_recording_max_entries,
+            marketplace_base_url: prefs.marketplace_base_url,
+            marketplace_dev_login: prefs.marketplace_dev_login,
         }
     }
 }
@@ -762,6 +837,13 @@ impl<'de> Deserialize<'de> for UserPreferences {
             None => default_dictation_hotkey_from_legacy(&wire.hotkey, &wire.custom_combo_hotkey)
                 .map_err(serde::de::Error::custom)?,
         };
+        let streaming_insert_default_migrated = wire.streaming_insert_default_migrated;
+        let streaming_insert = if streaming_insert_default_migrated {
+            wire.streaming_insert
+        } else {
+            true
+        };
+
         Ok(Self {
             hotkey: wire.hotkey,
             dictation_hotkey,
@@ -813,8 +895,15 @@ impl<'de> Deserialize<'de> for UserPreferences {
             history_retention_days: wire.history_retention_days,
             polish_context_window_minutes: wire.polish_context_window_minutes,
             start_minimized: wire.start_minimized,
-            streaming_insert: wire.streaming_insert,
+            streaming_insert,
+            streaming_insert_default_migrated: true,
             streaming_insert_save_clipboard: wire.streaming_insert_save_clipboard,
+            auto_update_check: wire.auto_update_check,
+            history_max_entries: wire.history_max_entries,
+            record_audio_for_debug: wire.record_audio_for_debug,
+            audio_recording_max_entries: wire.audio_recording_max_entries,
+            marketplace_base_url: wire.marketplace_base_url,
+            marketplace_dev_login: wire.marketplace_dev_login,
         })
     }
 }
@@ -893,13 +982,24 @@ const ROLE_BLOCK: &str = "# 角色\n\
 
 const COMMON_RULES: &str = "# 通用规则\n\
     1) \u{4E0D}确定 / 转写明显不完整 / 断句在半截 \u{2192} 保留原话，\u{4E0D}要替用户补全或猜测。\n\
-    2) 中英混输、专有名词、产品名、代码 / 命令 / 路径 / URL、数字与单位、emoji \u{2192} 原样保留。\n\
+    2) 中英混输、专有名词、产品名、代码 / 命令 / 路径 / URL、数字与单位、emoji \u{2192} 原样保留。\
+    带次版本号的产品名（如 GPT-5.6、Claude 4.7、iOS 26.1、Python 3.13、Tauri 2.10）也算\u{201C}数字与单位\u{201D}的一部分，\
+    完整保留小数 / 次版本号，\u{4E0D}省略成主版本（GPT-5.6 \u{4E0D}写成 GPT-5、Claude 4.7 \u{4E0D}写成 Claude 4）。\
+    （例外：当转写词是 # 热词列表中某个词的同音 / 形近误识别时，按热词列表里的正确写法输出，这一条比\u{201C}原样保留\u{201D}优先。）\n\
     3) \u{4E0D}引入用户没说过的事实；中途改口以最终版本为准。在保留原意和语气的前提下，按用户的整体意图把零碎口语组织成协调、自然的书面表达。\n\
     4) 如果原始转写本身是在\u{201C}询问 / 要求别人做某事\u{201D}，只整理为清楚的问题或请求，\u{4E0D}代替对方回答。\n\
-    5) 自动纠错：明显的 ASR 同音 / 形近错字按上下文纠回正确字面，常见模式包括\
-    \u{201C}跟目录 / 根木鹿\u{201D}\u{2192}\u{201C}根目录\u{201D}、\u{201C}代码厂\u{201D}\u{2192}\u{201C}代码仓\u{201D}、\
-    \u{201C}编一编\u{201D}\u{2192}\u{201C}编译\u{201D}、\u{201C}的 / 得 / 地\u{201D}用法、\u{201C}做 / 作\u{201D} 等常见错别字。\
-    专有名词（见 # 热词）、人名、品牌名、不在常见中文词典里的词原样保留，\u{4E0D}强行改字；改了之后含义会发生变化的不改。";
+    5) 自动纠错（ASR 主动纠错，按置信度分级处理）：\n\
+    \u{2003}\u{2003}\u{2022} 高置信度：错误明显、正确写法唯一 \u{2192} 直接替换，\u{4E0D}保留原词、\u{4E0D}加说明。\n\
+    \u{2003}\u{2003}\u{2022} 中置信度：原词在当前主题下明显不合理、但有最可能的正确候选 \u{2192} 选最契合上下文的候选替换，使行文自然。\n\
+    \u{2003}\u{2003}\u{2022} 低置信度：无法判断正确词 \u{2192} 保留原词，\u{4E0D}强行编造不存在的字段、链接、路径或步骤。\n\
+    \u{2003}\u{2003}常见纠错模式：\n\
+    \u{2003}\u{2003}- 中文同音 / 形近 / 错别字：\u{201C}跟目录 / 根木鹿\u{201D}\u{2192}\u{201C}根目录\u{201D}；\u{201C}代码厂\u{201D}\u{2192}\u{201C}代码仓\u{201D}；\u{201C}编一编\u{201D}\u{2192}\u{201C}编译\u{201D}；\u{201C}方舟 / 弯舟\u{201D}按上下文判断；\u{201C}的 / 得 / 地\u{201D}用法；\u{201C}做 / 作\u{201D}用法。\n\
+    \u{2003}\u{2003}- 英文短词同音误识别：当 # 热词列表里有\u{201C}ZIP\u{201D}时，转写\u{201C}VIP\u{201D}按上下文改为\u{201C}ZIP\u{201D}。\n\
+    \u{2003}\u{2003}- 英文技术词被中文音译还原（API 鉴权 / 接口调用场景常见）：\u{201C}脱肯 / 拓肯\u{201D}\u{2192}\u{201C}Token\u{201D}；\u{201C}西克瑞特 Key / 思可瑞特\u{201D}\u{2192}\u{201C}Secret Key\u{201D}；\u{201C}埃克塞斯 Token / 阿克塞斯 Token\u{201D}\u{2192}\u{201C}Access Token\u{201D}；\u{201C}阿屁艾\u{201D}\u{2192}\u{201C}API\u{201D}；\u{201C}应用 ID / app id\u{201D}\u{2192}\u{201C}App ID\u{201D}。\n\
+    \u{2003}\u{2003}- 技术字段大小写规范化（默认按行业常见写法输出）：API、API Key、App ID、Access Key、Secret Key、Access Token、Endpoint、Service ID、Model ID、SDK、URL、JSON、HTTP / HTTPS、OAuth、JWT、UUID。\n\
+    \u{2003}\u{2003}- 大小写敏感场景（代码变量名、Bash 命令、文件路径、环境变量、URL 路径段）原样保留\u{4E0D}规范化。\n\
+    \u{2003}\u{2003}人名、品牌名、不在常见中文词典里的词原样保留，\u{4E0D}强行改字；改了之后含义会发生变化的\u{4E0D}改。\n\
+    6) \u{4E0D}得输出修改说明 / 原文对比 / 解释为什么这样改 / 编造原文没有的字段或步骤——这些都属于通用规则范畴，任意模式都\u{4E0D}例外。";
 
 const OUTPUT_BLOCK: &str = "# 输出\n\
     直接输出最终文本正文。需要结构化时直接从标题 / 段落 / 编号开始。\n\
@@ -945,6 +1045,9 @@ pub fn default_style_system_prompt_for_mode(mode: PolishMode) -> String {
             把口述整理为脉络清晰、可直接复制走的结构化文本：保留用户的口语引子（润色后作为首行过渡），\
             主动按语义把扁平事项归类成 2\u{2013}4 个主题，用双层格式呈现，尾巴查询用自然收尾句。\n\
             \n\
+            **多条独立条目场景例外**：当输入是「多条互相独立的新闻 / 公司动态 / 产品发布 / 行业进展」拼成的播报式内容（典型如 AI 日报、行业资讯整理、多家公司发布、多个独立事件回顾），\
+            每条独立成一个主题，可以超过 4 个，\u{4E0D}强行合并到 2\u{2013}4 类。判断信号：条目之间没有共享主体、彼此互不相关、用户用\u{201C}下面是几条新闻\u{201D}\u{201C}今天的资讯\u{201D}\u{201C}最新进展\u{201D}等播报式引子。\n\
+            \n\
             **默认行为：双层 list。判断事项的标准**：\
             以下任意一种都算一个事项 \u{2192} \u{4E0D}\u{4F9D}\u{8D56}\u{7528}\u{6237}\u{662F}\u{5426}\u{660E}\u{8BF4}\u{201C}\u{7B2C}\u{4E00}\u{201D}\u{201C}\u{7B2C}\u{4E8C}\u{201D}\u{201C}\u{53E6}\u{5916}\u{201D}\u{7B49}\u{8FDE}\u{63A5}\u{8BCD}\u{3002}\n\
             \u{2003}\u{2003}1) 可独立成句的陈述（\u{4E3B}+\u{8C13}+\u{5BBE}，如\u{201C}\u{300A}\u{67D0}\u{4E1C}\u{897F}\u{300B}\u{8FD8}\u{662F}\u{767D}\u{8272}\u{201D}）\n\
@@ -968,7 +1071,10 @@ pub fn default_style_system_prompt_for_mode(mode: PolishMode) -> String {
             都必须按语义重新归类成下面定义的双层格式。\u{200D}\u{200D}照抄原结构 = 失败。\n\
             \n\
             双层格式（主清单标准写法）：\n\
-            - 第一层（主题）：行首用 \"1.\" \"2.\" \"3.\" \u{2026}，每个主题一行短标题（4\u{2013}8 字最佳）；\n\
+            - 第一层（主题）：行首用 \"1.\" \"2.\" \"3.\" \u{2026}，每个主题一行短标题（4\u{2013}8 字最佳）；\
+            主题标题应包含事项中的关键实体名（人名 / 公司名 / 产品名 / 平台名），\
+            例如\u{300C}OpenAI 模型动态\u{300D}\u{300C}苹果与欧盟监管争议\u{300D}，而非纯抽象类别如\u{300C}模型进展\u{300D}\u{300C}监管争议\u{300D}；\
+            只有当某主题包含多个不同实体且无法压缩时，才退回到抽象命名。\n\
             - 第二层（子项）：另起一行，行首用 \"(a)\" \"(b)\" \"(c)\" \u{2026}，每条一句完整陈述。\n\
             顶层\u{4E0D}使用半括号写法（如 \"1)\" \"2)\"）；不在子项内再嵌第三层。\n\
             \n\
@@ -1065,11 +1171,26 @@ pub fn default_style_system_prompt_for_mode(mode: PolishMode) -> String {
             \u{200B}（注意：\u{4E0D}写\u{201C}\u{6211}\u{4EEC}\u{770B}\u{4E86}\u{4E00}\u{4E0B}\u{201D}\u{201C}\u{7ECF}\u{8FC7}\u{8BC4}\u{4F30}\u{201D}\u{4E4B}\u{7C7B}\u{4EE3}\u{5165}\u{8BED}）",
     };
 
+    // 热词与纠错模块以 `{{HOTWORDS}}` 占位符在 ROLE_BLOCK 之后预留位置——polish.rs
+    // 的 compose_system_prompt 拿到 prompt 后查找此占位符并替换为运行时构造的实际热词
+    // + 错别字纠正块。把它放在「人格之后、任务之前」让模型在确立角色后立刻收到这个
+    // 高优先级指令；与传统「拼在末尾」相比，对中段注意力衰减更友好。
+    //
+    // 用户在 Style Pack 编辑器自定义 prompt 时可以保留 / 移动 / 删除 `{{HOTWORDS}}`：
+    // 含 → 替换位置；不含 → fallback 拼在末尾（兼容历史 prompt）。
     format!(
-        "{}\n\n{}\n\n{}\n\n{}",
-        ROLE_BLOCK, task_and_example, COMMON_RULES, OUTPUT_BLOCK
+        "{}\n\n{}\n\n{}\n\n{}\n\n{}",
+        ROLE_BLOCK,
+        HOTWORDS_PLACEHOLDER,
+        task_and_example,
+        COMMON_RULES,
+        OUTPUT_BLOCK
     )
 }
+
+/// 热词与纠错模块在 system prompt 里的位置占位符。
+/// polish.rs::compose_system_prompt 找到后替换为运行时实际热词块。
+pub const HOTWORDS_PLACEHOLDER: &str = "{{HOTWORDS}}";
 
 fn default_raw_style_system_prompt() -> String {
     default_style_system_prompt_for_mode(PolishMode::Raw)
@@ -1096,7 +1217,7 @@ impl Default for UserPreferences {
                 &None,
             )
             .expect("default legacy hotkey is not custom"),
-            default_mode: PolishMode::Light,
+            default_mode: PolishMode::Structured,
             enabled_modes: vec![
                 PolishMode::Raw,
                 PolishMode::Light,
@@ -1137,8 +1258,15 @@ impl Default for UserPreferences {
             history_retention_days: default_history_retention_days(),
             polish_context_window_minutes: default_polish_context_window_minutes(),
             start_minimized: false,
-            streaming_insert: false,
+            streaming_insert: true,
+            streaming_insert_default_migrated: true,
             streaming_insert_save_clipboard: true,
+            auto_update_check: true,
+            history_max_entries: None,
+            record_audio_for_debug: false,
+            audio_recording_max_entries: None,
+            marketplace_base_url: String::new(),
+            marketplace_dev_login: String::new(),
         }
     }
 }
@@ -1565,7 +1693,7 @@ impl HotkeyCapability {
                 supports_side_specific_modifiers: true,
                 explicit_fallback_available: false,
                 status_hint: Some(
-                    "Linux 仅 best-effort：X11 可尝试 rdev 监听；Wayland 会明确提示暂不支持全局热键。".into(),
+                    "Linux 仅 best-effort：X11 可尝试 rdev 监听；Wayland 请在桌面环境中绑定 openless --toggle-dictation 等 CLI 命令。".into(),
                 ),
             }
         }
@@ -1821,6 +1949,48 @@ mod tests {
 
         let from_empty: UserPreferences = serde_json::from_str("{}").unwrap();
         assert_eq!(from_empty.paste_shortcut, PasteShortcut::CtrlV);
+    }
+
+    /// issue #440: 老版本会把默认 `streamingInsert:false` 写进 preferences.json。
+    /// 缺少迁移标记的旧文件统一迁到 true；带有迁移标记后，用户再手动关掉的 false
+    /// 必须保留。
+    #[test]
+    fn streaming_insert_defaults_to_enabled_for_missing_or_legacy_unmigrated_pref() {
+        let prefs = UserPreferences::default();
+        assert!(prefs.streaming_insert);
+        assert!(prefs.streaming_insert_default_migrated);
+        assert!(prefs.streaming_insert_save_clipboard);
+
+        let from_empty: UserPreferences = serde_json::from_str("{}").unwrap();
+        assert!(from_empty.streaming_insert);
+        assert!(from_empty.streaming_insert_default_migrated);
+        assert!(from_empty.streaming_insert_save_clipboard);
+
+        let from_legacy_false: UserPreferences = serde_json::from_str(
+            r#"{
+                "streamingInsert": false,
+                "streamingInsertSaveClipboard": true
+            }"#,
+        )
+        .unwrap();
+        assert!(from_legacy_false.streaming_insert);
+        assert!(from_legacy_false.streaming_insert_default_migrated);
+    }
+
+    #[test]
+    fn streaming_insert_preserves_explicit_disabled_value() {
+        let prefs: UserPreferences = serde_json::from_str(
+            r#"{
+                "streamingInsert": false,
+                "streamingInsertDefaultMigrated": true,
+                "streamingInsertSaveClipboard": false
+            }"#,
+        )
+        .unwrap();
+
+        assert!(!prefs.streaming_insert);
+        assert!(prefs.streaming_insert_default_migrated);
+        assert!(!prefs.streaming_insert_save_clipboard);
     }
 
     #[test]

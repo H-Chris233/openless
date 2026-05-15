@@ -15,6 +15,7 @@ import { Vocab } from '../pages/Vocab';
 import { Style } from '../pages/Style';
 import { Translation } from '../pages/Translation';
 import { SelectionAsk } from '../pages/SelectionAsk';
+// 风格市场不再作为独立 nav tab —— 已整合为 Style 页面内 modal（入口在「风格包」标题右侧）。
 // LocalAsr 不再作为主 nav tab——本地 ASR 模型管理已合并到 Settings → Advanced 中
 // 通过 <LocalAsr embedded /> 渲染。这里之前的 import 与 NAV_BASE 条目都已移除。
 import { APP_VERSION_LABEL, IS_BETA_BUILD } from '../lib/appVersion';

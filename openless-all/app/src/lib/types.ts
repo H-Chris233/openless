@@ -18,6 +18,9 @@ export interface DictationSession {
   errorCode: string | null;
   durationMs: number | null;
   dictionaryEntryCount: number | null;
+  /** 该会话是否在录音时归档了原始 wav（取决于当时 prefs.recordAudioForDebug）。
+   *  true 时前端在 History 渲染播放按钮，凭 id 通过 read_audio_recording IPC 拿字节流。 */
+  hasAudioRecording: boolean | null;
 }
 
 export interface DictionaryEntry {
@@ -174,6 +177,9 @@ export interface StylePack {
   active: boolean;
   recommendedModel?: string | null;
   compatibleAppVersion?: string | null;
+  /** 衍生关系：null = 本地原创（或还没首发到云端）；非空 = 这份 pack 安装自云端 originPackId。 */
+  originPackId?: string | null;
+  originAuthorLogin?: string | null;
 }
 
 export interface StylePackRuntimeDiagnostics {
@@ -273,11 +279,52 @@ export interface UserPreferences {
   updateChannel: UpdateChannel;
   /** 流式输入：润色 SSE 一边到达一边逐字模拟键盘事件输出到当前焦点。开启后用户感知到
    *  的处理时延显著降低。v1 限定 macOS + OpenAI-compatible provider，其他配置自动回落
-   *  到原一次性插入。默认 false 与历史行为一致。 */
+   *  到原一次性插入。默认 true。 */
   streamingInsert: boolean;
+  /** issue #440 一次性迁移标记：旧配置缺少该字段时后端会把老默认 false 迁到 true；
+   *  迁移后用户再手动关掉 streamingInsert 时保留 false。 */
+  streamingInsertDefaultMigrated: boolean;
   /** 流式输入成功后是否把最终润色文本写回剪贴板。开启后 Cmd+V 还能重复粘贴该次输出，
    *  与一次性路径行为对齐。默认 true。 */
   streamingInsertSaveClipboard: boolean;
+  /** 主窗口启动 + 后台每 60 分钟自动检查云端新版本。默认 true。
+   *  关闭后仅 Settings → 关于 的「检查更新」手动按钮可用。 */
+  autoUpdateCheck: boolean;
+  /** 历史记录上限（条数）。null = 走默认 200；5..=200 之间为用户自定义。 */
+  historyMaxEntries: number | null;
+  /** 是否为每次会话保留原始麦克风音频文件（wav），用于排查 ASR 误识别 / 麦克风灵敏度。
+   *  默认 false。开启后会占磁盘空间，受 historyRetentionDays 同样的清理策略约束。 */
+  recordAudioForDebug: boolean;
+  /** recordings/ 里保留的最近 wav 文件数。null = 跟随 200 硬上限；1..=200 之间为用户自定义。
+   *  跟 historyMaxEntries 解耦——「文本档案多但 wav 只留最近 5 条」是合法组合。 */
+  audioRecordingMaxEntries: number | null;
+  /** Marketplace HTTP 基地址。空 = 本地开发默认 http://127.0.0.1:8090；生产填 https://api.<domain>。 */
+  marketplaceBaseUrl: string;
+  /** Marketplace dev-mode 模拟登录用户名（GitHub login 风格）。生产换 OAuth token 后此字段废弃。 */
+  marketplaceDevLogin: string;
+}
+
+export interface MarketplaceListItem {
+  id: string;
+  slug: string;
+  name: string;
+  description: string;
+  authorLogin: string;
+  version: string;
+  baseMode: PolishMode;
+  tags: string[];
+  likeCount: number;
+  downloadCount: number;
+  publishedAt: string;
+  updatedAt: string;
+  /** 衍生关系：null = 原创；非空 = 衍生自 originPackId，UI 显「衍生自 @originAuthorLogin」。 */
+  originPackId?: string | null;
+  originAuthorLogin?: string | null;
+}
+
+export interface MarketplaceDetail extends MarketplaceListItem {
+  prompt: string;
+  state: 'pending' | 'approved' | 'rejected';
 }
 
 export interface MicrophoneDevice {

@@ -59,8 +59,15 @@ const previousPrefs: UserPreferences = {
   polishContextWindowMinutes: 5,
   startMinimized: false,
   updateChannel: 'stable',
-  streamingInsert: false,
+  streamingInsert: true,
+  streamingInsertDefaultMigrated: true,
   streamingInsertSaveClipboard: true,
+  autoUpdateCheck: true,
+  historyMaxEntries: null,
+  recordAudioForDebug: false,
+  audioRecordingMaxEntries: null,
+  marketplaceBaseUrl: '',
+  marketplaceDevLogin: '',
 };
 
 const nextPrefs: UserPreferences = {

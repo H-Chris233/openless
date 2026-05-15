@@ -315,6 +315,36 @@ function RecordingSection() {
   };
   const onStartMinimizedChange = (startMinimized: boolean) =>
     savePrefs({ ...prefs, startMinimized });
+  const onAutoUpdateCheckChange = (autoUpdateCheck: boolean) =>
+    savePrefs({ ...prefs, autoUpdateCheck });
+  const onMarketplaceBaseUrlChange = (marketplaceBaseUrl: string) =>
+    savePrefs({ ...prefs, marketplaceBaseUrl });
+  const onMarketplaceDevLoginChange = (marketplaceDevLogin: string) =>
+    savePrefs({ ...prefs, marketplaceDevLogin });
+  const onRecordAudioForDebugChange = (recordAudioForDebug: boolean) =>
+    savePrefs({ ...prefs, recordAudioForDebug });
+  // 历史条数 200 是当前 HISTORY_CAP（persistence.rs:32），下限 5 是避免用户填 0 导致
+  // 写一条就立刻被清光；空字符串视为不限制，落回 null → 后端走 200 默认。
+  const onHistoryMaxEntriesChange = (raw: string) => {
+    const trimmed = raw.trim();
+    if (trimmed === '') {
+      void savePrefs({ ...prefs, historyMaxEntries: null });
+      return;
+    }
+    const parsed = Number.parseInt(trimmed, 10);
+    if (Number.isNaN(parsed)) return;
+    void savePrefs({ ...prefs, historyMaxEntries: clamp(parsed, 5, 200) });
+  };
+  const onAudioRecordingMaxEntriesChange = (raw: string) => {
+    const trimmed = raw.trim();
+    if (trimmed === '') {
+      void savePrefs({ ...prefs, audioRecordingMaxEntries: null });
+      return;
+    }
+    const parsed = Number.parseInt(trimmed, 10);
+    if (Number.isNaN(parsed)) return;
+    void savePrefs({ ...prefs, audioRecordingMaxEntries: clamp(parsed, 1, 200) });
+  };
 
   const choices: Array<[HotkeyMode, string]> = [
     ['toggle', t('settings.recording.modeToggle')],
@@ -517,6 +547,20 @@ function RecordingSection() {
         />
       </SettingRow>
       <SettingRow
+        label={t('settings.recording.historyMaxEntriesLabel')}
+        desc={t('settings.recording.historyMaxEntriesDesc')}
+      >
+        <input
+          type="number"
+          min={5}
+          max={200}
+          placeholder="200"
+          value={prefs.historyMaxEntries ?? ''}
+          onChange={e => onHistoryMaxEntriesChange(e.target.value)}
+          style={{ ...inputStyle, width: 80, textAlign: 'right' }}
+        />
+      </SettingRow>
+      <SettingRow
         label={t('settings.recording.polishContextWindowLabel')}
         desc={t('settings.recording.polishContextWindowDesc')}
       >
@@ -527,6 +571,27 @@ function RecordingSection() {
           value={prefs.polishContextWindowMinutes}
           onChange={e => onPolishContextWindowChange(e.target.value)}
           style={{ ...inputStyle, width: 80, textAlign: 'right' }}
+        />
+      </SettingRow>
+      <SettingRow
+        label={t('settings.recording.recordAudioForDebugLabel')}
+        desc={t('settings.recording.recordAudioForDebugDesc')}
+      >
+        <Toggle on={prefs.recordAudioForDebug} onToggle={onRecordAudioForDebugChange} />
+      </SettingRow>
+      <SettingRow
+        label={t('settings.recording.audioRecordingMaxEntriesLabel')}
+        desc={t('settings.recording.audioRecordingMaxEntriesDesc')}
+      >
+        <input
+          type="number"
+          min={1}
+          max={200}
+          placeholder="200"
+          value={prefs.audioRecordingMaxEntries ?? ''}
+          onChange={e => onAudioRecordingMaxEntriesChange(e.target.value)}
+          style={{ ...inputStyle, width: 80, textAlign: 'right' }}
+          disabled={!prefs.recordAudioForDebug}
         />
       </SettingRow>
     </Collapsible>
@@ -540,11 +605,45 @@ function RecordingSection() {
       >
         <Toggle on={prefs.startMinimized} onToggle={onStartMinimizedChange} />
       </SettingRow>
+      <SettingRow
+        label={t('settings.recording.autoUpdateCheckLabel')}
+        desc={t('settings.recording.autoUpdateCheckDesc')}
+      >
+        <Toggle on={prefs.autoUpdateCheck} onToggle={onAutoUpdateCheckChange} />
+      </SettingRow>
       {capability.statusHint && (
         <div style={{ marginTop: 6, fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.5 }}>
           {capability.statusHint}
         </div>
       )}
+    </Collapsible>
+
+    {/* ─── 风格市场（折叠） ────────────────────────────────────────── */}
+    <Collapsible title={t('settings.recording.marketplaceGroupTitle')}>
+      <SettingRow
+        label={t('settings.recording.marketplaceBaseUrlLabel')}
+        desc={t('settings.recording.marketplaceBaseUrlDesc')}
+      >
+        <input
+          type="text"
+          placeholder="http://127.0.0.1:8090"
+          value={prefs.marketplaceBaseUrl}
+          onChange={e => onMarketplaceBaseUrlChange(e.target.value)}
+          style={{ ...inputStyle, width: 280 }}
+        />
+      </SettingRow>
+      <SettingRow
+        label={t('settings.recording.marketplaceDevLoginLabel')}
+        desc={t('settings.recording.marketplaceDevLoginDesc')}
+      >
+        <input
+          type="text"
+          placeholder="your-github-login"
+          value={prefs.marketplaceDevLogin}
+          onChange={e => onMarketplaceDevLoginChange(e.target.value)}
+          style={{ ...inputStyle, width: 180 }}
+        />
+      </SettingRow>
     </Collapsible>
     </>
   );
@@ -1605,34 +1704,6 @@ function ProvidersSection() {
           )}
         />
         <ProviderTools key={committedLlmProvider} kind="llm" modelAccount="ark.model_id" onModelSelected={() => setLlmModelRevision(v => v + 1)} />
-      </Card>
-
-      <Card>
-        <div style={{ marginBottom: 10 }}>
-          <div style={{ fontSize: 13, fontWeight: 600 }}>{t('settings.providers.styleSystemPromptTitle')}</div>
-          <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', marginTop: 2 }}>
-            {t('settings.providers.styleSystemPromptDesc')}
-          </div>
-        </div>
-        <div
-          style={{
-            padding: 16,
-            borderRadius: 14,
-            border: '0.5px solid var(--ol-line)',
-            background: 'linear-gradient(180deg, rgba(248,250,252,0.95), rgba(255,255,255,0.98))',
-          }}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
-            <Pill tone="blue">{t('settings.providers.styleSystemPromptMovedBadge')}</Pill>
-            <Pill tone="outline">{t('settings.providers.styleSystemPromptTitle')}</Pill>
-          </div>
-          <div style={{ fontSize: 12.5, color: 'var(--ol-ink-2)', lineHeight: 1.7, marginBottom: 10 }}>
-            {t('settings.providers.styleSystemPromptMovedDesc')}
-          </div>
-          <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.6 }}>
-            {t('settings.providers.styleSystemPromptMovedHint')}
-          </div>
-        </div>
       </Card>
 
       <Card>

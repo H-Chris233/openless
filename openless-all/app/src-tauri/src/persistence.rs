@@ -139,6 +139,90 @@ pub fn local_models_root() -> Result<PathBuf> {
     Ok(dir)
 }
 
+/// 录音归档目录：`<data_dir>/recordings/`。
+/// 仅当用户开 `prefs.record_audio_for_debug` 时才会有内容（每次会话一个 `<session_id>.wav`）。
+/// 同样受 `history_retention_days` 清理（写入新文件时顺手裁旧的）。
+pub fn recordings_root() -> Result<PathBuf> {
+    let dir = data_dir()?.join("recordings");
+    ensure_dir(&dir)?;
+    Ok(dir)
+}
+
+/// 双重 cap 清理 `recordings/*.wav`：
+/// - `retention_days > 0` → 把超过 N 天的删掉（沿用 history 的 retention 逻辑）。
+/// - `max_entries == Some(n)` → 按 mtime 倒序保留最新的 n 条（clamp 到 1..=HISTORY_CAP）；
+///   `None` 时退回 HISTORY_CAP (200) 硬上限，避免无限增长。
+/// 调用方：每次新建一条录音前。失败仅打 warn，避免影响主路径。
+pub fn prune_recordings(retention_days: u32, max_entries: Option<u32>) -> Result<()> {
+    let dir = match data_dir() {
+        Ok(d) => d.join("recordings"),
+        Err(_) => return Ok(()),
+    };
+    if !dir.exists() {
+        return Ok(());
+    }
+
+    // 第一步：按天清理。仅扫 .wav，跟第二步保持一致；metadata 读不到的文件按"过期"处理
+    // —— fs 损坏 / 未来格式不一致的孤儿文件应当被回收而不是无限累积。
+    if retention_days > 0 {
+        let cutoff = std::time::SystemTime::now()
+            - std::time::Duration::from_secs(u64::from(retention_days) * 24 * 3600);
+        for entry in fs::read_dir(&dir).context("read recordings dir")?.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("wav") {
+                continue;
+            }
+            let modified = entry
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            if modified < cutoff {
+                if let Err(err) = fs::remove_file(&path) {
+                    log::warn!("[recordings] prune (days) remove failed for {path:?}: {err}");
+                }
+            }
+        }
+    }
+
+    // 第二步：按条数清理。剩下的 wav 按 mtime 倒序，超出 cap 的删掉。
+    let cap = max_entries
+        .map(|n| (n as usize).clamp(1, HISTORY_CAP))
+        .unwrap_or(HISTORY_CAP);
+    let mut entries: Vec<(PathBuf, std::time::SystemTime)> = fs::read_dir(&dir)
+        .context("read recordings dir")?
+        .flatten()
+        .filter_map(|e| {
+            let path = e.path();
+            // 只看 .wav，避免误删未来其他类型的归档文件。
+            if path.extension().and_then(|ext| ext.to_str()) != Some("wav") {
+                return None;
+            }
+            let modified = e.metadata().ok()?.modified().ok()?;
+            Some((path, modified))
+        })
+        .collect();
+    if entries.len() <= cap {
+        return Ok(());
+    }
+    entries.sort_by(|a, b| b.1.cmp(&a.1));
+    for (path, _) in entries.into_iter().skip(cap) {
+        if let Err(err) = fs::remove_file(&path) {
+            log::warn!(
+                "[recordings] prune (count) remove failed for {:?}: {err}",
+                path
+            );
+        }
+    }
+    Ok(())
+}
+
+/// 单个 session 的录音文件路径。不保证文件已存在（DictationSession.has_audio_recording
+/// 决定文件是否被写过）。前端用 `read_audio_recording` IPC 读字节流喂 HTMLAudio。
+pub fn recording_path_for_session(session_id: &str) -> Result<PathBuf> {
+    Ok(recordings_root()?.join(format!("{session_id}.wav")))
+}
+
 /// Foundry Local 下载与缓存根目录。DLL 和模型都不打进安装包，和 Qwen3-ASR
 /// 一样放在 OpenLess 的 models 目录下，卸载清理用户数据时可以一起删除。
 #[cfg(target_os = "windows")]
@@ -198,6 +282,45 @@ fn read_or_default<T: for<'de> Deserialize<'de> + Default>(path: &Path) -> Resul
     }
     serde_json::from_slice::<T>(&bytes)
         .with_context(|| format!("decode failed: {}", path.display()))
+}
+
+fn read_preferences(path: &Path) -> Result<UserPreferences> {
+    if !path.exists() {
+        return Ok(UserPreferences::default());
+    }
+    let bytes = fs::read(path).with_context(|| format!("read failed: {}", path.display()))?;
+    if bytes.is_empty() {
+        return Ok(UserPreferences::default());
+    }
+    let prefs = serde_json::from_slice::<UserPreferences>(&bytes)
+        .with_context(|| format!("decode failed: {}", path.display()))?;
+
+    // issue #440：老版本可能已把旧默认 `streamingInsert:false` 写进 preferences.json。
+    // 反序列化会在内存里迁到 true，但还必须把迁移标记落盘，否则每次启动都停留在
+    // “旧文件”状态，无法表达用户后续手动关闭后的 durable opt-out。
+    let streaming_default_migrated = serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("streamingInsertDefaultMigrated")
+                .and_then(|flag| flag.as_bool())
+        })
+        .unwrap_or(false);
+    if !streaming_default_migrated {
+        match serde_json::to_vec_pretty(&prefs)
+            .context("encode prefs failed")
+            .and_then(|json| atomic_write(path, &json))
+        {
+            Ok(()) => log::info!("[prefs] migrated streamingInsert default marker"),
+            Err(err) => log::warn!(
+                "[prefs] failed to persist streamingInsert migration marker for {}: {}",
+                path.display(),
+                err
+            ),
+        }
+    }
+
+    Ok(prefs)
 }
 
 // ───────────────────────── credentials vault ─────────────────────────
@@ -786,16 +909,19 @@ impl HistoryStore {
     }
 
     pub fn append(&self, session: DictationSession) -> Result<()> {
-        self.append_with_retention(session, 0)
+        self.append_with_retention(session, 0, None)
     }
 
     /// `retention_days == 0` 跟旧 append 行为一致（不按时间清理）。
     /// `> 0` 时在写入新条目后顺手把超过 N 天的会话裁掉，写入时就完成清理，
-    /// 不需要后台轮询。最后再受 200 条硬上限约束（HISTORY_CAP）。
+    /// 不需要后台轮询。最后再受条数上限约束：
+    /// - `max_entries == None` → HISTORY_CAP (200)
+    /// - `max_entries == Some(n)` → clamp 到 5..=HISTORY_CAP，避免用户填 0 / 极大值。
     pub fn append_with_retention(
         &self,
         session: DictationSession,
         retention_days: u32,
+        max_entries: Option<u32>,
     ) -> Result<()> {
         let _guard = self.lock.lock();
         let mut sessions = self.read_locked()?;
@@ -810,8 +936,11 @@ impl HistoryStore {
                     .unwrap_or(true)
             });
         }
-        if sessions.len() > HISTORY_CAP {
-            sessions.truncate(HISTORY_CAP);
+        let cap = max_entries
+            .map(|n| (n as usize).clamp(5, HISTORY_CAP))
+            .unwrap_or(HISTORY_CAP);
+        if sessions.len() > cap {
+            sessions.truncate(cap);
         }
         self.write_locked(&sessions)
     }
@@ -876,7 +1005,7 @@ impl PreferencesStore {
         ensure_dir(&dir)?;
         let path = dir.join(PREFERENCES_FILE);
         let prefs = if path.exists() {
-            read_or_default::<UserPreferences>(&path).unwrap_or_else(|e| {
+            read_preferences(&path).unwrap_or_else(|e| {
                 log::warn!(
                     "[prefs] load {} failed, using defaults: {}",
                     path.display(),
@@ -1023,6 +1152,37 @@ impl StylePackStore {
             .ok_or_else(|| anyhow!("no enabled style pack available"))
     }
 
+    /// 从模板新建一个 imported 风格包（"+"按钮路径）。
+    /// 跟 ZIP 导入不同：没有 manifest.json、没有 assets，纯空白模板。
+    /// 调用方负责 set `prefs.active_style_pack_id` 等高层 wiring（这里只管落盘）。
+    pub fn create_from_template(&self, template: StylePack) -> Result<StylePack> {
+        let mut packs = self.state.lock();
+        let base_id = if template.id.trim().is_empty() {
+            format!("imported-{}", Uuid::new_v4().simple())
+        } else {
+            template.id.clone()
+        };
+        let assigned_id = unique_imported_style_pack_id(&packs, &base_id);
+        let now = Utc::now().to_rfc3339();
+        let mut pack = template;
+        pack.id = assigned_id;
+        pack.kind = StylePackKind::Imported;
+        pack.created_at = Some(now.clone());
+        pack.updated_at = Some(now);
+        pack.active = false;
+        pack.enabled = true;
+        packs.push(pack.clone());
+        write_style_packs_file(&self.path, &packs)?;
+        log::info!(
+            "[style-pack] created from template id={} base_mode={:?} prompt_chars={} examples={}",
+            pack.id,
+            pack.base_mode,
+            pack.prompt.chars().count(),
+            pack.examples.len()
+        );
+        Ok(pack)
+    }
+
     pub fn upsert(&self, incoming: StylePack) -> Result<StylePack> {
         let mut packs = self.state.lock();
         let index = packs
@@ -1043,6 +1203,27 @@ impl StylePackStore {
             updated.tags.len(),
             updated.version
         );
+        Ok(updated)
+    }
+
+    /// 设置衍生关系；marketplace_install 安装本地包后绑定 upstream id + author。
+    /// 单独走这里是为了不让前端通用 save 路径误清这两字段。
+    pub fn set_origin(
+        &self,
+        id: &str,
+        origin_pack_id: Option<String>,
+        origin_author_login: Option<String>,
+    ) -> Result<StylePack> {
+        let mut packs = self.state.lock();
+        let index = packs
+            .iter()
+            .position(|pack| pack.id == id)
+            .ok_or_else(|| anyhow!("style pack {} not found", id))?;
+        packs[index].origin_pack_id = normalize_optional_text(origin_pack_id);
+        packs[index].origin_author_login = normalize_optional_text(origin_author_login);
+        packs[index].updated_at = Some(Utc::now().to_rfc3339());
+        let updated = packs[index].clone();
+        write_style_packs_file(&self.path, &packs)?;
         Ok(updated)
     }
 
@@ -1161,6 +1342,8 @@ impl StylePackStore {
             compatible_app_version: manifest
                 .compatible_app_version
                 .and_then(|value| normalize_optional_text(Some(value))),
+            origin_pack_id: None,
+            origin_author_login: None,
         };
         packs.insert(0, pack.clone());
         write_style_packs_file(&self.path, &packs)?;
@@ -1510,6 +1693,8 @@ fn merge_style_pack_update(existing: StylePack, incoming: StylePack) -> Result<S
     updated.tags = normalize_tags(&incoming.tags);
     updated.recommended_model = normalize_optional_text(incoming.recommended_model);
     updated.compatible_app_version = normalize_optional_text(incoming.compatible_app_version);
+    // origin 字段是 marketplace_install 之后的「衍生关系绑定」，**不能**走通用 save 路径覆盖
+    // ——否则前端 save 时丢失 originPackId 就会清掉关联。要写 origin 走专用的 set_origin。
     updated.updated_at = Some(Utc::now().to_rfc3339());
     Ok(updated)
 }
@@ -2055,8 +2240,8 @@ impl CredentialsVault {
 #[cfg(test)]
 mod tests {
     use super::{
-        chunk_json_payload, list_vocab_presets, save_vocab_presets, sync_style_pack_preferences,
-        validate_correction_rule_syntax, KEYRING_CHUNK_MAX_UTF16_UNITS,
+        chunk_json_payload, list_vocab_presets, read_preferences, save_vocab_presets,
+        sync_style_pack_preferences, validate_correction_rule_syntax, KEYRING_CHUNK_MAX_UTF16_UNITS,
     };
     use crate::types::{builtin_style_packs, CustomStylePrompts, VocabPreset, VocabPresetStore};
     use std::fs;
@@ -2076,6 +2261,44 @@ mod tests {
         assert!(chunks
             .iter()
             .all(|chunk| chunk.encode_utf16().count() <= KEYRING_CHUNK_MAX_UTF16_UNITS));
+    }
+
+    #[test]
+    fn legacy_streaming_insert_false_is_migrated_and_marker_is_persisted() {
+        let tmp: PathBuf =
+            std::env::temp_dir().join(format!("openless-prefs-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&tmp).expect("create temp dir");
+        let path = tmp.join("preferences.json");
+        fs::write(
+            &path,
+            r#"{
+                "streamingInsert": false,
+                "streamingInsertSaveClipboard": true
+            }"#,
+        )
+        .expect("write legacy prefs");
+
+        let prefs = read_preferences(&path).expect("read prefs");
+        assert!(prefs.streaming_insert);
+        assert!(prefs.streaming_insert_default_migrated);
+
+        let saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("read saved prefs"))
+                .expect("decode saved prefs");
+        assert_eq!(
+            saved
+                .get("streamingInsert")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            saved
+                .get("streamingInsertDefaultMigrated")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]

@@ -324,6 +324,49 @@ fn finalize_polished_text(
     }
 }
 
+fn streaming_insert_eligible(
+    streaming_insert_enabled: bool,
+    translation_active: bool,
+    mode: PolishMode,
+    raw_uses_llm: bool,
+    wayland_session: bool,
+) -> bool {
+    streaming_insert_enabled
+        && !translation_active
+        && (mode != PolishMode::Raw || raw_uses_llm)
+        && !wayland_session
+}
+
+fn wayland_done_message(status: InsertStatus, polish_failed: bool) -> Option<String> {
+    match status {
+        InsertStatus::Inserted | InsertStatus::PasteSent => None,
+        InsertStatus::CopiedFallback => Some(if polish_failed {
+            "Wayland 未启用自动输入，已复制原文到剪贴板，请手动粘贴".to_string()
+        } else {
+            "Wayland 未启用自动输入，已复制到剪贴板，请手动粘贴".to_string()
+        }),
+        InsertStatus::Failed => Some("Wayland 未启用自动输入，剪贴板写入失败".to_string()),
+    }
+}
+
+fn default_done_message(status: InsertStatus, polish_failed: bool) -> Option<String> {
+    if polish_failed {
+        // polish 失败优先告知用户，即使 insert 成功也要让用户知道这版是原文
+        Some("润色失败，已插入原文".to_string())
+    } else {
+        match status {
+            InsertStatus::Inserted => None,
+            InsertStatus::PasteSent => Some("已尝试粘贴".to_string()),
+            InsertStatus::CopiedFallback => Some(if cfg!(target_os = "windows") {
+                "已复制，请 Ctrl+V".to_string()
+            } else {
+                "已复制，请粘贴".to_string()
+            }),
+            InsertStatus::Failed => Some("插入失败".to_string()),
+        }
+    }
+}
+
 pub(super) async fn handle_pressed_edge(inner: &Arc<Inner>) {
     let was_held = inner.hotkey_trigger_held.swap(true, Ordering::SeqCst);
     if !was_held {
@@ -785,8 +828,31 @@ pub(super) async fn start_recorder_for_starting(
     let microphone_device_name = selected_microphone_device_name(inner);
     stop_microphone_preview_monitor(inner, "dictation recorder");
     acquire_recording_mute(inner, "dictation").await;
-    match Recorder::start(microphone_device_name, consumer, level_handler) {
-        Ok((rec, runtime_errors)) => {
+    let audio_archive_path = if inner.prefs.get().record_audio_for_debug {
+        // 用 coordinator 的 SessionId 作为文件名，跟 history 那条记录 id 对齐（见
+        // 下游 polish 收尾时 `history_session_id = current_session_id.to_string()`）。
+        // 顺手把超龄 / 超量录音清理一下，避免 debug 开关常开时磁盘膨胀。
+        let prefs = inner.prefs.get();
+        let _ = crate::persistence::prune_recordings(
+            prefs.history_retention_days,
+            prefs.audio_recording_max_entries,
+        );
+        crate::persistence::recording_path_for_session(&session_id.to_string()).ok()
+    } else {
+        None
+    };
+    match Recorder::start(
+        microphone_device_name,
+        consumer,
+        level_handler,
+        audio_archive_path,
+    ) {
+        Ok((rec, runtime_errors, archive_active)) => {
+            // 把 archive 实际创建状态存到 Inner，让 history 写入路径（含 empty-transcript
+            // 失败分支）读真实情况，而不是 prefs 开关。修 pr_agent "Wrong Flag" 反馈。
+            inner
+                .audio_archive_active
+                .store(archive_active, std::sync::atomic::Ordering::Relaxed);
             store_recorder_for_session(inner, session_id, rec);
             spawn_recorder_error_monitor(inner, runtime_errors);
             // 不在这里 emit Recording capsule。
@@ -1230,11 +1296,17 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
             error_code: Some("emptyTranscript".to_string()),
             duration_ms: Some(raw.duration_ms),
             dictionary_entry_count: Some(enabled_phrases(inner).len() as u32),
+            // empty-transcript（ASR 没识别到任何文字）也保留 wav 标记——这是用户最想
+            // 通过原始录音定位"是不是麦克风太小声 / ASR 模型问题"的场景。修 pr_agent
+            // "Missing Audio" 反馈。
+            has_audio_recording: Some(inner.audio_archive_active.load(Ordering::Relaxed)),
         };
-        if let Err(e) = inner
-            .history
-            .append_with_retention(session, inner.prefs.get().history_retention_days)
-        {
+        let prefs_snapshot = inner.prefs.get();
+        if let Err(e) = inner.history.append_with_retention(
+            session,
+            prefs_snapshot.history_retention_days,
+            prefs_snapshot.history_max_entries,
+        ) {
             log::error!("[coord] history append failed: {e}");
         }
         emit_capsule(
@@ -1338,10 +1410,16 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
     };
     // 流式插入 opt-in 路径：开关打开 + 非翻译 + 非 Raw 模式 → 进入流式分支。
     // 任何不满足都走原一次性 polish_or_passthrough 路径，行为跟历史完全一致。
-    let streaming_eligible =
-        prefs.streaming_insert && !translation_active && (mode != PolishMode::Raw || raw_uses_llm);
+    let wayland_session = crate::hotkey::is_wayland_session();
+    let streaming_eligible = streaming_insert_eligible(
+        prefs.streaming_insert,
+        translation_active,
+        mode,
+        raw_uses_llm,
+        wayland_session,
+    );
     log::info!(
-        "[coord] polish dispatch: translation={translation_active} mode={mode:?} streaming_eligible={streaming_eligible}"
+        "[coord] polish dispatch: translation={translation_active} mode={mode:?} wayland_session={wayland_session} streaming_eligible={streaming_eligible}"
     );
 
     let (polished, polish_error, already_streamed) = if translation_active {
@@ -1445,6 +1523,24 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
             polish_error
         );
         InsertStatus::Inserted
+    } else if wayland_session {
+        log::info!(
+            "[coord] Wayland session detected; skipping synthetic paste and attempting copy-only fallback ({} chars)",
+            polished.chars().count()
+        );
+        let status = inner.inserter.copy_fallback(&polished);
+        match status {
+            InsertStatus::CopiedFallback => {
+                log::info!("[coord] Wayland copy-only fallback succeeded")
+            }
+            InsertStatus::Failed => {
+                log::error!("[coord] Wayland copy-only fallback failed: clipboard write failed")
+            }
+            other => log::warn!(
+                "[coord] Wayland copy-only fallback returned unexpected status: {other:?}"
+            ),
+        }
+        status
     } else if focus_ready_for_paste {
         #[cfg(target_os = "windows")]
         {
@@ -1503,12 +1599,16 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         polish_error.is_some(),
         focus_ready_for_paste,
         allow_non_tsf_insertion_fallback,
+        wayland_session,
     )
     .map(str::to_string);
     let tsf_required_insert_failed = error_code.as_deref() == Some("windowsImeTsfRequired");
 
-    let history_session_id = Uuid::new_v4().to_string();
+    // 与 coordinator 内部 SessionId 对齐：方便 recorder 旁路写盘的 `<session_id>.wav`
+    // 跟 history 这条 DictationSession.id 同名，前端凭 id 就能找到对应录音文件。
+    let history_session_id = current_session_id.to_string();
     let history_created_at = Utc::now().to_rfc3339();
+    let prefs_snapshot = inner.prefs.get();
     let session = DictationSession {
         id: history_session_id.clone(),
         created_at: history_created_at.clone(),
@@ -1523,29 +1623,23 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         // 历史详情页的"X 个热词"显示：用本次实际命中次数（每个匹配实例算一次），
         // 比"启用词条总数"更能反映本段口述命中了多少。u64 → u32 截断对单段听写足够。
         dictionary_entry_count: Some(total_hits.min(u32::MAX as u64) as u32),
+        // 用 begin_session 时 Recorder::start 返回的实际写盘状态，而不是 prefs 开关——
+        // 开关打开但路径创建失败时这里是 false，避免前端渲染播放按钮后端 404。
+        has_audio_recording: Some(inner.audio_archive_active.load(Ordering::Relaxed)),
     };
-    if let Err(e) = inner
-        .history
-        .append_with_retention(session, inner.prefs.get().history_retention_days)
-    {
+    if let Err(e) = inner.history.append_with_retention(
+        session,
+        prefs_snapshot.history_retention_days,
+        prefs_snapshot.history_max_entries,
+    ) {
         log::error!("[coord] history append failed: {e}");
     }
     let done_message = if tsf_required_insert_failed {
         Some("TSF 未上屏，已禁止非 TSF 兜底".to_string())
-    } else if polish_error.is_some() {
-        // polish 失败优先告知用户，即使 insert 成功也要让用户知道这版是原文
-        Some("润色失败，已插入原文".to_string())
+    } else if wayland_session {
+        wayland_done_message(status, polish_error.is_some())
     } else {
-        match status {
-            InsertStatus::Inserted => None,
-            InsertStatus::PasteSent => Some("已尝试粘贴".to_string()),
-            InsertStatus::CopiedFallback => Some(if cfg!(target_os = "windows") {
-                "已复制，请 Ctrl+V".to_string()
-            } else {
-                "已复制，请粘贴".to_string()
-            }),
-            InsertStatus::Failed => Some("插入失败".to_string()),
-        }
+        default_done_message(status, polish_error.is_some())
     };
 
     emit_capsule(
@@ -1572,8 +1666,11 @@ pub(super) fn dictation_error_code(
     polish_failed: bool,
     focus_ready_for_paste: bool,
     allow_non_tsf_insertion_fallback: bool,
+    wayland_session: bool,
 ) -> Option<&'static str> {
-    if !focus_ready_for_paste && status == InsertStatus::Failed {
+    if wayland_session && status == InsertStatus::Failed {
+        Some("waylandClipboardWriteFailed")
+    } else if !focus_ready_for_paste && status == InsertStatus::Failed {
         Some("focusRestoreFailed")
     } else if cfg!(target_os = "windows")
         && focus_ready_for_paste
@@ -1628,8 +1725,11 @@ fn append_typed_prefix(target: &mut String, delta: &str, typed_chars: usize) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::{append_typed_prefix, finalize_polished_text};
-    use crate::types::{ChineseScriptPreference, CorrectionRule, PolishMode};
+    use super::{
+        append_typed_prefix, default_done_message, dictation_error_code, finalize_polished_text,
+        streaming_insert_eligible, wayland_done_message,
+    };
+    use crate::types::{ChineseScriptPreference, CorrectionRule, InsertStatus, PolishMode};
 
     fn correction_rule(pattern: &str, replacement: &str) -> CorrectionRule {
         CorrectionRule {
@@ -1711,5 +1811,63 @@ mod tests {
 
         assert_eq!(appended, 1);
         assert_eq!(typed, "好");
+    }
+
+    #[test]
+    fn wayland_disables_streaming_insert_even_when_pref_enabled() {
+        assert!(!streaming_insert_eligible(
+            true,
+            false,
+            PolishMode::Light,
+            false,
+            true
+        ));
+    }
+
+    #[test]
+    fn x11_linux_can_still_use_streaming_insert_when_other_gates_pass() {
+        assert!(streaming_insert_eligible(
+            true,
+            false,
+            PolishMode::Light,
+            false,
+            false
+        ));
+    }
+
+    #[test]
+    fn wayland_done_message_tells_user_manual_paste_is_required() {
+        assert_eq!(
+            wayland_done_message(InsertStatus::CopiedFallback, false),
+            Some("Wayland 未启用自动输入，已复制到剪贴板，请手动粘贴".to_string())
+        );
+        assert_eq!(
+            wayland_done_message(InsertStatus::CopiedFallback, true),
+            Some("Wayland 未启用自动输入，已复制原文到剪贴板，请手动粘贴".to_string())
+        );
+        assert_eq!(
+            wayland_done_message(InsertStatus::Failed, false),
+            Some("Wayland 未启用自动输入，剪贴板写入失败".to_string())
+        );
+    }
+
+    #[test]
+    fn default_done_message_keeps_existing_non_wayland_behavior() {
+        assert_eq!(
+            default_done_message(InsertStatus::PasteSent, false),
+            Some("已尝试粘贴".to_string())
+        );
+        assert_eq!(
+            default_done_message(InsertStatus::Inserted, true),
+            Some("润色失败，已插入原文".to_string())
+        );
+    }
+
+    #[test]
+    fn wayland_clipboard_failure_uses_specific_error_code() {
+        assert_eq!(
+            dictation_error_code(InsertStatus::Failed, false, false, true, true),
+            Some("waylandClipboardWriteFailed")
+        );
     }
 }
