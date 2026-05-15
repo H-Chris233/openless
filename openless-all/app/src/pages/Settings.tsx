@@ -317,6 +317,10 @@ function RecordingSection() {
     savePrefs({ ...prefs, startMinimized });
   const onAutoUpdateCheckChange = (autoUpdateCheck: boolean) =>
     savePrefs({ ...prefs, autoUpdateCheck });
+  const onMarketplaceBaseUrlChange = (marketplaceBaseUrl: string) =>
+    savePrefs({ ...prefs, marketplaceBaseUrl });
+  const onMarketplaceDevLoginChange = (marketplaceDevLogin: string) =>
+    savePrefs({ ...prefs, marketplaceDevLogin });
   const onRecordAudioForDebugChange = (recordAudioForDebug: boolean) =>
     savePrefs({ ...prefs, recordAudioForDebug });
   // 历史条数 200 是当前 HISTORY_CAP（persistence.rs:32），下限 5 是避免用户填 0 导致
@@ -612,6 +616,34 @@ function RecordingSection() {
           {capability.statusHint}
         </div>
       )}
+    </Collapsible>
+
+    {/* ─── 风格市场（折叠） ────────────────────────────────────────── */}
+    <Collapsible title={t('settings.recording.marketplaceGroupTitle')}>
+      <SettingRow
+        label={t('settings.recording.marketplaceBaseUrlLabel')}
+        desc={t('settings.recording.marketplaceBaseUrlDesc')}
+      >
+        <input
+          type="text"
+          placeholder="http://127.0.0.1:8090"
+          value={prefs.marketplaceBaseUrl}
+          onChange={e => onMarketplaceBaseUrlChange(e.target.value)}
+          style={{ ...inputStyle, width: 280 }}
+        />
+      </SettingRow>
+      <SettingRow
+        label={t('settings.recording.marketplaceDevLoginLabel')}
+        desc={t('settings.recording.marketplaceDevLoginDesc')}
+      >
+        <input
+          type="text"
+          placeholder="your-github-login"
+          value={prefs.marketplaceDevLogin}
+          onChange={e => onMarketplaceDevLoginChange(e.target.value)}
+          style={{ ...inputStyle, width: 180 }}
+        />
+      </SettingRow>
     </Collapsible>
     </>
   );
