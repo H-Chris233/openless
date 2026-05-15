@@ -339,8 +339,22 @@ jobs:
             throw "MSI installer smoke failed with exit $LASTEXITCODE"
           }
 
-      # ── Linux：产 deb / rpm / AppImage ──
-      # bundle.resources 里的 Windows TSF DLL 占位对 Linux 包没意义，用空 map 覆盖跳过。
+      # ── Linux：先编译 fcitx5 插件，再产 deb / rpm / AppImage ──
+      - name: Build fcitx5 plugin
+        if: matrix.platform == 'ubuntu-22.04'
+        shell: bash
+        working-directory: 'openless-all/scripts/linux-fcitx5-plugin'
+        run: |
+          sudo apt-get install -y cmake fcitx5-dev
+          mkdir -p build && cd build
+          cmake ..
+          make
+          # 把插件 .so + .conf 复制到 src-tauri/linux-fcitx5-plugin/ 下面，
+          # 供 tauri deb/rpm bundler 的 files 配置使用。
+          mkdir -p "$GITHUB_WORKSPACE/openless-all/app/src-tauri/linux-fcitx5-plugin"
+          cp libopenless.so "$GITHUB_WORKSPACE/openless-all/app/src-tauri/linux-fcitx5-plugin/"
+          cp openless.conf "$GITHUB_WORKSPACE/openless-all/app/src-tauri/linux-fcitx5-plugin/"
+
       - name: Build (Linux)
         if: matrix.platform == 'ubuntu-22.04'
         shell: bash
@@ -349,13 +363,39 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
+          # 构建带 fcitx5 插件的 deb/rpm/AppImage。
+          # 插件 .so + .conf 由上一步 Build fcitx5 plugin 生成并复制到
+          # src-tauri/linux-fcitx5-plugin/ 下。
+          cat > /tmp/tauri-linux-config.json << 'CONFIG_EOF'
+          {
+            "bundle": {
+              "resources": {},
+              "linux": {
+                "deb": {
+                  "depends": ["fcitx5", "fcitx5-module-dbus", "libdbus-1-3"],
+                  "files": {
+                    "/usr/lib/fcitx5/libopenless.so": "linux-fcitx5-plugin/libopenless.so",
+                    "/usr/share/fcitx5/addon/openless.conf": "linux-fcitx5-plugin/openless.conf"
+                  }
+                },
+                "rpm": {
+                  "depends": ["fcitx5", "fcitx5-module-dbus"],
+                  "files": {
+                    "/usr/lib64/fcitx5/libopenless.so": "linux-fcitx5-plugin/libopenless.so",
+                    "/usr/share/fcitx5/addon/openless.conf": "linux-fcitx5-plugin/openless.conf"
+                  }
+                }
+              }
+            }
+          }
+          CONFIG_EOF
           if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
-            npm run tauri -- build --bundles deb,rpm,appimage \
-              --config '{"bundle":{"resources":{},"createUpdaterArtifacts":true}}'
+            jq '.bundle.createUpdaterArtifacts = true' /tmp/tauri-linux-config.json > /tmp/tauri-linux-config-signed.json
+            CONFIG_FILE=/tmp/tauri-linux-config-signed.json
           else
-            npm run tauri -- build --bundles deb,rpm,appimage \
-              --config '{"bundle":{"resources":{}}}'
+            CONFIG_FILE=/tmp/tauri-linux-config.json
           fi
+          npm run tauri -- build --bundles deb,rpm,appimage --config "$CONFIG_FILE"
 
       - name: Disambiguate macOS updater bundle filename
         if: startsWith(matrix.platform, 'macos') && env.TAURI_SIGNING_PRIVATE_KEY != ''
