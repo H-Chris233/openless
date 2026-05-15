@@ -60,6 +60,7 @@ export const ko: typeof zhCN = {
     history: '기록',
     vocab: '어휘',
     style: '스타일',
+    marketplace: '마켓',
     translation: '번역',
     selectionAsk: '선택 질문',
     localAsr: '모델 설정',

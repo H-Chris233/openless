@@ -9,6 +9,8 @@ import type {
   DictationSession,
   DictionaryEntry,
   HotkeyCapability,
+  MarketplaceDetail,
+  MarketplaceListItem,
   HotkeyStatus,
   MicrophoneDevice,
   PermissionStatus,
@@ -101,6 +103,8 @@ let mockSettings: UserPreferences = {
   historyMaxEntries: null,
   recordAudioForDebug: false,
   audioRecordingMaxEntries: null,
+  marketplaceBaseUrl: '',
+  marketplaceDevLogin: '',
 };
 
 const mockFullStylePrompts: StyleSystemPrompts = {
@@ -954,3 +958,61 @@ export async function exportErrorLog(suggestedFileName: string): Promise<string 
 }
 
 export { isTauri };
+
+// ── Marketplace (Phase A) ─────────────────────────────────────────────
+// 5 个 IPC wrapper —— marketplace-backend HTTP 通过 Rust IPC 转发。Mock fallback
+// 让 vite dev 在浏览器里也能预览 UI（返回空列表 / 假数据）。
+
+const MOCK_MARKETPLACE: MarketplaceListItem[] = [
+  {
+    id: '00000000-0000-0000-0000-000000000001',
+    slug: 'demo-pack',
+    name: '示范风格包',
+    description: 'Mock 数据 - vite dev 模式下显示',
+    authorLogin: 'demo',
+    version: '1.0.0',
+    baseMode: 'structured',
+    tags: ['demo'],
+    likeCount: 12,
+    downloadCount: 50,
+    publishedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  },
+];
+
+export function listMarketplace(
+  options: { query?: string; sort?: 'new' | 'popular'; limit?: number } = {},
+): Promise<MarketplaceListItem[]> {
+  return invokeOrMock('marketplace_list', options, () => MOCK_MARKETPLACE);
+}
+
+export function fetchMarketplaceDetail(packId: string): Promise<MarketplaceDetail> {
+  return invokeOrMock('marketplace_detail', { packId }, () => ({
+    ...MOCK_MARKETPLACE[0],
+    prompt: '# 角色\n你是测试用 polish 助手。\n\n# 任务\n按整体意图整理转写。',
+    state: 'approved' as const,
+  }));
+}
+
+export function installMarketplacePack(packId: string): Promise<StylePack> {
+  return invokeOrMock('marketplace_install', { packId }, () => mockStylePacks[0]);
+}
+
+export function uploadMarketplacePack(
+  packId: string,
+): Promise<{ id: string; state: string; message: string }> {
+  return invokeOrMock('marketplace_upload', { packId }, () => ({
+    id: 'mock-uploaded',
+    state: 'pending',
+    message: 'Mock 上传成功（vite dev）',
+  }));
+}
+
+export function likeMarketplacePack(
+  packId: string,
+): Promise<{ likeCount: number; alreadyLiked: boolean }> {
+  return invokeOrMock('marketplace_like', { packId }, () => ({
+    likeCount: 13,
+    alreadyLiked: false,
+  }));
+}

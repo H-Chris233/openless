@@ -65,6 +65,8 @@ const previousPrefs: UserPreferences = {
   historyMaxEntries: null,
   recordAudioForDebug: false,
   audioRecordingMaxEntries: null,
+  marketplaceBaseUrl: '',
+  marketplaceDevLogin: '',
 };
 
 const nextPrefs: UserPreferences = {

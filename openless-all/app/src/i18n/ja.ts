@@ -60,6 +60,7 @@ export const ja: typeof zhCN = {
     history: '履歴',
     vocab: '語彙',
     style: 'スタイル',
+    marketplace: 'マーケット',
     translation: '翻訳',
     selectionAsk: '選択追問',
     localAsr: 'モデル設定',
