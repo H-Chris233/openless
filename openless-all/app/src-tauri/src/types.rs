@@ -592,8 +592,10 @@ pub struct UserPreferences {
     /// - 仅 OpenAI-compatible provider 实装（v1）；Gemini / Codex provider 走原一次性
     ///   插入路径
     ///
-    /// 默认 false 与历史行为一致。
-    #[serde(default)]
+    /// 默认 true（自 1.3.2-3 起）—— 流式落字感知延迟低，所有 fallback case 都已经接好，
+    /// 让开箱即用就能体验。CJK IME / Codex / Gemini provider 自动回落到一次性路径，
+    /// 用户无感。详见上面「限制」段。
+    #[serde(default = "default_true")]
     pub streaming_insert: bool,
     /// 流式输入成功后是否把最终润色文本写回剪贴板。一次性路径天然走剪贴板，所以
     /// Cmd+V 可以重复粘贴；流式路径直接合成键盘事件、不动剪贴板，会让用户失去这层
@@ -1115,11 +1117,26 @@ pub fn default_style_system_prompt_for_mode(mode: PolishMode) -> String {
             \u{200B}（注意：\u{4E0D}写\u{201C}\u{6211}\u{4EEC}\u{770B}\u{4E86}\u{4E00}\u{4E0B}\u{201D}\u{201C}\u{7ECF}\u{8FC7}\u{8BC4}\u{4F30}\u{201D}\u{4E4B}\u{7C7B}\u{4EE3}\u{5165}\u{8BED}）",
     };
 
+    // 热词与纠错模块以 `{{HOTWORDS}}` 占位符在 ROLE_BLOCK 之后预留位置——polish.rs
+    // 的 compose_system_prompt 拿到 prompt 后查找此占位符并替换为运行时构造的实际热词
+    // + 错别字纠正块。把它放在「人格之后、任务之前」让模型在确立角色后立刻收到这个
+    // 高优先级指令；与传统「拼在末尾」相比，对中段注意力衰减更友好。
+    //
+    // 用户在 Style Pack 编辑器自定义 prompt 时可以保留 / 移动 / 删除 `{{HOTWORDS}}`：
+    // 含 → 替换位置；不含 → fallback 拼在末尾（兼容历史 prompt）。
     format!(
-        "{}\n\n{}\n\n{}\n\n{}",
-        ROLE_BLOCK, task_and_example, COMMON_RULES, OUTPUT_BLOCK
+        "{}\n\n{}\n\n{}\n\n{}\n\n{}",
+        ROLE_BLOCK,
+        HOTWORDS_PLACEHOLDER,
+        task_and_example,
+        COMMON_RULES,
+        OUTPUT_BLOCK
     )
 }
+
+/// 热词与纠错模块在 system prompt 里的位置占位符。
+/// polish.rs::compose_system_prompt 找到后替换为运行时实际热词块。
+pub const HOTWORDS_PLACEHOLDER: &str = "{{HOTWORDS}}";
 
 fn default_raw_style_system_prompt() -> String {
     default_style_system_prompt_for_mode(PolishMode::Raw)
@@ -1146,7 +1163,7 @@ impl Default for UserPreferences {
                 &None,
             )
             .expect("default legacy hotkey is not custom"),
-            default_mode: PolishMode::Light,
+            default_mode: PolishMode::Structured,
             enabled_modes: vec![
                 PolishMode::Raw,
                 PolishMode::Light,
@@ -1187,7 +1204,7 @@ impl Default for UserPreferences {
             history_retention_days: default_history_retention_days(),
             polish_context_window_minutes: default_polish_context_window_minutes(),
             start_minimized: false,
-            streaming_insert: false,
+            streaming_insert: true,
             streaming_insert_save_clipboard: true,
             auto_update_check: true,
             history_max_entries: None,
