@@ -597,6 +597,11 @@ pub struct UserPreferences {
     /// 用户无感。详见上面「限制」段。
     #[serde(default = "default_true")]
     pub streaming_insert: bool,
+    /// issue #440 的一次性迁移标记。老版本会把默认 `streamingInsert:false`
+    /// 写进 preferences.json，升级后仅看 bool 无法区分「老默认」和「用户手动关」。
+    /// 缺少此标记的旧文件统一迁到 true；迁移后用户再关会带着标记保存，后续保留 false。
+    #[serde(default)]
+    pub streaming_insert_default_migrated: bool,
     /// 流式输入成功后是否把最终润色文本写回剪贴板。一次性路径天然走剪贴板，所以
     /// Cmd+V 可以重复粘贴；流式路径直接合成键盘事件、不动剪贴板，会让用户失去这层
     /// 兜底。开启后流式成功收尾时把 final text 写到系统剪贴板，跟一次性行为对齐。
@@ -731,8 +736,10 @@ struct UserPreferencesWire {
     polish_context_window_minutes: u32,
     #[serde(default)]
     start_minimized: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     streaming_insert: bool,
+    #[serde(default)]
+    streaming_insert_default_migrated: bool,
     #[serde(default = "default_true")]
     streaming_insert_save_clipboard: bool,
     #[serde(default = "default_true")]
@@ -792,6 +799,7 @@ impl Default for UserPreferencesWire {
             polish_context_window_minutes: prefs.polish_context_window_minutes,
             start_minimized: prefs.start_minimized,
             streaming_insert: prefs.streaming_insert,
+            streaming_insert_default_migrated: prefs.streaming_insert_default_migrated,
             streaming_insert_save_clipboard: prefs.streaming_insert_save_clipboard,
             auto_update_check: prefs.auto_update_check,
             history_max_entries: prefs.history_max_entries,
@@ -814,6 +822,13 @@ impl<'de> Deserialize<'de> for UserPreferences {
             None => default_dictation_hotkey_from_legacy(&wire.hotkey, &wire.custom_combo_hotkey)
                 .map_err(serde::de::Error::custom)?,
         };
+        let streaming_insert_default_migrated = wire.streaming_insert_default_migrated;
+        let streaming_insert = if streaming_insert_default_migrated {
+            wire.streaming_insert
+        } else {
+            true
+        };
+
         Ok(Self {
             hotkey: wire.hotkey,
             dictation_hotkey,
@@ -865,7 +880,8 @@ impl<'de> Deserialize<'de> for UserPreferences {
             history_retention_days: wire.history_retention_days,
             polish_context_window_minutes: wire.polish_context_window_minutes,
             start_minimized: wire.start_minimized,
-            streaming_insert: wire.streaming_insert,
+            streaming_insert,
+            streaming_insert_default_migrated: true,
             streaming_insert_save_clipboard: wire.streaming_insert_save_clipboard,
             auto_update_check: wire.auto_update_check,
             history_max_entries: wire.history_max_entries,
@@ -1221,6 +1237,7 @@ impl Default for UserPreferences {
             polish_context_window_minutes: default_polish_context_window_minutes(),
             start_minimized: false,
             streaming_insert: true,
+            streaming_insert_default_migrated: true,
             streaming_insert_save_clipboard: true,
             auto_update_check: true,
             history_max_entries: None,
@@ -1910,6 +1927,48 @@ mod tests {
 
         let from_empty: UserPreferences = serde_json::from_str("{}").unwrap();
         assert_eq!(from_empty.paste_shortcut, PasteShortcut::CtrlV);
+    }
+
+    /// issue #440: 老版本会把默认 `streamingInsert:false` 写进 preferences.json。
+    /// 缺少迁移标记的旧文件统一迁到 true；带有迁移标记后，用户再手动关掉的 false
+    /// 必须保留。
+    #[test]
+    fn streaming_insert_defaults_to_enabled_for_missing_or_legacy_unmigrated_pref() {
+        let prefs = UserPreferences::default();
+        assert!(prefs.streaming_insert);
+        assert!(prefs.streaming_insert_default_migrated);
+        assert!(prefs.streaming_insert_save_clipboard);
+
+        let from_empty: UserPreferences = serde_json::from_str("{}").unwrap();
+        assert!(from_empty.streaming_insert);
+        assert!(from_empty.streaming_insert_default_migrated);
+        assert!(from_empty.streaming_insert_save_clipboard);
+
+        let from_legacy_false: UserPreferences = serde_json::from_str(
+            r#"{
+                "streamingInsert": false,
+                "streamingInsertSaveClipboard": true
+            }"#,
+        )
+        .unwrap();
+        assert!(from_legacy_false.streaming_insert);
+        assert!(from_legacy_false.streaming_insert_default_migrated);
+    }
+
+    #[test]
+    fn streaming_insert_preserves_explicit_disabled_value() {
+        let prefs: UserPreferences = serde_json::from_str(
+            r#"{
+                "streamingInsert": false,
+                "streamingInsertDefaultMigrated": true,
+                "streamingInsertSaveClipboard": false
+            }"#,
+        )
+        .unwrap();
+
+        assert!(!prefs.streaming_insert);
+        assert!(prefs.streaming_insert_default_migrated);
+        assert!(!prefs.streaming_insert_save_clipboard);
     }
 
     #[test]
