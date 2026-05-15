@@ -96,16 +96,14 @@ public:
                         auto *ic = keyEvent.inputContext();
                         if (ic != savedIc_) {
                             savedIc_ = ic;
-                            savedIcDestroyedConnection_.reset();
+                            savedIcDestroyedConnection_ = ScopedConnection();
                             if (ic) {
                                 savedIcDestroyedConnection_ =
-                                    std::make_unique<ScopedConnection>(
-                                        ic->connect(
-                                            ic->destroyed, [this]() {
-                                                FCITX_LOGC(openless, Debug)
-                                                    << "savedIc_ destroyed, clearing";
-                                                savedIc_ = nullptr;
-                                            }));
+                                    ic->destroyed.connect([this]() {
+                                        FCITX_LOGC(openless, Debug)
+                                            << "savedIc_ destroyed, clearing";
+                                        savedIc_ = nullptr;
+                                    });
                             }
                         }
                     }
@@ -259,9 +257,10 @@ private:
     uint32_t triggerRawStates_;
     /// 快捷键按下时保存的输入上下文指针，用于 commitText 在失焦后仍能提交文字。
     /// 事件处理线程和 DBus 处理线程都是 fcitx5 主事件循环，无竞态。
-    /// 通过 savedIcDestroyedConnection_ 监听 IC 销毁信号自动清空，避免野指针。
+    /// 通过 savedIcDestroyedConnection_（连接到 InputContext::destroyed 信号）
+    /// 监听 IC 销毁时自动清空指针，避免野指针。
     InputContext *savedIc_;
-    std::unique_ptr<ScopedConnection> savedIcDestroyedConnection_;
+    ScopedConnection savedIcDestroyedConnection_;
     std::vector<std::unique_ptr<HandlerTableEntry<EventHandler>>>
         eventHandlers_;
 };
