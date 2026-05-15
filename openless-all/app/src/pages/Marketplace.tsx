@@ -53,9 +53,10 @@ export function Marketplace() {
     return () => window.clearTimeout(id);
   }, [query]);
 
-  // 单调递增 seq 防 stale 响应覆盖：用户快速改 query 时旧请求的 response
+  // 单调递增 seq 防 stale 响应覆盖：用户快速改 query / 切换 pack 时旧请求 response
   // 可能晚于新请求到达，比较 seq 丢弃过期结果。
   const reqSeqRef = useRef(0);
+  const detailSeqRef = useRef(0);
   const refresh = useCallback(async () => {
     const seq = ++reqSeqRef.current;
     setLoading(true);
@@ -78,18 +79,21 @@ export function Marketplace() {
   }, [refresh]);
 
   const openDetail = async (id: string) => {
+    const seq = ++detailSeqRef.current;
     setSelectedId(id);
     setDetail(null);
     setDetailLoading(true);
     try {
       const d = await fetchMarketplaceDetail(id);
+      if (seq !== detailSeqRef.current) return; // stale: 用户已切到另一个 pack
       setDetail(d);
     } catch (error) {
+      if (seq !== detailSeqRef.current) return;
       console.error('[marketplace] detail failed', error);
       setActionMsg({ kind: 'err', text: t('marketplace.errors.detail', { err: errorMessage(error) }) });
       setSelectedId(null);
     } finally {
-      setDetailLoading(false);
+      if (seq === detailSeqRef.current) setDetailLoading(false);
     }
   };
 
