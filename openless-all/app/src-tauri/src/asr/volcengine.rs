@@ -53,8 +53,8 @@ pub enum VolcengineASRError {
     /// WebSocket 握手阶段服务端返回 401 / 403：凭据被拒。
     /// 区分自 `ConnectionFailed`（DNS/TLS/网络层失败）—— 前者通常是 App ID / Access
     /// Token / Resource ID 错或账号没开通 bigmodel；后者是网络断 / 防火墙 / DNS。
-    /// 显式 variant 让 coordinator 在 capsule 给用户中文「检查凭据」提示，不是 raw HTTP error。
-    #[error("Volcengine 凭据被拒（HTTP {0}）：请检查 Settings → 凭据 → Volcengine 的 App ID 和 Access Token，或确认账号已开通 SAUC bigmodel 资源")]
+    /// 文案简短，原因在文档里说明，capsule 不堆长引导。
+    #[error("凭据被拒（{0}）")]
     AuthRejected(u16),
     #[error("authentication failed")]
     AuthenticationFailed,
