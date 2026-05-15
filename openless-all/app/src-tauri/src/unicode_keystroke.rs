@@ -417,18 +417,18 @@ mod linux_impl {
 
     pub struct PreviousInputSource;
 
-    /// 优先通过 fcitx5 插件一次性提交整段文字（支持中文、兼容 Wayland/X11）。
+    /// 通过 fcitx5 插件一次性提交整段文字（支持中文、Wayland/X11 均可）。
+    /// 如果插件未加载返回 Err，调用方降级到剪贴板拷贝。
     pub fn type_unicode_chunk(text: &str) -> Result<usize, TypeError> {
         if text.is_empty() {
             return Ok(0);
         }
-        // fcitx5 插件能处理全部文字，且是 native 方式（不走键盘合成），
-        // 所以整个 chunk 一次性 commit 即可，返回全部字符数。
-        // 失败时不降级——enigo XTest 在 Wayland 不可用。
         if crate::linux_fcitx::commit_text(text).is_ok() {
             Ok(text.chars().count())
         } else {
-            Err(TypeError::EnigoText("commit_text failed on Wayland, try clipboard fallback".into()))
+            Err(TypeError::EnigoText(
+                "fcitx5 plugin unavailable, try clipboard fallback".into(),
+            ))
         }
     }
 

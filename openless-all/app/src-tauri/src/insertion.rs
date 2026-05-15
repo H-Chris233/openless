@@ -50,8 +50,8 @@ impl TextInserter {
         if text.is_empty() {
             return InsertStatus::CopiedFallback;
         }
-        // Linux: 使用 fcitx5 CommitText 直写（支持中文、兼容 Wayland/X11）。
-        // 失败时仅复制到剪贴板，不走 enigo XTest（Wayland 不可用）。
+        // Linux: 始终优先使用 fcitx5 CommitText 直写（支持中文、Wayland/X11 均可）。
+        // 如果插件未加载，降级到剪贴板拷贝（统一路径，不单独维护 enigo XTest）。
         #[cfg(target_os = "linux")]
         {
             match crate::linux_fcitx::commit_text(text) {
