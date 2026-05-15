@@ -1236,15 +1236,17 @@ pub(crate) fn http_client_builder(base_url: &str, timeout_secs: u64) -> reqwest:
     }
 }
 
-/// 发请求 + 网络抖动 retry：connect / request / timeout 三类 transient 错误首次失败时
-/// 等 500ms 重试一次，再失败按原样返回。HTTP 4xx/5xx 不在这里触发——那些走 response
-/// 的 status 分支单独处理。
+/// 发请求 + 网络抖动 retry：**只**对 `is_connect()` / `is_request()` 这两类「服务端
+/// 必然没收到」的失败重试一次。`is_timeout()` 故意**不**重试——超时时服务端可能已经
+/// 在处理请求并扣计费（LLM completion 是非幂等动作），重试会导致重复 billing + 重复
+/// completion。HTTP 4xx/5xx 不在这里触发——那些走 response.status() 分支单独处理。
 ///
 /// 调用前提：传入的 RequestBuilder body 必须是内存型（json / form），不能是 stream
 /// reader——retry 用 `try_clone()` 复制 RequestBuilder，stream body 不支持。
 ///
-/// 对流式 SSE 路径 retry 是安全的：失败发生在 `send().await` 阶段，response 还没回
-/// 来 → on_delta 必然未被调用 → 不会有「已流式输出的字被重复」的问题。
+/// 对流式 SSE 路径 retry 是安全的：connect / request 类失败发生在 TCP 握手 / HTTP
+/// 请求写出阶段，response 还没回 → on_delta 必然未被调用 → 不会有「已流式输出的字
+/// 被重复」的问题。
 async fn send_with_transient_retry(
     request: reqwest::RequestBuilder,
 ) -> Result<reqwest::Response, LLMError> {
@@ -1254,7 +1256,7 @@ async fn send_with_transient_retry(
         .expect("memory-backed body (json/form) must be clonable for retry");
     match initial.send().await {
         Ok(r) => Ok(r),
-        Err(e) if e.is_connect() || e.is_request() || e.is_timeout() => {
+        Err(e) if e.is_connect() || e.is_request() => {
             log::warn!(
                 "[llm] send transient failure, retry in {}ms: {}",
                 RETRY_DELAY_MS,
