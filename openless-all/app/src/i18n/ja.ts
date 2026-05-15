@@ -534,7 +534,7 @@ export const ja: typeof zhCN = {
       streamingInsertHintWindows:
         'SendInput Unicode で TSF / IME を迂回。入力ソースの切替は不要です。',
       streamingInsertHintLinux:
-        'enigo + XTest でキー合成。X11 は安定、Wayland は compositor 依存で失敗時は自動フォールバック。',
+        'X11 では enigo + XTest でキー合成します。Wayland ではストリーミング入力を無効化し、出力をクリップボードに残して手動貼り付けします。',
       streamingInsertSaveClipboardLabel: 'クリップボードに保存',
       streamingInsertSaveClipboardHint: '挿入成功後に最終テキストをクリップボードへ書き込み、Cmd+V で再貼付け可能にします。OFF ではクリップボードに触れません。',
       localAsrTitle: 'ローカル ASR モデル（実験的）',

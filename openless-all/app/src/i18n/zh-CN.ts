@@ -530,7 +530,7 @@ export const zhCN = {
       streamingInsertHintWindows:
         'SendInput Unicode 直接送字符，绕过 TSF / IME，不切输入法。',
       streamingInsertHintLinux:
-        'enigo + XTest 合成按键。X11 稳定；Wayland 取决于 compositor，失败自动回落。',
+        'X11 使用 enigo + XTest 合成按键；Wayland 下会自动关闭流式输入，并保留到剪贴板供手动粘贴。',
       streamingInsertSaveClipboardLabel: '同步到剪贴板',
       streamingInsertSaveClipboardHint: '插入成功后把最终文本写入剪贴板，方便 Cmd+V 再次粘贴；关闭后流式过程不动剪贴板。',
       localAsrTitle: '本地 ASR 模型（实验性）',

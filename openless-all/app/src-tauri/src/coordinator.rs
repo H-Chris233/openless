@@ -3600,7 +3600,7 @@ mod tests {
     #[test]
     fn focus_restore_failure_uses_specific_error_code_when_insert_fails() {
         assert_eq!(
-            dictation_error_code(InsertStatus::Failed, false, false, false),
+            dictation_error_code(InsertStatus::Failed, false, false, false, false),
             Some("focusRestoreFailed")
         );
     }
@@ -3617,7 +3617,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     fn tsf_required_failure_keeps_tsf_error_when_focus_was_ready() {
         assert_eq!(
-            dictation_error_code(InsertStatus::Failed, false, true, false),
+            dictation_error_code(InsertStatus::Failed, false, true, false, false),
             Some("windowsImeTsfRequired")
         );
     }

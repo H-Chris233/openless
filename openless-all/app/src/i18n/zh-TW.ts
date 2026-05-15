@@ -532,7 +532,7 @@ export const zhTW: typeof zhCN = {
       streamingInsertHintWindows:
         'SendInput Unicode 直接送字元，繞過 TSF / IME，不切輸入法。',
       streamingInsertHintLinux:
-        'enigo + XTest 合成按鍵。X11 穩定；Wayland 取決於 compositor，失敗自動回落。',
+        'X11 使用 enigo + XTest 合成按鍵；Wayland 下會自動關閉串流輸入，並保留到剪貼簿供手動貼上。',
       streamingInsertSaveClipboardLabel: '同步到剪貼簿',
       streamingInsertSaveClipboardHint: '插入成功後把最終文字寫入剪貼簿，方便 Cmd+V 再次貼上；關閉後流式過程不動剪貼簿。',
       localAsrTitle: '本地 ASR 模型（實驗性）',
