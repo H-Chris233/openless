@@ -2379,6 +2379,9 @@ pub async fn marketplace_detail(
     coord: CoordinatorState<'_>,
     pack_id: String,
 ) -> Result<MarketplaceDetail, String> {
+    if !is_valid_session_id(&pack_id) {
+        return Err("invalid pack id".into());
+    }
     let prefs = coord.prefs().get();
     let base = marketplace_url_from_prefs(&prefs);
     let client = reqwest::Client::new();
@@ -2402,6 +2405,12 @@ pub async fn marketplace_install(
     coord: CoordinatorState<'_>,
     pack_id: String,
 ) -> Result<StylePack, String> {
+    // 安全校验：pack_id 来自远端 backend，可能含路径遍历 segment。
+    // 用跟 read_audio_recording 同样的 UUID-v4 白名单挡住 ../ / 绝对路径等。
+    // backend 当前用 Uuid::new_v4 生成所有 id，合法 id 必然匹配。
+    if !is_valid_session_id(&pack_id) {
+        return Err("invalid pack id".into());
+    }
     let prefs = coord.prefs().get();
     let base = marketplace_url_from_prefs(&prefs);
     let client = reqwest::Client::new();
@@ -2417,7 +2426,7 @@ pub async fn marketplace_install(
         .await
         .map_err(|e| format!("read body failed: {e}"))?;
 
-    // 写到临时文件后调既有 import_from_zip（复用本地 ZIP 解析逻辑）
+    // pack_id 已经过 UUID 白名单，拼临时文件路径安全。
     let tmp = std::env::temp_dir().join(format!("openless-marketplace-{pack_id}.zip"));
     std::fs::write(&tmp, &bytes).map_err(|e| format!("write tmp zip: {e}"))?;
     let result = coord
@@ -2433,6 +2442,10 @@ pub async fn marketplace_upload(
     coord: CoordinatorState<'_>,
     pack_id: String,
 ) -> Result<serde_json::Value, String> {
+    // 本地 style pack id 也是 Uuid::new_v4 字面，跟远端同形态。挡 path traversal。
+    if !is_valid_session_id(&pack_id) {
+        return Err("invalid pack id".into());
+    }
     let prefs = coord.prefs().get();
     let base = marketplace_url_from_prefs(&prefs);
     let dev_user = marketplace_dev_user(&prefs);
@@ -2478,6 +2491,9 @@ pub async fn marketplace_like(
     coord: CoordinatorState<'_>,
     pack_id: String,
 ) -> Result<serde_json::Value, String> {
+    if !is_valid_session_id(&pack_id) {
+        return Err("invalid pack id".into());
+    }
     let prefs = coord.prefs().get();
     let base = marketplace_url_from_prefs(&prefs);
     let dev_user = marketplace_dev_user(&prefs);

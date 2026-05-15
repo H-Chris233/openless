@@ -11,7 +11,7 @@
 // 用户在 Settings 填生产 URL 后客户端自动切换。
 // dev 上传需要 prefs.marketplaceDevLogin（GitHub login 风格）—— 空时上传按钮 disabled。
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Icon } from '../components/Icon';
 import {
@@ -53,17 +53,23 @@ export function Marketplace() {
     return () => window.clearTimeout(id);
   }, [query]);
 
+  // 单调递增 seq 防 stale 响应覆盖：用户快速改 query 时旧请求的 response
+  // 可能晚于新请求到达，比较 seq 丢弃过期结果。
+  const reqSeqRef = useRef(0);
   const refresh = useCallback(async () => {
+    const seq = ++reqSeqRef.current;
     setLoading(true);
     setLoadError(null);
     try {
       const list = await listMarketplace({ query: debouncedQuery, sort, limit: 50 });
+      if (seq !== reqSeqRef.current) return; // stale response
       setItems(list);
     } catch (error) {
+      if (seq !== reqSeqRef.current) return;
       console.error('[marketplace] list failed', error);
       setLoadError(errorMessage(error));
     } finally {
-      setLoading(false);
+      if (seq === reqSeqRef.current) setLoading(false);
     }
   }, [debouncedQuery, sort]);
 
