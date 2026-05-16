@@ -292,6 +292,8 @@ pub fn run() {
             commands::marketplace_my_likes,
             commands::marketplace_my_packs,
             commands::marketplace_delete,
+            commands::github_device_flow_start,
+            commands::github_device_flow_poll,
             commands::list_vocab,
             commands::add_vocab,
             commands::remove_vocab,

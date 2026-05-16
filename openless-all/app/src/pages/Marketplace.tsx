@@ -16,6 +16,8 @@ import { useTranslation } from 'react-i18next';
 import { Icon } from '../components/Icon';
 import {
   fetchMarketplaceDetail,
+  githubDeviceFlowPoll,
+  githubDeviceFlowStart,
   installMarketplacePack,
   likeMarketplacePack,
   listMarketplace,
@@ -23,7 +25,10 @@ import {
   marketplaceDelete,
   marketplaceMyLikes,
   marketplaceMyPacks,
+  openExternal,
+  readMarketplaceListCache,
   uploadMarketplacePack,
+  writeMarketplaceListCache,
 } from '../lib/ipc';
 import { useHotkeySettings } from '../state/HotkeySettingsContext';
 import type { MarketplaceDetail, MarketplaceListItem, MarketplaceMyPackItem, StylePack } from '../lib/types';
@@ -33,9 +38,10 @@ type SortMode = 'popular' | 'new' | 'liked';
 
 export function Marketplace() {
   const { t } = useTranslation();
-  const { prefs } = useHotkeySettings();
+  const { prefs, updatePrefs } = useHotkeySettings();
 
-  const [items, setItems] = useState<MarketplaceListItem[]>([]);
+  // 启动时尝试读缓存：上次默认视图（popular + 空 query）的列表，秒呈现。后台 refresh 校准。
+  const [items, setItems] = useState<MarketplaceListItem[]>(() => readMarketplaceListCache() ?? []);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [query, setQuery] = useState('');
@@ -77,6 +83,15 @@ export function Marketplace() {
   const [myPacksQuery, setMyPacksQuery] = useState('');
   // 弹框内已下架包 5 分钟自动消失：tick 每 30s 一次，让 visibleMyPacks 重新计算。
   const [nowTick, setNowTick] = useState(() => Date.now());
+  // GitHub OAuth Device Flow 状态。点登录 chip → 'starting' → 'pending'（展示 user_code 等待
+  // 用户在浏览器授权）→ 'success'（自动保存 marketplaceDevLogin）/ 'error'。
+  type OAuthPhase =
+    | { phase: 'idle' }
+    | { phase: 'starting' }
+    | { phase: 'pending'; userCode: string; verificationUri: string; deviceCode: string }
+    | { phase: 'success'; login: string }
+    | { phase: 'error'; message: string };
+  const [oauth, setOauth] = useState<OAuthPhase>({ phase: 'idle' });
   // 当前用户赞过的 pack id 集合 —— 用于红心渲染 + 「我赞过的」过滤。
   // 进入 marketplace 时拉一次；点星后本地 mutate。
   const [likedIds, setLikedIds] = useState<Set<string>>(new Set());
@@ -107,6 +122,10 @@ export function Marketplace() {
       const list = await listMarketplace({ query: debouncedQuery, sort: serverSort, limit: 50 });
       if (seq !== reqSeqRef.current) return; // stale response
       setItems(list);
+      // 只缓存「默认视图」（popular + 空 query），重开时秒出。
+      if (serverSort === 'popular' && debouncedQuery.trim() === '') {
+        writeMarketplaceListCache(list);
+      }
     } catch (error) {
       if (seq !== reqSeqRef.current) return;
       console.error('[marketplace] list failed', error);
@@ -366,6 +385,68 @@ export function Marketplace() {
     }
   };
 
+  // GitHub OAuth Device Flow 入口：点登录 chip 触发。
+  const beginGithubLogin = useCallback(async () => {
+    setOauth({ phase: 'starting' });
+    try {
+      const start = await githubDeviceFlowStart();
+      setOauth({
+        phase: 'pending',
+        userCode: start.userCode,
+        verificationUri: start.verificationUri,
+        deviceCode: start.deviceCode,
+      });
+      // 自动拉起浏览器到 verification_uri；失败不致命，用户可以手动复制点击
+      try { await openExternal(start.verificationUri); } catch { /* user can copy manually */ }
+    } catch (error) {
+      setOauth({ phase: 'error', message: errorMessage(error) });
+    }
+  }, []);
+
+  // OAuth 轮询：phase==='pending' 时每 interval 秒打 backend → GitHub 一次。
+  useEffect(() => {
+    if (oauth.phase !== 'pending') return;
+    let cancelled = false;
+    let timer: number | null = null;
+    let interval = 5_000;
+    const pendingDeviceCode = oauth.deviceCode;
+    const tick = async () => {
+      if (cancelled) return;
+      try {
+        const res = await githubDeviceFlowPoll(pendingDeviceCode);
+        if (cancelled) return;
+        if (res.kind === 'authorized') {
+          setOauth({ phase: 'success', login: res.login });
+          // 写入 prefs.marketplaceDevLogin，让后续 X-Dev-User 走真实 GitHub login。
+          try {
+            await updatePrefs(current => ({ ...current, marketplaceDevLogin: res.login }));
+          } catch (e) {
+            console.warn('[oauth] save login to prefs failed', e);
+          }
+          setActionMsg({ kind: 'ok', text: `已登录为 @${res.login}` });
+          window.setTimeout(() => {
+            if (!cancelled) setOauth({ phase: 'idle' });
+          }, 1500);
+        } else if (res.kind === 'slowDown') {
+          interval = Math.min(interval + 5_000, 30_000);
+          timer = window.setTimeout(tick, interval);
+        } else if (res.kind === 'pending') {
+          timer = window.setTimeout(tick, interval);
+        } else {
+          setOauth({ phase: 'error', message: res.message });
+        }
+      } catch (error) {
+        if (cancelled) return;
+        setOauth({ phase: 'error', message: errorMessage(error) });
+      }
+    };
+    timer = window.setTimeout(tick, interval);
+    return () => {
+      cancelled = true;
+      if (timer != null) window.clearTimeout(timer);
+    };
+  }, [oauth, updatePrefs]);
+
   const sortPills = useMemo<Array<{ id: SortMode; label: string }>>(
     () => [
       { id: 'popular', label: t('marketplace.sortPopular') },
@@ -531,7 +612,8 @@ export function Marketplace() {
 
       {/* 卡片列表 / 我的发布 */}
       <div style={{ flex: 1, overflow: 'auto' }} className="ol-thinscroll">
-        {loading ? (
+        {loading && items.length === 0 ? (
+          // 只在没有缓存数据时才显示 loading；有缓存就直接渲染缓存数据，后台 refresh 校准
           <div style={{ padding: 32, textAlign: 'center', color: 'var(--ol-ink-4)', fontSize: 13 }}>
             {t('common.loading')}
           </div>
@@ -775,15 +857,13 @@ export function Marketplace() {
                 }}
               />
             </div>
-            {/* 用户名 + 登录 chip。点击 → 触发 OAuth Device Flow（上线后接入）；
-                现阶段提示用户去 Settings 填发布身份。 */}
+            {/* 用户名 + 登录 chip。点击 → 触发 GitHub OAuth Device Flow。
+                已登录时再点会重新走一次（切账号）。 */}
             <button
               type="button"
-              title={currentLogin ? '已登录身份 · GitHub OAuth 上线后可切换' : '点击去 Settings 填写身份'}
-              onClick={() => setActionMsg({
-                kind: 'ok',
-                text: currentLogin ? `当前身份 @${currentLogin}` : 'GitHub 登录开发中，请先在 Settings → 风格市场 填写身份',
-              })}
+              title={currentLogin ? `点击重新登录 / 切换账号（当前 @${currentLogin}）` : '点击用 GitHub 登录'}
+              onClick={() => void beginGithubLogin()}
+              disabled={oauth.phase === 'starting' || oauth.phase === 'pending'}
               style={{
                 display: 'inline-flex', alignItems: 'center', gap: 6,
                 padding: '5px 10px', borderRadius: 9,
@@ -791,8 +871,9 @@ export function Marketplace() {
                 background: currentLogin ? 'var(--ol-blue-soft)' : 'var(--ol-surface)',
                 color: currentLogin ? 'var(--ol-blue)' : 'var(--ol-ink-3)',
                 fontSize: 12, fontWeight: 650,
-                cursor: 'pointer',
+                cursor: (oauth.phase === 'starting' || oauth.phase === 'pending') ? 'wait' : 'pointer',
                 whiteSpace: 'nowrap',
+                opacity: (oauth.phase === 'starting' || oauth.phase === 'pending') ? 0.6 : 1,
               }}
             >
               <span style={{
@@ -903,6 +984,121 @@ export function Marketplace() {
                   </div>
                 </div>
               ))}
+            </div>
+          )}
+        </Modal>
+      )}
+
+      {/* GitHub OAuth Device Flow 弹框（叠在「我的发布」之上）*/}
+      {oauth.phase !== 'idle' && (
+        <Modal onClose={() => {
+          // 关闭即放弃；正在 pending 也允许取消
+          setOauth({ phase: 'idle' });
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14, gap: 12 }}>
+            <h2 style={{ margin: 0, fontSize: 16, fontWeight: 650 }}>用 GitHub 登录</h2>
+            <button
+              type="button"
+              aria-label="关闭"
+              title="关闭"
+              onClick={() => setOauth({ phase: 'idle' })}
+              style={{
+                width: 28, height: 28, borderRadius: 8,
+                display: 'inline-grid', placeItems: 'center',
+                border: '0.5px solid var(--ol-line-strong)',
+                background: 'var(--ol-surface)',
+                color: 'var(--ol-ink-2)',
+                cursor: 'pointer',
+                fontSize: 16, lineHeight: 1,
+              }}
+            >×</button>
+          </div>
+
+          {oauth.phase === 'starting' && (
+            <div style={{ padding: '24px 8px', textAlign: 'center', color: 'var(--ol-ink-3)', fontSize: 13 }}>
+              正在生成设备验证码…
+            </div>
+          )}
+
+          {oauth.phase === 'pending' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+              <div style={{ fontSize: 13, color: 'var(--ol-ink-2)', lineHeight: 1.6 }}>
+                在浏览器中打开 <span style={{ fontFamily: 'var(--ol-font-mono)', fontSize: 12, padding: '1px 5px', background: 'var(--ol-surface-2)', borderRadius: 4 }}>{oauth.verificationUri}</span> 并输入下方代码：
+              </div>
+              <div style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12,
+                padding: 18, borderRadius: 12,
+                border: '0.5px solid var(--ol-line-strong)',
+                background: 'var(--ol-surface-2)',
+              }}>
+                <span style={{
+                  fontFamily: 'var(--ol-font-mono)',
+                  fontSize: 22, fontWeight: 700,
+                  letterSpacing: 2,
+                  color: 'var(--ol-blue)',
+                }}>{oauth.userCode}</span>
+                <Btn
+                  variant="ghost"
+                  size="sm"
+                  onClick={async () => {
+                    try {
+                      await navigator.clipboard.writeText(oauth.userCode);
+                      setActionMsg({ kind: 'ok', text: '已复制设备码' });
+                    } catch (e) {
+                      setActionMsg({ kind: 'err', text: `复制失败：${errorMessage(e)}` });
+                    }
+                  }}
+                >
+                  复制
+                </Btn>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                <Btn variant="ghost" size="sm" onClick={() => void openExternal(oauth.verificationUri)}>
+                  打开浏览器
+                </Btn>
+                <Btn variant="ghost" size="sm" onClick={() => setOauth({ phase: 'idle' })}>
+                  取消
+                </Btn>
+              </div>
+              <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', textAlign: 'center', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
+                <span style={{
+                  display: 'inline-block', width: 8, height: 8, borderRadius: 999,
+                  background: 'var(--ol-blue)', animation: 'ol-pulse 1.4s ease-in-out infinite',
+                }} />
+                等待你在浏览器中授权…
+              </div>
+              <style>{`
+                @keyframes ol-pulse {
+                  0%, 100% { opacity: 0.3; }
+                  50% { opacity: 1; }
+                }
+              `}</style>
+            </div>
+          )}
+
+          {oauth.phase === 'success' && (
+            <div style={{ padding: '24px 8px', textAlign: 'center' }}>
+              <div style={{ fontSize: 24, color: 'var(--ol-blue)', marginBottom: 8 }}>✓</div>
+              <div style={{ fontSize: 14, fontWeight: 650, color: 'var(--ol-ink)' }}>已登录为 @{oauth.login}</div>
+            </div>
+          )}
+
+          {oauth.phase === 'error' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <div style={{
+                padding: 12, borderRadius: 10,
+                border: '0.5px solid rgba(239,68,68,0.3)',
+                background: 'rgba(239,68,68,0.06)',
+                color: '#b91c1c',
+                fontSize: 12, lineHeight: 1.6,
+                whiteSpace: 'pre-wrap',
+              }}>
+                {oauth.message}
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+                <Btn variant="ghost" size="sm" onClick={() => setOauth({ phase: 'idle' })}>关闭</Btn>
+                <Btn variant="blue" size="sm" onClick={() => void beginGithubLogin()}>重试</Btn>
+              </div>
             </div>
           )}
         </Modal>

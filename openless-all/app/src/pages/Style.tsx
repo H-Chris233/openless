@@ -643,28 +643,12 @@ export function Style() {
         kicker={copy.kicker}
         title={copy.title}
         desc={copy.desc}
-        titleRight={(
-          <button
-            type="button"
-            onClick={() => setMarketplaceOpen(true)}
-            title={isEnglish ? 'Open Style Marketplace' : '打开风格市场'}
-            style={{
-              display: 'inline-flex', alignItems: 'center', gap: 6,
-              padding: '6px 12px', borderRadius: 999,
-              border: '0.5px solid var(--ol-line)',
-              background: 'var(--ol-surface)',
-              color: 'var(--ol-blue)',
-              fontSize: 12, fontWeight: 500,
-              cursor: 'pointer',
-              transition: 'background 0.16s var(--ol-motion-quick)',
-            }}
-          >
-            <Icon name="cloud" size={13} />
-            <span>{isEnglish ? 'Marketplace' : '风格市场'}</span>
-          </button>
-        )}
         right={(
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end', marginTop: 40 }}>
+            {/* 风格市场入口：放在 刷新 左边（按用户需求）。点击 → 全屏弹框承载 <Marketplace />。*/}
+            <Btn variant="ghost" icon="cloud" onClick={() => setMarketplaceOpen(true)}>
+              {isEnglish ? 'Marketplace' : '风格市场'}
+            </Btn>
             <Btn variant="ghost" icon="refresh" onClick={() => void loadPacks(selectedId)} disabled={busy === 'loading'}>
               {t('common.refresh')}
             </Btn>

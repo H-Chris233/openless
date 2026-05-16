@@ -1031,3 +1031,69 @@ export function marketplaceMyPacks(): Promise<MarketplaceMyPackItem[]> {
 export function marketplaceDelete(packId: string): Promise<void> {
   return invokeOrMock<void>('marketplace_delete', { packId }, () => undefined);
 }
+
+// ─────────────────────── GitHub OAuth Device Flow (Phase 1) ───────────────
+// 客户端直连 GitHub OAuth Device Flow 拿 login，自动写进 prefs.marketplaceDevLogin。
+// marketplace backend 不动（继续走 X-Dev-User header；Phase 2 才接 JWT 验证）。
+//
+// 后端 Rust 实现：commands.rs:github_device_flow_start / github_device_flow_poll
+// 需要预先配置 GITHUB_OAUTH_CLIENT_ID（OAuth App client_id，非敏感，可硬编码）。
+
+export interface GithubDeviceStartResponse {
+  deviceCode: string;
+  userCode: string;
+  verificationUri: string;
+  interval: number;
+  expiresIn: number;
+}
+
+export type GithubDevicePollResult =
+  | { kind: 'authorized'; login: string }
+  | { kind: 'pending' }
+  | { kind: 'slowDown' }
+  | { kind: 'error'; message: string };
+
+export function githubDeviceFlowStart(): Promise<GithubDeviceStartResponse> {
+  return invokeOrMock<GithubDeviceStartResponse>('github_device_flow_start', undefined, () => ({
+    deviceCode: 'mock-device-code-xxxxxxxx',
+    userCode: 'MOCK-CODE',
+    verificationUri: 'https://github.com/login/device',
+    interval: 5,
+    expiresIn: 900,
+  }));
+}
+
+export function githubDeviceFlowPoll(deviceCode: string): Promise<GithubDevicePollResult> {
+  return invokeOrMock<GithubDevicePollResult>('github_device_flow_poll', { deviceCode }, () => ({
+    kind: 'authorized' as const,
+    login: 'mock-user',
+  }));
+}
+
+// ─────────────────────── Marketplace list 缓存 (sessionStorage) ─────────────
+// 让用户重开「风格市场」时秒看到上次列表，再后台 refresh 校准。
+// 只缓存「默认视图」(query='' + sort='popular')，避免缓存 query/sort 组合爆炸。
+
+const MARKETPLACE_LIST_CACHE_KEY = 'ol-marketplace-list-cache-v1';
+const MARKETPLACE_LIST_CACHE_TTL_MS = 5 * 60 * 1000; // 5 分钟内信任缓存
+
+export function readMarketplaceListCache(): MarketplaceListItem[] | null {
+  try {
+    const raw = sessionStorage.getItem(MARKETPLACE_LIST_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { items: MarketplaceListItem[]; ts: number };
+    if (!parsed || !Array.isArray(parsed.items)) return null;
+    if (Date.now() - parsed.ts > MARKETPLACE_LIST_CACHE_TTL_MS) return null;
+    return parsed.items;
+  } catch {
+    return null;
+  }
+}
+
+export function writeMarketplaceListCache(items: MarketplaceListItem[]): void {
+  try {
+    sessionStorage.setItem(MARKETPLACE_LIST_CACHE_KEY, JSON.stringify({ items, ts: Date.now() }));
+  } catch {
+    // quota exceeded / disabled — silent
+  }
+}
