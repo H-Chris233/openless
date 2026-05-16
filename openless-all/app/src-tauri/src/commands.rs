@@ -2336,13 +2336,15 @@ pub struct MarketplaceMyPackItem {
     pub state: String,
 }
 
-fn marketplace_url_from_prefs(prefs: &UserPreferences) -> String {
-    let base = prefs.marketplace_base_url.trim();
-    if base.is_empty() {
-        "http://127.0.0.1:8090".to_string()
-    } else {
-        base.trim_end_matches('/').to_string()
-    }
+/// 风格市场 backend URL —— 硬编码到生产云端，不再读 prefs。
+///
+/// 历史上这里读 `prefs.marketplace_base_url`（dev 本地可填 127.0.0.1:8090），
+/// 现在风格市场已经稳定部署在 apic.openless.top，把 URL 锁死避免用户误改 / 写错。
+/// 参数 `_prefs` 保留是为不动调用点签名；将来需要白名单 / 多 endpoint 时再开口。
+const MARKETPLACE_BASE_URL: &str = "https://apic.openless.top";
+
+fn marketplace_url_from_prefs(_prefs: &UserPreferences) -> String {
+    MARKETPLACE_BASE_URL.to_string()
 }
 
 fn marketplace_dev_user(prefs: &UserPreferences) -> String {

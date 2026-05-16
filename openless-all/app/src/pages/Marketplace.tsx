@@ -75,6 +75,8 @@ export function Marketplace() {
   // （不与外层 marketplace 搜索 query 互相干扰）。
   const [showMyPacks, setShowMyPacks] = useState(false);
   const [myPacksQuery, setMyPacksQuery] = useState('');
+  // 弹框内已下架包 5 分钟自动消失：tick 每 30s 一次，让 visibleMyPacks 重新计算。
+  const [nowTick, setNowTick] = useState(() => Date.now());
   // 当前用户赞过的 pack id 集合 —— 用于红心渲染 + 「我赞过的」过滤。
   // 进入 marketplace 时拉一次；点星后本地 mutate。
   const [likedIds, setLikedIds] = useState<Set<string>>(new Set());
@@ -120,14 +122,21 @@ export function Marketplace() {
   }, [items, sort, likedIds]);
 
   const visibleMyPacks = useMemo(() => {
+    // 已下架超过 5 分钟自动隐藏 —— 让用户看到「下架成功」反馈但不长期占位。
+    const WITHDRAWN_VISIBLE_MS = 5 * 60 * 1000;
+    const withdrawnCutoff = nowTick - WITHDRAWN_VISIBLE_MS;
     const q = myPacksQuery.trim().toLowerCase();
-    if (!q) return myPacks;
-    return myPacks.filter(pack =>
-      pack.name.toLowerCase().includes(q)
-      || pack.description.toLowerCase().includes(q)
-      || pack.tags.some(tag => tag.toLowerCase().includes(q)),
-    );
-  }, [myPacks, myPacksQuery]);
+    return myPacks.filter(pack => {
+      if (pack.state === 'withdrawn') {
+        const updatedAt = Date.parse(pack.updatedAt);
+        if (Number.isFinite(updatedAt) && updatedAt < withdrawnCutoff) return false;
+      }
+      if (!q) return true;
+      return pack.name.toLowerCase().includes(q)
+        || pack.description.toLowerCase().includes(q)
+        || pack.tags.some(tag => tag.toLowerCase().includes(q));
+    });
+  }, [myPacks, myPacksQuery, nowTick]);
 
   useEffect(() => {
     void refresh();
@@ -171,6 +180,14 @@ export function Marketplace() {
       void refreshMyPacks();
     }
   }, [showMyPacks, currentLogin, refreshMyPacks]);
+
+  // 弹框打开期间 tick 时间，让已下架自动消失定时生效。
+  useEffect(() => {
+    if (!showMyPacks) return;
+    setNowTick(Date.now());
+    const id = window.setInterval(() => setNowTick(Date.now()), 30_000);
+    return () => window.clearInterval(id);
+  }, [showMyPacks]);
 
   const openDetail = async (id: string) => {
     const seq = ++detailSeqRef.current;
@@ -357,8 +374,6 @@ export function Marketplace() {
     ],
     [t],
   );
-
-  const accountTitle = currentLogin ? `@${currentLogin}` : '未登录';
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, position: 'relative' }}>
@@ -728,42 +743,9 @@ export function Marketplace() {
       {/* 我的发布 · 弹框形态（叠在风格市场页面之上）*/}
       {showMyPacks && (
         <Modal onClose={() => setShowMyPacks(false)}>
-          {/* 标题 + 关闭 */}
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14, gap: 12 }}>
-            <h2 style={{ margin: 0, fontSize: 16, fontWeight: 650 }}>我的发布</h2>
-          </div>
-
-          {/* 账户信息 */}
-          <div
-            style={{
-              display: 'flex', alignItems: 'center', gap: 10,
-              padding: '10px 12px',
-              border: '0.5px solid var(--ol-line-strong)',
-              borderRadius: 10,
-              background: 'var(--ol-surface-2)',
-              marginBottom: 12,
-            }}
-          >
-            <span style={{
-              width: 28, height: 28, borderRadius: 999,
-              display: 'inline-grid', placeItems: 'center',
-              background: 'var(--ol-blue-soft)', color: 'var(--ol-blue)',
-              fontSize: 12, fontWeight: 750,
-            }}>
-              {(currentLogin || '?').slice(0, 1).toUpperCase()}
-            </span>
-            <div style={{ minWidth: 0, flex: 1 }}>
-              <div style={{ fontSize: 13, fontWeight: 650, color: 'var(--ol-ink)' }}>{accountTitle}</div>
-              <div style={{ fontSize: 11.5, color: 'var(--ol-ink-3)', marginTop: 2 }}>
-                {currentLogin
-                  ? `已发布 ${myPacks.length} 个风格包${myPacks.filter(p => p.state === 'pending').length > 0 ? ` · ${myPacks.filter(p => p.state === 'pending').length} 个审核中` : ''}`
-                  : '请先在 Settings → 风格市场 填写发布身份'}
-              </div>
-            </div>
-          </div>
-
-          {/* 搜索（左上）+ 刷新 + 上传 */}
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12 }}>
+          {/* 顶部一行：搜索 (左) + 用户名/登录 (中) + 关闭 × (右) */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+            {/* 搜索框 (最左) */}
             <div
               style={{
                 flex: 1,
@@ -782,6 +764,7 @@ export function Marketplace() {
                 placeholder="搜索名称、标签"
                 value={myPacksQuery}
                 onChange={e => setMyPacksQuery(e.target.value)}
+                autoFocus
                 style={{
                   flex: 1,
                   outline: 'none',
@@ -792,14 +775,74 @@ export function Marketplace() {
                 }}
               />
             </div>
-            <Btn icon="refresh" variant="ghost" size="sm" onClick={() => void refreshMyPacks()} disabled={!currentLogin}>
-              {t('common.refresh')}
-            </Btn>
-            <span title={canUpload ? '' : t('marketplace.uploadDisabledHint')}>
-              <Btn icon="cloud" variant="blue" size="sm" onClick={() => void openUploadPicker()} disabled={!canUpload}>
-                {t('marketplace.uploadBtn')}
+            {/* 用户名 + 登录 chip。点击 → 触发 OAuth Device Flow（上线后接入）；
+                现阶段提示用户去 Settings 填发布身份。 */}
+            <button
+              type="button"
+              title={currentLogin ? '已登录身份 · GitHub OAuth 上线后可切换' : '点击去 Settings 填写身份'}
+              onClick={() => setActionMsg({
+                kind: 'ok',
+                text: currentLogin ? `当前身份 @${currentLogin}` : 'GitHub 登录开发中，请先在 Settings → 风格市场 填写身份',
+              })}
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 6,
+                padding: '5px 10px', borderRadius: 9,
+                border: '0.5px solid var(--ol-line-strong)',
+                background: currentLogin ? 'var(--ol-blue-soft)' : 'var(--ol-surface)',
+                color: currentLogin ? 'var(--ol-blue)' : 'var(--ol-ink-3)',
+                fontSize: 12, fontWeight: 650,
+                cursor: 'pointer',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              <span style={{
+                width: 18, height: 18, borderRadius: 999,
+                display: 'inline-grid', placeItems: 'center',
+                background: currentLogin ? 'rgba(37,99,235,0.14)' : 'rgba(15,23,42,0.06)',
+                fontSize: 10, fontWeight: 750,
+              }}>
+                {(currentLogin || '?').slice(0, 1).toUpperCase()}
+              </span>
+              <span>{currentLogin ? `@${currentLogin}` : '登录'}</span>
+            </button>
+            {/* 关闭 × */}
+            <button
+              type="button"
+              aria-label="关闭"
+              title="关闭"
+              onClick={() => setShowMyPacks(false)}
+              style={{
+                width: 30, height: 30, borderRadius: 9,
+                display: 'inline-grid', placeItems: 'center',
+                border: '0.5px solid var(--ol-line-strong)',
+                background: 'var(--ol-surface)',
+                color: 'var(--ol-ink-2)',
+                cursor: 'pointer',
+                fontSize: 18, lineHeight: 1,
+                fontWeight: 500,
+              }}
+            >
+              ×
+            </button>
+          </div>
+
+          {/* 第二行：计数信息（左）+ 刷新 + 上传（右）*/}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 12 }}>
+            <div style={{ fontSize: 11.5, color: 'var(--ol-ink-3)' }}>
+              {currentLogin
+                ? `已发布 ${myPacks.length} 个风格包${myPacks.filter(p => p.state === 'pending').length > 0 ? ` · ${myPacks.filter(p => p.state === 'pending').length} 个审核中` : ''}`
+                : '请先在 Settings → 风格市场 填写发布身份'}
+            </div>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <Btn icon="refresh" variant="ghost" size="sm" onClick={() => void refreshMyPacks()} disabled={!currentLogin}>
+                {t('common.refresh')}
               </Btn>
-            </span>
+              <span title={canUpload ? '' : t('marketplace.uploadDisabledHint')}>
+                <Btn icon="cloud" variant="blue" size="sm" onClick={() => void openUploadPicker()} disabled={!canUpload}>
+                  {t('marketplace.uploadBtn')}
+                </Btn>
+              </span>
+            </div>
           </div>
 
           {/* 包列表 */}
@@ -871,6 +914,7 @@ export function Marketplace() {
 function Modal({ children, onClose }: { children: React.ReactNode; onClose: () => void }) {
   return (
     <div
+      className="ol-modal-backdrop"
       onClick={onClose}
       style={{
         position: 'fixed',
@@ -883,6 +927,7 @@ function Modal({ children, onClose }: { children: React.ReactNode; onClose: () =
       }}
     >
       <div
+        className="ol-modal-card"
         onClick={e => e.stopPropagation()}
         style={{
           width: 'min(560px, 100%)',
@@ -897,6 +942,24 @@ function Modal({ children, onClose }: { children: React.ReactNode; onClose: () =
       >
         {children}
       </div>
+      <style>{`
+        @keyframes ol-modal-backdrop-in {
+          from { opacity: 0; }
+          to   { opacity: 1; }
+        }
+        @keyframes ol-modal-card-in {
+          from { opacity: 0; transform: scale(.96) translateY(4px); }
+          to   { opacity: 1; transform: scale(1) translateY(0); }
+        }
+        .ol-modal-backdrop {
+          animation: ol-modal-backdrop-in .14s ease-out;
+          will-change: opacity;
+        }
+        .ol-modal-card {
+          animation: ol-modal-card-in .18s cubic-bezier(.34,1.56,.64,1);
+          will-change: transform, opacity;
+        }
+      `}</style>
     </div>
   );
 }
