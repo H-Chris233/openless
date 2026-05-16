@@ -2676,19 +2676,16 @@ mod tests {
     }
 
     #[test]
-    fn structured_prompt_prioritizes_ai_coding_terms_and_compact_structure() {
+    fn structured_prompt_anchors_on_high_density_examples_and_term_protection() {
         let prompt = prompts::system_prompt(PolishMode::Structured);
 
-        // 清晰结构现在优先服务 AI 编程协作：场景、格式、术语三件事必须靠前讲清楚。
-        assert!(prompt.contains("# 任务（清晰结构 · AI 编程协作）"));
-        assert!(prompt.contains("# 强制结构化触发（最高优先级）"));
-        assert!(prompt.contains("长口述不输出成一整段"));
-        assert!(prompt.contains("产品 UI / 功能反馈"));
-        assert!(prompt.contains("操作指引 / 接入教程"));
-        assert!(prompt.contains("编程任务 / 排障清单"));
-        assert!(prompt.contains("AI 模型 / 工具资讯"));
-        assert!(prompt.contains("顶层主题用 `1.` `2.` `3.` 连续编号"));
-        assert!(prompt.contains("每个主题下都从 `(a)` 重新开始"));
+        // v1.3.0 设计哲学回归：简洁规则 + 高密度演示性示例。
+        // 任务首段 + 双层格式 + 事项数规则三件事必须靠前讲清楚。
+        assert!(prompt.contains("# 任务（清晰结构）"));
+        assert!(prompt.contains("# 双层格式"));
+        assert!(prompt.contains("第一层（主题）"));
+        assert!(prompt.contains("第二层（子项）"));
+        assert!(prompt.contains("# 事项数 → 输出形态"));
 
         // 防回归：模型名、字段名、布尔值和版本号必须被显式保护。
         assert!(prompt.contains("Claude"));
@@ -2700,36 +2697,38 @@ mod tests {
         assert!(prompt.contains("true / false / null"));
         assert!(prompt.contains("不要把 GPT 5.5 写成 GPT 5"));
 
-        // 示例要短，但必须锚定 AI 编程任务和 AI 模型资讯两类高频输入。
-        assert!(prompt.contains("帮忙给 Codex 提个任务，主要包含以下内容："));
-        assert!(prompt.contains("确认 Secret Key 不被硬编码到代码里"));
-        assert!(prompt.contains("Gemini 3.2 更名为 Gemini 3.5"));
-        assert!(prompt.contains("remote control 改为 true"));
+        // 4 个核心示例的锚点：超长 GitHub 请求、已编号工作日报、散乱长口述、AI 日报。
+        assert!(prompt.contains("帮忙给 GitHub 提个请求，主要包含以下内容："));
+        assert!(prompt.contains("代码与功能优化"));
+        assert!(prompt.contains("今天的工作小结如下："));
+        assert!(prompt.contains("Gemini 3.2 版本更名为 Gemini 3.5"));
+        assert!(prompt.contains("remote control 的参数值更改为 true"));
     }
 
     #[test]
     fn structured_prompt_keeps_regrouping_and_no_loss_guards() {
         let prompt = prompts::system_prompt(PolishMode::Structured);
 
+        // v1.3.0 回归的关键规则：已编号 ≠ 不用改、≥3 必须重组、≤2 不硬塞层级。
         assert!(
-            prompt.contains("事项不丢失"),
-            "Structured prompt 必须明确防止事项丢失"
-        );
-        assert!(
-            prompt.contains("事项 ≤ 2 条且原文很短"),
-            "Structured prompt 必须只允许短输入降级为段落"
-        );
-        assert!(
-            prompt.contains("长口述不能用这一条降级"),
-            "Structured prompt 必须防止长口述降级成一大段"
+            prompt.contains("照抄原结构 = 失败"),
+            "Structured prompt 必须把照抄原结构判为失败"
         );
         assert!(
             prompt.contains("不硬塞层级"),
             "Structured prompt 必须避免短输入过度结构化"
         );
         assert!(
-            prompt.contains("没有编造原文不存在的实现方案"),
+            prompt.contains("不丢失任何一件事"),
+            "Structured prompt 必须明确防止事项丢失"
+        );
+        assert!(
+            prompt.contains("不补充用户没说过的实现方案"),
             "Structured prompt 必须禁止替用户编造实现方案"
+        );
+        assert!(
+            prompt.contains("即使原文已经写成"),
+            "Structured prompt 必须显式说明已编号的输入也要重新归类"
         );
     }
 
