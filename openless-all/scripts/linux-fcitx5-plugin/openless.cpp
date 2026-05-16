@@ -13,6 +13,7 @@
  *                                    （非特权进程隔离）。
  *    SetHotkey(as: keys)           — 设置听写触发快捷键 (Key::parse 格式)
  *    SetHotkeyRaw(uu: sym, states) — 直接设听写触发 sym+states (不走 parse)
+ *    SetCustomDictationTrigger(s: keyString) — 设置自定义组合键 (Key::parse 格式)
  *    SetQaHotkeyRaw(uu: sym, states)     — 直接设 QA 面板触发 sym+states
  *    SetTranslationHotkeyRaw(uu: sym, states) — 直接设翻译模式触发 sym+states
  *  信号:
@@ -66,6 +67,7 @@ public:
           qaRawStates_(0),
           translationRawSym_(0),
           translationRawStates_(0),
+          hasCustomDictationKey_(false),
           savedIc_(nullptr) {
 
         // 1. 读取配置
@@ -108,8 +110,23 @@ public:
                     auto states = static_cast<uint32_t>(keyEvent.key().states());
                     bool isPress = !keyEvent.isRelease();
 
+                    // 检查自定义组合键（优先级最高）
+                    if (hasCustomDictationKey_ &&
+                        keyEvent.key().sym() == customDictationKey_.sym() &&
+                        keyEvent.key().states() == customDictationKey_.states()) {
+                        FCITX_LOGC(openless, Debug)
+                            << "Custom dictation combo: sym=" << sym
+                            << " states=" << states
+                            << " isPress=" << isPress;
+                        dictationKeyEvent(
+                            static_cast<uint32_t>(customDictationKey_.sym()),
+                            static_cast<uint32_t>(customDictationKey_.states()),
+                            isPress);
+                        keyEvent.filterAndAccept();
+                        return;
+                    }
+
                     // 检查听写触发键（raw + keylist 双路径）
-                    bool dictationMatched = false;
                     if ((triggerRawSym_ != 0 &&
                          sym == triggerRawSym_ &&
                          states == triggerRawStates_) ||
@@ -121,7 +138,6 @@ public:
                             }
                             return false;
                         }())) {
-                        dictationMatched = true;
                         auto dsym = triggerRawSym_ != 0
                             ? triggerRawSym_
                             : static_cast<uint32_t>(triggerKeyList_[0].sym());
@@ -265,6 +281,27 @@ public:
         rebuildTriggerKeys();
     }
 
+    void setCustomDictationTrigger(const std::string &keyString) {
+        Key key(keyString);
+        if (!key.isValid()) {
+            FCITX_LOGC(openless, Warn)
+                << "SetCustomDictationTrigger: invalid key '" << keyString << "'";
+            hasCustomDictationKey_ = false;
+            return;
+        }
+        customDictationKey_ = key;
+        hasCustomDictationKey_ = true;
+        // 有自定义键时清空已有 raw+keylist 路径，避免双发
+        triggerRawSym_ = 0;
+        triggerRawStates_ = 0;
+        config_.triggerKey.setValue(KeyList{});
+        safeSaveAsIni(config_, configFile());
+        FCITX_LOGC(openless, Info)
+            << "SetCustomDictationTrigger: '" << keyString << "'"
+            << " sym=" << static_cast<uint32_t>(key.sym())
+            << " states=" << static_cast<uint32_t>(key.states());
+    }
+
     void setQaHotkeyRaw(uint32_t sym, uint32_t states) {
         qaRawSym_ = sym;
         qaRawStates_ = states;
@@ -292,6 +329,7 @@ public:
     FCITX_OBJECT_VTABLE_METHOD(commitText, "CommitText", "s", "");
     FCITX_OBJECT_VTABLE_METHOD(setHotkey, "SetHotkey", "as", "");
     FCITX_OBJECT_VTABLE_METHOD(setHotkeyRaw, "SetHotkeyRaw", "uu", "");
+    FCITX_OBJECT_VTABLE_METHOD(setCustomDictationTrigger, "SetCustomDictationTrigger", "s", "");
     FCITX_OBJECT_VTABLE_METHOD(setQaHotkeyRaw, "SetQaHotkeyRaw", "uu", "");
     FCITX_OBJECT_VTABLE_METHOD(setTranslationHotkeyRaw, "SetTranslationHotkeyRaw", "uu", "");
     FCITX_OBJECT_VTABLE_SIGNAL(dictationKeyEvent, "DictationKeyEvent", "uub");
@@ -360,6 +398,8 @@ private:
     uint32_t qaRawStates_;
     uint32_t translationRawSym_;
     uint32_t translationRawStates_;
+    Key customDictationKey_;
+    bool hasCustomDictationKey_;
     /// 快捷键按下时保存的输入上下文指针，用于 commitText 在失焦后仍能提交文字。
     /// 事件处理线程和 DBus 处理线程都是 fcitx5 主事件循环，无竞态。
     /// 通过 InputContextDestroyed 事件监听 IC 销毁时自动清空指针。

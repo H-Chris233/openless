@@ -479,6 +479,8 @@ impl Coordinator {
                         .name("openless-combo-hotkey-bridge".into())
                         .spawn(move || combo_hotkey_bridge_loop(bridge_inner, rx))
                         .ok();
+                    #[cfg(target_os = "linux")]
+                    sync_custom_dictation_to_plugin(&inner_clone);
                 }
                 Err(e) => {
                     log::warn!("[coord] update combo hotkey binding 失败: {e}");
@@ -702,7 +704,11 @@ impl Coordinator {
             let plugin_binding = binding.clone();
             monitor.update_binding(binding);
             #[cfg(target_os = "linux")]
-            crate::linux_fcitx::sync_binding_to_plugin(&plugin_binding);
+            if plugin_binding.trigger == crate::types::HotkeyTrigger::Custom {
+                sync_custom_dictation_to_plugin(&self.inner);
+            } else {
+                crate::linux_fcitx::sync_binding_to_plugin(&plugin_binding);
+            }
             return;
         }
         let (tx, rx) = mpsc::channel::<HotkeyEvent>();
@@ -727,7 +733,11 @@ impl Coordinator {
                 #[cfg(target_os = "linux")]
                 {
                     crate::linux_fcitx::start_dictation_signal_listener(fcitx_tx);
-                    crate::linux_fcitx::sync_binding_to_plugin(&fcitx_binding);
+                    if fcitx_binding.trigger == crate::types::HotkeyTrigger::Custom {
+                        sync_custom_dictation_to_plugin(&self.inner);
+                    } else {
+                        crate::linux_fcitx::sync_binding_to_plugin(&fcitx_binding);
+                    }
                 }
             }
             Err(e) => {
@@ -942,6 +952,23 @@ fn hotkey_supervisor_loop(inner: Arc<Inner>) {
         if inner.hotkey.lock().is_some() {
             return;
         }
+        // Linux: 启动前检查 fcitx5 插件是否可用
+        #[cfg(target_os = "linux")]
+        if !crate::linux_fcitx::available() {
+            *inner.hotkey_status.lock() = HotkeyStatus {
+                adapter: capability.adapter,
+                state: HotkeyStatusState::Failed,
+                message: Some("fcitx5 插件不可用 — 请确保 fcitx5 已安装且在运行".into()),
+                last_error: Some(crate::types::HotkeyInstallError {
+                    code: "fcitx5_unavailable".into(),
+                    message: "fcitx5 插件 DBus 接口无响应".into(),
+                }),
+            };
+            log::warn!("[hotkey-supervisor] fcitx5 plugin unavailable, retrying...");
+            attempts += 1;
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            continue;
+        }
         *inner.hotkey_status.lock() = HotkeyStatus {
             adapter: capability.adapter,
             state: HotkeyStatusState::Starting,
@@ -985,7 +1012,11 @@ fn hotkey_supervisor_loop(inner: Arc<Inner>) {
                 #[cfg(target_os = "linux")]
                 {
                     crate::linux_fcitx::start_dictation_signal_listener(fcitx_tx);
-                    crate::linux_fcitx::sync_binding_to_plugin(&fcitx_binding);
+                    if fcitx_binding.trigger == crate::types::HotkeyTrigger::Custom {
+                        sync_custom_dictation_to_plugin(&inner);
+                    } else {
+                        crate::linux_fcitx::sync_binding_to_plugin(&fcitx_binding);
+                    }
                 }
                 return;
             }
@@ -1552,6 +1583,25 @@ fn action_hotkey_bridge_thread_name(kind: ActionHotkeyKind) -> &'static str {
 
 fn is_builtin_translation_shift(binding: &crate::types::ShortcutBinding) -> bool {
     binding.modifiers.is_empty() && binding.primary.eq_ignore_ascii_case("shift")
+}
+
+/// Linux: 从 prefs 读取自定义组合键，同步到 fcitx5 插件。
+#[cfg(target_os = "linux")]
+fn sync_custom_dictation_to_plugin(inner: &Arc<Inner>) {
+    let prefs = inner.prefs.get();
+    let dictation = &prefs.dictation_hotkey;
+    // 只有 Custom 组合键才需要走插件同步
+    if dictation.modifiers.is_empty() {
+        return;
+    }
+    let key_string = crate::linux_fcitx::binding_to_fcitx_key_string(dictation);
+    if key_string.is_empty() {
+        return;
+    }
+    match crate::linux_fcitx::set_custom_dictation_trigger(&key_string) {
+        Ok(()) => log::info!("[fcitx] Synced custom dictation trigger '{}' to plugin", key_string),
+        Err(e) => log::warn!("[fcitx] Failed to sync custom dictation trigger: {e}"),
+    }
 }
 
 fn modifier_shortcut_triggers(

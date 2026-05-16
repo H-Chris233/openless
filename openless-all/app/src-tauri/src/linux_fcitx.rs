@@ -129,6 +129,55 @@ pub fn sync_binding_to_plugin(binding: &crate::types::HotkeyBinding) {
     }
 }
 
+/// 将 ShortcutBinding 转换为 fcitx5 Key::parse 格式的字符串。
+///
+/// 例如 `modifiers: ["Ctrl", "Alt"], primary: "d"` → `"Control+Alt+d"`。
+pub fn binding_to_fcitx_key_string(binding: &crate::types::ShortcutBinding) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for m in &binding.modifiers {
+        let lower = m.to_lowercase();
+        let normalized = match lower.as_str() {
+            "ctrl" | "control" => "Control",
+            "alt" | "option" | "opt" => "Alt",
+            "shift" => "Shift",
+            "super" | "meta" | "cmd" | "win" | "command" => "Super",
+            other => other,
+        };
+        if !parts.contains(&normalized.to_string()) {
+            parts.push(normalized.to_string());
+        }
+    }
+    // 主键：取小写，去掉 "Key" 前缀（如 "KeyD" → "d"）
+    let primary = binding.primary.trim();
+    let primary = if let Some(stripped) = primary.strip_prefix("Key") {
+        stripped.to_lowercase()
+    } else {
+        primary.to_lowercase()
+    };
+    if primary.is_empty() {
+        return String::new();
+    }
+    if parts.is_empty() {
+        primary
+    } else {
+        format!("{}+{}", parts.join("+"), primary)
+    }
+}
+
+/// 通过 fcitx5 插件的 SetCustomDictationTrigger 方法设置自定义组合键。
+pub fn set_custom_dictation_trigger(key_string: &str) -> Result<(), String> {
+    let conn = dbus::blocking::Connection::new_session()
+        .map_err(|e| format!("dbus session: {e}"))?;
+    let msg = dbus::Message::new_method_call(
+        DEST, PATH, IFACE, "SetCustomDictationTrigger",
+    )
+    .map_err(|e| format!("build msg: {e}"))?
+    .append1(key_string);
+    conn.send_with_reply_and_block(msg, TIMEOUT)
+        .map_err(|e| format!("SetCustomDictationTrigger: {e}"))?;
+    Ok(())
+}
+
 /// 将 QA 面板快捷键同步到 fcitx5 插件。
 pub fn sync_qa_binding(trigger: Option<crate::types::HotkeyTrigger>) {
     let Some(trigger) = trigger else {
