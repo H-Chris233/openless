@@ -232,6 +232,8 @@ public:
     }
 
     void setHotkey(const std::vector<std::string> &keys) {
+        // 切换预设修饰键时清空自定义组合键，避免双发
+        hasCustomDictationKey_ = false;
         KeyList keyList;
         for (const auto &s : keys) {
             Key key(s);
@@ -260,6 +262,8 @@ public:
     }
 
     void setHotkeyRaw(uint32_t sym, uint32_t states) {
+        // 切换预设修饰键时清空自定义组合键，避免双发
+        hasCustomDictationKey_ = false;
         triggerRawSym_ = sym;
         triggerRawStates_ = states;
         // 同时尝试维护 KeyList（如果 sym 可转为有效 key）
@@ -295,7 +299,15 @@ public:
         triggerRawSym_ = 0;
         triggerRawStates_ = 0;
         config_.triggerKey.setValue(KeyList{});
-        safeSaveAsIni(config_, configFile());
+        // 同时持久化清空 TriggerRawSym/TriggerRawStates，防止 fcitx5 重启后从 INI 加载旧值
+        {
+            RawConfig raw;
+            readAsIni(raw, configFile());
+            config_.save(raw);
+            raw.setValueByPath("TriggerRawSym", "0");
+            raw.setValueByPath("TriggerRawStates", "0");
+            safeSaveAsIni(raw, configFile());
+        }
         FCITX_LOGC(openless, Info)
             << "SetCustomDictationTrigger: '" << keyString << "'"
             << " sym=" << static_cast<uint32_t>(key.sym())
