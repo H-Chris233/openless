@@ -359,6 +359,11 @@ jobs:
           echo "Detected: addon=$FCITX_ADDON_DIR  pkgdata=$FCITX_PKGDATA_DIR"
           echo "FCITX_ADDON_DIR=$FCITX_ADDON_DIR" >> "$GITHUB_ENV"
           echo "FCITX_ADDON_CONF_DIR=${FCITX_PKGDATA_DIR}/addon" >> "$GITHUB_ENV"
+          # 对 RPM 目标映射路径：Debian multiarch（如 /usr/lib/x86_64-linux-gnu）
+          # -> /usr/lib64（RPM 标准）。conf 路径跨发行版一致。
+          RPM_ADDON_DIR=$(echo "$FCITX_ADDON_DIR" \
+            | sed 's|/usr/lib/[^/]*/fcitx5|/usr/lib64/fcitx5|;s|/usr/lib/x86_64-linux-gnu/fcitx5|/usr/lib64/fcitx5|')
+          echo "FCITX_RPM_ADDON_DIR=$RPM_ADDON_DIR" >> "$GITHUB_ENV"
           # 把插件 .so + .conf 复制到 src-tauri/linux-fcitx5-plugin/ 下面，
           # 供 tauri deb/rpm bundler 的 files 配置使用。
           mkdir -p "$GITHUB_WORKSPACE/openless-all/app/src-tauri/linux-fcitx5-plugin"
@@ -392,8 +397,8 @@ jobs:
                 "rpm": {
                   "depends": ["fcitx5", "fcitx5-module-dbus"],
                   "files": {
-                    "/usr/lib64/fcitx5/libopenless.so": "linux-fcitx5-plugin/libopenless.so",
-                    "/usr/share/fcitx5/addon/openless.conf": "linux-fcitx5-plugin/openless.conf"
+                    "${FCITX_RPM_ADDON_DIR}/libopenless.so": "linux-fcitx5-plugin/libopenless.so",
+                    "${FCITX_ADDON_CONF_DIR}/openless.conf": "linux-fcitx5-plugin/openless.conf"
                   }
                 }
               }
