@@ -99,7 +99,7 @@ fn trigger_to_keysym(trigger: crate::types::HotkeyTrigger) -> u32 {
         crate::types::HotkeyTrigger::RightOption | crate::types::HotkeyTrigger::RightAlt => KEYSYM_ALT_R,
         crate::types::HotkeyTrigger::LeftOption => KEYSYM_ALT_L,
         crate::types::HotkeyTrigger::RightCommand => KEYSYM_SUPER_R,
-        crate::types::HotkeyTrigger::Fn => KEYSYM_SUPER_L,
+        crate::types::HotkeyTrigger::Fn => KEYSYM_CONTROL_R,
         crate::types::HotkeyTrigger::Custom => unreachable!(),
     }
 }
@@ -111,7 +111,7 @@ fn trigger_name(trigger: crate::types::HotkeyTrigger) -> &'static str {
         crate::types::HotkeyTrigger::RightOption | crate::types::HotkeyTrigger::RightAlt => "Alt_R",
         crate::types::HotkeyTrigger::LeftOption => "Alt_L",
         crate::types::HotkeyTrigger::RightCommand => "Super_R",
-        crate::types::HotkeyTrigger::Fn => "Super_L",
+        crate::types::HotkeyTrigger::Fn => "Control_R",
         crate::types::HotkeyTrigger::Custom => unreachable!(),
     }
 }
