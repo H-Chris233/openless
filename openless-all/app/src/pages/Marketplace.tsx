@@ -76,6 +76,8 @@ export function Marketplace() {
   const [uploadOriginPackId, setUploadOriginPackId] = useState<string | null>(null);
   const [uploadTargetName, setUploadTargetName] = useState<string | null>(null);
   const [localPacks, setLocalPacks] = useState<StylePack[]>([]);
+  // 上传选包器选中态：点 pack 卡片选中（不立刻上传），底部「确定上传」才真正提交。
+  const [selectedUploadPackId, setSelectedUploadPackId] = useState<string | null>(null);
   const [myPacks, setMyPacks] = useState<MarketplaceMyPackItem[]>([]);
   // 「我的发布」改为弹框形态：showMyPacks 控制开关，myPacksQuery 是弹框内独立搜索词
   // （不与外层 marketplace 搜索 query 互相干扰）。
@@ -290,6 +292,11 @@ export function Marketplace() {
           return a.name.localeCompare(b.name);
         });
       setLocalPacks(editable);
+      // 更新流程下预选「建议更新」的本地包（同名），用户多数情况下一键确认。
+      const recommended = target.length > 0
+        ? editable.find(p => p.name.trim().toLowerCase() === target)
+        : undefined;
+      setSelectedUploadPackId(recommended?.id ?? null);
       setShowUpload(true);
     } catch (error) {
       setActionMsg({ kind: 'err', text: t('marketplace.errors.loadLocal', { err: errorMessage(error) }) });
@@ -377,6 +384,7 @@ export function Marketplace() {
       setShowUpload(false);
       setUploadOriginPackId(null);
       setUploadTargetName(null);
+      setSelectedUploadPackId(null);
       // 后续 polling 用服务端真实数据校准（审核状态可能 pending→approved/rejected）。
       window.setTimeout(() => { void refresh(); void refreshMyPacks(); }, 1500);
       window.setTimeout(() => { void refresh(); void refreshMyPacks(); }, 5000);
@@ -772,14 +780,22 @@ export function Marketplace() {
         </Modal>
       )}
 
-      {/* 上传选包器 */}
+      {/* 上传选包器 —— zIndex 60 让它叠在「我的发布」(zIndex 50) 之上 */}
       {showUpload && (
-        <Modal onClose={() => { setShowUpload(false); setUploadOriginPackId(null); setUploadTargetName(null); }}>
+        <Modal
+          zIndex={60}
+          onClose={() => {
+            setShowUpload(false);
+            setUploadOriginPackId(null);
+            setUploadTargetName(null);
+            setSelectedUploadPackId(null);
+          }}
+        >
           <h2 style={{ margin: '0 0 12px', fontSize: 16, fontWeight: 650 }}>
             {uploadOriginPackId ? `更新「${uploadTargetName ?? '风格包'}」` : t('marketplace.uploadTitle')}
           </h2>
           <div style={{ fontSize: 12, color: 'var(--ol-ink-3)', marginBottom: 12 }}>
-            {uploadOriginPackId ? '请选择本地对应的新版本风格包；同名本地包会排在最上面。' : t('marketplace.uploadHint', { login: prefs?.marketplaceDevLogin ?? '' })}
+            {uploadOriginPackId ? '选中要上传的本地新版本风格包，下方点「确定上传」。同名包默认预选。' : t('marketplace.uploadHint', { login: prefs?.marketplaceDevLogin ?? '' })}
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 360, overflow: 'auto' }}>
             {localPacks.length === 0 ? (
@@ -789,34 +805,67 @@ export function Marketplace() {
             ) : (
               localPacks.map(p => {
                 const recommended = !!uploadTargetName && p.name.trim().toLowerCase() === uploadTargetName.trim().toLowerCase();
+                const selected = selectedUploadPackId === p.id;
                 return (
                   <button
                     key={p.id}
-                    onClick={() => void onUpload(p.id)}
+                    type="button"
+                    onClick={() => setSelectedUploadPackId(prev => (prev === p.id ? null : p.id))}
                     style={{
                       textAlign: 'left',
                       padding: 10,
-                      border: recommended ? '0.5px solid var(--ol-blue)' : '0.5px solid var(--ol-line-strong)',
+                      border: selected ? '1px solid var(--ol-blue)' : '0.5px solid var(--ol-line-strong)',
                       borderRadius: 8,
-                      background: recommended ? 'var(--ol-blue-soft)' : 'var(--ol-surface)',
+                      background: selected ? 'var(--ol-blue-soft)' : 'var(--ol-surface)',
                       cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 10,
                     }}
                   >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'space-between' }}>
-                      <div style={{ fontSize: 13, fontWeight: 600 }}>{p.name}</div>
-                      {recommended && <Pill size="sm" tone="blue">建议更新</Pill>}
-                    </div>
-                    <div style={{ fontSize: 11, color: 'var(--ol-ink-4)', marginTop: 2 }}>
-                      {p.description || t('marketplace.noDescription')}
+                    {/* 选中圈：未选空圆，选中蓝实心 + 白勾 */}
+                    <span style={{
+                      flexShrink: 0,
+                      width: 18, height: 18, borderRadius: 999,
+                      border: selected ? '1px solid var(--ol-blue)' : '1px solid var(--ol-line-strong)',
+                      background: selected ? 'var(--ol-blue)' : 'transparent',
+                      display: 'inline-grid', placeItems: 'center',
+                      color: '#fff', fontSize: 11, fontWeight: 700,
+                      transition: 'background 0.12s, border-color 0.12s',
+                    }}>
+                      {selected && '✓'}
+                    </span>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'space-between' }}>
+                        <div style={{ fontSize: 13, fontWeight: 600 }}>{p.name}</div>
+                        {recommended && <Pill size="sm" tone="blue">建议更新</Pill>}
+                      </div>
+                      <div style={{ fontSize: 11, color: 'var(--ol-ink-4)', marginTop: 2 }}>
+                        {p.description || t('marketplace.noDescription')}
+                      </div>
                     </div>
                   </button>
                 );
               })
             )}
           </div>
-          <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 14 }}>
-            <Btn variant="ghost" size="sm" onClick={() => { setShowUpload(false); setUploadOriginPackId(null); setUploadTargetName(null); }}>
+          {/* 底部：取消 / 确定上传（未选中时 disabled）*/}
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 14 }}>
+            <Btn variant="ghost" size="sm" onClick={() => {
+              setShowUpload(false);
+              setUploadOriginPackId(null);
+              setUploadTargetName(null);
+              setSelectedUploadPackId(null);
+            }}>
               {t('common.cancel')}
+            </Btn>
+            <Btn
+              variant="blue"
+              size="sm"
+              disabled={!selectedUploadPackId}
+              onClick={() => { if (selectedUploadPackId) void onUpload(selectedUploadPackId); }}
+            >
+              确定上传
             </Btn>
           </div>
         </Modal>
@@ -1107,7 +1156,16 @@ export function Marketplace() {
   );
 }
 
-function Modal({ children, onClose }: { children: React.ReactNode; onClose: () => void }) {
+function Modal({
+  children,
+  onClose,
+  zIndex = 50,
+}: {
+  children: React.ReactNode;
+  onClose: () => void;
+  /** 默认 50；多层叠加时（如上传 picker 在「我的发布」之上）传更大的值。*/
+  zIndex?: number;
+}) {
   return (
     <div
       className="ol-modal-backdrop"
@@ -1118,7 +1176,7 @@ function Modal({ children, onClose }: { children: React.ReactNode; onClose: () =
         background: 'rgba(0,0,0,0.22)',
         display: 'grid',
         placeItems: 'center',
-        zIndex: 50,
+        zIndex,
         padding: 20,
       }}
     >
