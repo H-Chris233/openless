@@ -113,7 +113,7 @@ pub fn available() -> bool {
 ///
 /// # 调用时机
 ///
-/// 仅在 Wayland session 下调用（X11 走 rdev 避免双发）。
+/// Linux 热键源：通过 DBus 监听 fcitx5 插件的 DictationKeyEvent 信号。
 #[cfg(target_os = "linux")]
 pub fn start_dictation_signal_listener(
     tx: std::sync::mpsc::Sender<crate::hotkey::HotkeyEvent>,
@@ -144,7 +144,7 @@ pub fn start_dictation_signal_listener(
             };
 
             // 信号参数: (sym: u32, states: u32, is_press: bool)
-            if let Err(e) = conn.add_match(rule, move |args: (u32, u32, bool), _conn, _msg| {
+            let match_result = conn.add_match(rule, move |args: (u32, u32, bool), _conn, _msg| {
                 let (_sym, _states, is_press) = args;
                 log::debug!(
                     "[fcitx-hotkey] DictationKeyEvent: sym={}, states={}, isPress={}",
@@ -159,10 +159,14 @@ pub fn start_dictation_signal_listener(
                 };
                 let _ = tx.send(event);
                 true // 保持匹配活跃
-            }) {
-                log::warn!("[fcitx-hotkey] Failed to add match: {e}");
-                return;
-            }
+            });
+            let _match = match match_result {
+                Ok(m) => m,
+                Err(e) => {
+                    log::warn!("[fcitx-hotkey] Failed to add match: {e}");
+                    return;
+                }
+            };
 
             log::info!("[fcitx-hotkey] Listening for DictationKeyEvent signals");
             loop {

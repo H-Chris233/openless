@@ -379,24 +379,6 @@ export const ko: typeof zhCN = {
       startupAtBoot: '부팅 시 자동 시작',
       startupAtBootDesc: '로그인 시 OpenLess 자동 시작.',
       startupAtBootError: '자동 시작 전환 실패: {{message}}',
-      wayland: {
-        calloutTitle: 'Wayland 데스크톱 환경 감지됨',
-        calloutBody: 'Wayland는 보안상 앱의 전역 단축키 감지를 허용하지 않습니다. 시스템 설정에서 아래 각 명령에 대해 사용자 지정 단축키를 만드세요 (QA와 취소 명령은 선택 사항):',
-        copyButton: '복사',
-        copyButtonCopied: '복사됨',
-        commandToggleDictationLabel: '녹음 시작 / 중지',
-        commandToggleQaLabel: 'QA 패널 열기 / 닫기',
-        commandCancelDictationLabel: '현재 녹음 취소',
-        helpToggle: '각 데스크톱 환경별 설정 단계',
-        gnomeTitle: 'GNOME',
-        gnomeSteps: '설정 → 키보드 → 단축키 보기 및 사용자 지정 → 사용자 지정 단축키 → 추가. 1-3회 반복하여 명령 칸에 위 각 명령을 붙여넣고 원하는 키 조합을 기록.',
-        kdeTitle: 'KDE Plasma',
-        kdeSteps: '시스템 설정 → 키보드 → 단축키 → 새로 추가 → 명령/URL. 위 각 명령에 대해 다른 트리거 키를 기록하고 저장.',
-        hyprlandTitle: 'Hyprland',
-        hyprlandSteps: '~/.config/hypr/hyprland.conf 파일에 아래 1-3 줄을 추가하고 hyprctl reload 실행:\nbind = SUPER, Y, exec, openless --toggle-dictation\nbind = SUPER, U, exec, openless --toggle-qa\nbind = SUPER, I, exec, openless --cancel-dictation',
-        swayTitle: 'sway',
-        swaySteps: '~/.config/sway/config 파일에 아래 1-3 줄을 추가하고 swaymsg reload 실행:\nbindsym $mod+y exec openless --toggle-dictation\nbindsym $mod+u exec openless --toggle-qa\nbindsym $mod+i exec openless --cancel-dictation',
-      },
     },
     providers: {
       llmTitle: 'LLM 모델(정리)',
@@ -540,7 +522,7 @@ export const ko: typeof zhCN = {
       streamingInsertHintWindows:
         'SendInput Unicode 로 TSF / IME 를 우회. 입력 소스 전환 불필요.',
       streamingInsertHintLinux:
-        'X11에서는 enigo + XTest로 키를 합성합니다. Wayland에서는 스트리밍 입력을 비활성화하고 출력을 클립보드에 남겨 수동 붙여넣기를 사용합니다.',
+        'fcitx5 플러그인으로 텍스트 전송. 스트리밍 입력은 enigo + XTest 키 합성 사용.',
       streamingInsertSaveClipboardLabel: '클립보드에 저장',
       streamingInsertSaveClipboardHint: '삽입 성공 후 최종 텍스트를 클립보드에 기록하여 Cmd+V 로 다시 붙여넣을 수 있게 합니다. 끄면 클립보드를 건드리지 않습니다.',
       localAsrTitle: '로컬 ASR 모델 (실험적)',
@@ -705,7 +687,7 @@ export const ko: typeof zhCN = {
     adapter: {
       macEventTap: 'macOS Event Tap',
       windowsLowLevel: 'Windows 저수준 키보드 후크',
-      rdev: 'rdev 리스너',
+      fcitx5: 'fcitx5 입력기 플러그인',
     },
   },
   localAsr: {

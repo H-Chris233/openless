@@ -379,24 +379,6 @@ export const ja: typeof zhCN = {
       startupAtBoot: '起動時に自動起動',
       startupAtBootDesc: 'ログイン時に OpenLess を自動起動。',
       startupAtBootError: '自動起動の切り替えに失敗：{{message}}',
-      wayland: {
-        calloutTitle: 'Wayland デスクトップを検出',
-        calloutBody: 'Wayland はセキュリティ上、アプリのグローバルショートカット監視を許可していません。システム設定で以下の各コマンド用にカスタムショートカットを作成してください（QA と録音キャンセルは任意）：',
-        copyButton: 'コピー',
-        copyButtonCopied: 'コピー済み',
-        commandToggleDictationLabel: '録音の開始 / 停止',
-        commandToggleQaLabel: 'QA パネルの表示 / 非表示',
-        commandCancelDictationLabel: '現在の録音をキャンセル',
-        helpToggle: '各デスクトップ環境の設定手順',
-        gnomeTitle: 'GNOME',
-        gnomeSteps: '設定 → キーボード → ショートカットの表示とカスタマイズ → カスタムショートカット → 追加。1〜3 回繰り返し、コマンド欄に上記の各コマンドを貼り付け、希望のキー組み合わせを入力。',
-        kdeTitle: 'KDE Plasma',
-        kdeSteps: 'システム設定 → キーボード → ショートカット → 新規追加 → コマンド/URL。上記の各コマンドに対してトリガーキーを別々に記録し、保存。',
-        hyprlandTitle: 'Hyprland',
-        hyprlandSteps: '~/.config/hypr/hyprland.conf に以下から 1〜3 行を追加し、hyprctl reload を実行：\nbind = SUPER, Y, exec, openless --toggle-dictation\nbind = SUPER, U, exec, openless --toggle-qa\nbind = SUPER, I, exec, openless --cancel-dictation',
-        swayTitle: 'sway',
-        swaySteps: '~/.config/sway/config に以下から 1〜3 行を追加し、swaymsg reload を実行：\nbindsym $mod+y exec openless --toggle-dictation\nbindsym $mod+u exec openless --toggle-qa\nbindsym $mod+i exec openless --cancel-dictation',
-      },
     },
     providers: {
       llmTitle: 'LLM モデル（整文）',
@@ -540,7 +522,7 @@ export const ja: typeof zhCN = {
       streamingInsertHintWindows:
         'SendInput Unicode で TSF / IME を迂回。入力ソースの切替は不要です。',
       streamingInsertHintLinux:
-        'X11 では enigo + XTest でキー合成します。Wayland ではストリーミング入力を無効化し、出力をクリップボードに残して手動貼り付けします。',
+        'fcitx5 プラグインで文字を送信。ストリーミング入力は enigo + XTest でキー合成。',
       streamingInsertSaveClipboardLabel: 'クリップボードに保存',
       streamingInsertSaveClipboardHint: '挿入成功後に最終テキストをクリップボードへ書き込み、Cmd+V で再貼付け可能にします。OFF ではクリップボードに触れません。',
       localAsrTitle: 'ローカル ASR モデル（実験的）',
@@ -705,7 +687,7 @@ export const ja: typeof zhCN = {
     adapter: {
       macEventTap: 'macOS Event Tap',
       windowsLowLevel: 'Windows 低レベルキーボードフック',
-      rdev: 'rdev リスナー',
+      fcitx5: 'fcitx5 インプットメソッドプラグイン',
     },
   },
   localAsr: {

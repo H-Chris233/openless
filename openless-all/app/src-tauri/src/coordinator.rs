@@ -150,10 +150,6 @@ struct Inner {
     /// 最近一次应用到 capsule 窗口的几何状态。避免录音 level tick 反复触发
     /// resize / reposition。
     capsule_layout: Mutex<Option<CapsuleLayoutState>>,
-    /// Linux: 胶囊窗口当前是否已 show 过。防止每次 emit_capsule 都调 window.show()
-    /// 抢走目标 app 的键盘焦点。首次 Idle→可见时 show 一次，后续可见→可见不重新 show。
-    /// 回到 Idle 时 reset 为 false，下次 session 再 show。
-    capsule_window_visible: AtomicBool,
     /// QA 用的 ASR 句柄（始终是 Volcengine 流式）。
     qa_asr: Mutex<Option<Arc<VolcengineStreamingASR>>>,
     /// QA 用的 Recorder 句柄。
@@ -227,7 +223,6 @@ impl Coordinator {
                     qa_hotkey: Mutex::new(None),
                     qa_state: Mutex::new(QaSessionState::default()),
                     capsule_layout: Mutex::new(None),
-                    capsule_window_visible: AtomicBool::new(false),
                     qa_asr: Mutex::new(None),
                     qa_recorder: Mutex::new(None),
                     qa_stream_cancelled: Arc::new(AtomicBool::new(false)),
@@ -278,7 +273,6 @@ impl Coordinator {
                 qa_hotkey: Mutex::new(None),
                 qa_state: Mutex::new(QaSessionState::default()),
                 capsule_layout: Mutex::new(None),
-                capsule_window_visible: AtomicBool::new(false),
                 qa_asr: Mutex::new(None),
                 qa_recorder: Mutex::new(None),
                 qa_stream_cancelled: Arc::new(AtomicBool::new(false)),
@@ -704,15 +698,11 @@ impl Coordinator {
 
     fn ensure_modifier_hotkey_monitor(&self, binding: crate::types::HotkeyBinding) {
         if let Some(monitor) = self.inner.hotkey.lock().as_ref() {
-            // 先 clone 再 move，确保 fcitx5 插件也能同步到新热键。
             #[cfg(target_os = "linux")]
             let plugin_binding = binding.clone();
             monitor.update_binding(binding);
-            // Wayland: 同步新热键到 fcitx5 插件（rdev 路径已由 update_binding 更新）。
             #[cfg(target_os = "linux")]
-            if crate::hotkey::is_wayland_session() {
-                crate::linux_fcitx::sync_binding_to_plugin(&plugin_binding);
-            }
+            crate::linux_fcitx::sync_binding_to_plugin(&plugin_binding);
             return;
         }
         let (tx, rx) = mpsc::channel::<HotkeyEvent>();
@@ -733,9 +723,9 @@ impl Coordinator {
                     .name("openless-hotkey-bridge".into())
                     .spawn(move || hotkey_bridge_loop(inner_clone, rx))
                     .ok();
-                // Wayland: 启动 fcitx5 插件信号监听作为热键源（X11 走 rdev 避免双发）。
+                // Linux: 启动 fcitx5 插件信号监听作为热键源。
                 #[cfg(target_os = "linux")]
-                if crate::hotkey::is_wayland_session() {
+                {
                     crate::linux_fcitx::start_dictation_signal_listener(fcitx_tx);
                     crate::linux_fcitx::sync_binding_to_plugin(&fcitx_binding);
                 }
@@ -784,16 +774,14 @@ impl Coordinator {
 
     /// 返回当前听写阶段（read-only 快照），供 CLI 入口在 dispatch toggle 时决策。
     /// 与原热键边沿走的 `handle_pressed` 分支完全相同的判定逻辑：Idle → start，
-    /// Listening → stop。Linux/Wayland 下桌面快捷键 → CLI 转发是唯一触发路径，
-    /// 必须复用这套语义。
+    /// Listening → stop。可用于桌面快捷键 → CLI 转发的备用触发路径。
     pub fn dictation_phase_for_cli(&self) -> SessionPhase {
         self.inner.state.lock().phase
     }
 
     /// CLI 入口的 QA toggle：直接复用 modifier-only QA 热键边沿的处理函数。
     /// 与 `handle_qa_hotkey_pressed` 同语义 — Idle → 开浮窗 / Recording → 收尾 /
-    /// Processing → 忽略。Wayland 下没有 modifier-only / global-hotkey 监听，CLI
-    /// 是唯一进入点。
+    /// Processing → 忽略。桌面快捷键 → CLI 转发的备用进入点。
     pub async fn cli_toggle_qa_panel(&self) {
         handle_qa_hotkey_pressed(&self.inner).await;
     }
@@ -993,9 +981,9 @@ fn hotkey_supervisor_loop(inner: Arc<Inner>) {
                     .name("openless-hotkey-bridge".into())
                     .spawn(move || hotkey_bridge_loop(inner_clone, rx))
                     .ok();
-                // Wayland: 启动 fcitx5 插件信号监听作为热键源（X11 走 rdev 避免双发）。
+                // Linux: 启动 fcitx5 插件信号监听作为热键源。
                 #[cfg(target_os = "linux")]
-                if crate::hotkey::is_wayland_session() {
+                {
                     crate::linux_fcitx::start_dictation_signal_listener(fcitx_tx);
                     crate::linux_fcitx::sync_binding_to_plugin(&fcitx_binding);
                 }
@@ -3630,7 +3618,7 @@ mod tests {
     #[test]
     fn focus_restore_failure_uses_specific_error_code_when_insert_fails() {
         assert_eq!(
-            dictation_error_code(InsertStatus::Failed, false, false, false, false),
+            dictation_error_code(InsertStatus::Failed, false, false, false),
             Some("focusRestoreFailed")
         );
     }
@@ -3647,7 +3635,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     fn tsf_required_failure_keeps_tsf_error_when_focus_was_ready() {
         assert_eq!(
-            dictation_error_code(InsertStatus::Failed, false, true, false, false),
+            dictation_error_code(InsertStatus::Failed, false, true, false),
             Some("windowsImeTsfRequired")
         );
     }
@@ -4159,12 +4147,10 @@ fn emit_capsule(
             return;
         };
         let show_capsule = inner_for_main.prefs.get().show_capsule;
-
-        // Wayland: 不操作胶囊窗口（不 show/hide，不 reposition），
-        // 避免抢走目标 app 键盘焦点。文字通过 fcitx5 插件直接 commit，
-        // 用户始终在目标 app 中。
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        if crate::hotkey::is_wayland_session() {
+        // Linux: 不操作胶囊窗口（不 show/hide，不 reposition）。
+        // 文字通过 fcitx5 插件直接 commit，用户始终在目标 app 中。
+        #[cfg(target_os = "linux")]
+        {
             return;
         }
 
@@ -4176,16 +4162,6 @@ fn emit_capsule(
         maybe_position_capsule_bottom_center(&inner_for_main, &window, translation);
         if show_capsule && visible {
             if !show_capsule_window_no_activate(&app_for_main, &window) {
-                #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-                {
-                    // Linux (X11): 仅首次 Idle→可见时 show 窗口，避免每次 emit 都抢焦点。
-                    let was_visible = inner_for_main
-                        .capsule_window_visible
-                        .swap(true, std::sync::atomic::Ordering::SeqCst);
-                    if !was_visible {
-                        let _ = window.show();
-                    }
-                }
                 #[cfg(any(target_os = "macos", target_os = "windows"))]
                 let _ = window.show();
             }
@@ -4194,10 +4170,6 @@ fn emit_capsule(
             #[cfg(target_os = "macos")]
             crate::restore_main_window_key_if_active(&app_for_main);
         } else {
-            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-            inner_for_main
-                .capsule_window_visible
-                .store(false, std::sync::atomic::Ordering::SeqCst);
             hide_capsule_window_if_present();
             let _ = window.hide();
         }

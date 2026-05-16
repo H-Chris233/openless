@@ -202,5 +202,5 @@ function WindowsImeStatusPill({ status }: { status: WindowsImeStatus | null }) {
 function adapterDisplayName(adapter: HotkeyCapability['adapter'] | HotkeyStatus['adapter']) {
   if (adapter === 'macEventTap') return i18n.t('hotkey.adapter.macEventTap');
   if (adapter === 'windowsLowLevel') return i18n.t('hotkey.adapter.windowsLowLevel');
-  return i18n.t('hotkey.adapter.rdev');
+  return i18n.t('hotkey.adapter.fcitx5');
 }

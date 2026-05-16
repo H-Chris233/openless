@@ -114,7 +114,7 @@ export function AdvancedSection() {
           时延显著降低，但有几个限制（不满足时自动回落原一次性插入路径）：
           - macOS：CGEvent Unicode + 临时切到 ABC 输入源（CJK / 日文 IME 拦截兜底）
           - Windows：SendInput Unicode，绕过 TSF / IME，不需要切输入法
-          - Linux（实验）：X11 走 enigo + XTest；Wayland 下禁用流式输入并回落剪贴板
+          - Linux：通过 fcitx5 插件提交文字；流式输入使用 enigo + XTest 合成按键
           - 仅 OpenAI-compatible provider 实装；Gemini / Codex 透明降级
           - 密码框 / 1Password / SSH prompt 等 Secure Input 框拒绝合成按键 → 失败回落
           每个平台用各自的 hint key，互相不显示对方平台的细节。 */}

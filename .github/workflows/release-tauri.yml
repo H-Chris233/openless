@@ -373,7 +373,8 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          # 构建带 fcitx5 插件的 deb/rpm/AppImage。
+          # 构建带 fcitx5 插件的 deb/rpm。AppImage 不含插件（无法安装系统路径），
+          # 用户需手动安装脚本 scripts/linux-fcitx5-plugin/build.sh 输出的 .so 和 .conf。
           # 插件 .so + .conf 由上一步 Build fcitx5 plugin 生成并复制到
           # src-tauri/linux-fcitx5-plugin/ 下。
           cat > /tmp/tauri-linux-config.json << CONFIG_EOF

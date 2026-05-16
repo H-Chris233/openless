@@ -6,7 +6,7 @@
 //!   非主线程触发 `dispatch_assert_queue_fail` → SIGTRAP abort（已踩坑）。
 //! - Windows：原生 `WH_KEYBOARD_LL` low-level keyboard hook，保留 modifier-only
 //!   trigger（如右 Control / 右 Alt）的真实语义，不再把平台能力藏在 `rdev` 抽象里。
-//! - Linux / 其他：继续 best-effort 走 `rdev::listen`。
+//! - Linux：fcitx5 插件提供热键事件（DBus 信号 `DictationKeyEvent`）。
 //!
 //! 仅产出"边沿"事件，toggle vs hold 由 Coordinator 解释。
 
@@ -171,21 +171,6 @@ impl Drop for HotkeyMonitor {
     fn drop(&mut self) {
         self.adapter.shutdown();
     }
-}
-
-/// 是否处于 Wayland session。Linux 以外的平台恒返回 false。
-///
-/// 主用途：`lib.rs` 在 hotkey listener 起好后据此决定是否额外 emit
-/// `wayland_cli_mode` 事件，让前端 Settings 面板展示「请绑桌面快捷键到
-/// `openless --toggle-dictation`」的引导文案。
-#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-pub fn is_wayland_session() -> bool {
-    std::env::var("XDG_SESSION_TYPE").ok().as_deref() == Some("wayland")
-}
-
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-pub fn is_wayland_session() -> bool {
-    false
 }
 
 fn install_error(code: &str, message: impl Into<String>) -> HotkeyInstallError {
@@ -1199,69 +1184,39 @@ mod platform {
 
 #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 mod platform {
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc::Sender;
-    use std::sync::Arc;
-    use std::time::Duration;
 
-    use rdev::{listen, Event, EventType, Key};
-
-    use super::{
-        install_error, reset_shared_held_state, start_listener_thread, update_shared_binding,
-        update_shared_modifier_shortcuts, HotkeyAdapter, HotkeyEvent, Shared, StartupTx,
-    };
+    use super::{HotkeyAdapter, HotkeyEvent};
     use crate::types::{HotkeyAdapterKind, HotkeyBinding, HotkeyInstallError, HotkeyTrigger};
 
-    /// X11 走 rdev 监听器；Wayland 协议层面禁止应用监听其他窗口的键盘事件
-    /// （详见 `docs/issue-420-wayland-hotkey-research.md` 2 节），所以这里
-    /// 返回一个"CLI 适配器"占位：不安装任何键盘 hook，但实现 HotkeyAdapter
-    /// trait 以让上层 `ensure_modifier_hotkey_monitor` 正常走 `Installed` 分支，
-    /// 不再把 Wayland 当成"安装失败"。
+    /// Linux 统一使用 fcitx5 插件作为热键源（Wayland / X11 均可），
+    /// 不再启用 rdev 监听器。此处返回占位 adapter 让上层走 `Installed` 分支。
     ///
-    /// 用户实际的触发路径变成：桌面环境快捷键 → `openless --toggle-dictation`
-    /// → tauri-plugin-single-instance 拦截并把 argv 转给主实例 coordinator。
-    /// 前端 Settings 面板会监听 `wayland_cli_mode` 事件并展示对应的引导文案。
+    /// 实际的热键事件由 `linux_fcitx::start_dictation_signal_listener` 接收
+    /// fcitx5 插件的 DBus 信号并转发到 `Sender<HotkeyEvent>`。
     pub fn start_adapter(
-        binding: HotkeyBinding,
+        _binding: HotkeyBinding,
         tx: Sender<HotkeyEvent>,
     ) -> Result<Box<dyn HotkeyAdapter>, HotkeyInstallError> {
-        if super::is_wayland_session() {
-            log::info!(
-                "[hotkey] Wayland session detected; rdev listener skipped — \
-                 use desktop shortcut → `openless --toggle-dictation` instead (issue #420)"
-            );
-            // tx 在 stub adapter 下无人 push 事件 — 持有它直到 adapter 被 drop 即可。
-            return Ok(Box::new(WaylandCliAdapter { _tx: tx }));
-        }
-        let listener = start_listener_thread(
-            binding,
-            tx,
-            "openless-hotkey-rdev",
-            "hotkey hook 启动超时",
-            run_listen_loop,
-        )?;
-        let _ = listener.startup;
-        Ok(Box::new(RdevHotkeyAdapter {
-            shared: listener.shared,
-        }))
+        log::info!(
+            "[hotkey] Linux — fcitx5 plugin handles hotkeys; rdev listener skipped"
+        );
+        Ok(Box::new(PlaceholderAdapter { _tx: tx }))
     }
 
-    /// Wayland 下的占位 adapter：实现接口但不监听键盘。
-    /// 上层 coordinator 仍会把它登记为 `Installed`（hotkey 状态显示正常），
-    /// 用户的触发路径由 CLI + single-instance 转发承担。
-    struct WaylandCliAdapter {
+    /// Linux 占位 adapter：实现接口但不监听键盘。
+    /// 热键事件由 fcitx5 插件的 `DictationKeyEvent` DBus 信号提供。
+    struct PlaceholderAdapter {
         _tx: Sender<HotkeyEvent>,
     }
 
-    impl HotkeyAdapter for WaylandCliAdapter {
+    impl HotkeyAdapter for PlaceholderAdapter {
         fn kind(&self) -> HotkeyAdapterKind {
-            // 复用 Rdev kind 显示，避免新增枚举项波及整个序列化层。
-            // 真实 adapter 状态由 `wayland_cli_mode` 事件在前端单独引导。
-            HotkeyAdapterKind::Rdev
+            HotkeyAdapterKind::Fcitx5
         }
 
         fn update_binding(&self, _binding: HotkeyBinding) {
-            // Wayland 下绑定由桌面环境管理；忽略后端绑定变更，但不报错。
+            // fcitx5 插件热键由 sync_binding_to_plugin 单独同步。
         }
 
         fn update_modifier_shortcuts(
@@ -1269,323 +1224,8 @@ mod platform {
             _qa_trigger: Option<HotkeyTrigger>,
             _translation_trigger: Option<HotkeyTrigger>,
         ) {
-            // 同上 — modifier-only 修饰键在 Wayland 上也走不通，留空。
         }
 
         fn reset_held_state(&self) {}
-    }
-
-    struct RdevHotkeyAdapter {
-        shared: Arc<Shared>,
-    }
-
-    impl HotkeyAdapter for RdevHotkeyAdapter {
-        fn kind(&self) -> HotkeyAdapterKind {
-            HotkeyAdapterKind::Rdev
-        }
-
-        fn update_binding(&self, binding: HotkeyBinding) {
-            update_shared_binding(&self.shared, binding);
-        }
-
-        fn update_modifier_shortcuts(
-            &self,
-            qa_trigger: Option<HotkeyTrigger>,
-            translation_trigger: Option<HotkeyTrigger>,
-        ) {
-            update_shared_modifier_shortcuts(&self.shared, qa_trigger, translation_trigger);
-        }
-
-        fn reset_held_state(&self) {
-            reset_shared_held_state(&self.shared);
-        }
-    }
-
-    fn run_listen_loop(shared: Arc<Shared>, tx: Sender<HotkeyEvent>, status_tx: StartupTx<()>) {
-        let status_sent = Arc::new(AtomicBool::new(false));
-        let ready_status_sent = Arc::clone(&status_sent);
-        let ready_status_tx = status_tx.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(350));
-            if !ready_status_sent.swap(true, Ordering::SeqCst) {
-                let _ = ready_status_tx.send(Ok(()));
-            }
-        });
-        let cb_shared = Arc::clone(&shared);
-        let result = listen(move |event: Event| {
-            dispatch_event(&cb_shared, &tx, event);
-        });
-        if let Err(err) = result {
-            if !status_sent.swap(true, Ordering::SeqCst) {
-                let _ = status_tx.send(Err(install_error(
-                    "listen_failed",
-                    format!("rdev::listen 启动失败: {err:?}"),
-                )));
-            }
-            log::error!("[hotkey] rdev::listen 启动失败: {:?}", err);
-        }
-    }
-
-    fn dispatch_event(shared: &Shared, tx: &Sender<HotkeyEvent>, event: Event) {
-        let trigger = shared.binding.read().trigger;
-        match event.event_type {
-            EventType::KeyPress(key) => {
-                if key == Key::Escape {
-                    let _ = tx.send(HotkeyEvent::Cancelled);
-                    return;
-                }
-                // Shift（任一侧）= 翻译模式修饰键。详见 issue #4。
-                if matches!(key, Key::ShiftLeft | Key::ShiftRight) {
-                    let was_held = shared
-                        .translation_modifier_held
-                        .swap(true, Ordering::SeqCst);
-                    if !was_held {
-                        let _ = tx.send(HotkeyEvent::TranslationModifierPressed);
-                    }
-                    return;
-                }
-                handle_optional_modifier_press(
-                    shared,
-                    tx,
-                    key,
-                    *shared.qa_trigger.read(),
-                    &shared.qa_trigger_held,
-                    HotkeyEvent::QaShortcutPressed,
-                );
-                handle_optional_modifier_press(
-                    shared,
-                    tx,
-                    key,
-                    *shared.translation_trigger.read(),
-                    &shared.translation_trigger_held,
-                    HotkeyEvent::TranslationModifierPressed,
-                );
-                if trigger == HotkeyTrigger::Custom {
-                    return;
-                }
-                if key == trigger_to_rdev_key(trigger) {
-                    let was_held = shared.trigger_held.swap(true, Ordering::SeqCst);
-                    if !was_held {
-                        let _ = tx.send(HotkeyEvent::Pressed);
-                    }
-                }
-            }
-            EventType::KeyRelease(key) => {
-                if matches!(key, Key::ShiftLeft | Key::ShiftRight) {
-                    shared
-                        .translation_modifier_held
-                        .store(false, Ordering::SeqCst);
-                    return;
-                }
-                handle_optional_modifier_release(
-                    shared,
-                    key,
-                    *shared.qa_trigger.read(),
-                    &shared.qa_trigger_held,
-                );
-                handle_optional_modifier_release(
-                    shared,
-                    key,
-                    *shared.translation_trigger.read(),
-                    &shared.translation_trigger_held,
-                );
-                if trigger == HotkeyTrigger::Custom {
-                    return;
-                }
-                if key == trigger_to_rdev_key(trigger) {
-                    let was_held = shared.trigger_held.swap(false, Ordering::SeqCst);
-                    if was_held {
-                        let _ = tx.send(HotkeyEvent::Released);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn handle_optional_modifier_press(
-        shared: &Shared,
-        tx: &Sender<HotkeyEvent>,
-        key: Key,
-        trigger: Option<HotkeyTrigger>,
-        held: &std::sync::atomic::AtomicBool,
-        event: HotkeyEvent,
-    ) {
-        let Some(trigger) = trigger else {
-            return;
-        };
-        if trigger == HotkeyTrigger::Custom || key != trigger_to_rdev_key(trigger) {
-            return;
-        }
-        let was_held = held.swap(true, Ordering::SeqCst);
-        if !was_held {
-            let _ = tx.send(event);
-        }
-    }
-
-    fn handle_optional_modifier_release(
-        _shared: &Shared,
-        key: Key,
-        trigger: Option<HotkeyTrigger>,
-        held: &std::sync::atomic::AtomicBool,
-    ) {
-        let Some(trigger) = trigger else {
-            return;
-        };
-        if trigger != HotkeyTrigger::Custom && key == trigger_to_rdev_key(trigger) {
-            held.store(false, Ordering::SeqCst);
-        }
-    }
-
-    fn trigger_to_rdev_key(trigger: HotkeyTrigger) -> Key {
-        match trigger {
-            HotkeyTrigger::RightOption | HotkeyTrigger::RightAlt => Key::AltGr,
-            HotkeyTrigger::LeftOption => Key::Alt,
-            HotkeyTrigger::RightControl => Key::ControlRight,
-            HotkeyTrigger::LeftControl => Key::ControlLeft,
-            HotkeyTrigger::RightCommand => Key::MetaRight,
-            HotkeyTrigger::Fn => Key::Function,
-            HotkeyTrigger::Custom => unreachable!("custom combo hotkeys use ComboHotkeyMonitor"),
-        }
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-        use parking_lot::RwLock;
-        use std::sync::atomic::AtomicBool;
-        use std::sync::mpsc;
-        use std::time::SystemTime;
-
-        fn shared(trigger: HotkeyTrigger) -> Shared {
-            Shared {
-                binding: RwLock::new(HotkeyBinding {
-                    trigger,
-                    mode: crate::types::HotkeyMode::Toggle,
-                    keys: None,
-                }),
-                trigger_held: AtomicBool::new(false),
-                qa_trigger: RwLock::new(None),
-                qa_trigger_held: AtomicBool::new(false),
-                translation_trigger: RwLock::new(None),
-                translation_trigger_held: AtomicBool::new(false),
-                translation_modifier_held: AtomicBool::new(false),
-            }
-        }
-
-        fn key_event(event_type: EventType) -> Event {
-            Event {
-                time: SystemTime::UNIX_EPOCH,
-                name: None,
-                event_type,
-            }
-        }
-
-        fn drain(rx: &mpsc::Receiver<HotkeyEvent>) -> Vec<HotkeyEvent> {
-            rx.try_iter().collect()
-        }
-
-        #[test]
-        fn rdev_modifier_edges_are_deduped_from_mock_events() {
-            let shared = shared(HotkeyTrigger::RightControl);
-            let (tx, rx) = mpsc::channel();
-
-            dispatch_event(
-                &shared,
-                &tx,
-                key_event(EventType::KeyPress(Key::ControlRight)),
-            );
-            dispatch_event(
-                &shared,
-                &tx,
-                key_event(EventType::KeyPress(Key::ControlRight)),
-            );
-            dispatch_event(
-                &shared,
-                &tx,
-                key_event(EventType::KeyRelease(Key::ControlRight)),
-            );
-            dispatch_event(
-                &shared,
-                &tx,
-                key_event(EventType::KeyRelease(Key::ControlRight)),
-            );
-
-            assert_eq!(
-                drain(&rx),
-                vec![HotkeyEvent::Pressed, HotkeyEvent::Released]
-            );
-        }
-
-        #[test]
-        fn rdev_modifier_edges_ignore_unrelated_keys_and_reemit_after_release() {
-            let shared = shared(HotkeyTrigger::RightControl);
-            let (tx, rx) = mpsc::channel();
-
-            dispatch_event(
-                &shared,
-                &tx,
-                key_event(EventType::KeyPress(Key::ControlLeft)),
-            );
-            dispatch_event(
-                &shared,
-                &tx,
-                key_event(EventType::KeyRelease(Key::ControlRight)),
-            );
-            dispatch_event(
-                &shared,
-                &tx,
-                key_event(EventType::KeyPress(Key::ControlRight)),
-            );
-            dispatch_event(
-                &shared,
-                &tx,
-                key_event(EventType::KeyRelease(Key::ControlRight)),
-            );
-            dispatch_event(
-                &shared,
-                &tx,
-                key_event(EventType::KeyPress(Key::ControlRight)),
-            );
-
-            assert_eq!(
-                drain(&rx),
-                vec![
-                    HotkeyEvent::Pressed,
-                    HotkeyEvent::Released,
-                    HotkeyEvent::Pressed
-                ]
-            );
-        }
-
-        #[test]
-        fn rdev_optional_modifier_shortcuts_use_independent_latches() {
-            let shared = shared(HotkeyTrigger::RightControl);
-            *shared.qa_trigger.write() = Some(HotkeyTrigger::RightCommand);
-            *shared.translation_trigger.write() = Some(HotkeyTrigger::LeftOption);
-            let (tx, rx) = mpsc::channel();
-
-            dispatch_event(&shared, &tx, key_event(EventType::KeyPress(Key::MetaRight)));
-            dispatch_event(&shared, &tx, key_event(EventType::KeyPress(Key::MetaRight)));
-            dispatch_event(&shared, &tx, key_event(EventType::KeyPress(Key::Alt)));
-            dispatch_event(&shared, &tx, key_event(EventType::KeyPress(Key::ShiftLeft)));
-            dispatch_event(&shared, &tx, key_event(EventType::KeyPress(Key::ShiftLeft)));
-            dispatch_event(
-                &shared,
-                &tx,
-                key_event(EventType::KeyRelease(Key::MetaRight)),
-            );
-            dispatch_event(&shared, &tx, key_event(EventType::KeyPress(Key::MetaRight)));
-
-            assert_eq!(
-                drain(&rx),
-                vec![
-                    HotkeyEvent::QaShortcutPressed,
-                    HotkeyEvent::TranslationModifierPressed,
-                    HotkeyEvent::TranslationModifierPressed,
-                    HotkeyEvent::QaShortcutPressed,
-                ]
-            );
-        }
     }
 }

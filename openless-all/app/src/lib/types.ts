@@ -74,7 +74,7 @@ export interface HotkeyBinding {
   keys?: HotkeyKey[] | null;
 }
 
-export type HotkeyAdapterKind = 'macEventTap' | 'windowsLowLevel' | 'rdev';
+export type HotkeyAdapterKind = 'macEventTap' | 'windowsLowLevel' | 'fcitx5';
 
 export interface HotkeyCapability {
   adapter: HotkeyAdapterKind;

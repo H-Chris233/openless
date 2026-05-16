@@ -406,24 +406,6 @@ export const zhTW: typeof zhCN = {
       startupAtBoot: '開機自啓',
       startupAtBootDesc: '登錄系統時自動啓動 OpenLess。',
       startupAtBootError: '開機自啓切換失敗：{{message}}',
-      wayland: {
-        calloutTitle: '偵測到 Wayland 桌面環境',
-        calloutBody: 'Wayland 出於安全考慮不允許應用監聽全域快速鍵。請在系統設定中為下面的命令分別建立自訂快速鍵（QA 與取消錄音命令可選）：',
-        copyButton: '複製',
-        copyButtonCopied: '已複製',
-        commandToggleDictationLabel: '開始 / 停止錄音',
-        commandToggleQaLabel: '開啟 / 關閉 QA 面板',
-        commandCancelDictationLabel: '取消目前錄音',
-        helpToggle: '查看各桌面環境設定步驟',
-        gnomeTitle: 'GNOME',
-        gnomeSteps: '設定 → 鍵盤 → 檢視並自訂快速鍵 → 自訂快速鍵 → 新增快速鍵。重複新增 1-3 組，命令處分別填入上方命令，再錄入想用的按鍵組合。',
-        kdeTitle: 'KDE Plasma',
-        kdeSteps: '系統設定 → 鍵盤 → 快速鍵 → 新增 → 命令/URL，動作處分別貼上上方命令並錄入不同觸發鍵，儲存即可。',
-        hyprlandTitle: 'Hyprland',
-        hyprlandSteps: '編輯 ~/.config/hypr/hyprland.conf，加入下面任意 1-3 行後執行 hyprctl reload：\nbind = SUPER, Y, exec, openless --toggle-dictation\nbind = SUPER, U, exec, openless --toggle-qa\nbind = SUPER, I, exec, openless --cancel-dictation',
-        swayTitle: 'sway',
-        swaySteps: '編輯 ~/.config/sway/config，加入下面任意 1-3 行後執行 swaymsg reload：\nbindsym $mod+y exec openless --toggle-dictation\nbindsym $mod+u exec openless --toggle-qa\nbindsym $mod+i exec openless --cancel-dictation',
-      },
     },
     providers: {
       llmTitle: 'LLM 模型（潤色）',
@@ -567,7 +549,7 @@ export const zhTW: typeof zhCN = {
       streamingInsertHintWindows:
         'SendInput Unicode 直接送字元，繞過 TSF / IME，不切輸入法。',
       streamingInsertHintLinux:
-        'X11 使用 enigo + XTest 合成按鍵；Wayland 下會自動關閉串流輸入，並保留到剪貼簿供手動貼上。',
+        '通過 fcitx5 插件提交文字；串流輸入使用 enigo + XTest 合成按鍵。',
       streamingInsertSaveClipboardLabel: '同步到剪貼簿',
       streamingInsertSaveClipboardHint: '插入成功後把最終文字寫入剪貼簿，方便 Cmd+V 再次貼上；關閉後流式過程不動剪貼簿。',
       localAsrTitle: '本地 ASR 模型（實驗性）',
@@ -732,7 +714,7 @@ export const zhTW: typeof zhCN = {
     adapter: {
       macEventTap: 'macOS Event Tap',
       windowsLowLevel: 'Windows 低層鍵盤 hook',
-      rdev: 'rdev 監聽器',
+      fcitx5: 'fcitx5 輸入法插件',
     },
   },
   localAsr: {

@@ -14,9 +14,7 @@
 //!   必须 `switch_to_ascii` 切到 ABC，session 结束再 `restore_input_source` 切回。
 //! - **Windows**：`SendInput(KEYEVENTF_UNICODE)` 直接发 UTF-16 scancode。TSF 不拦
 //!   Unicode 事件（与 keyboard layout / IME 解耦），所以不需要切输入法。
-//! - **Linux**：enigo `Keyboard::text(...)`。X11 走 XTest 稳定；Wayland 看 compositor
-//!   是否给 libei 权限，stock GNOME-Wayland 经常拒绝，调用方应当容忍失败回落到一次性。
-//!   不切输入法 —— Linux 的 fcitx / ibus 与 enigo 的交互非常碎，v1 不尝试。
+//! - **Linux**：走 fcitx5 插件 commitString 直写（DBus）或剪贴板回落。
 //!
 //! ## 已知坑（macOS）
 //!

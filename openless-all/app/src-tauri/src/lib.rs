@@ -74,7 +74,7 @@ pub fn run() {
         // 否则两份 OpenLess（如 /Applications/ + dev build）会各自抓全局热键，
         // 导致按一次键、两个进程同时跑流水线、文本被插入两遍。见 issue #50。
         //
-        // 第二个进程的 argv 还有一个用处：作为 Linux/Wayland 下的「触发器入口」。
+        // 第二个进程的 argv 还有一个用处：作为 Linux 下的「触发器入口」。
         // 桌面环境快捷键执行 `openless --toggle-dictation` 时，第二个进程被本插件
         // 拦截 → argv 直接转给主实例 coordinator。详见 issue #420 / `cli.rs`。
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
@@ -247,14 +247,6 @@ pub fn run() {
                 show_main_window(app.handle());
             }
 
-            // Wayland 下没有可用的全局键盘监听（issue #420）。Coordinator 已通过 stub adapter
-            // 把 hotkey 状态标记为 Installed，整个应用照常起来。前端走 pull 模型：RecordingSection
-            // mount 时调 `is_wayland_cli_mode` 取状态再渲染 CLI 引导 callout。原本用一次性 event 通知
-            // 行不通——Settings 模态是按需 mount，事件不缓冲不 replay，listener 几乎必然错过。
-            if hotkey::is_wayland_session() {
-                log::info!("[startup] Wayland session — frontend will pull via is_wayland_cli_mode");
-            }
-
             // 首次启动也可能带 CLI flag（用户双击 .desktop 之前先用 CLI 起一遍）。
             // 等 coordinator 准备好后再 dispatch；GUI 仍然照常起来。
             let first_run_args: Vec<String> = std::env::args().collect();
@@ -274,7 +266,6 @@ pub fn run() {
             commands::fetch_latest_beta_release,
             commands::get_hotkey_status,
             commands::get_hotkey_capability,
-            commands::is_wayland_cli_mode,
             commands::set_shortcut_recording_active,
             commands::get_windows_ime_status,
             commands::list_microphone_devices,

@@ -91,21 +91,9 @@ public:
                     auto &keyEvent = static_cast<KeyEvent &>(event);
                     // 保存当前输入上下文：快捷键按下时用户在目标 app 中，
                     // 此后胶囊窗口可能抢走焦点，但 commitText 仍能用此 IC 提交文字。
-                    // 同时监听 IC 销毁信号，自动清空指针避免野指针。
+                    // IC 销毁时通过 InputContextDestroyed 事件自动清空指针（见下方）。
                     if (!keyEvent.isRelease()) {
-                        auto *ic = keyEvent.inputContext();
-                        if (ic != savedIc_) {
-                            savedIc_ = ic;
-                            savedIcDestroyedConnection_ = ScopedConnection();
-                            if (ic) {
-                                savedIcDestroyedConnection_ =
-                                    ic->destroyed.connect([this]() {
-                                        FCITX_LOGC(openless, Debug)
-                                            << "savedIc_ destroyed, clearing";
-                                        savedIc_ = nullptr;
-                                    });
-                            }
-                        }
+                        savedIc_ = keyEvent.inputContext();
                     }
                     // 先检查 raw sym/states（修饰键专用路径，绕过 Key::parse 限制）
                     if ((triggerRawSym_ != 0 &&
@@ -133,6 +121,18 @@ public:
                         dictationKeyEvent(sym, states, isPress);
                         keyEvent.filterAndAccept();
                         return;
+                    }
+                }));
+
+        // 4. 监听 InputContext 销毁事件，自动清空 savedIc_ 避免野指针
+        eventHandlers_.push_back(
+            instance_->watchEvent(
+                EventType::InputContextDestroyed,
+                EventWatcherPhase::Default,
+                [this](Event &event) {
+                    auto &icEvent = static_cast<InputContextEvent &>(event);
+                    if (icEvent.inputContext() == savedIc_) {
+                        savedIc_ = nullptr;
                     }
                 }));
 
@@ -183,6 +183,15 @@ public:
         triggerRawSym_ = 0;
         triggerRawStates_ = 0;
         safeSaveAsIni(config_, configFile());
+        // 同时清除磁盘上残留的 TriggerRawSym/TriggerRawStates（旧 raw 模式的持久化值），
+        // 防止下次 fcitx5 重启 reloadConfig 重新加载旧 raw 热键覆盖新配置。
+        {
+            RawConfig raw;
+            readAsIni(raw, configFile());
+            raw.setValueByPath("TriggerRawSym", "0");
+            raw.setValueByPath("TriggerRawStates", "0");
+            safeSaveAsIni(raw, configFile());
+        }
         rebuildTriggerKeys();
     }
 
@@ -257,10 +266,8 @@ private:
     uint32_t triggerRawStates_;
     /// 快捷键按下时保存的输入上下文指针，用于 commitText 在失焦后仍能提交文字。
     /// 事件处理线程和 DBus 处理线程都是 fcitx5 主事件循环，无竞态。
-    /// 通过 savedIcDestroyedConnection_（连接到 InputContext::destroyed 信号）
-    /// 监听 IC 销毁时自动清空指针，避免野指针。
+    /// 通过 InputContextDestroyed 事件监听 IC 销毁时自动清空指针。
     InputContext *savedIc_;
-    ScopedConnection savedIcDestroyedConnection_;
     std::vector<std::unique_ptr<HandlerTableEntry<EventHandler>>>
         eventHandlers_;
 };
