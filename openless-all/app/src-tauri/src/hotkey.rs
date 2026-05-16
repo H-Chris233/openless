@@ -1221,9 +1221,11 @@ mod platform {
 
         fn update_modifier_shortcuts(
             &self,
-            _qa_trigger: Option<HotkeyTrigger>,
-            _translation_trigger: Option<HotkeyTrigger>,
+            qa_trigger: Option<HotkeyTrigger>,
+            translation_trigger: Option<HotkeyTrigger>,
         ) {
+            crate::linux_fcitx::sync_qa_binding(qa_trigger);
+            crate::linux_fcitx::sync_translation_binding(translation_trigger);
         }
 
         fn reset_held_state(&self) {}
