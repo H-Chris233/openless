@@ -2695,7 +2695,7 @@ pub async fn marketplace_my_packs(
 //   - 创建后在 General 页面勾选 "Enable Device Flow"
 //   - 抄 client_id 填到本常量
 
-const GITHUB_OAUTH_CLIENT_ID: &str = "";
+const GITHUB_OAUTH_CLIENT_ID: &str = "Ov23liyv3nEucG7oMHNE";
 
 fn get_github_oauth_client_id() -> Result<String, String> {
     if let Ok(env_id) = std::env::var("GITHUB_OAUTH_CLIENT_ID") {
