@@ -1051,6 +1051,12 @@ struct StylePackArchiveManifest {
     icon_file: Option<String>,
     recommended_model: Option<String>,
     compatible_app_version: Option<String>,
+    /// Marketplace 上游关系。旧 ZIP 没有此字段时自动为 None；
+    /// 兼容早期口误/拼写包里可能出现的 `orion*` 字段名。
+    #[serde(default, alias = "orionPackId", alias = "orion_pack_id", alias = "origin_pack_id")]
+    origin_pack_id: Option<String>,
+    #[serde(default, alias = "orionAuthorLogin", alias = "orion_author_login", alias = "origin_author_login")]
+    origin_author_login: Option<String>,
 }
 
 pub struct StylePackStore {
@@ -1342,8 +1348,8 @@ impl StylePackStore {
             compatible_app_version: manifest
                 .compatible_app_version
                 .and_then(|value| normalize_optional_text(Some(value))),
-            origin_pack_id: None,
-            origin_author_login: None,
+            origin_pack_id: normalize_optional_text(manifest.origin_pack_id),
+            origin_author_login: normalize_optional_text(manifest.origin_author_login),
         };
         packs.insert(0, pack.clone());
         write_style_packs_file(&self.path, &packs)?;
@@ -1393,6 +1399,8 @@ impl StylePackStore {
             icon_file: icon_file.clone(),
             recommended_model: pack.recommended_model.clone(),
             compatible_app_version: pack.compatible_app_version.clone(),
+            origin_pack_id: pack.origin_pack_id.clone(),
+            origin_author_login: pack.origin_author_login.clone(),
         };
 
         zip.start_file("manifest.json", options)

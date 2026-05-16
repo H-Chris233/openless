@@ -11,6 +11,7 @@ import type {
   HotkeyCapability,
   MarketplaceDetail,
   MarketplaceListItem,
+  MarketplaceMyPackItem,
   HotkeyStatus,
   MicrophoneDevice,
   PermissionStatus,
@@ -137,19 +138,16 @@ const mockFullStylePrompts: StyleSystemPrompts = {
 # 输出
 输出一段可直接发送的自然文字。`,
   structured: `# 角色
-语音输入整理器。把多事项口述整理成层次清楚、可复制执行的结构化文本。
+语音输入整理器。把 AI 编程协作、技术排障和模型资讯口述整理成结构清楚、术语准确的文本。
 
-# 任务（清晰结构）
-识别主题边界，把零散事项按语义归类。事项较多时优先输出两层结构，保证读者一眼能看清主次。
+# 任务（清晰结构 · AI 编程协作）
+优先修正 ASR 造成的技术词、模型名、字段名错误；多事项按主题输出双层 list，操作指引输出连续步骤。
 
-# 通用规则
-1) 不补充用户没说过的事实或行动项。
-2) 原文里已有编号或换行，不代表可以原样照抄；需要按语义重新分组。
-3) 专有名词、命令、路径、URL、数字和单位保持准确。
-4) 只输出最终结果，不要解释你的整理过程。
+# 术语
+Token、Secret Key、Access Token、API、App ID、Claude、Gemini、Cappuccino、Coder、LongCat、Codex、MCP、SSE、PR、CI、ASR、LLM、SOTA、FP8。保留命令、路径、环境变量、URL、true / false / null 和模型版本号。
 
 # 输出
-需要结构化时，直接从标题、编号或列表开始。`,
+直接输出最终正文。顶层用 1./2./3.，子项用缩进 3 个空格的 (a)(b)(c)。不加解释。`,
   formal: `# 角色
 语音输入整理器。把口述整理成适合邮件、同步和正式沟通的专业表达。
 
@@ -192,9 +190,9 @@ const mockBuiltinExamples: Record<PolishMode, StylePackExample[]> = {
   ],
   structured: [
     {
-      title: '任务整理',
-      input: '这周要做三件事一个是把登录页 bug 修掉第二个是补 README 第三个是把发版脚本再走一遍',
-      output: '这周要完成以下三件事：\n1. 修复登录页相关 bug。\n2. 补充 README 文档。\n3. 重新走一遍发版脚本。',
+      title: 'AI 编程任务',
+      input: '帮我给 codex 提个任务先把登录页 bug 修掉然后补一下 README 里面的环境变量说明还有那个西克瑞特 key 别写死到代码里',
+      output: '帮忙给 Codex 提个任务，主要包含以下内容：\n\n1. 登录页修复\n   (a) 修复登录页相关 bug。\n2. 文档与配置\n   (a) 补充 README 中的环境变量说明。\n   (b) 确认 Secret Key 不被硬编码到代码里。',
     },
   ],
   formal: [
@@ -784,9 +782,9 @@ export function resetBuiltinStylePack(id: string): Promise<StylePack> {
         'builtin',
         'structured',
         '清晰结构',
-        '适合多事项和多主题口述，自动整理为层次清楚的结构化输出。',
-        '把口述整理成结构清楚的文本，必要时按主题分组或分点输出。',
-        ['结构化', '条理'],
+        '面向 AI 编程协作、技术排障和模型资讯，优先保证术语与结构准确。',
+        mockDefaultStyleSystemPrompts.structured,
+        ['AI 编程', '技术结构化'],
       ),
       'builtin.formal': makeMockStylePack(
         'builtin.formal',
@@ -1001,8 +999,9 @@ export function installMarketplacePack(packId: string): Promise<StylePack> {
 
 export function uploadMarketplacePack(
   packId: string,
+  originPackId?: string | null,
 ): Promise<{ id: string; state: string; message: string }> {
-  return invokeOrMock('marketplace_upload', { packId }, () => ({
+  return invokeOrMock('marketplace_upload', { packId, originPackId: originPackId ?? null }, () => ({
     id: 'mock-uploaded',
     state: 'pending',
     message: 'Mock 上传成功（vite dev）',
@@ -1021,6 +1020,11 @@ export function likeMarketplacePack(
 /** 拉当前登录用户赞过的所有 pack id（用于红心 + 「我赞过的」过滤）。 */
 export function marketplaceMyLikes(): Promise<string[]> {
   return invokeOrMock<string[]>('marketplace_my_likes', undefined, () => []);
+}
+
+/** 拉当前登录用户发布过的所有 pack（含审核中/已撤回），用于「我的发布」。 */
+export function marketplaceMyPacks(): Promise<MarketplaceMyPackItem[]> {
+  return invokeOrMock<MarketplaceMyPackItem[]>('marketplace_my_packs', undefined, () => []);
 }
 
 /** 撤回自己发布的 pack（后端软删 state='withdrawn'）。仅允许原作者。 */

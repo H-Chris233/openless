@@ -22,10 +22,11 @@ import {
   listStylePacks,
   marketplaceDelete,
   marketplaceMyLikes,
+  marketplaceMyPacks,
   uploadMarketplacePack,
 } from '../lib/ipc';
 import { useHotkeySettings } from '../state/HotkeySettingsContext';
-import type { MarketplaceDetail, MarketplaceListItem, StylePack } from '../lib/types';
+import type { MarketplaceDetail, MarketplaceListItem, MarketplaceMyPackItem, StylePack } from '../lib/types';
 import { Btn, Card, PageHeader, Pill } from './_atoms';
 
 type SortMode = 'popular' | 'new' | 'liked' | 'mine';
@@ -66,9 +67,12 @@ export function Marketplace() {
   };
 
   const [showUpload, setShowUpload] = useState(false);
+  const [uploadOriginPackId, setUploadOriginPackId] = useState<string | null>(null);
+  const [uploadTargetName, setUploadTargetName] = useState<string | null>(null);
   const [localPacks, setLocalPacks] = useState<StylePack[]>([]);
+  const [myPacks, setMyPacks] = useState<MarketplaceMyPackItem[]>([]);
   // 当前用户赞过的 pack id 集合 —— 用于红心渲染 + 「我赞过的」过滤。
-  // 进入 marketplace 时拉一次；点赞/取消赞后本地 mutate。
+  // 进入 marketplace 时拉一次；点星后本地 mutate。
   const [likedIds, setLikedIds] = useState<Set<string>>(new Set());
   const canUpload = (prefs?.marketplaceDevLogin ?? '').trim().length > 0;
   const currentLogin = (prefs?.marketplaceDevLogin ?? '').trim();
@@ -108,9 +112,18 @@ export function Marketplace() {
 
   const visibleItems = useMemo(() => {
     if (sort === 'liked') return items.filter(it => likedIds.has(it.id));
-    if (sort === 'mine') return items.filter(it => it.authorLogin === currentLogin);
     return items;
-  }, [items, sort, likedIds, currentLogin]);
+  }, [items, sort, likedIds]);
+
+  const visibleMyPacks = useMemo(() => {
+    const q = debouncedQuery.trim().toLowerCase();
+    if (!q) return myPacks;
+    return myPacks.filter(pack =>
+      pack.name.toLowerCase().includes(q)
+      || pack.description.toLowerCase().includes(q)
+      || pack.tags.some(tag => tag.toLowerCase().includes(q)),
+    );
+  }, [myPacks, debouncedQuery]);
 
   useEffect(() => {
     void refresh();
@@ -129,6 +142,24 @@ export function Marketplace() {
     })();
     return () => { cancelled = true; };
   }, [currentLogin]);
+
+  const refreshMyPacks = useCallback(async () => {
+    if (!currentLogin) {
+      setMyPacks([]);
+      return;
+    }
+    try {
+      const packs = await marketplaceMyPacks();
+      setMyPacks(packs);
+    } catch (error) {
+      console.warn('[marketplace] fetch my-packs failed', error);
+      setActionMsg({ kind: 'err', text: `我的发布加载失败：${errorMessage(error)}` });
+    }
+  }, [currentLogin]);
+
+  useEffect(() => {
+    void refreshMyPacks();
+  }, [refreshMyPacks]);
 
   const openDetail = async (id: string) => {
     const seq = ++detailSeqRef.current;
@@ -178,11 +209,22 @@ export function Marketplace() {
     }
   };
 
-  const openUploadPicker = async () => {
+  const openUploadPicker = async (originPackId: string | null = null, targetName: string | null = null) => {
     try {
+      setUploadOriginPackId(originPackId);
+      setUploadTargetName(targetName);
       const packs = await listStylePacks();
-      // 内置 pack 是只读模板，不能上传；过滤掉避免用户选了再被 backend 拒。
-      setLocalPacks(packs.filter(p => p.kind !== 'builtin'));
+      // 内置 pack 是只读模板，不能上传；更新时把同名本地版本排到最前面。
+      const target = (targetName ?? '').trim().toLowerCase();
+      const editable = packs
+        .filter(p => p.kind !== 'builtin')
+        .sort((a, b) => {
+          const aMatch = target.length > 0 && a.name.trim().toLowerCase() === target;
+          const bMatch = target.length > 0 && b.name.trim().toLowerCase() === target;
+          if (aMatch !== bMatch) return aMatch ? -1 : 1;
+          return a.name.localeCompare(b.name);
+        });
+      setLocalPacks(editable);
       setShowUpload(true);
     } catch (error) {
       setActionMsg({ kind: 'err', text: t('marketplace.errors.loadLocal', { err: errorMessage(error) }) });
@@ -206,14 +248,31 @@ export function Marketplace() {
     }
   };
 
+  const onDeleteMine = async (pack: MarketplaceMyPackItem) => {
+    if (pack.authorLogin !== currentLogin) return;
+    // eslint-disable-next-line no-alert
+    if (!window.confirm(`确认从风格市场撤回「${pack.name}」？本地副本不会被删除。`)) return;
+    try {
+      await marketplaceDelete(pack.id);
+      setActionMsg({ kind: 'ok', text: '已从风格市场撤回' });
+      setMyPacks(prev => prev.filter(p => p.id !== pack.id));
+      setItems(prev => prev.filter(p => p.id !== pack.id));
+      void refreshMyPacks();
+    } catch (error) {
+      setActionMsg({ kind: 'err', text: `撤回失败：${errorMessage(error)}` });
+    }
+  };
+
   const onUpload = async (packId: string) => {
     try {
-      await uploadMarketplacePack(packId);
+      await uploadMarketplacePack(packId, uploadOriginPackId);
       setActionMsg({ kind: 'ok', text: t('marketplace.uploaded') });
       setShowUpload(false);
+      setUploadOriginPackId(null);
+      setUploadTargetName(null);
       // 自传后 ~3s 让 agent 走完审核再回灌，让用户立刻看到自己的包出现在列表里。
-      window.setTimeout(() => { void refresh(); }, 1500);
-      window.setTimeout(() => { void refresh(); }, 5000);
+      window.setTimeout(() => { void refresh(); void refreshMyPacks(); }, 1500);
+      window.setTimeout(() => { void refresh(); void refreshMyPacks(); }, 5000);
     } catch (error) {
       setActionMsg({ kind: 'err', text: t('marketplace.errors.upload', { err: errorMessage(error) }) });
     }
@@ -224,20 +283,52 @@ export function Marketplace() {
       { id: 'popular', label: t('marketplace.sortPopular') },
       { id: 'new', label: t('marketplace.sortNew') },
       { id: 'liked', label: '我赞过的' },
-      { id: 'mine', label: '我发布的' },
     ],
     [t],
   );
 
+  const accountTitle = currentLogin ? `@${currentLogin}` : '未登录';
+  const isMineView = sort === 'mine';
+  const headerTitle = isMineView ? '我的发布' : t('marketplace.title');
+  const headerDesc = isMineView
+    ? '管理你发布到风格市场的风格包，可查看状态、发布第二代或下架。'
+    : t('marketplace.desc');
+  const searchPlaceholder = isMineView ? '搜索名称、标签' : t('marketplace.searchPlaceholder');
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, position: 'relative' }}>
       <PageHeader
-        kicker={t('marketplace.kicker')}
-        title={t('marketplace.title')}
-        desc={t('marketplace.desc')}
+        kicker={isMineView ? 'MY ACCOUNT' : t('marketplace.kicker')}
+        title={headerTitle}
+        desc={headerDesc}
         right={
-          <div style={{ display: 'flex', gap: 8 }}>
-            <Btn icon="refresh" variant="ghost" size="sm" onClick={() => void refresh()}>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+            <button
+              type="button"
+              onClick={() => setSort(isMineView ? 'popular' : 'mine')}
+              title={isMineView ? '返回风格包市场' : (currentLogin ? `查看 ${currentLogin} 的发布` : '先在 Settings → 风格市场 填写发布身份')}
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 8,
+                height: 30, padding: '0 12px', borderRadius: 9,
+                border: isMineView ? '0.5px solid var(--ol-blue)' : '0.5px solid var(--ol-line-strong)',
+                background: isMineView ? 'var(--ol-blue-soft)' : 'var(--ol-surface)',
+                color: isMineView ? 'var(--ol-blue)' : 'var(--ol-ink-2)',
+                fontSize: 12, fontWeight: 650,
+                cursor: 'pointer',
+                boxShadow: '0 1px 2px rgba(15,17,22,0.04)',
+              }}
+            >
+              <span style={{
+                width: 18, height: 18, borderRadius: 999,
+                display: 'inline-grid', placeItems: 'center',
+                background: isMineView ? 'rgba(37,99,235,0.14)' : 'rgba(15,23,42,0.06)',
+                fontSize: 10, fontWeight: 750,
+              }}>
+                {(currentLogin || '?').slice(0, 1).toUpperCase()}
+              </span>
+              <span>{isMineView ? '风格包市场' : '我的发布'}</span>
+            </button>
+            <Btn icon="refresh" variant="ghost" size="sm" onClick={() => isMineView ? void refreshMyPacks() : void refresh()}>
               {t('common.refresh')}
             </Btn>
             <span title={canUpload ? '' : t('marketplace.uploadDisabledHint')}>
@@ -279,7 +370,7 @@ export function Marketplace() {
           <Icon name="search" size={14} stroke="var(--ol-ink-3)" />
           <input
             type="search"
-            placeholder={t('marketplace.searchPlaceholder')}
+            placeholder={searchPlaceholder}
             value={query}
             onChange={e => setQuery(e.target.value)}
             style={{
@@ -293,6 +384,7 @@ export function Marketplace() {
           />
         </div>
         <div style={{ display: 'flex', gap: 4 }}>
+          {isMineView && <span style={{ alignSelf: 'center', marginRight: 2, fontSize: 11.5, color: 'var(--ol-ink-4)' }}>风格包浏览</span>}
           {sortPills.map(p => (
             <button
               key={p.id}
@@ -369,9 +461,73 @@ export function Marketplace() {
         </Card>
       )}
 
-      {/* 卡片列表 */}
+      {/* 卡片列表 / 我的发布 */}
       <div style={{ flex: 1, overflow: 'auto' }} className="ol-thinscroll">
-        {loading ? (
+        {sort === 'mine' ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <Card padding={14} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 12, fontWeight: 650, color: 'var(--ol-ink)' }}>我的账户 · {accountTitle}</div>
+                <div style={{ fontSize: 11.5, color: 'var(--ol-ink-3)', marginTop: 3 }}>
+                  {currentLogin ? `已发布 ${visibleMyPacks.length} 个风格包，可按名称或标签搜索。` : '先在 Settings → 风格市场 填写发布身份。'}
+                </div>
+              </div>
+              <Btn icon="refresh" variant="ghost" size="sm" onClick={() => void refreshMyPacks()} disabled={!currentLogin}>
+                {t('common.refresh')}
+              </Btn>
+            </Card>
+
+            {visibleMyPacks.length === 0 ? (
+              <Card padding={28} style={{ textAlign: 'center' }}>
+                <div style={{ fontSize: 13, color: 'var(--ol-ink-3)', marginBottom: 6 }}>你还没有发布过风格包</div>
+                <div style={{ fontSize: 11, color: 'var(--ol-ink-4)' }}>在「风格」页面编辑后点「发布到风格市场」，或点击右上角上传本地风格包。</div>
+              </Card>
+            ) : (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 12 }}>
+                {visibleMyPacks.map(pack => (
+                  <div
+                    key={pack.id}
+                    style={{
+                      padding: 14,
+                      borderRadius: 12,
+                      border: '0.5px solid var(--ol-line-strong)',
+                      background: 'var(--ol-surface)',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 8,
+                    }}
+                  >
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontSize: 14, fontWeight: 650, color: 'var(--ol-ink)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{pack.name}</div>
+                        <div style={{ fontSize: 11, color: 'var(--ol-ink-4)', marginTop: 3 }}>v{pack.version} · {new Date(pack.updatedAt).toLocaleDateString()}</div>
+                      </div>
+                      <Pill size="sm" tone={pack.state === 'approved' ? 'ok' : 'outline'} style={pack.state === 'rejected' || pack.state === 'withdrawn' ? { color: '#ef4444', borderColor: 'rgba(239,68,68,0.28)' } : undefined}>{statusLabel(pack.state)}</Pill>
+                    </div>
+                    <div style={{ fontSize: 12, color: 'var(--ol-ink-3)', lineHeight: 1.5, minHeight: 36 }}>{pack.description || t('marketplace.noDescription')}</div>
+                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                      <Pill size="sm" tone="outline">{pack.baseMode}</Pill>
+                      {pack.tags.slice(0, 2).map(tag => <Pill key={tag} size="sm" tone="default">{tag}</Pill>)}
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginTop: 'auto' }}>
+                      <span style={{ fontSize: 11, color: 'var(--ol-ink-4)' }}>★ {pack.likeCount} · ↓ {pack.downloadCount}</span>
+                      <div style={{ display: 'flex', gap: 6 }}>
+                        <Btn variant="ghost" size="sm" onClick={() => void openUploadPicker(pack.id, pack.name)} disabled={!canUpload}>
+                          更新
+                        </Btn>
+                        {pack.state !== 'withdrawn' && (
+                          <Btn variant="ghost" size="sm" onClick={() => void onDeleteMine(pack)}>
+                            <span style={{ color: '#ef4444' }}>下架</span>
+                          </Btn>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        ) : loading ? (
           <div style={{ padding: 32, textAlign: 'center', color: 'var(--ol-ink-4)', fontSize: 13 }}>
             {t('common.loading')}
           </div>
@@ -379,23 +535,15 @@ export function Marketplace() {
           <Card padding={28} style={{ textAlign: 'center' }}>
             <div style={{ fontSize: 13, color: 'var(--ol-ink-3)', marginBottom: 6 }}>
               {sort === 'liked' && '你还没有赞过任何风格包'}
-              {sort === 'mine' && '你还没有发布过风格包'}
               {(sort === 'popular' || sort === 'new') && t('marketplace.empty')}
             </div>
             <div style={{ fontSize: 11, color: 'var(--ol-ink-4)' }}>
-              {sort === 'liked' && '点开任一风格包，红心点亮后会出现在这里'}
-              {sort === 'mine' && '在「风格」页面编辑后点「发布到风格市场」'}
+              {sort === 'liked' && '点开任一风格包，红色星星点亮后会出现在这里'}
               {(sort === 'popular' || sort === 'new') && t('marketplace.emptyHint')}
             </div>
           </Card>
         ) : (
-          <div
-            style={{
-              display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))',
-              gap: 12,
-            }}
-          >
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 12 }}>
             {visibleItems.map(p => (
               <button
                 key={p.id}
@@ -414,22 +562,9 @@ export function Marketplace() {
               >
                 <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 6 }}>
                   <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--ol-ink-1)' }}>{p.name}</span>
-                  <span style={{ fontSize: 10, color: 'var(--ol-ink-4)', fontFamily: 'var(--ol-font-mono)' }}>
-                    v{p.version}
-                  </span>
+                  <span style={{ fontSize: 10, color: 'var(--ol-ink-4)', fontFamily: 'var(--ol-font-mono)' }}>v{p.version}</span>
                 </div>
-                <div
-                  style={{
-                    fontSize: 12,
-                    color: 'var(--ol-ink-3)',
-                    lineHeight: 1.5,
-                    display: '-webkit-box',
-                    WebkitLineClamp: 2,
-                    WebkitBoxOrient: 'vertical',
-                    overflow: 'hidden',
-                    minHeight: 36,
-                  }}
-                >
+                <div style={{ fontSize: 12, color: 'var(--ol-ink-3)', lineHeight: 1.5, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden', minHeight: 36 }}>
                   {p.description || t('marketplace.noDescription')}
                 </div>
                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 2 }}>
@@ -439,24 +574,12 @@ export function Marketplace() {
                       <Pill size="sm" tone="ok">衍生自 @{p.originAuthorLogin}</Pill>
                     </span>
                   )}
-                  {p.tags.slice(0, 2).map(tag => (
-                    <Pill key={tag} size="sm" tone="default">{tag}</Pill>
-                  ))}
+                  {p.tags.slice(0, 2).map(tag => <Pill key={tag} size="sm" tone="default">{tag}</Pill>)}
                 </div>
-                <div
-                  style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    fontSize: 11,
-                    color: 'var(--ol-ink-4)',
-                    marginTop: 4,
-                  }}
-                >
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: 'var(--ol-ink-4)', marginTop: 4 }}>
                   <span style={{ fontWeight: 500, color: 'var(--ol-ink-3)' }}>@{p.authorLogin}</span>
                   <span>
-                    <span style={{ color: likedIds.has(p.id) ? '#ef4444' : 'inherit' }}>
-                      {likedIds.has(p.id) ? '♥' : '♡'}
-                    </span>
+                    <span style={{ color: likedIds.has(p.id) ? '#ef4444' : 'var(--ol-ink-4)' }}>{likedIds.has(p.id) ? '★' : '☆'}</span>
                     {' '}{p.likeCount} · ↓ {p.downloadCount}
                   </span>
                 </div>
@@ -490,8 +613,8 @@ export function Marketplace() {
               <div style={{ fontSize: 11, color: 'var(--ol-ink-4)', marginBottom: 12 }}>
                 <span style={{ fontWeight: 500, color: 'var(--ol-ink-3)' }}>@{detail.authorLogin}</span>
                 {' · '}
-                <span style={{ color: likedIds.has(detail.id) ? '#ef4444' : 'inherit' }}>
-                  {likedIds.has(detail.id) ? '♥' : '♡'}
+                <span style={{ color: likedIds.has(detail.id) ? '#ef4444' : 'var(--ol-ink-4)' }}>
+                  {likedIds.has(detail.id) ? '★' : '☆'}
                 </span>
                 {' '}{detail.likeCount}{' · ↓ '}{detail.downloadCount}
               </div>
@@ -529,17 +652,17 @@ export function Marketplace() {
                 <div style={{ display: 'flex', gap: 8 }}>
                   <Btn variant="ghost" size="sm" onClick={() => void onLike()}>
                     <span
-                      key={`heart-${detail.id}-${likedIds.has(detail.id) ? 'on' : 'off'}`}
-                      className="ol-heart-pop"
+                      key={`star-${detail.id}-${likedIds.has(detail.id) ? 'on' : 'off'}`}
+                      className="ol-star-pop"
                       style={{
                         color: likedIds.has(detail.id) ? '#ef4444' : 'inherit',
                         marginRight: 4,
                         display: 'inline-block',
                       }}
                     >
-                      {likedIds.has(detail.id) ? '♥' : '♡'}
+                      {likedIds.has(detail.id) ? '★' : '☆'}
                     </span>
-                    {likedIds.has(detail.id) ? '取消赞' : t('marketplace.likeBtn')}
+                    {detail.likeCount}
                   </Btn>
                   <Btn variant="ghost" size="sm" onClick={() => setSelectedId(null)}>
                     {t('common.cancel')}
@@ -556,7 +679,7 @@ export function Marketplace() {
                   60%  { transform: scale(.85); }
                   100% { transform: scale(1); }
                 }
-                .ol-heart-pop { animation: ol-heart-pop-keyframes .32s var(--ol-motion-spring, cubic-bezier(.34,1.56,.64,1)); }
+                .ol-star-pop { animation: ol-heart-pop-keyframes .32s var(--ol-motion-spring, cubic-bezier(.34,1.56,.64,1)); }
               `}</style>
             </>
           )}
@@ -565,10 +688,12 @@ export function Marketplace() {
 
       {/* 上传选包器 */}
       {showUpload && (
-        <Modal onClose={() => setShowUpload(false)}>
-          <h2 style={{ margin: '0 0 12px', fontSize: 16, fontWeight: 650 }}>{t('marketplace.uploadTitle')}</h2>
+        <Modal onClose={() => { setShowUpload(false); setUploadOriginPackId(null); setUploadTargetName(null); }}>
+          <h2 style={{ margin: '0 0 12px', fontSize: 16, fontWeight: 650 }}>
+            {uploadOriginPackId ? `更新「${uploadTargetName ?? '风格包'}」` : t('marketplace.uploadTitle')}
+          </h2>
           <div style={{ fontSize: 12, color: 'var(--ol-ink-3)', marginBottom: 12 }}>
-            {t('marketplace.uploadHint', { login: prefs?.marketplaceDevLogin ?? '' })}
+            {uploadOriginPackId ? '请选择本地对应的新版本风格包；同名本地包会排在最上面。' : t('marketplace.uploadHint', { login: prefs?.marketplaceDevLogin ?? '' })}
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 360, overflow: 'auto' }}>
             {localPacks.length === 0 ? (
@@ -576,29 +701,35 @@ export function Marketplace() {
                 {t('marketplace.uploadNoLocal')}
               </div>
             ) : (
-              localPacks.map(p => (
-                <button
-                  key={p.id}
-                  onClick={() => void onUpload(p.id)}
-                  style={{
-                    textAlign: 'left',
-                    padding: 10,
-                    border: '0.5px solid var(--ol-line-strong)',
-                    borderRadius: 8,
-                    background: 'var(--ol-surface)',
-                    cursor: 'pointer',
-                  }}
-                >
-                  <div style={{ fontSize: 13, fontWeight: 600 }}>{p.name}</div>
-                  <div style={{ fontSize: 11, color: 'var(--ol-ink-4)', marginTop: 2 }}>
-                    {p.description || t('marketplace.noDescription')}
-                  </div>
-                </button>
-              ))
+              localPacks.map(p => {
+                const recommended = !!uploadTargetName && p.name.trim().toLowerCase() === uploadTargetName.trim().toLowerCase();
+                return (
+                  <button
+                    key={p.id}
+                    onClick={() => void onUpload(p.id)}
+                    style={{
+                      textAlign: 'left',
+                      padding: 10,
+                      border: recommended ? '0.5px solid var(--ol-blue)' : '0.5px solid var(--ol-line-strong)',
+                      borderRadius: 8,
+                      background: recommended ? 'var(--ol-blue-soft)' : 'var(--ol-surface)',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'space-between' }}>
+                      <div style={{ fontSize: 13, fontWeight: 600 }}>{p.name}</div>
+                      {recommended && <Pill size="sm" tone="blue">建议更新</Pill>}
+                    </div>
+                    <div style={{ fontSize: 11, color: 'var(--ol-ink-4)', marginTop: 2 }}>
+                      {p.description || t('marketplace.noDescription')}
+                    </div>
+                  </button>
+                );
+              })
             )}
           </div>
           <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 14 }}>
-            <Btn variant="ghost" size="sm" onClick={() => setShowUpload(false)}>
+            <Btn variant="ghost" size="sm" onClick={() => { setShowUpload(false); setUploadOriginPackId(null); setUploadTargetName(null); }}>
               {t('common.cancel')}
             </Btn>
           </div>
@@ -639,6 +770,17 @@ function Modal({ children, onClose }: { children: React.ReactNode; onClose: () =
       </div>
     </div>
   );
+}
+
+function statusLabel(state: string): string {
+  switch (state) {
+    case 'pending': return '审核中';
+    case 'approved': return '已上架';
+    case 'rejected': return '未通过';
+    case 'withdrawn': return '已下架';
+    case 'superseded': return '已被新版替换';
+    default: return state || '未知';
+  }
 }
 
 function errorMessage(error: unknown): string {

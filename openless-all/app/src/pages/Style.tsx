@@ -134,6 +134,7 @@ export function Style() {
     exportZip: isEnglish ? 'Export ZIP' : '导出 ZIP',
     exportShort: isEnglish ? 'Export' : '导出',
     publishMarketplace: isEnglish ? 'Publish to Marketplace' : '发布到风格市场',
+    updateMarketplace: isEnglish ? 'Update Marketplace version' : '更新到风格市场新版本',
     publishDisabledHint: isEnglish
       ? 'Configure your GitHub login in Settings → Marketplace first'
       : '请先在 设置 → 风格市场 配置 GitHub 用户名',
@@ -643,23 +644,18 @@ export function Style() {
         title={copy.title}
         desc={copy.desc}
         titleRight={(
-          // 风格市场暂时未开放（云端服务尚未上线）—— 入口保留可见但灰色 + 点击 toast 提示。
-          // 真正功能（Marketplace 组件 / IPC / backend client）保留，等云端就绪可一行恢复 onClick。
           <button
             type="button"
-            onClick={() => showSaveStatus(
-              'failed',
-              isEnglish ? 'Style Marketplace is not yet available' : '风格市场暂时未开放',
-            )}
-            title={isEnglish ? 'Style Marketplace is not yet available' : '风格市场暂时未开放'}
+            onClick={() => setMarketplaceOpen(true)}
+            title={isEnglish ? 'Open Style Marketplace' : '打开风格市场'}
             style={{
               display: 'inline-flex', alignItems: 'center', gap: 6,
               padding: '6px 12px', borderRadius: 999,
               border: '0.5px solid var(--ol-line)',
-              background: 'rgba(120,120,128,0.10)',
-              color: 'var(--ol-ink-4)',
+              background: 'var(--ol-surface)',
+              color: 'var(--ol-blue)',
               fontSize: 12, fontWeight: 500,
-              cursor: 'default',
+              cursor: 'pointer',
               transition: 'background 0.16s var(--ol-motion-quick)',
             }}
           >
@@ -1015,7 +1011,7 @@ export function Style() {
                           onClick={() => void handlePublishToMarketplace()}
                           disabled={!canPublish || draft?.kind === 'builtin' || busy === 'exporting'}
                         >
-                          {copy.publishMarketplace}
+                          {draft?.originPackId ? copy.updateMarketplace : copy.publishMarketplace}
                         </Btn>
                       </span>
                       <Btn

@@ -2315,6 +2315,8 @@ pub struct MarketplaceListItem {
     pub download_count: i64,
     pub published_at: String,
     pub updated_at: String,
+    pub origin_pack_id: Option<String>,
+    pub origin_author_login: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
@@ -2323,6 +2325,14 @@ pub struct MarketplaceDetail {
     #[serde(flatten)]
     pub summary: MarketplaceListItem,
     pub prompt: String,
+    pub state: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketplaceMyPackItem {
+    #[serde(flatten)]
+    pub summary: MarketplaceListItem,
     pub state: String,
 }
 
@@ -2336,12 +2346,7 @@ fn marketplace_url_from_prefs(prefs: &UserPreferences) -> String {
 }
 
 fn marketplace_dev_user(prefs: &UserPreferences) -> String {
-    let login = prefs.marketplace_dev_login.trim();
-    if login.is_empty() {
-        "anonymous".to_string()
-    } else {
-        login.to_string()
-    }
+    prefs.marketplace_dev_login.trim().to_string()
 }
 
 #[tauri::command]
@@ -2478,6 +2483,7 @@ pub async fn marketplace_install(
 pub async fn marketplace_upload(
     coord: CoordinatorState<'_>,
     pack_id: String,
+    origin_pack_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
     // 本地 pack id 形态：`builtin.light` / 用户 slug / Uuid。用 local 白名单挡 `..` / `/` / `\`。
     if !is_valid_local_pack_id(&pack_id) {
@@ -2486,6 +2492,9 @@ pub async fn marketplace_upload(
     let prefs = coord.prefs().get();
     let base = marketplace_url_from_prefs(&prefs);
     let dev_user = marketplace_dev_user(&prefs);
+    if dev_user.is_empty() {
+        return Err("未登录：先在 Settings 填发布者名字".into());
+    }
 
     // 拉本地 pack 拿 origin_pack_id —— 装过的 pack 这里有值，
     // backend 据此判同作者就 supersede 原行（新版本），他人就 derivative（独立新 row）。
@@ -2493,7 +2502,9 @@ pub async fn marketplace_upload(
         .style_packs()
         .get(&pack_id)
         .map_err(|e| format!("local pack not found: {e}"))?;
-    let origin_pack_id = local_pack.origin_pack_id.clone();
+    let origin_pack_id = origin_pack_id
+        .filter(|id| is_valid_session_id(id))
+        .or_else(|| local_pack.origin_pack_id.clone());
 
     // 先 export 本地 pack → 临时 ZIP
     let tmp = std::env::temp_dir().join(format!("openless-marketplace-upload-{pack_id}.zip"));
@@ -2561,6 +2572,9 @@ pub async fn marketplace_like(
     let prefs = coord.prefs().get();
     let base = marketplace_url_from_prefs(&prefs);
     let dev_user = marketplace_dev_user(&prefs);
+    if dev_user.is_empty() {
+        return Err("未登录：先在 Settings 填发布者名字".into());
+    }
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("{base}/packs/{pack_id}/like"))
@@ -2632,6 +2646,33 @@ pub async fn marketplace_my_likes(coord: CoordinatorState<'_>) -> Result<Vec<Str
     resp.json::<Vec<String>>()
         .await
         .map_err(|e| format!("parse my-likes failed: {e}"))
+}
+
+/// 拉当前用户发布过的 pack（含审核中/已通过/已拒绝/已撤回），用于「我的发布」页面。
+#[tauri::command]
+pub async fn marketplace_my_packs(
+    coord: CoordinatorState<'_>,
+) -> Result<Vec<MarketplaceMyPackItem>, String> {
+    let prefs = coord.prefs().get();
+    let base = marketplace_url_from_prefs(&prefs);
+    let dev_user = marketplace_dev_user(&prefs);
+    if dev_user.is_empty() {
+        return Ok(Vec::new());
+    }
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{base}/me/packs"))
+        .header("X-Dev-User", dev_user)
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| format!("my-packs request failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("my-packs HTTP {}", resp.status()));
+    }
+    resp.json::<Vec<MarketplaceMyPackItem>>()
+        .await
+        .map_err(|e| format!("parse my-packs failed: {e}"))
 }
 
 #[cfg(test)]

@@ -2676,67 +2676,61 @@ mod tests {
     }
 
     #[test]
-    fn structured_prompt_includes_dense_github_request_example() {
+    fn structured_prompt_prioritizes_ai_coding_terms_and_compact_structure() {
         let prompt = prompts::system_prompt(PolishMode::Structured);
 
-        // 任务段：必须教会模型保留口语引子、按主题归类、用 (a) 子项、自然尾巴
-        assert!(prompt.contains("# 保留口语引子并润色成自然首行"));
-        assert!(prompt.contains("# 尾巴查询用自然收尾句"));
-        assert!(prompt.contains("\"(a)\" \"(b)\" \"(c)\""));
-        assert!(prompt.contains("代码与功能 / 文档与配置 / 界面与交互 / 项目清理"));
-        assert!(prompt.contains("GitHub、README、issue/issues"));
+        // 清晰结构现在优先服务 AI 编程协作：场景、格式、术语三件事必须靠前讲清楚。
+        assert!(prompt.contains("# 任务（清晰结构 · AI 编程协作）"));
+        assert!(prompt.contains("# 强制结构化触发（最高优先级）"));
+        assert!(prompt.contains("长口述不输出成一整段"));
+        assert!(prompt.contains("产品 UI / 功能反馈"));
+        assert!(prompt.contains("操作指引 / 接入教程"));
+        assert!(prompt.contains("编程任务 / 排障清单"));
+        assert!(prompt.contains("AI 模型 / 工具资讯"));
+        assert!(prompt.contains("顶层主题用 `1.` `2.` `3.` 连续编号"));
+        assert!(prompt.contains("每个主题下都从 `(a)` 重新开始"));
 
-        // 示例 1：双层格式必须用 (a) (b)，且带首行过渡。
-        assert!(prompt.contains("发布前需要完成以下事项："));
-        assert!(prompt.contains("(a) 登录页。"));
+        // 防回归：模型名、字段名、布尔值和版本号必须被显式保护。
+        assert!(prompt.contains("Claude"));
+        assert!(prompt.contains("Gemini"));
+        assert!(prompt.contains("Cappuccino"));
+        assert!(prompt.contains("Coder"));
+        assert!(prompt.contains("LongCat"));
+        assert!(prompt.contains("Secret Key"));
+        assert!(prompt.contains("true / false / null"));
+        assert!(prompt.contains("不要把 GPT 5.5 写成 GPT 5"));
 
-        // 示例 2：必须呈现"引子润色 + 4 主题归类 + 自然尾巴"的目标输出。
-        assert!(prompt.contains("帮忙给 GitHub 提个请求，主要包含以下内容："));
-        assert!(prompt.contains("1. 代码与功能优化"));
-        assert!(prompt.contains("(a) 上传最新代码，修复页面闪退的 bug"));
-        assert!(prompt.contains("4. 项目清理与合并"));
-        assert!(prompt.contains("最后再检查一下还有哪些 issue 需要处理。"));
-
-        // 防回归：旧版"另外："标签写法不能再出现在示例输出里。
-        assert!(!prompt.contains("另外：检查一下当前还有哪些 issues"));
+        // 示例要短，但必须锚定 AI 编程任务和 AI 模型资讯两类高频输入。
+        assert!(prompt.contains("帮忙给 Codex 提个任务，主要包含以下内容："));
+        assert!(prompt.contains("确认 Secret Key 不被硬编码到代码里"));
+        assert!(prompt.contains("Gemini 3.2 更名为 Gemini 3.5"));
+        assert!(prompt.contains("remote control 改为 true"));
     }
 
     #[test]
-    fn structured_prompt_forces_regrouping_even_for_already_structured_input() {
-        // 回归测试 issue #305：用户输入工作日报（已半结构化、标点规范），
-        // 旧 prompt 让 LLM 判定为"已经完整不需要改"，原样 passthrough。
-        // 新 prompt 必须明确：原文是否已有结构 ≠ 不用改的依据；
-        // 事项 ≥ 3 条都要重新归类成双层格式。
+    fn structured_prompt_keeps_regrouping_and_no_loss_guards() {
         let prompt = prompts::system_prompt(PolishMode::Structured);
 
-        // 明确"已结构化 ≠ 不用改"的前提
         assert!(
-            prompt.contains("不是\u{201C}\u{5DF2}\u{7ECF}\u{6574}\u{7406}\u{597D}\u{4E0D}\u{7528}\u{6539}\u{201D}的判断依据"),
-            "Structured prompt 缺少\"已结构化≠不用改\"的明确否定"
+            prompt.contains("事项不丢失"),
+            "Structured prompt 必须明确防止事项丢失"
         );
         assert!(
-            prompt.contains("照抄原结构 = 失败"),
-            "Structured prompt 缺少照抄原结构的失败判定"
-        );
-
-        // 阈值改为 ≥3
-        assert!(
-            prompt.contains("事项 \u{2265}3 条"),
-            "Structured prompt 必须把重组阈值降到 3"
+            prompt.contains("事项 ≤ 2 条且原文很短"),
+            "Structured prompt 必须只允许短输入降级为段落"
         );
         assert!(
-            prompt.contains("即使原文已经写成"),
-            "Structured prompt 必须显式说明已编号的输入也要重新归类"
+            prompt.contains("长口述不能用这一条降级"),
+            "Structured prompt 必须防止长口述降级成一大段"
         );
-
-        // 新增工作日报示例 3
         assert!(
-            prompt.contains("# 示例 3（已半结构化的工作日报，仍要重组）"),
-            "Structured prompt 缺少工作日报示例（#305）"
+            prompt.contains("不硬塞层级"),
+            "Structured prompt 必须避免短输入过度结构化"
         );
-        assert!(prompt.contains("今天的工作小结如下："));
-        assert!(prompt.contains("1. 客户对接"));
-        assert!(prompt.contains("(a) 召开对齐会"));
+        assert!(
+            prompt.contains("没有编造原文不存在的实现方案"),
+            "Structured prompt 必须禁止替用户编造实现方案"
+        );
     }
 
     #[test]

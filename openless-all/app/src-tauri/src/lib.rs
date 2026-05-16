@@ -290,6 +290,7 @@ pub fn run() {
             commands::marketplace_upload,
             commands::marketplace_like,
             commands::marketplace_my_likes,
+            commands::marketplace_my_packs,
             commands::marketplace_delete,
             commands::list_vocab,
             commands::add_vocab,
