@@ -1590,10 +1590,6 @@ fn is_builtin_translation_shift(binding: &crate::types::ShortcutBinding) -> bool
 fn sync_custom_dictation_to_plugin(inner: &Arc<Inner>) {
     let prefs = inner.prefs.get();
     let dictation = &prefs.dictation_hotkey;
-    // 只有 Custom 组合键才需要走插件同步
-    if dictation.modifiers.is_empty() {
-        return;
-    }
     let key_string = crate::linux_fcitx::binding_to_fcitx_key_string(dictation);
     if key_string.is_empty() {
         return;
