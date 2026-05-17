@@ -12,7 +12,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
-# Compile antirez/qwen-asr C sources for the local ASR engine on macOS.
+# Compile vendored Open-Less/qwen-asr C sources for the local ASR engine on macOS.
 cc = "1.1"
 
 [dependencies]
@@ -74,7 +74,7 @@ core-graphics = "0.24"
 objc2 = "0.5"
 objc2-foundation = "0.2"
 objc2-app-kit = "0.2"
-# antirez/qwen-asr 用 malloc 分配返回字符串，必须用 C `free()` 释放。
+# qwen-asr 用 malloc 分配返回字符串，必须用 C `free()` 释放。
 libc = "0.2"
 
 [target.'cfg(target_os = "windows")'.dependencies]

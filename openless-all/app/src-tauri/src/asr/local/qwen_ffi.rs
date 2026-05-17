@@ -1,4 +1,4 @@
-//! 对 antirez/qwen-asr 公共 C API 的最小 FFI 声明。
+//! 对 vendored Open-Less/qwen-asr 公共 C API 的最小 FFI 声明。
 //!
 //! 头文件见 `vendor/qwen-asr/qwen_asr.h`。这里**不**复刻 `qwen_ctx_t`
 //! 内部布局——保持不透明指针即可，避免 pthread/对齐相关的脆弱假设。

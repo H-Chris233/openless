@@ -14,7 +14,7 @@ export interface LocalAsrSettings {
   providerId: string;
   activeModel: string;
   mirror: string;
-  /** macOS 才编入 antirez/qwen-asr 引擎；Win 端 UI 据此把"开始"按钮灰掉。 */
+  /** macOS 才编入 vendored Open-Less/qwen-asr 引擎；Win 端 UI 据此把"开始"按钮灰掉。 */
   engineAvailable: boolean;
 }
 

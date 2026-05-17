@@ -5,7 +5,7 @@ fn main() {
     tauri_build::build();
 }
 
-/// 编译 antirez/qwen-asr 的 C 源（仅 macOS）。
+/// 编译 vendored Open-Less/qwen-asr 的 C 源（仅 macOS）。
 ///
 /// 上游 Makefile `make blas` 等价配置：BLAS 加速通过 Accelerate framework，
 /// `USE_BLAS` + `ACCELERATE_NEW_LAPACK` 是必要宏。
@@ -34,7 +34,7 @@ fn build_qwen_asr_macos() {
         .define("ACCELERATE_NEW_LAPACK", None)
         .flag("-O3")
         .flag("-ffast-math")
-        // 上游开 `-Wall -Wextra`；我们把 antirez 的代码当三方依赖，把无关警告压成静默
+        // 上游开 `-Wall -Wextra`；我们把 qwen-asr 的代码当三方依赖，把无关警告压成静默
         // 避免 build log 噪音淹没我们自己的告警。
         .flag("-Wno-unused-parameter")
         .flag("-Wno-unused-variable")

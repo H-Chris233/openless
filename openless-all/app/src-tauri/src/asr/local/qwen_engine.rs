@@ -1,4 +1,4 @@
-//! antirez/qwen-asr 的安全 Rust 包装。
+//! vendored Open-Less/qwen-asr 的安全 Rust 包装。
 //!
 //! 当前只暴露**最小可用面**：`load` / `transcribe_audio` / `transcribe_stream`
 //! + token 回调。后续接 coordinator 时再扩 prompt/language 设置。
@@ -35,7 +35,7 @@ unsafe impl Sync for QwenAsrEngine {}
 
 impl QwenAsrEngine {
     /// 从模型目录加载（目录里需含 `config.json` / `model.safetensors*` /
-    /// `vocab.json` / `merges.txt`，结构见 antirez `download_model.sh`）。
+    /// `vocab.json` / `merges.txt`，结构见 qwen-asr `download_model.sh`）。
     pub fn load(model_dir: &Path) -> Result<Self> {
         let dir_str = model_dir
             .to_str()

@@ -59,7 +59,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           # vendor/qwen-asr 是 macOS 上 build.rs 必须的 git submodule（cc-rs 编译
-          # antirez/qwen-asr 的 C 源），不拉就会在 mac 端 cargo build 阶段挂掉。
+          # Open-Less/qwen-asr fork 的 C 源），不拉就会在 mac 端 cargo build 阶段挂掉。
           submodules: recursive
 
       - uses: actions/setup-node@v4
