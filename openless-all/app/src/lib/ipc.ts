@@ -11,6 +11,7 @@ import type {
   HotkeyCapability,
   MarketplaceDetail,
   MarketplaceListItem,
+  MarketplaceMyPackItem,
   HotkeyStatus,
   MicrophoneDevice,
   PermissionStatus,
@@ -104,7 +105,7 @@ let mockSettings: UserPreferences = {
   historyMaxEntries: null,
   recordAudioForDebug: false,
   audioRecordingMaxEntries: null,
-  marketplaceBaseUrl: '',
+  marketplaceBaseUrl: 'https://apic.openless.top',
   marketplaceDevLogin: '',
 };
 
@@ -137,19 +138,16 @@ const mockFullStylePrompts: StyleSystemPrompts = {
 # 输出
 输出一段可直接发送的自然文字。`,
   structured: `# 角色
-语音输入整理器。把多事项口述整理成层次清楚、可复制执行的结构化文本。
+语音输入整理器。把 AI 编程协作、技术排障和模型资讯口述整理成结构清楚、术语准确的文本。
 
-# 任务（清晰结构）
-识别主题边界，把零散事项按语义归类。事项较多时优先输出两层结构，保证读者一眼能看清主次。
+# 任务（清晰结构 · AI 编程协作）
+优先修正 ASR 造成的技术词、模型名、字段名错误；多事项按主题输出双层 list，操作指引输出连续步骤。
 
-# 通用规则
-1) 不补充用户没说过的事实或行动项。
-2) 原文里已有编号或换行，不代表可以原样照抄；需要按语义重新分组。
-3) 专有名词、命令、路径、URL、数字和单位保持准确。
-4) 只输出最终结果，不要解释你的整理过程。
+# 术语
+Token、Secret Key、Access Token、API、App ID、Claude、Gemini、Cappuccino、Coder、LongCat、Codex、MCP、SSE、PR、CI、ASR、LLM、SOTA、FP8。保留命令、路径、环境变量、URL、true / false / null 和模型版本号。
 
 # 输出
-需要结构化时，直接从标题、编号或列表开始。`,
+直接输出最终正文。顶层用 1./2./3.，子项用缩进 3 个空格的 (a)(b)(c)。不加解释。`,
   formal: `# 角色
 语音输入整理器。把口述整理成适合邮件、同步和正式沟通的专业表达。
 
@@ -192,9 +190,9 @@ const mockBuiltinExamples: Record<PolishMode, StylePackExample[]> = {
   ],
   structured: [
     {
-      title: '任务整理',
-      input: '这周要做三件事一个是把登录页 bug 修掉第二个是补 README 第三个是把发版脚本再走一遍',
-      output: '这周要完成以下三件事：\n1. 修复登录页相关 bug。\n2. 补充 README 文档。\n3. 重新走一遍发版脚本。',
+      title: 'AI 编程任务',
+      input: '帮我给 codex 提个任务先把登录页 bug 修掉然后补一下 README 里面的环境变量说明还有那个西克瑞特 key 别写死到代码里',
+      output: '帮忙给 Codex 提个任务，主要包含以下内容：\n\n1. 登录页修复\n   (a) 修复登录页相关 bug。\n2. 文档与配置\n   (a) 补充 README 中的环境变量说明。\n   (b) 确认 Secret Key 不被硬编码到代码里。',
     },
   ],
   formal: [
@@ -778,9 +776,9 @@ export function resetBuiltinStylePack(id: string): Promise<StylePack> {
         'builtin',
         'structured',
         '清晰结构',
-        '适合多事项和多主题口述，自动整理为层次清楚的结构化输出。',
-        '把口述整理成结构清楚的文本，必要时按主题分组或分点输出。',
-        ['结构化', '条理'],
+        '面向 AI 编程协作、技术排障和模型资讯，优先保证术语与结构准确。',
+        mockDefaultStyleSystemPrompts.structured,
+        ['AI 编程', '技术结构化'],
       ),
       'builtin.formal': makeMockStylePack(
         'builtin.formal',
@@ -995,8 +993,9 @@ export function installMarketplacePack(packId: string): Promise<StylePack> {
 
 export function uploadMarketplacePack(
   packId: string,
+  originPackId?: string | null,
 ): Promise<{ id: string; state: string; message: string }> {
-  return invokeOrMock('marketplace_upload', { packId }, () => ({
+  return invokeOrMock('marketplace_upload', { packId, originPackId: originPackId ?? null }, () => ({
     id: 'mock-uploaded',
     state: 'pending',
     message: 'Mock 上传成功（vite dev）',
@@ -1017,7 +1016,188 @@ export function marketplaceMyLikes(): Promise<string[]> {
   return invokeOrMock<string[]>('marketplace_my_likes', undefined, () => []);
 }
 
+/** 拉当前登录用户发布过的所有 pack（含审核中/已撤回），用于「我的发布」。 */
+export function marketplaceMyPacks(): Promise<MarketplaceMyPackItem[]> {
+  return invokeOrMock<MarketplaceMyPackItem[]>('marketplace_my_packs', undefined, () => []);
+}
+
 /** 撤回自己发布的 pack（后端软删 state='withdrawn'）。仅允许原作者。 */
 export function marketplaceDelete(packId: string): Promise<void> {
   return invokeOrMock<void>('marketplace_delete', { packId }, () => undefined);
+}
+
+// ─────────────────────── GitHub OAuth Device Flow (Phase 1) ───────────────
+// 客户端直连 GitHub OAuth Device Flow 拿 login，自动写进 prefs.marketplaceDevLogin。
+// marketplace backend 不动（继续走 X-Dev-User header；Phase 2 才接 JWT 验证）。
+//
+// 后端 Rust 实现：commands.rs:github_device_flow_start / github_device_flow_poll
+// 需要预先配置 GITHUB_OAUTH_CLIENT_ID（OAuth App client_id，非敏感，可硬编码）。
+
+export interface GithubDeviceStartResponse {
+  deviceCode: string;
+  userCode: string;
+  verificationUri: string;
+  interval: number;
+  expiresIn: number;
+}
+
+export type GithubDevicePollResult =
+  | { kind: 'authorized'; login: string }
+  | { kind: 'pending' }
+  | { kind: 'slowDown' }
+  | { kind: 'error'; message: string };
+
+export function githubDeviceFlowStart(): Promise<GithubDeviceStartResponse> {
+  return invokeOrMock<GithubDeviceStartResponse>('github_device_flow_start', undefined, () => ({
+    deviceCode: 'mock-device-code-xxxxxxxx',
+    userCode: 'MOCK-CODE',
+    verificationUri: 'https://github.com/login/device',
+    interval: 5,
+    expiresIn: 900,
+  }));
+}
+
+export function githubDeviceFlowPoll(deviceCode: string): Promise<GithubDevicePollResult> {
+  return invokeOrMock<GithubDevicePollResult>('github_device_flow_poll', { deviceCode }, () => ({
+    kind: 'authorized' as const,
+    login: 'mock-user',
+  }));
+}
+
+// ─────────────────────── Marketplace 差量缓存（localStorage） ────────────────
+//
+// 设计：两段式分发。
+// 1) List = 轻量元数据（id + version + updatedAt + 名称 / 计数 / tag），无 prompt 正文。
+//    本机持久化，重开 marketplace 秒呈现；后台 refresh 校准。
+// 2) Detail = 含 prompt 正文，按 (id, version, updatedAt) 三元组缓存。
+//    三元组等价于「内容版本签名」—— version+updatedAt 任一变化 = 内容变了 → 必须重拉。
+//    命中 = 复用本机，不发请求；未命中 = fetchMarketplaceDetail 再写回。
+// 3) 当 list 里某 pack 消失（被下架 / 撤回）或它的版本签名变了 → 驱逐对应 detail 缓存。
+//
+// 安全审查（防止恶意服务端 / 缓存投毒 / OOM）：
+// - ID 必须是 UUID v4（backend 已强制此约束；客户端镜像校验防 key 注入）。
+// - detail.id 必须与请求 packId 一致（防服务端返回错位内容）。
+// - 单条 detail 的 prompt 长度上限 200KB（防 OOM via 巨型注入）。
+// - detail 缓存条数上限 64，按 LRU 淘汰（防 localStorage 配额耗尽）。
+// - List items 在读取 / 写入时按合法 ID 过滤，丢弃格式异常项。
+
+const MARKETPLACE_LIST_CACHE_KEY = 'ol-marketplace-list-cache-v2';
+const MARKETPLACE_DETAIL_CACHE_KEY = 'ol-marketplace-detail-cache-v2';
+const MARKETPLACE_LIST_TTL_MS = 24 * 60 * 60 * 1000;          // 24h —— list 本来变动稀，refresh 也会自动覆盖
+const MARKETPLACE_DETAIL_TTL_MS = 30 * 24 * 60 * 60 * 1000;   // 30 天 —— detail 已经按版本三元组锁定，TTL 只是兜底
+const MARKETPLACE_DETAIL_MAX_ENTRIES = 64;
+const MARKETPLACE_DETAIL_MAX_PROMPT_CHARS = 200_000;
+
+const PACK_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function isValidMarketplacePackId(id: unknown): id is string {
+  return typeof id === 'string' && PACK_ID_RE.test(id);
+}
+
+function detailCacheKey(id: string, version: string, updatedAt: string): string {
+  // version + updatedAt 任一字段为空也能拼出确定 key（refetch 会自然覆盖）。
+  return `${id}::${version ?? ''}::${updatedAt ?? ''}`;
+}
+
+export function readMarketplaceListCache(): MarketplaceListItem[] | null {
+  try {
+    const raw = localStorage.getItem(MARKETPLACE_LIST_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { items: MarketplaceListItem[]; ts: number };
+    if (!parsed || !Array.isArray(parsed.items)) return null;
+    if (Date.now() - parsed.ts > MARKETPLACE_LIST_TTL_MS) return null;
+    return parsed.items.filter(it => it && isValidMarketplacePackId(it.id));
+  } catch {
+    return null;
+  }
+}
+
+export function writeMarketplaceListCache(items: MarketplaceListItem[]): void {
+  try {
+    const sanitized = items.filter(it => it && isValidMarketplacePackId(it.id));
+    localStorage.setItem(
+      MARKETPLACE_LIST_CACHE_KEY,
+      JSON.stringify({ items: sanitized, ts: Date.now() }),
+    );
+    // 服务端最新视图里没有的 (id, version, updatedAt) 一律驱逐 ——
+    // 这是「云端哈希被移除时本机也移除」的执行点。
+    const keepKeys = new Set(
+      sanitized.map(it => detailCacheKey(it.id, it.version ?? '', it.updatedAt ?? '')),
+    );
+    pruneMarketplaceDetailCache(keepKeys);
+  } catch {
+    // quota exceeded / disabled — silent
+  }
+}
+
+type MarketplaceDetailCacheEntry = {
+  key: string;
+  detail: MarketplaceDetail;
+  ts: number;
+};
+
+function readMarketplaceDetailStore(): Record<string, MarketplaceDetailCacheEntry> {
+  try {
+    const raw = localStorage.getItem(MARKETPLACE_DETAIL_CACHE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, MarketplaceDetailCacheEntry> | null;
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeMarketplaceDetailStore(store: Record<string, MarketplaceDetailCacheEntry>): void {
+  try {
+    localStorage.setItem(MARKETPLACE_DETAIL_CACHE_KEY, JSON.stringify(store));
+  } catch {
+    // 配额耗尽 — 下次 read 时按 entries 数清理，命中失败会重新走网络。
+  }
+}
+
+export function readMarketplaceDetailCache(
+  packId: string,
+  version: string,
+  updatedAt: string,
+): MarketplaceDetail | null {
+  if (!isValidMarketplacePackId(packId)) return null;
+  const store = readMarketplaceDetailStore();
+  const entry = store[detailCacheKey(packId, version, updatedAt)];
+  if (!entry) return null;
+  if (Date.now() - entry.ts > MARKETPLACE_DETAIL_TTL_MS) return null;
+  if (!entry.detail || entry.detail.id !== packId) return null;
+  return entry.detail;
+}
+
+export function writeMarketplaceDetailCache(detail: MarketplaceDetail): void {
+  if (!isValidMarketplacePackId(detail.id)) return;
+  if (
+    typeof detail.prompt === 'string'
+    && detail.prompt.length > MARKETPLACE_DETAIL_MAX_PROMPT_CHARS
+  ) {
+    // 巨型 prompt 拒收 —— 防 OOM / 防服务端被攻陷后用大 payload 拖慢客户端。
+    return;
+  }
+  const store = readMarketplaceDetailStore();
+  const key = detailCacheKey(detail.id, detail.version ?? '', detail.updatedAt ?? '');
+  store[key] = { key, detail, ts: Date.now() };
+  // LRU: 旧的优先丢
+  const entries = Object.values(store).sort((a, b) => a.ts - b.ts);
+  while (entries.length > MARKETPLACE_DETAIL_MAX_ENTRIES) {
+    const oldest = entries.shift();
+    if (oldest) delete store[oldest.key];
+  }
+  writeMarketplaceDetailStore(store);
+}
+
+function pruneMarketplaceDetailCache(keepKeys: Set<string>): void {
+  const store = readMarketplaceDetailStore();
+  let changed = false;
+  for (const key of Object.keys(store)) {
+    if (!keepKeys.has(key)) {
+      delete store[key];
+      changed = true;
+    }
+  }
+  if (changed) writeMarketplaceDetailStore(store);
 }

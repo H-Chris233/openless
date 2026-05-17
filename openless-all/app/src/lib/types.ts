@@ -327,6 +327,10 @@ export interface MarketplaceDetail extends MarketplaceListItem {
   state: 'pending' | 'approved' | 'rejected';
 }
 
+export interface MarketplaceMyPackItem extends MarketplaceListItem {
+  state: 'pending' | 'approved' | 'rejected' | 'withdrawn' | 'superseded' | string;
+}
+
 export interface MicrophoneDevice {
   name: string;
   isDefault: boolean;

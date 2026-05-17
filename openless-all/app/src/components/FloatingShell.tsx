@@ -1,6 +1,6 @@
 // FloatingShell.tsx — frosted outer frame + raised inner console.
-// Sidebar lives INSIDE the console card. Footer icons sit on the frosted outer.
-// Settings is no longer a sidebar tab — it opens as a centered modal sheet.
+// Sidebar lives INSIDE the console card.
+// Settings opens as a centered modal sheet from the sidebar bottom entry.
 //
 // Ported verbatim from design_handoff_openless/variants.jsx::FloatingShell.
 
@@ -101,11 +101,19 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
   const navItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const [pillRect, setPillRect] = useState<{ top: number; height: number } | null>(null);
   useLayoutEffect(() => {
+    if (settingsOpen) {
+      setPillRect(null);
+      return;
+    }
     const idx = NAV.findIndex(n => n.id === currentTab);
+    if (idx < 0) {
+      setPillRect(null);
+      return;
+    }
     const el = navItemRefs.current[idx];
     if (!el) return;
     setPillRect({ top: el.offsetTop, height: el.offsetHeight });
-  }, [currentTab, NAV]);
+  }, [currentTab, settingsOpen, NAV]);
 
   useEffect(() => {
     let cancelled = false;
@@ -228,7 +236,7 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
               />
             )}
             {NAV.map((n, i) => {
-              const active = currentTab === n.id;
+              const active = !settingsOpen && currentTab === n.id;
               return (
                 <button
                   key={n.id}
@@ -256,6 +264,59 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
           </nav>
 
           <div style={{ flex: 1 }} />
+
+          {/* 底部两行：上行 = 版本 chip（含 BETA 标），下行 = 设置按钮。
+              单行布局在窄 sidebar 下会把「设置」挤成两行竖字 + 版本糊一起；
+              翻回两行同时把顺序反过来：设置真正落到最底，版本在它上面。 */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, paddingTop: 10 }}>
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                flexWrap: 'wrap',
+                padding: '0 10px',
+                fontFamily: 'var(--ol-font-sans)',
+                fontSize: 11,
+                color: 'var(--ol-ink-4)',
+              }}
+            >
+              {IS_BETA_BUILD && (
+                <span style={{
+                  display: 'inline-block',
+                  padding: '2px 8px',
+                  fontSize: 10,
+                  fontWeight: 600,
+                  letterSpacing: '0.04em',
+                  textTransform: 'uppercase',
+                  color: 'var(--ol-blue)',
+                  background: 'rgba(37,99,235,0.10)',
+                  borderRadius: 999,
+                }}>{t('shell.betaTag')}</span>
+              )}
+
+              <span>{t('shell.footer.version', { version: APP_VERSION_LABEL })}</span>
+            </div>
+
+            <button
+              onClick={() => openSettings()}
+              className={settingsOpen ? 'ol-nav-btn ol-nav-btn-active' : 'ol-nav-btn'}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 10,
+                padding: '7px 10px',
+                borderRadius: 8, border: 0,
+                background: settingsOpen ? 'var(--ol-surface)' : 'transparent',
+                boxShadow: settingsOpen ? '0 1px 2px rgba(0,0,0,.05), 0 0 0 0.5px rgba(0,0,0,.06)' : 'none',
+                fontFamily: 'inherit', fontSize: 13,
+                cursor: 'default',
+                transition: 'color 0.16s var(--ol-motion-quick), background 0.16s var(--ol-motion-quick)',
+                textAlign: 'left',
+              }}
+            >
+              <Icon name="settings" size={14} />
+              <span style={{ flex: 1 }}>{t('shell.footer.settings')}</span>
+            </button>
+          </div>
         </aside>
 
         {/* Main content — v1.3.1-8 用户希望"sidebar / main panel / caption 三处玻璃统一"。
@@ -316,43 +377,6 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
               )}
             </div>
           </main>
-        </div>
-      </div>
-
-      {/* Footer — 透明地坐在外层磨砂底板上，跟 sidebar 同一片磨砂玻璃 */}
-      <div
-        style={{
-          flexShrink: 0,
-          height: 44,
-          display: 'flex', alignItems: 'center',
-          padding: '0 24px',
-          gap: 4,
-          fontSize: 11,
-          color: 'var(--ol-ink-4)',
-          position: 'relative',
-          zIndex: 2,
-        }}>
-
-        <div style={{ flex: 1 }} />
-
-        {IS_BETA_BUILD && (
-          <span style={{
-            display: 'inline-block',
-            padding: '2px 8px',
-            fontSize: 10,
-            fontWeight: 600,
-            letterSpacing: '0.04em',
-            textTransform: 'uppercase',
-            color: 'var(--ol-blue)',
-            background: 'rgba(37,99,235,0.10)',
-            borderRadius: 999,
-            marginRight: 8,
-          }}>{t('shell.betaTag')}</span>
-        )}
-
-        <span style={{ fontFamily: 'var(--ol-font-sans)', marginRight: 12 }}>{t('shell.footer.version', { version: APP_VERSION_LABEL })}</span>
-        <div style={{ marginRight: 12 }}>
-          <FooterIcon name="settings" tip={t('shell.footer.settings')} active={settingsOpen} onClick={() => openSettings()} />
         </div>
       </div>
 
@@ -602,40 +626,6 @@ function HotkeyModeMigrationPrompt({ onLater, onOpenSettings }: { onLater: () =>
         </div>
       </div>
     </div>
-  );
-}
-
-interface FooterIconProps {
-  name: string;
-  tip: string;
-  active?: boolean;
-  onClick?: () => void;
-}
-
-function FooterIcon({ name, tip, active, onClick }: FooterIconProps) {
-  const [hover, setHover] = useState(false);
-  // 选中（active）= popover 打开，深灰；hover = 浅灰；其它 = 透明
-  const background = active
-    ? 'rgba(0,0,0,0.10)'
-    : hover
-      ? 'rgba(0,0,0,0.05)'
-      : 'transparent';
-  return (
-    <button
-      onClick={onClick}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      title={tip}
-      style={{
-        width: 30, height: 30, borderRadius: 7, border: 0,
-        background,
-        color: active ? 'var(--ol-ink)' : hover ? 'var(--ol-ink-2)' : 'var(--ol-ink-4)',
-        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-        cursor: 'default',
-        transition: 'background 0.16s var(--ol-motion-quick), color 0.16s var(--ol-motion-quick)',
-      }}>
-      <Icon name={name} size={15} />
-    </button>
   );
 }
 

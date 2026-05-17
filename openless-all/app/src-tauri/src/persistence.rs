@@ -131,7 +131,7 @@ fn ensure_dir(dir: &Path) -> Result<()> {
 }
 
 /// 本地 ASR 模型根目录：`<data_dir>/models/qwen3-asr/`。
-/// 子目录 = 模型 id（如 `qwen3-asr-0.6b`），存 antirez `download_model.sh`
+/// 子目录 = 模型 id（如 `qwen3-asr-0.6b`），存 qwen-asr `download_model.sh`
 /// 列出的 5–7 个文件。
 pub fn local_models_root() -> Result<PathBuf> {
     let dir = data_dir()?.join("models").join("qwen3-asr");
@@ -260,15 +260,27 @@ pub fn foundry_logs_root() -> Result<PathBuf> {
     Ok(dir)
 }
 
-/// Atomic write: write to `*.tmp` first, then rename onto the target path.
+/// Atomic write: write to a unique `*.tmp-<uuid>` first, then rename onto the
+/// target path. The unique suffix lets concurrent writers each own their own
+/// tmp file, so a parallel rename never finds its source already taken.
 fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         ensure_dir(parent)?;
     }
-    let tmp_path = path.with_extension("tmp");
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let tmp_path = path.with_file_name(format!(
+        "{file_name}.tmp-{}",
+        Uuid::new_v4().simple()
+    ));
     fs::write(&tmp_path, contents)
         .with_context(|| format!("write tmp failed: {}", tmp_path.display()))?;
-    fs::rename(&tmp_path, path).with_context(|| format!("rename failed: {}", path.display()))?;
+    if let Err(err) = fs::rename(&tmp_path, path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(err).with_context(|| format!("rename failed: {}", path.display()));
+    }
     Ok(())
 }
 
@@ -1051,6 +1063,12 @@ struct StylePackArchiveManifest {
     icon_file: Option<String>,
     recommended_model: Option<String>,
     compatible_app_version: Option<String>,
+    /// Marketplace 上游关系。旧 ZIP 没有此字段时自动为 None；
+    /// 兼容早期口误/拼写包里可能出现的 `orion*` 字段名。
+    #[serde(default, alias = "orionPackId", alias = "orion_pack_id", alias = "origin_pack_id")]
+    origin_pack_id: Option<String>,
+    #[serde(default, alias = "orionAuthorLogin", alias = "orion_author_login", alias = "origin_author_login")]
+    origin_author_login: Option<String>,
 }
 
 pub struct StylePackStore {
@@ -1342,8 +1360,8 @@ impl StylePackStore {
             compatible_app_version: manifest
                 .compatible_app_version
                 .and_then(|value| normalize_optional_text(Some(value))),
-            origin_pack_id: None,
-            origin_author_login: None,
+            origin_pack_id: normalize_optional_text(manifest.origin_pack_id),
+            origin_author_login: normalize_optional_text(manifest.origin_author_login),
         };
         packs.insert(0, pack.clone());
         write_style_packs_file(&self.path, &packs)?;
@@ -1393,6 +1411,8 @@ impl StylePackStore {
             icon_file: icon_file.clone(),
             recommended_model: pack.recommended_model.clone(),
             compatible_app_version: pack.compatible_app_version.clone(),
+            origin_pack_id: pack.origin_pack_id.clone(),
+            origin_author_login: pack.origin_author_login.clone(),
         };
 
         zip.start_file("manifest.json", options)

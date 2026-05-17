@@ -4,7 +4,7 @@ This is the current cross-platform OpenLess workspace.
 
 ## App Directory
 
-The runnable Tauri app lives in `app/`. The macOS build links a vendored C ASR engine (`antirez/qwen-asr`) tracked as a git submodule under `app/src-tauri/vendor/qwen-asr/`, so initialize submodules on first clone.
+The runnable Tauri app lives in `app/`. The macOS build links a vendored C ASR engine (`Open-Less/qwen-asr`, forked from `antirez/qwen-asr`) tracked as a git submodule under `app/src-tauri/vendor/qwen-asr/`, so initialize submodules on first clone.
 
 ```bash
 # First clone only — pull in vendored submodules

@@ -298,8 +298,6 @@ function RecordingSection() {
     savePrefs({ ...prefs, startMinimized });
   const onAutoUpdateCheckChange = (autoUpdateCheck: boolean) =>
     savePrefs({ ...prefs, autoUpdateCheck });
-  const onMarketplaceBaseUrlChange = (marketplaceBaseUrl: string) =>
-    savePrefs({ ...prefs, marketplaceBaseUrl });
   const onMarketplaceDevLoginChange = (marketplaceDevLogin: string) =>
     savePrefs({ ...prefs, marketplaceDevLogin });
   const onRecordAudioForDebugChange = (recordAudioForDebug: boolean) =>
@@ -599,19 +597,9 @@ function RecordingSection() {
     </Collapsible>
 
     {/* ─── 风格市场（折叠） ────────────────────────────────────────── */}
+    {/* URL 已硬编码到云端 apic.openless.top（commands.rs:MARKETPLACE_BASE_URL），
+        Settings 不再提供输入，避免用户改错导致连不上。GitHub OAuth 上线后这里会接登录按钮。 */}
     <Collapsible title={t('settings.recording.marketplaceGroupTitle')}>
-      <SettingRow
-        label={t('settings.recording.marketplaceBaseUrlLabel')}
-        desc={t('settings.recording.marketplaceBaseUrlDesc')}
-      >
-        <input
-          type="text"
-          placeholder="http://127.0.0.1:8090"
-          value={prefs.marketplaceBaseUrl}
-          onChange={e => onMarketplaceBaseUrlChange(e.target.value)}
-          style={{ ...inputStyle, width: 280 }}
-        />
-      </SettingRow>
       <SettingRow
         label={t('settings.recording.marketplaceDevLoginLabel')}
         desc={t('settings.recording.marketplaceDevLoginDesc')}

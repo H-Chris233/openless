@@ -271,11 +271,13 @@ pub(crate) fn activate_builtin_style_mode(
 // 渠道偏好的写入路径跟 set_settings 复用 persist_settings：保持热键兜底归一化
 // 跟其他 prefs 写入一致，且写完后 emit "prefs:changed"，让前端跨 webview 同步。
 //
-// 注意：plugin-updater 2.10 的 Builder 不暴露 endpoints() 运行时 API，因此切到 Beta
-// 渠道**不会**改变 in-app「检查更新」的行为——它仍然只看正式版 manifest。Beta 用户
-// 通过 `fetch_latest_beta_release` 获取最新 prerelease，由前端跳浏览器手动下载，
-// 物理隔离 Beta 包不会通过 auto-update 推到正式版用户。详见 PR-B-2 description 与
-// CLAUDE.md `Branch & release-channel workflow` 段落。
+// 更新：plugin-updater 2.10.1 的 Builder 现在暴露 .endpoints() runtime API（CLAUDE.md
+// 当年记的"不支持"已不成立）。本节配合 `app_check_update_with_channel` 命令实现
+// Beta auto-update：Stable 渠道 → 走 tauri.conf 的默认 endpoints；Beta 渠道 →
+// fetch_latest_beta_release 拿最新 prerelease tag → 拼成 -beta manifest URL →
+// builder.endpoints(vec![url]).build().check()。Stable 用户绝对不会撞到 Beta 包
+// （Beta tag 的 manifest 文件名带 `-beta` 后缀，跟 Stable manifest 在 GitHub
+// Release assets 里物理分离）。
 
 #[tauri::command]
 pub fn get_update_channel(coord: CoordinatorState<'_>) -> UpdateChannel {
@@ -375,6 +377,101 @@ fn extract_between(haystack: &str, open: &str, close: &str) -> Option<String> {
     let start = haystack.find(open)? + open.len();
     let end = haystack[start..].find(close)?;
     Some(haystack[start..start + end].to_string())
+}
+
+// ─────────────────────── Channel-aware updater check ────────────────────────
+//
+// 替换前端原来直接 import('@tauri-apps/plugin-updater').check() 的路径：
+// - Stable 渠道：builder 不动 endpoints，沿用 tauri.conf 配的 stable manifest URL。
+// - Beta 渠道：先 fetch_latest_beta_release 拿最新 prerelease tag，拼成 -beta manifest
+//   URL（同时给一对 mirror + direct），再 builder.endpoints(vec![url])?.build()?.check()。
+//
+// 返回的 Metadata 形状与 plugin-updater 的 JS UpdateMetadata 完全一致（rid +
+// currentVersion 等驼峰字段），前端可以直接 `new Update(metadata)` 复用 plugin
+// 的 download / install / close 实现，无需我们自己写下载和签名校验。
+//
+// 物理隔离：Beta tag 推出来的 manifest 文件名带 `-beta` 后缀（参见 release-tauri.yml
+// 第 382 行注释），跟 Stable 的 `latest-{tgt}-{arch}.json` 在 GitHub Release assets
+// 里是分开的两份文件 —— 即使代码逻辑写错把 Beta URL 传给 Stable 用户，HTTP 也是
+// 直接 404，绝不会拿到错档。
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppUpdateMetadata {
+    pub rid: tauri::ResourceId,
+    pub current_version: String,
+    pub version: String,
+    pub date: Option<String>,
+    pub body: Option<String>,
+    /// 原始 manifest JSON——`new Update(metadata)` 在 JS 那边会校验它存在；
+    /// 我们透传 plugin 自己 check 时拿到的字段。
+    pub raw_json: serde_json::Value,
+}
+
+/// 按 prefs.update_channel 决定 manifest 来源，再走 plugin-updater 的标准 check 流程。
+/// 返回 None = 当前是最新；Some(metadata) = 有新版可装。
+#[tauri::command]
+pub async fn app_check_update_with_channel<R: tauri::Runtime>(
+    coord: CoordinatorState<'_>,
+    webview: tauri::Webview<R>,
+    timeout_ms: Option<u64>,
+) -> Result<Option<AppUpdateMetadata>, String> {
+    use tauri_plugin_updater::UpdaterExt;
+
+    let channel = coord.prefs().get().update_channel;
+    let mut builder = webview.updater_builder();
+    if let Some(ms) = timeout_ms {
+        builder = builder.timeout(std::time::Duration::from_millis(ms));
+    }
+    if matches!(channel, UpdateChannel::Beta) {
+        let urls = resolve_beta_manifest_endpoints().await?;
+        builder = builder
+            .endpoints(urls)
+            .map_err(|e| format!("set beta endpoints: {e}"))?;
+    }
+    let updater = builder.build().map_err(|e| format!("build updater: {e}"))?;
+    let update = updater
+        .check()
+        .await
+        .map_err(|e| format!("check update failed: {e}"))?;
+
+    let Some(update) = update else {
+        return Ok(None);
+    };
+    // date 字段透传需要引 time crate；前端 AutoUpdate.tsx 实际并不用 date，所以这里
+    // 直接置 None，避免拉一个新 dep 进 src-tauri/Cargo.toml。
+    let metadata = AppUpdateMetadata {
+        current_version: update.current_version.clone(),
+        version: update.version.clone(),
+        date: None,
+        body: update.body.clone(),
+        raw_json: update.raw_json.clone(),
+        rid: webview.resources_table().add(update),
+    };
+    Ok(Some(metadata))
+}
+
+/// 把 fetch_latest_beta_release 找到的最新 prerelease tag 拼成 -beta manifest URL 对。
+/// 顺序：先镜像（fastgit.cc 代理 GitHub），后直连 —— 跟 tauri.conf 现有 Stable
+/// endpoints 一致，让国内访问优先打到 CDN。
+async fn resolve_beta_manifest_endpoints() -> Result<Vec<url::Url>, String> {
+    let Some(latest) = fetch_latest_beta_release().await? else {
+        return Err("尚未发布过 Beta 版本".to_string());
+    };
+    let tag = latest.tag_name;
+    // {{target}} / {{arch}} 占位符由 plugin 在 check 时替换。Rust raw string 用 r#""#
+    // 不需要转义双花括号，比 format! 干净。
+    let mirror = format!(
+        "https://fastgit.cc/https://github.com/appergb/openless/releases/download/{tag}/latest-{{{{target}}}}-{{{{arch}}}}-beta-mirror.json"
+    );
+    let direct = format!(
+        "https://github.com/appergb/openless/releases/download/{tag}/latest-{{{{target}}}}-{{{{arch}}}}-beta.json"
+    );
+    let mirror_url =
+        url::Url::parse(&mirror).map_err(|e| format!("parse beta mirror url: {e}"))?;
+    let direct_url =
+        url::Url::parse(&direct).map_err(|e| format!("parse beta direct url: {e}"))?;
+    Ok(vec![mirror_url, direct_url])
 }
 
 #[tauri::command]
@@ -2303,6 +2400,8 @@ pub struct MarketplaceListItem {
     pub download_count: i64,
     pub published_at: String,
     pub updated_at: String,
+    pub origin_pack_id: Option<String>,
+    pub origin_author_login: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
@@ -2314,22 +2413,27 @@ pub struct MarketplaceDetail {
     pub state: String,
 }
 
-fn marketplace_url_from_prefs(prefs: &UserPreferences) -> String {
-    let base = prefs.marketplace_base_url.trim();
-    if base.is_empty() {
-        "http://127.0.0.1:8090".to_string()
-    } else {
-        base.trim_end_matches('/').to_string()
-    }
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketplaceMyPackItem {
+    #[serde(flatten)]
+    pub summary: MarketplaceListItem,
+    pub state: String,
+}
+
+/// 风格市场 backend URL —— 硬编码到生产云端，不再读 prefs。
+///
+/// 历史上这里读 `prefs.marketplace_base_url`（dev 本地可填 127.0.0.1:8090），
+/// 现在风格市场已经稳定部署在 apic.openless.top，把 URL 锁死避免用户误改 / 写错。
+/// 参数 `_prefs` 保留是为不动调用点签名；将来需要白名单 / 多 endpoint 时再开口。
+const MARKETPLACE_BASE_URL: &str = "https://apic.openless.top";
+
+fn marketplace_url_from_prefs(_prefs: &UserPreferences) -> String {
+    MARKETPLACE_BASE_URL.to_string()
 }
 
 fn marketplace_dev_user(prefs: &UserPreferences) -> String {
-    let login = prefs.marketplace_dev_login.trim();
-    if login.is_empty() {
-        "anonymous".to_string()
-    } else {
-        login.to_string()
-    }
+    prefs.marketplace_dev_login.trim().to_string()
 }
 
 #[tauri::command]
@@ -2466,6 +2570,7 @@ pub async fn marketplace_install(
 pub async fn marketplace_upload(
     coord: CoordinatorState<'_>,
     pack_id: String,
+    origin_pack_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
     // 本地 pack id 形态：`builtin.light` / 用户 slug / Uuid。用 local 白名单挡 `..` / `/` / `\`。
     if !is_valid_local_pack_id(&pack_id) {
@@ -2474,6 +2579,9 @@ pub async fn marketplace_upload(
     let prefs = coord.prefs().get();
     let base = marketplace_url_from_prefs(&prefs);
     let dev_user = marketplace_dev_user(&prefs);
+    if dev_user.is_empty() {
+        return Err("未登录：先在 Settings 填发布者名字".into());
+    }
 
     // 拉本地 pack 拿 origin_pack_id —— 装过的 pack 这里有值，
     // backend 据此判同作者就 supersede 原行（新版本），他人就 derivative（独立新 row）。
@@ -2481,7 +2589,9 @@ pub async fn marketplace_upload(
         .style_packs()
         .get(&pack_id)
         .map_err(|e| format!("local pack not found: {e}"))?;
-    let origin_pack_id = local_pack.origin_pack_id.clone();
+    let origin_pack_id = origin_pack_id
+        .filter(|id| is_valid_session_id(id))
+        .or_else(|| local_pack.origin_pack_id.clone());
 
     // 先 export 本地 pack → 临时 ZIP
     let tmp = std::env::temp_dir().join(format!("openless-marketplace-upload-{pack_id}.zip"));
@@ -2549,6 +2659,9 @@ pub async fn marketplace_like(
     let prefs = coord.prefs().get();
     let base = marketplace_url_from_prefs(&prefs);
     let dev_user = marketplace_dev_user(&prefs);
+    if dev_user.is_empty() {
+        return Err("未登录：先在 Settings 填发布者名字".into());
+    }
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("{base}/packs/{pack_id}/like"))
@@ -2620,6 +2733,180 @@ pub async fn marketplace_my_likes(coord: CoordinatorState<'_>) -> Result<Vec<Str
     resp.json::<Vec<String>>()
         .await
         .map_err(|e| format!("parse my-likes failed: {e}"))
+}
+
+/// 拉当前用户发布过的 pack（含审核中/已通过/已拒绝/已撤回），用于「我的发布」页面。
+#[tauri::command]
+pub async fn marketplace_my_packs(
+    coord: CoordinatorState<'_>,
+) -> Result<Vec<MarketplaceMyPackItem>, String> {
+    let prefs = coord.prefs().get();
+    let base = marketplace_url_from_prefs(&prefs);
+    let dev_user = marketplace_dev_user(&prefs);
+    if dev_user.is_empty() {
+        return Ok(Vec::new());
+    }
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{base}/me/packs"))
+        .header("X-Dev-User", dev_user)
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| format!("my-packs request failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("my-packs HTTP {}", resp.status()));
+    }
+    resp.json::<Vec<MarketplaceMyPackItem>>()
+        .await
+        .map_err(|e| format!("parse my-packs failed: {e}"))
+}
+
+// ─────────────────────── GitHub OAuth Device Flow (Phase 1) ───────────────────────
+//
+// 客户端直连 GitHub 拿 access_token + login，前端自动把 login 写进
+// prefs.marketplaceDevLogin。marketplace backend 完全不动（依然 X-Dev-User）。
+// Phase 2 才会让 backend 验证 GitHub identity（JWT 签发 + 防伪造）。
+//
+// 配置 client_id 的两种方式（OAuth App client_id 非敏感，可硬编码）：
+//   1. 在下方 GITHUB_OAUTH_CLIENT_ID 常量填值（生产推荐 — 直接 bake 进二进制）
+//   2. 启动前设置环境变量 GITHUB_OAUTH_CLIENT_ID=<your_client_id>（dev 方便）
+//
+// 注册 OAuth App：
+//   https://github.com/settings/applications/new
+//   - Application name: OpenLess (or your fork)
+//   - Homepage URL: https://openless.top (or任意)
+//   - Authorization callback URL: https://openless.top (Device Flow 不真用，但表单要求填)
+//   - 创建后在 General 页面勾选 "Enable Device Flow"
+//   - 抄 client_id 填到本常量
+
+const GITHUB_OAUTH_CLIENT_ID: &str = "Ov23liyv3nEucG7oMHNE";
+
+fn get_github_oauth_client_id() -> Result<String, String> {
+    if let Ok(env_id) = std::env::var("GITHUB_OAUTH_CLIENT_ID") {
+        let trimmed = env_id.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
+        }
+    }
+    if !GITHUB_OAUTH_CLIENT_ID.is_empty() {
+        return Ok(GITHUB_OAUTH_CLIENT_ID.to_string());
+    }
+    Err("GitHub OAuth 未配置。请去 https://github.com/settings/applications/new 注册一个 OAuth App\
+        （必须勾 Enable Device Flow），把 client_id 填到 \
+        openless-all/app/src-tauri/src/commands.rs 的 GITHUB_OAUTH_CLIENT_ID 常量，\
+        或在启动前设置环境变量 GITHUB_OAUTH_CLIENT_ID=<your_client_id>。"
+        .to_string())
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GithubDeviceStartResponse {
+    pub device_code: String,
+    pub user_code: String,
+    pub verification_uri: String,
+    pub interval: u32,
+    pub expires_in: u32,
+}
+
+#[tauri::command]
+pub async fn github_device_flow_start() -> Result<GithubDeviceStartResponse, String> {
+    let client_id = get_github_oauth_client_id()?;
+    let client = reqwest::Client::new();
+    let resp = client
+        .post("https://github.com/login/device/code")
+        .header("Accept", "application/json")
+        .header("User-Agent", "OpenLess")
+        .form(&[("client_id", client_id.as_str()), ("scope", "read:user")])
+        .send()
+        .await
+        .map_err(|e| format!("调用 GitHub /login/device/code 失败：{e}"))?;
+    let status = resp.status();
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("解析 device/code 响应失败：{e}"))?;
+    if !status.is_success() {
+        let err = body["error"].as_str().unwrap_or("unknown_error");
+        let desc = body["error_description"].as_str().unwrap_or("");
+        return Err(format!("GitHub device/code {status} {err}: {desc}"));
+    }
+    Ok(GithubDeviceStartResponse {
+        device_code: body["device_code"].as_str().unwrap_or("").to_string(),
+        user_code: body["user_code"].as_str().unwrap_or("").to_string(),
+        verification_uri: body["verification_uri"]
+            .as_str()
+            .unwrap_or("https://github.com/login/device")
+            .to_string(),
+        interval: body["interval"].as_u64().unwrap_or(5) as u32,
+        expires_in: body["expires_in"].as_u64().unwrap_or(900) as u32,
+    })
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum GithubDevicePollResult {
+    Authorized { login: String },
+    Pending,
+    SlowDown,
+    Error { message: String },
+}
+
+#[tauri::command]
+pub async fn github_device_flow_poll(
+    device_code: String,
+) -> Result<GithubDevicePollResult, String> {
+    let client_id = get_github_oauth_client_id()?;
+    let client = reqwest::Client::new();
+    let token_resp = client
+        .post("https://github.com/login/oauth/access_token")
+        .header("Accept", "application/json")
+        .header("User-Agent", "OpenLess")
+        .form(&[
+            ("client_id", client_id.as_str()),
+            ("device_code", device_code.as_str()),
+            ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+        ])
+        .send()
+        .await
+        .map_err(|e| format!("调用 GitHub /login/oauth/access_token 失败：{e}"))?;
+    let body: serde_json::Value = token_resp
+        .json()
+        .await
+        .map_err(|e| format!("解析 access_token 响应失败：{e}"))?;
+
+    if let Some(token) = body["access_token"].as_str() {
+        let user_resp = client
+            .get("https://api.github.com/user")
+            .header("User-Agent", "OpenLess")
+            .header("Accept", "application/vnd.github+json")
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| format!("调用 GitHub /user 失败：{e}"))?;
+        let user_body: serde_json::Value = user_resp
+            .json()
+            .await
+            .map_err(|e| format!("解析 /user 响应失败：{e}"))?;
+        let login = user_body["login"].as_str().unwrap_or("").to_string();
+        if login.is_empty() {
+            return Ok(GithubDevicePollResult::Error {
+                message: "GitHub /user 返回空 login".to_string(),
+            });
+        }
+        return Ok(GithubDevicePollResult::Authorized { login });
+    }
+
+    let err = body["error"].as_str().unwrap_or("");
+    let msg = match err {
+        "authorization_pending" => return Ok(GithubDevicePollResult::Pending),
+        "slow_down" => return Ok(GithubDevicePollResult::SlowDown),
+        "expired_token" => "OAuth 设备码已过期，请重新发起登录".to_string(),
+        "access_denied" => "你在 GitHub 上拒绝了授权".to_string(),
+        other if !other.is_empty() => format!("OAuth 错误：{other}"),
+        _ => "未知 OAuth 错误（access_token 缺失）".to_string(),
+    };
+    Ok(GithubDevicePollResult::Error { message: msg })
 }
 
 #[cfg(test)]

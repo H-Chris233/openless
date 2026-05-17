@@ -2100,7 +2100,14 @@ pub mod prompts {
     /// 翻译模式 system prompt — 用户在「翻译」页选定的目标语言（内置 15 种自然语言原生名）。
     /// LLM 自己理解（"繁体中文"/"English"/"美式英文"/"日本語" 都行）。
     /// 此 prompt 之上还有 working_languages_premise 拼出的"# 上下文"前提。
+    ///
+    /// target_language == "English"（含 "美式英文" / "英文" / "english" 等别名）时整段切到
+    /// EN_TRANSLATE_SYSTEM_PROMPT —— 不再走通用 base，避免通用规则与 EN 专属的「ASR 纠错优先
+    /// + 中→英技术词规范化」相互稀释。来源：社区「重写为英文」prompt，精简整合后整体注入。
     pub fn translate_system_prompt(target_language: &str) -> String {
+        if is_english_target(target_language) {
+            return EN_TRANSLATE_SYSTEM_PROMPT.to_string();
+        }
         format!(
             "# 任务（翻译输出）\n\
              把下面收到的一段语音转写翻译成 \u{300C}{lang}\u{300D}。\n\
@@ -2135,6 +2142,97 @@ pub mod prompts {
             lang = target_language
         )
     }
+
+    /// target_language 是否指向英语 —— 容忍用户在偏好里写 "English" / "english" / "美式英文" /
+    /// "英文" / "British English" 等几种写法。匹配松一点没坏处：误命中只会让模型走 EN 专属
+    /// prompt，对纯中文 / 日文等目标本来就不会被选中。
+    fn is_english_target(target_language: &str) -> bool {
+        let trimmed = target_language.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.contains("english") {
+            return true;
+        }
+        trimmed.contains("英文") || trimmed.contains("英語") || trimmed.contains("英语")
+    }
+
+    /// 中→英专用 system prompt（target_language 命中 English 时整段替换通用 base）。
+    /// 设计原则：
+    /// - 自包含、无前置 base —— 这就是 LLM 收到的全部任务说明。
+    /// - 中文骨架方便描述中文 ASR 错误模式 + 中→英术语表（来源就是中文转写）。
+    /// - 比通用翻译 prompt 更窄、更强：ASR 纠错优先于逐字翻译；英文要求自然 idiomatic，
+    ///   不接受 Chinglish 直译。
+    /// - 来源：社区「重写为英文」prompt（imported.573e86a1bcf44dbb...），整合精简后注入。
+    const EN_TRANSLATE_SYSTEM_PROMPT: &str = "# 任务（中文转写 → 英文翻译）\n\
+        你是一名中译英助手，专门处理语音识别（ASR）后的中文技术文本。\n\
+        用户的转写不是可靠原文：可能有错别字、同音字、近音字、断句缺失、术语误识别、\
+        英文术语被中文音译。**你的任务不是逐字翻译，而是先理解用户真实意图，纠正显然的识别错误，\
+        再把修复后的意思翻译成自然、准确、专业的英文**。\
+        结果会被直接插入用户当前 app 的光标位置。\n\
+        \n\
+        # 工作流程（顺序不可换）\n\
+        1. 判断转写里是否存在 ASR 错误或语义异常。\n\
+        2. 把明显不合理 / 不符合上下文的词按下方分级策略修正。\n\
+        3. 把中文音译还原为标准英文技术术语。\n\
+        4. 整理混乱、口语化或重复的表达。\n\
+        5. 在不改变用户真实意图的前提下，翻译成自然、专业的英文。\n\
+        6. **只输出最终英文译文**。\n\
+        \n\
+        # ASR 纠错（按置信度分级）\n\
+        - 高置信度（错误明显、正确写法唯一）→ 直接替换，不保留原词、不加说明。\n\
+        - 中置信度（原词在当前主题下不合理，存在最可能候选）→ 选最契合上下文的候选替换。\n\
+        - 低置信度（无法判断正确词）→ 保留原词，\u{4E0D}强行编造不存在的字段、链接、路径或步骤。\n\
+        - 忠实的是用户**意图**，不是 ASR 产生的错误文本。\n\
+        \n\
+        # 中→英术语规范化（必须按右侧写法输出）\n\
+        - 令牌 / 脱肯 / 拓肯 → Token；访问令牌 → Access Token；刷新令牌 → Refresh Token。\n\
+        - 密钥 / 西克瑞特 key / 思可瑞特 → Secret Key；访问密钥 → Access Key。\n\
+        - 阿屁艾 → API；应用 ID / APP ID / app id → App ID；服务 ID → Service ID；模型 ID → Model ID。\n\
+        - 端点 → Endpoint；网关 → Gateway；钩子 → Webhook；接口 → API；调用接口 → call the API；\
+        请求头 → request header；请求头中携带 Token → include the Token in the request header；\
+        鉴权 → authentication；鉴权失败 → authentication failure；调用额度 → quota / available quota；\
+        生成结果 → generated output；前端 / 前端代码 → front-end / front-end code；\
+        后端 → back-end；公开文档 → public documentation；代码仓 → repository / repo。\n\
+        - 模型 / 产品名（按上下文判断）：克劳德 / 克劳迪 → Claude；双子座 / 杰米尼 / 极米利 → Gemini；\
+        卡布奇诺 / 卡布西诺 → Cappuccino；实习生 / 英特恩 → InternS or InternLM（按后缀和上下文判断）；\
+        阿里 Panda / 科德 / 卡德 / Coda → Coder（AI IDE / Agent 开发语境）；\
+        熊猫 / 浪猫 → LongCat（LongCat 平台 / 模型语境）。\n\
+        \n\
+        # 翻译要求\n\
+        - 英文必须**自然、准确、专业**，避免中式英语（Chinglish）和生硬直译。\n\
+        - 技术文档语气简洁、清晰、可执行；操作步骤整理为干净的英文步骤或段落。\n\
+        - 保持原说话语气：口语场景维持口语化，正式场景维持正式；不擅自正式化或扩写。\n\
+        - 数字、日期、时间用英语地区常见写法：\"5月1日下午两点\" → \"May 1, 2 PM\"；\
+        \"明天上午十点\" → \"tomorrow at 10 AM\"。\n\
+        - 转写已经是英文时：去明显口癖（um / you know / like）+ 补必要标点，\u{4E0D}做风格改写。\n\
+        \n\
+        # 原样保留（byte-for-byte，不翻译）\n\
+        - 代码标识符、Bash 命令、文件路径、环境变量、URL 路径段、配置 key、JSON 字段名、接口名。\n\
+        - 布尔值 `true / false / null`；不要改成 \"开启\" / \"开\" / \"2\"。\n\
+        - 完整版本号：GPT-5.6、Claude 4.7、Gemini 3.5、iOS 26.1、Python 3.13、Tauri 2.10 —— \
+        \u{4E0D}简写成 GPT-5、Claude 4、Gemini 3。\n\
+        - 缩略语 API / SDK / JWT / OAuth / JSON / HTTP / URL / SSE / MCP / CLI / PR / CI / CD / \
+        SOTA / MoE / FP8 / RLHF 全部大写，不展开成中文 / 全称。\n\
+        - 人名、地名、品牌名、emoji。\n\
+        - 例外：转写词是 # 热词列表中某词的同音 / 形近误识别时，按热词列表里的正确写法输出。\n\
+        \n\
+        # 边界 case\n\
+        - 转写非常短（一两个字）也照译，\u{4E0D}因为短就硬补内容。\n\
+        - 转写是命令式（\"加个空格 / 删除最后一行\"）时，照原意翻译为英文命令式，\u{4E0D}改成陈述句。\n\
+        - 转写全是 fillers（\"嗯嗯啊那个\"）时，输出空字符串。\n\
+        \n\
+        # 禁止\n\
+        1. \u{4E0D}得逐字翻译明显错误的 ASR 文本。\n\
+        2. \u{4E0D}得输出中文（不要给出中文润色稿、对比表、原文回显）。\n\
+        3. \u{4E0D}得输出解释、修改说明、change log、思路过程。\n\
+        4. \u{4E0D}得为了流畅而删减重要信息，也\u{4E0D}得添加用户未表达过的新事实、链接、路径、字段、步骤。\n\
+        5. \u{4E0D}得改变用户真实意图。\n\
+        \n\
+        # 输出\n\
+        只输出最终英文译文。\u{4E0D}带 \u{300C}翻译：\u{300D}\u{300C}译文：\u{300D}\u{300C}Translation:\u{300D}\
+        \u{4E4B}\u{7C7B}前缀，\u{4E0D}加引号、\u{4E0D}加 markdown 围栏、\u{4E0D}加代码 fence。";
 }
 
 #[cfg(test)]
@@ -2676,67 +2774,61 @@ mod tests {
     }
 
     #[test]
-    fn structured_prompt_includes_dense_github_request_example() {
+    fn structured_prompt_anchors_on_high_density_examples_and_term_protection() {
         let prompt = prompts::system_prompt(PolishMode::Structured);
 
-        // 任务段：必须教会模型保留口语引子、按主题归类、用 (a) 子项、自然尾巴
-        assert!(prompt.contains("# 保留口语引子并润色成自然首行"));
-        assert!(prompt.contains("# 尾巴查询用自然收尾句"));
-        assert!(prompt.contains("\"(a)\" \"(b)\" \"(c)\""));
-        assert!(prompt.contains("代码与功能 / 文档与配置 / 界面与交互 / 项目清理"));
-        assert!(prompt.contains("GitHub、README、issue/issues"));
+        // v2.0：八节中文序号骨架。结构化判断 + 双层格式 + 事项数规则必须靠前讲清楚。
+        assert!(prompt.contains("# 二、结构化判断（核心）"));
+        assert!(prompt.contains("# 三、双层格式"));
+        assert!(prompt.contains("第一层（主题）"));
+        assert!(prompt.contains("第二层（子项）"));
+        assert!(prompt.contains("事项 ≤ 2 条"));
+        assert!(prompt.contains("事项 ≥ 3 条"));
 
-        // 示例 1：双层格式必须用 (a) (b)，且带首行过渡。
-        assert!(prompt.contains("发布前需要完成以下事项："));
-        assert!(prompt.contains("(a) 登录页。"));
+        // 防回归：模型名、字段名、布尔值和版本号必须被显式保护。
+        assert!(prompt.contains("Claude"));
+        assert!(prompt.contains("Gemini"));
+        assert!(prompt.contains("Cappuccino"));
+        assert!(prompt.contains("Coder"));
+        assert!(prompt.contains("LongCat"));
+        assert!(prompt.contains("Secret Key"));
+        assert!(prompt.contains("true / false / null"));
+        assert!(prompt.contains("GPT-5.6"));
+        assert!(prompt.contains("**不**简写成 GPT-5、Claude 4"));
 
-        // 示例 2：必须呈现"引子润色 + 4 主题归类 + 自然尾巴"的目标输出。
+        // 4 个核心示例的锚点：超长 GitHub 请求、已编号工作日报、散乱长口述、AI 日报。
         assert!(prompt.contains("帮忙给 GitHub 提个请求，主要包含以下内容："));
-        assert!(prompt.contains("1. 代码与功能优化"));
-        assert!(prompt.contains("(a) 上传最新代码，修复页面闪退的 bug"));
-        assert!(prompt.contains("4. 项目清理与合并"));
-        assert!(prompt.contains("最后再检查一下还有哪些 issue 需要处理。"));
-
-        // 防回归：旧版"另外："标签写法不能再出现在示例输出里。
-        assert!(!prompt.contains("另外：检查一下当前还有哪些 issues"));
+        assert!(prompt.contains("代码与功能优化"));
+        assert!(prompt.contains("今天的工作小结如下："));
+        assert!(prompt.contains("Gemini 3.2 版本更名为 Gemini 3.5"));
+        assert!(prompt.contains("remote control 的参数值更改为 true"));
     }
 
     #[test]
-    fn structured_prompt_forces_regrouping_even_for_already_structured_input() {
-        // 回归测试 issue #305：用户输入工作日报（已半结构化、标点规范），
-        // 旧 prompt 让 LLM 判定为"已经完整不需要改"，原样 passthrough。
-        // 新 prompt 必须明确：原文是否已有结构 ≠ 不用改的依据；
-        // 事项 ≥ 3 条都要重新归类成双层格式。
+    fn structured_prompt_keeps_regrouping_and_no_loss_guards() {
         let prompt = prompts::system_prompt(PolishMode::Structured);
 
-        // 明确"已结构化 ≠ 不用改"的前提
-        assert!(
-            prompt.contains("不是\u{201C}\u{5DF2}\u{7ECF}\u{6574}\u{7406}\u{597D}\u{4E0D}\u{7528}\u{6539}\u{201D}的判断依据"),
-            "Structured prompt 缺少\"已结构化≠不用改\"的明确否定"
-        );
+        // v1.3.0 回归的关键规则：已编号 ≠ 不用改、≥3 必须重组、≤2 不硬塞层级。
         assert!(
             prompt.contains("照抄原结构 = 失败"),
-            "Structured prompt 缺少照抄原结构的失败判定"
+            "Structured prompt 必须把照抄原结构判为失败"
         );
-
-        // 阈值改为 ≥3
         assert!(
-            prompt.contains("事项 \u{2265}3 条"),
-            "Structured prompt 必须把重组阈值降到 3"
+            prompt.contains("不硬塞层级"),
+            "Structured prompt 必须避免短输入过度结构化"
+        );
+        assert!(
+            prompt.contains("不丢失任何一件事"),
+            "Structured prompt 必须明确防止事项丢失"
+        );
+        assert!(
+            prompt.contains("不补充用户没说过的实现方案"),
+            "Structured prompt 必须禁止替用户编造实现方案"
         );
         assert!(
             prompt.contains("即使原文已经写成"),
             "Structured prompt 必须显式说明已编号的输入也要重新归类"
         );
-
-        // 新增工作日报示例 3
-        assert!(
-            prompt.contains("# 示例 3（已半结构化的工作日报，仍要重组）"),
-            "Structured prompt 缺少工作日报示例（#305）"
-        );
-        assert!(prompt.contains("今天的工作小结如下："));
-        assert!(prompt.contains("1. 客户对接"));
-        assert!(prompt.contains("(a) 召开对齐会"));
     }
 
     #[test]
@@ -2790,26 +2882,58 @@ mod tests {
 
     #[test]
     fn common_rules_include_auto_correction_and_natural_organization() {
-        // 所有 mode 都要带上"自动纠错"（规则 5）和"按整体意图组织成自然书面表达"
-        // 的扩展（规则 3）。任一缺失说明 COMMON_RULES 被回退掉了。
-        for mode in [
-            PolishMode::Raw,
-            PolishMode::Light,
-            PolishMode::Structured,
-            PolishMode::Formal,
-        ] {
+        // 只有 Raw 仍走标准 ROLE_BLOCK / COMMON_RULES / OUTPUT_BLOCK wrapper。
+        // Light / Structured / Formal 已切到 v2 PRO 自带 prompt（含独立 ASR 纠错 + 分级策略）。
+        let raw = prompts::system_prompt(PolishMode::Raw);
+        assert!(raw.contains("5) 自动纠错"), "Raw prompt 缺少自动纠错规则");
+        assert!(raw.contains("根目录"), "Raw prompt 缺少根目录纠错示例");
+        assert!(
+            raw.contains("按用户的整体意图把零碎口语组织成协调、自然的书面表达"),
+            "Raw prompt 缺少自然组织扩展"
+        );
+
+        // v2 PRO 自带 prompt 必须共享：四/五、ASR 纠错段 + 高/低置信度分级 + 根目录词条。
+        for mode in [PolishMode::Light, PolishMode::Structured, PolishMode::Formal] {
             let prompt = prompts::system_prompt(mode);
+            let has_asr_heading = prompt.contains("# 四、ASR 纠错") || prompt.contains("# 五、ASR 纠错");
+            assert!(has_asr_heading, "{mode:?} prompt 缺少 v2 自带 ASR 纠错段落");
+            assert!(prompt.contains("根目录"), "{mode:?} prompt 缺少根目录纠错示例");
             assert!(
-                prompt.contains("5) 自动纠错"),
-                "{mode:?} prompt 缺少自动纠错规则"
+                prompt.contains("**高置信度**") && prompt.contains("**低置信度**"),
+                "{mode:?} prompt 缺少分级置信度策略"
             );
+        }
+    }
+
+    #[test]
+    fn translate_prompt_swaps_to_en_dedicated_when_target_is_english() {
+        // 英文目标：整段切到 EN_TRANSLATE_SYSTEM_PROMPT，不再带通用 base 的 \"# 任务（翻译输出）\" 标题。
+        let en = prompts::translate_system_prompt("English");
+        assert!(en.contains("# 任务（中文转写 → 英文翻译）"), "English target 必须使用 EN 专用 prompt");
+        assert!(!en.contains("# 任务（翻译输出）"), "English target 不应再带通用 base 标题");
+        assert!(en.contains("# 工作流程"));
+        assert!(en.contains("# 中→英术语规范化"));
+        assert!(en.contains("# 翻译要求"));
+        assert!(en.contains("# 禁止"));
+        assert!(en.contains("Secret Key"));
+        assert!(en.contains("App ID"));
+        assert!(en.contains("authentication failure"));
+        assert!(en.contains("Chinglish"));
+
+        // 非英文目标：仍走通用 base，不应包含 EN 专用 prompt 的任何独占段。
+        let zh_tw = prompts::translate_system_prompt("繁体中文");
+        assert!(zh_tw.contains("# 任务（翻译输出）"));
+        assert!(
+            !zh_tw.contains("# 任务（中文转写 → 英文翻译）"),
+            "非英文目标不应误用 EN 专用 prompt"
+        );
+
+        // 别名容忍：'美式英文' / '英文' / 'english' / 'British English' 都走 EN 专用 prompt。
+        for alias in ["美式英文", "英文", "english", "British English"] {
             assert!(
-                prompt.contains("根目录"),
-                "{mode:?} prompt 缺少根目录纠错示例"
-            );
-            assert!(
-                prompt.contains("按用户的整体意图把零碎口语组织成协调、自然的书面表达"),
-                "{mode:?} prompt 缺少自然组织扩展"
+                prompts::translate_system_prompt(alias)
+                    .contains("# 任务（中文转写 → 英文翻译）"),
+                "alias '{alias}' should resolve to English target"
             );
         }
     }

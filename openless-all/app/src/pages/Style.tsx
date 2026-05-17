@@ -119,129 +119,9 @@ function sanitizeZipFileName(name: string) {
 }
 
 export function Style() {
-  const { t, i18n } = useTranslation();
-  const isEnglish = i18n.language.toLowerCase().startsWith('en');
+  const { t } = useTranslation();
   const { prefs: marketplacePrefs } = useHotkeySettings();
   const canPublish = (marketplacePrefs?.marketplaceDevLogin ?? '').trim().length > 0;
-  const copy = {
-    kicker: 'STYLE PACKS',
-    title: isEnglish ? 'Style Packs' : '风格包',
-    desc: isEnglish
-      ? 'Manage local style packs.'
-      : '管理本地风格包。',
-    loadFailed: (message: string) => (isEnglish ? `Failed to load style packs: ${message}` : `加载风格包失败：${message}`),
-    importZip: isEnglish ? 'Import ZIP' : '导入 ZIP',
-    exportZip: isEnglish ? 'Export ZIP' : '导出 ZIP',
-    exportShort: isEnglish ? 'Export' : '导出',
-    publishMarketplace: isEnglish ? 'Publish to Marketplace' : '发布到风格市场',
-    publishDisabledHint: isEnglish
-      ? 'Configure your GitHub login in Settings → Marketplace first'
-      : '请先在 设置 → 风格市场 配置 GitHub 用户名',
-    publishSuccess: isEnglish
-      ? 'Published — pending review on marketplace'
-      : '发布成功，等待 marketplace 审核',
-    publishFailed: (msg: string) =>
-      isEnglish ? `Publish failed: ${msg}` : `发布失败：${msg}`,
-    builtin: isEnglish ? 'Built-in' : '内置',
-    imported: isEnglish ? 'Imported' : '导入',
-    active: isEnglish ? 'Active' : '当前',
-    activate: isEnglish ? 'Activate' : '激活',
-    edit: isEnglish ? 'Edit' : '编辑',
-    closeEditor: isEnglish ? 'Close' : '关闭',
-    unsaved: isEnglish ? 'Unsaved' : '未保存',
-    listTitle: isEnglish ? 'Local Packs' : '本地风格包',
-    listDesc: isEnglish
-      ? 'Browse and switch packs.'
-      : '浏览和切换风格包。',
-    listCount: (count: number) => (isEnglish ? `${count} packs` : `${count} 个风格包`),
-    addPackTileTitle: isEnglish ? 'New Pack' : '新建风格包',
-    addPackTileHint: isEnglish ? 'Start from a blank template.' : '从空白模板开始。',
-    createSuccess: isEnglish ? 'New pack created.' : '已创建新风格包',
-    createFailed: (message: string) => (isEnglish ? `Failed to create pack: ${message}` : `创建风格包失败：${message}`),
-    builtinPackEditLabel: (name: string) => (isEnglish ? `Edit "${name}"` : `编辑「${name}」`),
-    save: isEnglish ? 'Save' : '保存',
-    revert: isEnglish ? 'Revert' : '撤销',
-    saveSuccess: isEnglish ? 'Style pack saved.' : '风格包已保存',
-    saveFailed: (message: string) => (isEnglish ? `Failed to save style pack: ${message}` : `保存风格包失败：${message}`),
-    activateSuccess: (name: string) => (isEnglish ? `Set "${name}" as current.` : `已将“${name}”设为当前风格`),
-    activateFailed: (message: string) => (isEnglish ? `Failed to set current style pack: ${message}` : `设为当前风格失败：${message}`),
-    importSuccess: (name: string) => (isEnglish ? `Imported "${name}".` : `已导入“${name}”`),
-    importFailed: (message: string) => (isEnglish ? `Failed to import ZIP: ${message}` : `导入 ZIP 失败：${message}`),
-    exportSuccess: (path: string) => (isEnglish ? `Exported to ${path}` : `已导出到 ${path}`),
-    exportFailed: (message: string) => (isEnglish ? `Failed to export ZIP: ${message}` : `导出 ZIP 失败：${message}`),
-    exportDirtyFirst: isEnglish ? 'Save this pack before exporting ZIP.' : '请先保存当前风格包，再导出 ZIP。',
-    resetBuiltin: isEnglish ? 'Reset' : '重置',
-    resetSuccess: (name: string) => (isEnglish ? `Reset "${name}".` : `已重置“${name}”`),
-    resetFailed: (message: string) => (isEnglish ? `Failed to reset pack: ${message}` : `重置风格包失败：${message}`),
-    deleteImported: isEnglish ? 'Delete' : '删除',
-    deleteConfirm: (name: string) => (isEnglish
-      ? `Delete "${name}"? This cannot be undone.`
-      : `确定删除“${name}”吗？删除后无法恢复。`),
-    deleteSuccess: (name: string) => (isEnglish ? `Deleted "${name}".` : `已删除“${name}”`),
-    deleteFailed: (message: string) => (isEnglish ? `Failed to delete pack: ${message}` : `删除风格包失败：${message}`),
-    summaryCurrentEmpty: isEnglish ? 'No pack selected yet' : '还没有选中风格包',
-    editorTitle: isEnglish ? 'Edit Pack' : '编辑风格',
-    editorDesc: isEnglish
-      ? 'Edit this pack.'
-      : '编辑当前风格包。',
-    metaTitle: isEnglish ? 'Installation Info' : '安装信息',
-    metaSource: isEnglish ? 'Source' : '来源',
-    metaBaseMode: isEnglish ? 'Base Mode' : '基础模式',
-    metaUpdatedAt: isEnglish ? 'Updated' : '更新时间',
-    fieldName: isEnglish ? 'Name' : '名称',
-    fieldAuthor: isEnglish ? 'Author' : '作者',
-    fieldAuthorPlaceholder: isEnglish ? 'Optional source label' : '可选，方便标注来源',
-    fieldVersion: isEnglish ? 'Version' : '版本',
-    fieldTags: isEnglish ? 'Tags' : '标签',
-    fieldTagsPlaceholder: isEnglish ? 'Comma-separated tags, e.g. community, voiceover, formal' : '用英文逗号分隔，例如 community, voiceover, formal',
-    fieldDescription: isEnglish ? 'Description' : '描述',
-    fieldModel: isEnglish ? 'Recommended Model (Metadata)' : '推荐模型（仅元数据）',
-    fieldModelPlaceholder: isEnglish ? 'Optional, e.g. gpt-4.1 / deepseek-v3' : '可选，例如 gpt-4.1 / deepseek-v3',
-    fieldModelHint: isEnglish
-      ? 'Metadata only. Does not switch model.'
-      : '仅作说明，不会切换实际模型。',
-    fieldCompatibility: isEnglish ? 'Compatible App Version' : '兼容版本',
-    fieldCompatibilityPlaceholder: isEnglish ? 'Optional, e.g. >=1.3.0' : '可选，例如 >=1.3.0',
-    fullPromptTitle: isEnglish ? 'System Prompt' : 'System Prompt',
-    fullPromptHint: isEnglish
-      ? 'The prompt owned by this pack.'
-      : '这就是这套风格包自己的 Prompt。',
-    runtimeTitle: isEnglish ? 'OpenLess Runtime Directives' : 'OpenLess 运行时附加指令',
-    runtimeDesc: isEnglish
-      ? 'Read-only runtime helpers.'
-      : '只读的运行时辅助项。',
-    runtimeDirectiveContextTitle: isEnglish ? 'Context premise' : '上下文前提',
-    runtimeDirectiveContextDesc: isEnglish ? 'From language and app context' : '来自语言与应用上下文',
-    runtimeDirectiveContextEmpty: isEnglish ? 'Not added in the current preview.' : '当前不会附加',
-    runtimeDirectiveHotwordTitle: isEnglish ? 'Hotword block' : '热词提示段',
-    runtimeDirectiveHotwordDesc: isEnglish ? 'From enabled hotwords' : '来自已启用热词',
-    runtimeDirectiveHotwordEmpty: isEnglish ? 'Not added in the current preview.' : '当前不会附加',
-    runtimeDirectiveHistoryTitle: isEnglish ? 'Multi-turn history guardrail' : '多轮历史保护段',
-    runtimeDirectiveHistoryDesc: isEnglish ? 'Only for live multi-turn polish' : '仅用于实时多轮 polish',
-    runtimeDirectiveHistoryEmpty: isEnglish ? 'Only added when prior turns exist.' : '只有存在 prior turns 时才会附加',
-    runtimeDirectiveActive: isEnglish ? 'Active' : '当前生效',
-    runtimeDirectiveInactive: isEnglish ? 'Inactive' : '当前未生效',
-    runtimePreviewFailed: (message: string) => (isEnglish ? `Failed to build runtime preview: ${message}` : `生成运行时预览失败：${message}`),
-    runtimePreviewOmittedFrontApp: isEnglish ? 'Preview omits the front-app label.' : '预览已省略前台 app 标签。',
-    examplesTitle: isEnglish ? 'Effect Examples' : '效果示例',
-    examplesDesc: isEnglish
-      ? 'Exported with the pack.'
-      : '会随风格包一起导出。',
-    addExample: isEnglish ? 'Add Example' : '新增示例',
-    examplesEmpty: isEnglish
-      ? 'No examples yet.'
-      : '还没有示例。',
-    exampleTitlePlaceholder: (index: number) => (isEnglish ? `Example ${index} title` : `示例 ${index} 标题`),
-    exampleInput: isEnglish ? 'Input' : '输入',
-    exampleOutput: isEnglish ? 'Output' : '输出',
-    examplesCount: (count: number) => (isEnglish ? `${count} examples` : `${count} 个示例`),
-    discardCloseConfirm: isEnglish
-      ? 'Discard unsaved changes and close the editor?'
-      : '关闭编辑面板前要放弃未保存修改吗？',
-    discardSwitchConfirm: (name: string) => (isEnglish
-      ? `Discard unsaved changes and switch to "${name}"?`
-      : `要放弃当前未保存修改，并切换到“${name}”吗？`),
-  };
 
   const [packs, setPacks] = useState<StylePack[]>([]);
 
@@ -294,7 +174,7 @@ export function Style() {
         null;
       setSelectedId(nextSelectedId);
     } catch (loadError) {
-      showSaveStatus('failed', copy.loadFailed(String(loadError)));
+      showSaveStatus('failed', t('style.pack.loadFailed', { err: String(loadError) }));
     } finally {
       setBusy(null);
     }
@@ -390,7 +270,7 @@ export function Style() {
   const closeEditor = () => {
     if (editorClosing) return;
     if (dirty) {
-      if (!window.confirm(copy.discardCloseConfirm)) {
+      if (!window.confirm(t('style.pack.discardCloseConfirm'))) {
         return;
       }
       discardDraftChanges();
@@ -400,7 +280,7 @@ export function Style() {
 
   const openEditorForPack = (pack: StylePack) => {
     if (editorOpen && dirty && selectedPack && selectedPack.id !== pack.id) {
-      if (!window.confirm(copy.discardSwitchConfirm(pack.name))) {
+      if (!window.confirm(t('style.pack.discardSwitchConfirm', { name: pack.name }))) {
         return;
       }
     }
@@ -464,10 +344,10 @@ export function Style() {
         ...draft,
         tags: draft.tags.filter(Boolean),
       });
-      showSaveStatus('saved', copy.saveSuccess, true);
+      showSaveStatus('saved', t('style.pack.saveSuccess'), true);
       await loadPacks(saved.id);
     } catch (saveError) {
-      showSaveStatus('failed', copy.saveFailed(String(saveError)));
+      showSaveStatus('failed', t('style.pack.saveFailed', { err: String(saveError) }));
     } finally {
       setBusy(null);
     }
@@ -477,10 +357,10 @@ export function Style() {
     setBusy('activating');
     try {
       await setActiveStylePack(pack.id);
-      showSaveStatus('saved', copy.activateSuccess(pack.name), true);
+      showSaveStatus('saved', t('style.pack.activateSuccess', { name: pack.name }), true);
       await loadPacks(pack.id);
     } catch (activateError) {
-      showSaveStatus('failed', copy.activateFailed(String(activateError)));
+      showSaveStatus('failed', t('style.pack.activateFailed', { err: String(activateError) }));
     } finally {
       setBusy(null);
     }
@@ -491,10 +371,10 @@ export function Style() {
     setBusy('resetting');
     try {
       await resetBuiltinStylePack(selectedPack.id);
-      showSaveStatus('saved', copy.resetSuccess(selectedPack.name), true);
+      showSaveStatus('saved', t('style.pack.resetSuccess', { name: selectedPack.name }), true);
       await loadPacks(selectedPack.id);
     } catch (resetError) {
-      showSaveStatus('failed', copy.resetFailed(String(resetError)));
+      showSaveStatus('failed', t('style.pack.resetFailed', { err: String(resetError) }));
     } finally {
       setBusy(null);
     }
@@ -502,19 +382,19 @@ export function Style() {
 
   const handleDeleteImportedPack = async (pack: StylePack) => {
     if (pack.kind !== 'imported') return;
-    if (!window.confirm(copy.deleteConfirm(pack.name))) {
+    if (!window.confirm(t('style.pack.deleteConfirm', { name: pack.name }))) {
       return;
     }
     setBusy('deleting');
     try {
       await deleteStylePack(pack.id);
-      showSaveStatus('saved', copy.deleteSuccess(pack.name), true);
+      showSaveStatus('saved', t('style.pack.deleteSuccess', { name: pack.name }), true);
       if (editorOpen && selectedId === pack.id) {
         startEditorClose();
       }
       await loadPacks();
     } catch (deleteError) {
-      showSaveStatus('failed', copy.deleteFailed(String(deleteError)));
+      showSaveStatus('failed', t('style.pack.deleteFailed', { err: String(deleteError) }));
     } finally {
       setBusy(null);
     }
@@ -533,7 +413,7 @@ export function Style() {
         id: '',
       };
       const created = await createStylePackFromTemplate(template);
-      showSaveStatus('saved', copy.createSuccess, true);
+      showSaveStatus('saved', t('style.pack.createSuccess'), true);
       await loadPacks(created.id);
       // Re-fetch list, then open the editor on the new pack
       if (editorCloseTimer.current !== null) {
@@ -544,7 +424,7 @@ export function Style() {
       setSelectedId(created.id);
       setEditorOpen(true);
     } catch (createError) {
-      showSaveStatus('failed', copy.createFailed(String(createError)));
+      showSaveStatus('failed', t('style.pack.createFailed', { err: String(createError) }));
     } finally {
       setBusy(null);
     }
@@ -569,10 +449,10 @@ export function Style() {
         return;
       }
       const imported = await importStylePackFromZip(zipPath);
-      showSaveStatus('saved', copy.importSuccess(imported.name), true);
+      showSaveStatus('saved', t('style.pack.importSuccess', { name: imported.name }), true);
       await loadPacks(imported.id);
     } catch (importError) {
-      showSaveStatus('failed', copy.importFailed(String(importError)));
+      showSaveStatus('failed', t('style.pack.importFailed', { err: String(importError) }));
     } finally {
       setBusy(null);
     }
@@ -582,9 +462,7 @@ export function Style() {
     if (!pack) return;
     // 内置 pack 是只读模板，不能直接上传 —— 改它得先「在官方上面做一份」克隆出 imported。
     if (pack.kind === 'builtin') {
-      showSaveStatus('failed', isEnglish
-        ? 'Built-in packs cannot be published. Clone first via edit.'
-        : '内置风格包不能直接发布，请先编辑生成一份导入版。');
+      showSaveStatus('failed', t('style.pack.publishBuiltinRejected'));
       return;
     }
     setBusy('exporting');
@@ -596,9 +474,9 @@ export function Style() {
         pack = saved;
       }
       await uploadMarketplacePack(pack.id);
-      showSaveStatus('saved', copy.publishSuccess, true);
+      showSaveStatus('saved', t('style.pack.publishSuccess'), true);
     } catch (publishError) {
-      showSaveStatus('failed', copy.publishFailed(String(publishError)));
+      showSaveStatus('failed', t('style.pack.publishFailed', { err: String(publishError) }));
     } finally {
       setBusy(null);
     }
@@ -607,7 +485,7 @@ export function Style() {
   const handleExportZip = async (pack = selectedPack) => {
     if (!pack) return;
     if (editorOpen && dirty && selectedPack && pack.id === selectedPack.id) {
-      showSaveStatus('failed', copy.exportDirtyFirst);
+      showSaveStatus('failed', t('style.pack.exportDirtyFirst'));
       return;
     }
     setBusy('exporting');
@@ -628,9 +506,9 @@ export function Style() {
         return;
       }
       const savedPath = await exportStylePackToZip(pack.id, targetPath);
-      showSaveStatus('saved', copy.exportSuccess(savedPath), true);
+      showSaveStatus('saved', t('style.pack.exportSuccess', { path: savedPath }), true);
     } catch (exportError) {
-      showSaveStatus('failed', copy.exportFailed(String(exportError)));
+      showSaveStatus('failed', t('style.pack.exportFailed', { err: String(exportError) }));
     } finally {
       setBusy(null);
     }
@@ -639,41 +517,20 @@ export function Style() {
   return (
     <>
       <PageHeader
-        kicker={copy.kicker}
-        title={copy.title}
-        desc={copy.desc}
-        titleRight={(
-          // 风格市场暂时未开放（云端服务尚未上线）—— 入口保留可见但灰色 + 点击 toast 提示。
-          // 真正功能（Marketplace 组件 / IPC / backend client）保留，等云端就绪可一行恢复 onClick。
-          <button
-            type="button"
-            onClick={() => showSaveStatus(
-              'failed',
-              isEnglish ? 'Style Marketplace is not yet available' : '风格市场暂时未开放',
-            )}
-            title={isEnglish ? 'Style Marketplace is not yet available' : '风格市场暂时未开放'}
-            style={{
-              display: 'inline-flex', alignItems: 'center', gap: 6,
-              padding: '6px 12px', borderRadius: 999,
-              border: '0.5px solid var(--ol-line)',
-              background: 'rgba(120,120,128,0.10)',
-              color: 'var(--ol-ink-4)',
-              fontSize: 12, fontWeight: 500,
-              cursor: 'default',
-              transition: 'background 0.16s var(--ol-motion-quick)',
-            }}
-          >
-            <Icon name="cloud" size={13} />
-            <span>{isEnglish ? 'Marketplace' : '风格市场'}</span>
-          </button>
-        )}
+        kicker={t('style.pack.kicker')}
+        title={t('style.pack.title')}
+        desc={t('style.pack.desc')}
         right={(
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end', marginTop: 40 }}>
+            {/* 风格市场入口：放在 刷新 左边（按用户需求）。点击 → 全屏弹框承载 <Marketplace />。*/}
+            <Btn variant="ghost" icon="cloud" onClick={() => setMarketplaceOpen(true)}>
+              {t('style.pack.marketplaceBtn')}
+            </Btn>
             <Btn variant="ghost" icon="refresh" onClick={() => void loadPacks(selectedId)} disabled={busy === 'loading'}>
               {t('common.refresh')}
             </Btn>
             <Btn variant="blue" icon="archive" onClick={() => void handleImportZip()} disabled={busy === 'importing'}>
-              {busy === 'importing' ? t('common.loading') : copy.importZip}
+              {busy === 'importing' ? t('common.loading') : t('style.pack.importZip')}
             </Btn>
           </div>
         )}
@@ -702,8 +559,8 @@ export function Style() {
             <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', minWidth: 0 }}>
                 <div>
-                  <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--ol-ink)' }}>{copy.listTitle}</div>
-                  <div style={{ fontSize: 12, color: 'var(--ol-ink-3)', marginTop: 4, maxWidth: 760 }}>{copy.listDesc}</div>
+                  <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--ol-ink)' }}>{t('style.pack.listTitle')}</div>
+                  <div style={{ fontSize: 12, color: 'var(--ol-ink-3)', marginTop: 4, maxWidth: 760 }}>{t('style.pack.listDesc')}</div>
                 </div>
                 {rawPack && (
                   <button
@@ -729,11 +586,11 @@ export function Style() {
                     }}
                   >
                     <span>{rawPack.name}</span>
-                    {rawPack.active && <span style={{ fontSize: 11, opacity: 0.85 }}>·{copy.active}</span>}
+                    {rawPack.active && <span style={{ fontSize: 11, opacity: 0.85 }}>·{t('style.pack.active')}</span>}
                   </button>
                 )}
               </div>
-              <Pill tone="outline">{copy.listCount(packs.length)}</Pill>
+              <Pill tone="outline">{t('style.pack.listCount', { count: packs.length })}</Pill>
             </div>
           </div>
           <div className="ol-thinscroll" style={{ padding: 18, overflow: 'auto', flex: '1 1 0', minHeight: 0 }}>
@@ -769,15 +626,15 @@ export function Style() {
                           {pack.name}
                         </div>
                         <Pill tone={isBuiltin ? 'outline' : 'blue'} size="sm">
-                          {isBuiltin ? copy.builtin : copy.imported}
+                          {isBuiltin ? t('style.pack.builtin') : t('style.pack.imported')}
                         </Pill>
                         {pack.originAuthorLogin
                           && pack.originAuthorLogin !== (marketplacePrefs?.marketplaceDevLogin ?? '').trim() && (
-                          <span title={`衍生自 @${pack.originAuthorLogin}`}>
-                            <Pill tone="ok" size="sm">衍生自 @{pack.originAuthorLogin}</Pill>
+                          <span title={t('style.pack.derivativeBadge', { login: pack.originAuthorLogin })}>
+                            <Pill tone="ok" size="sm">{t('style.pack.derivativeBadge', { login: pack.originAuthorLogin })}</Pill>
                           </span>
                         )}
-                        {pack.active && <Pill tone="dark" size="sm">{copy.active}</Pill>}
+                        {pack.active && <Pill tone="dark" size="sm">{t('style.pack.active')}</Pill>}
                       </div>
                       <div
                         style={{
@@ -813,8 +670,8 @@ export function Style() {
                         type="button"
                         onClick={() => void handleDeleteImportedPack(pack)}
                         disabled={busy === 'deleting'}
-                        aria-label={copy.deleteImported}
-                        title={copy.deleteImported}
+                        aria-label={t('style.pack.deleteImported')}
+                        title={t('style.pack.deleteImported')}
                         style={{
                           width: 36, height: 36, borderRadius: 12,
                           display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
@@ -846,7 +703,7 @@ export function Style() {
                       disabled={pack.active || busy === 'activating'}
                       onClick={() => void handleActivate(pack)}
                     >
-                      {pack.active ? copy.active : copy.activate}
+                      {pack.active ? t('style.pack.active') : t('style.pack.activate')}
                     </Btn>
                     <Btn
                       size="sm"
@@ -855,7 +712,7 @@ export function Style() {
                       disabled={busy === 'exporting'}
                       onClick={() => void handleExportZip(pack)}
                     >
-                      {copy.exportShort}
+                      {t('style.pack.exportShort')}
                     </Btn>
                     <Btn
                       size="sm"
@@ -864,7 +721,7 @@ export function Style() {
                       disabled={isBuiltin}
                       onClick={() => openEditorForPack(pack)}
                     >
-                      {copy.edit}
+                      {t('style.pack.edit')}
                     </Btn>
                   </div>
                 </div>
@@ -874,7 +731,7 @@ export function Style() {
               type="button"
               onClick={() => void handleCreateFromTemplate()}
               disabled={busy === 'creating'}
-              aria-label={copy.addPackTileTitle}
+              aria-label={t('style.pack.addPackTileTitle')}
               style={{
                 display: 'flex',
                 flexDirection: 'column',
@@ -903,8 +760,8 @@ export function Style() {
               >
                 <Icon name="plus" size={22} />
               </div>
-              <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--ol-ink-2)' }}>{copy.addPackTileTitle}</div>
-              <div style={{ fontSize: 12, color: 'var(--ol-ink-4)', lineHeight: 1.55, maxWidth: 220 }}>{copy.addPackTileHint}</div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--ol-ink-2)' }}>{t('style.pack.addPackTileTitle')}</div>
+              <div style={{ fontSize: 12, color: 'var(--ol-ink-4)', lineHeight: 1.55, maxWidth: 220 }}>{t('style.pack.addPackTileHint')}</div>
             </button>
           </div>
         </div>
@@ -930,7 +787,7 @@ export function Style() {
           <div
             role="dialog"
             aria-modal="true"
-            aria-label={copy.editorTitle}
+            aria-label={t('style.pack.editorTitle')}
             style={{
               position: 'fixed',
               top: 16,
@@ -956,13 +813,13 @@ export function Style() {
               <div style={{ padding: 18, borderBottom: '0.5px solid var(--ol-line)' }}>
                 <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}>
                   <div style={{ minWidth: 0 }}>
-                    <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--ol-ink)' }}>{copy.editorTitle}</div>
-                    <div style={{ fontSize: 12, color: 'var(--ol-ink-3)', marginTop: 4, lineHeight: 1.6 }}>{copy.editorDesc}</div>
+                    <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--ol-ink)' }}>{t('style.pack.editorTitle')}</div>
+                    <div style={{ fontSize: 12, color: 'var(--ol-ink-3)', marginTop: 4, lineHeight: 1.6 }}>{t('style.pack.editorDesc')}</div>
                   </div>
                   <button
                     type="button"
                     onClick={closeEditor}
-                    aria-label={copy.closeEditor}
+                    aria-label={t('style.pack.closeEditor')}
                     style={{
                       width: 28,
                       height: 28,
@@ -983,29 +840,29 @@ export function Style() {
 
               {!draft ? (
                 <div style={{ padding: 28, color: 'var(--ol-ink-3)', fontSize: 13, lineHeight: 1.6 }}>
-                  {busy === 'loading' ? t('common.loading') : copy.summaryCurrentEmpty}
+                  {busy === 'loading' ? t('common.loading') : t('style.pack.summaryCurrentEmpty')}
                 </div>
               ) : (
                 <div className="ol-thinscroll" style={{ overflow: 'auto', padding: 18, display: 'flex', flexDirection: 'column', gap: 16 }}>
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                       <Pill tone={draft.kind === 'builtin' ? 'outline' : 'blue'}>
-                        {draft.kind === 'builtin' ? copy.builtin : copy.imported}
+                        {draft.kind === 'builtin' ? t('style.pack.builtin') : t('style.pack.imported')}
                       </Pill>
                       <Pill tone={modeTone(draft.baseMode)}>{t(`style.modes.${draft.baseMode}.name`)}</Pill>
-                      {draft.active && <Pill tone="dark">{copy.active}</Pill>}
-                      {dirty && <Pill tone="outline">{copy.unsaved}</Pill>}
+                      {draft.active && <Pill tone="dark">{t('style.pack.active')}</Pill>}
+                      {dirty && <Pill tone="outline">{t('style.pack.unsaved')}</Pill>}
                     </div>
                     <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                       <Btn variant="ghost" icon="archive" onClick={() => void handleExportZip()} disabled={busy === 'exporting'}>
-                        {copy.exportZip}
+                        {t('style.pack.exportZip')}
                       </Btn>
                       <span
                         title={
                           draft?.kind === 'builtin'
-                            ? (isEnglish ? 'Built-in packs cannot be published.' : '内置风格包不能直接发布')
+                            ? t('style.pack.publishBuiltinRejected')
                             : !canPublish
-                              ? copy.publishDisabledHint
+                              ? t('style.pack.publishDisabledHint')
                               : ''
                         }
                       >
@@ -1015,7 +872,7 @@ export function Style() {
                           onClick={() => void handlePublishToMarketplace()}
                           disabled={!canPublish || draft?.kind === 'builtin' || busy === 'exporting'}
                         >
-                          {copy.publishMarketplace}
+                          {draft?.originPackId ? t('style.pack.updateMarketplace') : t('style.pack.publishMarketplace')}
                         </Btn>
                       </span>
                       <Btn
@@ -1024,14 +881,14 @@ export function Style() {
                         disabled={draft.active || busy === 'activating'}
                         onClick={() => void handleActivate(draft)}
                       >
-                        {draft.active ? copy.active : copy.activate}
+                        {draft.active ? t('style.pack.active') : t('style.pack.activate')}
                       </Btn>
                     </div>
                   </div>
 
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
                     <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                      <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink)' }}>{copy.fieldName}</span>
+                      <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink)' }}>{t('style.pack.fieldName')}</span>
                       <input
                         value={draft.name}
                         onChange={event => patchDraft({ name: event.target.value })}
@@ -1039,16 +896,16 @@ export function Style() {
                       />
                     </label>
                     <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                      <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink)' }}>{copy.fieldAuthor}</span>
+                      <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink)' }}>{t('style.pack.fieldAuthor')}</span>
                       <input
                         value={draft.author ?? ''}
                         onChange={event => patchDraft({ author: event.target.value || null })}
                         style={inputStyle}
-                        placeholder={copy.fieldAuthorPlaceholder}
+                        placeholder={t('style.pack.fieldAuthorPlaceholder')}
                       />
                     </label>
                     <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                      <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink)' }}>{copy.fieldVersion}</span>
+                      <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink)' }}>{t('style.pack.fieldVersion')}</span>
                       <input
                         value={draft.version}
                         onChange={event => patchDraft({ version: event.target.value })}
@@ -1056,18 +913,18 @@ export function Style() {
                       />
                     </label>
                     <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                      <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink)' }}>{copy.fieldTags}</span>
+                      <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink)' }}>{t('style.pack.fieldTags')}</span>
                       <input
                         value={draft.tags.join(', ')}
                         onChange={event => patchDraft({ tags: event.target.value.split(',').map(value => value.trim()).filter(Boolean) })}
                         style={inputStyle}
-                        placeholder={copy.fieldTagsPlaceholder}
+                        placeholder={t('style.pack.fieldTagsPlaceholder')}
                       />
                     </label>
                   </div>
 
                   <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                    <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink)' }}>{copy.fieldDescription}</span>
+                    <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink)' }}>{t('style.pack.fieldDescription')}</span>
                     <textarea
                       value={draft.description}
                       onChange={event => patchDraft({ description: event.target.value })}
@@ -1077,32 +934,32 @@ export function Style() {
 
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
                     <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                      <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink)' }}>{copy.fieldModel}</span>
+                      <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink)' }}>{t('style.pack.fieldModel')}</span>
                       <input
                         value={draft.recommendedModel ?? ''}
                         onChange={event => patchDraft({ recommendedModel: event.target.value || null })}
                         style={inputStyle}
-                        placeholder={copy.fieldModelPlaceholder}
+                        placeholder={t('style.pack.fieldModelPlaceholder')}
                       />
-                      <span style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.55 }}>{copy.fieldModelHint}</span>
+                      <span style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.55 }}>{t('style.pack.fieldModelHint')}</span>
                     </label>
                     <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                      <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink)' }}>{copy.fieldCompatibility}</span>
+                      <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink)' }}>{t('style.pack.fieldCompatibility')}</span>
                       <input
                         value={draft.compatibleAppVersion ?? ''}
                         onChange={event => patchDraft({ compatibleAppVersion: event.target.value || null })}
                         style={inputStyle}
-                        placeholder={copy.fieldCompatibilityPlaceholder}
+                        placeholder={t('style.pack.fieldCompatibilityPlaceholder')}
                       />
                     </label>
                   </div>
 
                   <label style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
-                      <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink)' }}>{copy.fullPromptTitle}</span>
-                      <Pill tone="default" size="sm">{isEnglish ? `${draft.prompt.length} chars` : `${draft.prompt.length} 字符`}</Pill>
+                      <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink)' }}>{t('style.pack.fullPromptTitle')}</span>
+                      <Pill tone="default" size="sm">{t('style.pack.promptChars', { count: draft.prompt.length })}</Pill>
                     </div>
-                    <span style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.55 }}>{copy.fullPromptHint}</span>
+                    <span style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.55 }}>{t('style.pack.fullPromptHint')}</span>
                     <textarea
                       value={draft.prompt}
                       onChange={event => patchDraft({ prompt: event.target.value })}
@@ -1119,59 +976,59 @@ export function Style() {
                   >
                     <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
                       <div>
-                        <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--ol-ink)' }}>{copy.runtimeTitle}</div>
-                        <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', marginTop: 4, lineHeight: 1.6 }}>{copy.runtimeDesc}</div>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--ol-ink)' }}>{t('style.pack.runtimeTitle')}</div>
+                        <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', marginTop: 4, lineHeight: 1.6 }}>{t('style.pack.runtimeDesc')}</div>
                       </div>
                     </div>
 
                     <div style={{ display: 'grid', gap: 8, marginBottom: 8 }}>
                       <DirectiveRow
-                        title={copy.runtimeDirectiveContextTitle}
-                        detail={copy.runtimeDirectiveContextDesc}
+                        title={t('style.pack.runtimeContextTitle')}
+                        detail={t('style.pack.runtimeContextDesc')}
                         active={Boolean(runtimePreview?.contextPremise)}
-                        activeLabel={copy.runtimeDirectiveActive}
-                        inactiveLabel={copy.runtimeDirectiveInactive}
-                        inactiveHint={copy.runtimeDirectiveContextEmpty}
+                        activeLabel={t('style.pack.runtimeActive')}
+                        inactiveLabel={t('style.pack.runtimeInactive')}
+                        inactiveHint={t('style.pack.runtimeContextEmpty')}
                       />
                       <DirectiveRow
-                        title={copy.runtimeDirectiveHotwordTitle}
-                        detail={copy.runtimeDirectiveHotwordDesc}
+                        title={t('style.pack.runtimeHotwordTitle')}
+                        detail={t('style.pack.runtimeHotwordDesc')}
                         active={Boolean(runtimePreview?.hotwordBlock)}
-                        activeLabel={copy.runtimeDirectiveActive}
-                        inactiveLabel={copy.runtimeDirectiveInactive}
-                        inactiveHint={copy.runtimeDirectiveHotwordEmpty}
+                        activeLabel={t('style.pack.runtimeActive')}
+                        inactiveLabel={t('style.pack.runtimeInactive')}
+                        inactiveHint={t('style.pack.runtimeHotwordEmpty')}
                       />
                       <DirectiveRow
-                        title={copy.runtimeDirectiveHistoryTitle}
-                        detail={copy.runtimeDirectiveHistoryDesc}
+                        title={t('style.pack.runtimeHistoryTitle')}
+                        detail={t('style.pack.runtimeHistoryDesc')}
                         active={Boolean(runtimePreview?.historyInstruction)}
-                        activeLabel={copy.runtimeDirectiveActive}
-                        inactiveLabel={copy.runtimeDirectiveInactive}
-                        inactiveHint={copy.runtimeDirectiveHistoryEmpty}
+                        activeLabel={t('style.pack.runtimeActive')}
+                        inactiveLabel={t('style.pack.runtimeInactive')}
+                        inactiveHint={t('style.pack.runtimeHistoryEmpty')}
                       />
                     </div>
                     <div style={{ fontSize: 11.5, color: runtimePreviewError ? 'var(--ol-red, #b91c1c)' : 'var(--ol-ink-4)', marginTop: 10, lineHeight: 1.55 }}>
-                      {runtimePreviewError ? copy.runtimePreviewFailed(runtimePreviewError) : copy.runtimePreviewOmittedFrontApp}
+                      {runtimePreviewError ? t('style.pack.runtimePreviewFailed', { err: runtimePreviewError }) : t('style.pack.runtimePreviewOmittedFrontApp')}
                     </div>
                   </Card>
 
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
                     <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                       <Btn variant={dirty ? 'blue' : 'ghost'} icon="check" onClick={() => void handleSave()} disabled={!dirty || busy === 'saving'}>
-                        {busy === 'saving' ? t('common.saving') : copy.save}
+                        {busy === 'saving' ? t('common.saving') : t('style.pack.save')}
                       </Btn>
                       <Btn variant="ghost" icon="refresh" onClick={discardDraftChanges} disabled={!dirty}>
-                        {copy.revert}
+                        {t('style.pack.revert')}
                       </Btn>
                     </div>
                     <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                       {draft.kind === 'builtin' ? (
                         <Btn variant="soft" icon="refresh" onClick={() => void handleResetBuiltin()} disabled={busy === 'resetting'}>
-                          {copy.resetBuiltin}
+                          {t('style.pack.resetBuiltin')}
                         </Btn>
                       ) : (
                         <Btn variant="soft" icon="trash" onClick={() => void handleDeleteImported()} disabled={busy === 'deleting'}>
-                          {copy.deleteImported}
+                          {t('style.pack.deleteImported')}
                         </Btn>
                       )}
                     </div>
@@ -1186,29 +1043,29 @@ export function Style() {
                     }}
                   >
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-                      <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--ol-ink)' }}>{copy.metaTitle}</div>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--ol-ink)' }}>{t('style.pack.metaTitle')}</div>
                       <Pill tone="default" size="sm">{draft.id}</Pill>
                     </div>
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 10 }}>
-                      <MetaItem label={copy.metaSource} value={draft.kind === 'builtin' ? copy.builtin : copy.imported} />
-                      <MetaItem label={copy.metaBaseMode} value={t(`style.modes.${draft.baseMode}.name`)} />
-                      <MetaItem label={copy.metaUpdatedAt} value={draft.updatedAt || '—'} />
+                      <MetaItem label={t('style.pack.metaSource')} value={draft.kind === 'builtin' ? t('style.pack.builtin') : t('style.pack.imported')} />
+                      <MetaItem label={t('style.pack.metaBaseMode')} value={t(`style.modes.${draft.baseMode}.name`)} />
+                      <MetaItem label={t('style.pack.metaUpdatedAt')} value={draft.updatedAt || '—'} />
                     </div>
                   </div>
 
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
                     <div>
-                      <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--ol-ink)' }}>{copy.examplesTitle}</div>
-                      <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', marginTop: 4 }}>{copy.examplesDesc}</div>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--ol-ink)' }}>{t('style.pack.examplesTitle')}</div>
+                      <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', marginTop: 4 }}>{t('style.pack.examplesDesc')}</div>
                     </div>
-                    <Btn variant="ghost" icon="plus" onClick={appendExample}>{copy.addExample}</Btn>
+                    <Btn variant="ghost" icon="plus" onClick={appendExample}>{t('style.pack.addExample')}</Btn>
                   </div>
 
                   <div style={{ display: 'grid', gap: 12 }}>
                     {draft.examples.length === 0 && (
                       <Card padding={18} style={{ background: 'var(--ol-surface-2)' }}>
                         <div style={{ fontSize: 12.5, color: 'var(--ol-ink-3)', lineHeight: 1.6 }}>
-                          {copy.examplesEmpty}
+                          {t('style.pack.examplesEmpty')}
                         </div>
                       </Card>
                     )}
@@ -1226,7 +1083,7 @@ export function Style() {
                             value={example.title ?? ''}
                             onChange={event => patchExample(index, { title: event.target.value })}
                             style={{ ...inputStyle, fontWeight: 600 }}
-                            placeholder={copy.exampleTitlePlaceholder(index + 1)}
+                            placeholder={t('style.pack.exampleTitlePlaceholder', { index: index + 1 })}
                           />
                           <button
                             type="button"
@@ -1258,7 +1115,7 @@ export function Style() {
                             }}
                           >
                             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-                              <Pill tone="outline" size="sm">{copy.exampleInput}</Pill>
+                              <Pill tone="outline" size="sm">{t('style.pack.exampleInput')}</Pill>
                             </div>
                             <textarea
                               value={example.input}
@@ -1276,7 +1133,7 @@ export function Style() {
                             }}
                           >
                             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-                              <Pill tone="blue" size="sm">{copy.exampleOutput}</Pill>
+                              <Pill tone="blue" size="sm">{t('style.pack.exampleOutput')}</Pill>
                             </div>
                             <textarea
                               value={example.output}
