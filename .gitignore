@@ -45,3 +45,37 @@ openless-all/app/windows-ime/obj/
 
 # Planning docs are kept local only, not published to the public repo.
 docs/plans/
+
+# Internal AI 协作 + 规划 + 审计文档：本地保留，绝不发布到公共仓库。
+# 之前误入库的整套已在 chore/remove-internal-docs 中 git rm --cached，
+# 这里加规则避免再次被 `git add` 拉回来。
+
+# 根目录 AI 协作指南
+/CLAUDE.md
+/AGENTS.md
+/issue-*-plan.md
+
+# .github 内部协作 + 审计报告（ISSUE_TEMPLATE / workflows / pr template 仍保留发布）
+.github/COOPER_*.md
+.github/BUILD_TEST_REPORT.md
+.github/MULTI_SCALE_AUDIT.md
+.github/P1_TEST_REPORT.md
+.github/TEST_VERIFICATION.md
+.github/WATCHDOG_RISK_ANALYSIS.md
+.github/audit-reports/
+.github/finding-reports/
+.github/issues/EPIC-*.md
+
+# docs/ 下的规划 / 审计 / 内部 tracking（用户文档如 volcengine-setup / tauri-csp 保留）
+docs/audit-*.md
+docs/logic-review-*.md
+docs/qa-reasoning-roadmap.md
+docs/style-pack-marketplace.md
+docs/auto-update-download-acceleration.md
+docs/2026-*-investigation.md
+docs/*-research.md
+docs/windows-upstream-pr-workflow.md
+docs/github-tracking/
+docs/superpowers/
+docs/windows-lifecycle-tracking/
+docs/windows-ui-tracking/
