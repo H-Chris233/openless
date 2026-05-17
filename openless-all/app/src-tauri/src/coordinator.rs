@@ -73,6 +73,47 @@ use resources::{
     stop_microphone_preview_monitor, stop_qa_recorder, SessionResource, SharedRecordingMuteState,
 };
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CapsuleShowStrategy {
+    NoActivate,
+    FallbackShow,
+}
+
+fn capsule_show_strategy_for_platform() -> CapsuleShowStrategy {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    {
+        CapsuleShowStrategy::NoActivate
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        CapsuleShowStrategy::FallbackShow
+    }
+}
+
+static CAPSULE_NO_ACTIVATE_FALLBACK_WARNED: AtomicBool = AtomicBool::new(false);
+
+fn show_capsule_window_for_recording<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    window: &tauri::WebviewWindow<R>,
+) {
+    let mut needs_fallback = true;
+    if capsule_show_strategy_for_platform() == CapsuleShowStrategy::NoActivate {
+        needs_fallback = !show_capsule_window_no_activate(app, window);
+        if needs_fallback && !CAPSULE_NO_ACTIVATE_FALLBACK_WARNED.swap(true, Ordering::SeqCst) {
+            // 产品取舍：no-activate 是 macOS/AeroSpace 的主路径；但如果 ns_window
+            // 暂不可用，仍优先保住录音反馈，不让用户以为听写没启动。fallback 可能
+            // 重新触发 workspace 跳转，只在 no-activate 失败时作为降级路径。
+            log::warn!("[capsule] no-activate show failed; falling back to window.show()");
+        }
+    }
+
+    if needs_fallback {
+        if let Err(e) = window.show() {
+            log::warn!("[capsule] show fallback failed: {e}");
+        }
+    }
+}
+
 enum ActiveAsr {
     Volcengine(Arc<VolcengineStreamingASR>),
     Whisper(Arc<WhisperBatchASR>),
@@ -3501,6 +3542,21 @@ mod tests {
     }
 
     #[test]
+    fn capsule_show_strategy_matches_platform_activation_contract() {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        assert_eq!(
+            capsule_show_strategy_for_platform(),
+            CapsuleShowStrategy::NoActivate
+        );
+
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        assert_eq!(
+            capsule_show_strategy_for_platform(),
+            CapsuleShowStrategy::FallbackShow
+        );
+    }
+
+    #[test]
     #[cfg(target_os = "windows")]
     fn prepared_windows_ime_slot_is_taken_only_for_matching_session() {
         let mut slots = vec![PreparedWindowsImeSessionSlot {
@@ -4033,11 +4089,32 @@ fn show_capsule_window_no_activate<R: tauri::Runtime>(
     true
 }
 
-// macOS / Linux 上不走 no-activate 路径：胶囊由 emit_capsule 的 fallback
-// `window.show()` 直接显示，再用 restore_main_window_key_if_active 把焦点还给
-// 主窗口。这是 1.2.11 的实现 — 单独走 orderFrontRegardless 会让胶囊在 webview
-// 未完整初始化时偶发不可见。
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
+fn show_capsule_window_no_activate<R: tauri::Runtime>(
+    _app: &AppHandle<R>,
+    window: &tauri::WebviewWindow<R>,
+) -> bool {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+
+    let Ok(handle) = window.ns_window() else {
+        return false;
+    };
+    let ns_window = handle as *mut AnyObject;
+    if ns_window.is_null() {
+        return false;
+    }
+
+    // emit_capsule 已经把窗口操作 marshal 到 Tauri 主线程；这里不能再调用
+    // window.show()/set_focus()/NSApp.activate，否则 AeroSpace 会把 workspace 切回
+    // OpenLess 主窗口所在空间。orderFrontRegardless 只让胶囊可见，不成为 key window。
+    unsafe {
+        let _: () = msg_send![ns_window, orderFrontRegardless];
+    }
+    true
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn show_capsule_window_no_activate<R: tauri::Runtime>(
     _app: &AppHandle<R>,
     _window: &tauri::WebviewWindow<R>,
@@ -4128,10 +4205,8 @@ fn emit_capsule(
         // 处理，不依赖把 Done/Cancelled/Error 打成 invisible。详见 PR #140 评论。
         maybe_position_capsule_bottom_center(&inner_for_main, &window, translation);
         if show_capsule && visible {
-            if !show_capsule_window_no_activate(&app_for_main, &window) {
-                let _ = window.show();
-            }
-            // macOS/Windows 优先走 no-activate show，避免录音胶囊抢走主窗口点击焦点。
+            show_capsule_window_for_recording(&app_for_main, &window);
+            // macOS/Windows 优先走 no-activate show，避免录音胶囊抢走当前工作 app 焦点。
             // 若 fallback 到 show()，OpenLess 已是前台 app 时再把 key window 还给 main。
             #[cfg(target_os = "macos")]
             crate::restore_main_window_key_if_active(&app_for_main);
