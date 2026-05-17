@@ -265,39 +265,20 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
 
           <div style={{ flex: 1 }} />
 
-          {/* 底部一行：设置按钮（左）+ 版本 chip（右，marginLeft: auto 推到行尾）。
-              之前是两行：设置一行、版本另一行；浪费纵向空间，且把版本顶得太靠下。 */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, paddingTop: 10 }}>
-            <button
-              onClick={() => openSettings()}
-              className={settingsOpen ? 'ol-nav-btn ol-nav-btn-active' : 'ol-nav-btn'}
-              style={{
-                display: 'inline-flex', alignItems: 'center', gap: 10,
-                padding: '7px 10px',
-                borderRadius: 8, border: 0,
-                background: settingsOpen ? 'var(--ol-surface)' : 'transparent',
-                boxShadow: settingsOpen ? '0 1px 2px rgba(0,0,0,.05), 0 0 0 0.5px rgba(0,0,0,.06)' : 'none',
-                fontFamily: 'inherit', fontSize: 13,
-                cursor: 'default',
-                transition: 'color 0.16s var(--ol-motion-quick), background 0.16s var(--ol-motion-quick)',
-                textAlign: 'left',
-              }}
-            >
-              <Icon name="settings" size={14} />
-              <span>{t('shell.footer.settings')}</span>
-            </button>
-
+          {/* 底部两行：上行 = 版本 chip（含 BETA 标），下行 = 设置按钮。
+              单行布局在窄 sidebar 下会把「设置」挤成两行竖字 + 版本糊一起；
+              翻回两行同时把顺序反过来：设置真正落到最底，版本在它上面。 */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, paddingTop: 10 }}>
             <div
               style={{
-                marginLeft: 'auto',
                 display: 'flex',
                 alignItems: 'center',
-                gap: 6,
-                paddingRight: 10,
+                gap: 8,
+                flexWrap: 'wrap',
+                padding: '0 10px',
                 fontFamily: 'var(--ol-font-sans)',
                 fontSize: 11,
                 color: 'var(--ol-ink-4)',
-                whiteSpace: 'nowrap',
               }}
             >
               {IS_BETA_BUILD && (
@@ -316,6 +297,25 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
 
               <span>{t('shell.footer.version', { version: APP_VERSION_LABEL })}</span>
             </div>
+
+            <button
+              onClick={() => openSettings()}
+              className={settingsOpen ? 'ol-nav-btn ol-nav-btn-active' : 'ol-nav-btn'}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 10,
+                padding: '7px 10px',
+                borderRadius: 8, border: 0,
+                background: settingsOpen ? 'var(--ol-surface)' : 'transparent',
+                boxShadow: settingsOpen ? '0 1px 2px rgba(0,0,0,.05), 0 0 0 0.5px rgba(0,0,0,.06)' : 'none',
+                fontFamily: 'inherit', fontSize: 13,
+                cursor: 'default',
+                transition: 'color 0.16s var(--ol-motion-quick), background 0.16s var(--ol-motion-quick)',
+                textAlign: 'left',
+              }}
+            >
+              <Icon name="settings" size={14} />
+              <span style={{ flex: 1 }}>{t('shell.footer.settings')}</span>
+            </button>
           </div>
         </aside>
 
