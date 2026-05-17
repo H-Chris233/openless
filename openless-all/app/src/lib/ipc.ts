@@ -1070,21 +1070,49 @@ export function githubDeviceFlowPoll(deviceCode: string): Promise<GithubDevicePo
   }));
 }
 
-// ─────────────────────── Marketplace list 缓存 (sessionStorage) ─────────────
-// 让用户重开「风格市场」时秒看到上次列表，再后台 refresh 校准。
-// 只缓存「默认视图」(query='' + sort='popular')，避免缓存 query/sort 组合爆炸。
+// ─────────────────────── Marketplace 差量缓存（localStorage） ────────────────
+//
+// 设计：两段式分发。
+// 1) List = 轻量元数据（id + version + updatedAt + 名称 / 计数 / tag），无 prompt 正文。
+//    本机持久化，重开 marketplace 秒呈现；后台 refresh 校准。
+// 2) Detail = 含 prompt 正文，按 (id, version, updatedAt) 三元组缓存。
+//    三元组等价于「内容版本签名」—— version+updatedAt 任一变化 = 内容变了 → 必须重拉。
+//    命中 = 复用本机，不发请求；未命中 = fetchMarketplaceDetail 再写回。
+// 3) 当 list 里某 pack 消失（被下架 / 撤回）或它的版本签名变了 → 驱逐对应 detail 缓存。
+//
+// 安全审查（防止恶意服务端 / 缓存投毒 / OOM）：
+// - ID 必须是 UUID v4（backend 已强制此约束；客户端镜像校验防 key 注入）。
+// - detail.id 必须与请求 packId 一致（防服务端返回错位内容）。
+// - 单条 detail 的 prompt 长度上限 200KB（防 OOM via 巨型注入）。
+// - detail 缓存条数上限 64，按 LRU 淘汰（防 localStorage 配额耗尽）。
+// - List items 在读取 / 写入时按合法 ID 过滤，丢弃格式异常项。
 
-const MARKETPLACE_LIST_CACHE_KEY = 'ol-marketplace-list-cache-v1';
-const MARKETPLACE_LIST_CACHE_TTL_MS = 5 * 60 * 1000; // 5 分钟内信任缓存
+const MARKETPLACE_LIST_CACHE_KEY = 'ol-marketplace-list-cache-v2';
+const MARKETPLACE_DETAIL_CACHE_KEY = 'ol-marketplace-detail-cache-v2';
+const MARKETPLACE_LIST_TTL_MS = 24 * 60 * 60 * 1000;          // 24h —— list 本来变动稀，refresh 也会自动覆盖
+const MARKETPLACE_DETAIL_TTL_MS = 30 * 24 * 60 * 60 * 1000;   // 30 天 —— detail 已经按版本三元组锁定，TTL 只是兜底
+const MARKETPLACE_DETAIL_MAX_ENTRIES = 64;
+const MARKETPLACE_DETAIL_MAX_PROMPT_CHARS = 200_000;
+
+const PACK_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function isValidMarketplacePackId(id: unknown): id is string {
+  return typeof id === 'string' && PACK_ID_RE.test(id);
+}
+
+function detailCacheKey(id: string, version: string, updatedAt: string): string {
+  // version + updatedAt 任一字段为空也能拼出确定 key（refetch 会自然覆盖）。
+  return `${id}::${version ?? ''}::${updatedAt ?? ''}`;
+}
 
 export function readMarketplaceListCache(): MarketplaceListItem[] | null {
   try {
-    const raw = sessionStorage.getItem(MARKETPLACE_LIST_CACHE_KEY);
+    const raw = localStorage.getItem(MARKETPLACE_LIST_CACHE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as { items: MarketplaceListItem[]; ts: number };
     if (!parsed || !Array.isArray(parsed.items)) return null;
-    if (Date.now() - parsed.ts > MARKETPLACE_LIST_CACHE_TTL_MS) return null;
-    return parsed.items;
+    if (Date.now() - parsed.ts > MARKETPLACE_LIST_TTL_MS) return null;
+    return parsed.items.filter(it => it && isValidMarketplacePackId(it.id));
   } catch {
     return null;
   }
@@ -1092,8 +1120,90 @@ export function readMarketplaceListCache(): MarketplaceListItem[] | null {
 
 export function writeMarketplaceListCache(items: MarketplaceListItem[]): void {
   try {
-    sessionStorage.setItem(MARKETPLACE_LIST_CACHE_KEY, JSON.stringify({ items, ts: Date.now() }));
+    const sanitized = items.filter(it => it && isValidMarketplacePackId(it.id));
+    localStorage.setItem(
+      MARKETPLACE_LIST_CACHE_KEY,
+      JSON.stringify({ items: sanitized, ts: Date.now() }),
+    );
+    // 服务端最新视图里没有的 (id, version, updatedAt) 一律驱逐 ——
+    // 这是「云端哈希被移除时本机也移除」的执行点。
+    const keepKeys = new Set(
+      sanitized.map(it => detailCacheKey(it.id, it.version ?? '', it.updatedAt ?? '')),
+    );
+    pruneMarketplaceDetailCache(keepKeys);
   } catch {
     // quota exceeded / disabled — silent
   }
+}
+
+type MarketplaceDetailCacheEntry = {
+  key: string;
+  detail: MarketplaceDetail;
+  ts: number;
+};
+
+function readMarketplaceDetailStore(): Record<string, MarketplaceDetailCacheEntry> {
+  try {
+    const raw = localStorage.getItem(MARKETPLACE_DETAIL_CACHE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, MarketplaceDetailCacheEntry> | null;
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeMarketplaceDetailStore(store: Record<string, MarketplaceDetailCacheEntry>): void {
+  try {
+    localStorage.setItem(MARKETPLACE_DETAIL_CACHE_KEY, JSON.stringify(store));
+  } catch {
+    // 配额耗尽 — 下次 read 时按 entries 数清理，命中失败会重新走网络。
+  }
+}
+
+export function readMarketplaceDetailCache(
+  packId: string,
+  version: string,
+  updatedAt: string,
+): MarketplaceDetail | null {
+  if (!isValidMarketplacePackId(packId)) return null;
+  const store = readMarketplaceDetailStore();
+  const entry = store[detailCacheKey(packId, version, updatedAt)];
+  if (!entry) return null;
+  if (Date.now() - entry.ts > MARKETPLACE_DETAIL_TTL_MS) return null;
+  if (!entry.detail || entry.detail.id !== packId) return null;
+  return entry.detail;
+}
+
+export function writeMarketplaceDetailCache(detail: MarketplaceDetail): void {
+  if (!isValidMarketplacePackId(detail.id)) return;
+  if (
+    typeof detail.prompt === 'string'
+    && detail.prompt.length > MARKETPLACE_DETAIL_MAX_PROMPT_CHARS
+  ) {
+    // 巨型 prompt 拒收 —— 防 OOM / 防服务端被攻陷后用大 payload 拖慢客户端。
+    return;
+  }
+  const store = readMarketplaceDetailStore();
+  const key = detailCacheKey(detail.id, detail.version ?? '', detail.updatedAt ?? '');
+  store[key] = { key, detail, ts: Date.now() };
+  // LRU: 旧的优先丢
+  const entries = Object.values(store).sort((a, b) => a.ts - b.ts);
+  while (entries.length > MARKETPLACE_DETAIL_MAX_ENTRIES) {
+    const oldest = entries.shift();
+    if (oldest) delete store[oldest.key];
+  }
+  writeMarketplaceDetailStore(store);
+}
+
+function pruneMarketplaceDetailCache(keepKeys: Set<string>): void {
+  const store = readMarketplaceDetailStore();
+  let changed = false;
+  for (const key of Object.keys(store)) {
+    if (!keepKeys.has(key)) {
+      delete store[key];
+      changed = true;
+    }
+  }
+  if (changed) writeMarketplaceDetailStore(store);
 }

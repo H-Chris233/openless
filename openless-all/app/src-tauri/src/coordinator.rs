@@ -4054,6 +4054,18 @@ fn capture_ime_submit_target() -> Option<ImeSubmitTarget> {
     })
 }
 
+// Windows topmost overlay 的已知 OS 级限制（issue #457）：
+// `SetWindowPos(HWND_TOPMOST)` 让 capsule 在普通桌面合成、最大化窗口、borderless
+// windowed fullscreen 上正常叠加；但**对独占全屏（exclusive fullscreen）DirectX /
+// OpenGL 应用无效** —— 那条路径绕过桌面合成器，标准 topmost 窗口不参与合成 →
+// 用户看不见 capsule。这是 OS 层面的限制，用户空间无法绕过（除非接入 DirectX
+// overlay，工程量与风险都不在 surgical 修复范围内）。
+//
+// 用户侧 workaround：把游戏切到 borderless windowed fullscreen（Minecraft Java 默认
+// 即是；F11 在不同版本表现不一致，按设置里的「全屏」选项决定）。
+//
+// 相关 UIPI 限制：若游戏以管理员身份运行而 OpenLess 不是，`WH_KEYBOARD_LL` 收不到
+// 游戏的按键 → hotkey 完全不触发。这里跟 SetWindowPos 路径无关，但同源不可绕过。
 #[cfg(target_os = "windows")]
 fn show_capsule_window_no_activate<R: tauri::Runtime>(
     _app: &AppHandle<R>,
