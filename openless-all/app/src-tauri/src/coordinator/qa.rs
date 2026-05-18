@@ -7,7 +7,8 @@ use crate::selection::SelectionContext;
 use crate::types::CapsuleState;
 
 use super::{
-    begin_qa_session, cancel_qa_session, capture_frontmost_app, emit_capsule, end_qa_session, Inner,
+    begin_qa_session, cancel_qa_session, capture_focus_target, capture_frontmost_app, emit_capsule,
+    end_qa_session, Inner,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +23,10 @@ pub(super) struct QaSessionState {
     pub(super) cancelled: bool,
     pub(super) selection: Option<SelectionContext>,
     pub(super) front_app: Option<String>,
+    /// open_qa_panel 时用户原 app 的 HWND（Windows 专用，存 usize 跨线程安全）。
+    /// begin_qa_session 抓选区前临时把焦点还给它，避开 #466 修复后 QA 自己抢前台导致
+    /// simulate_copy 在 QA webview 上跑空。非 Windows / macOS 平台为 None 不参与。
+    pub(super) qa_focus_target: Option<usize>,
     /// 用于忽略迟到的 RMS / runtime error。
     pub(super) session_id: SessionId,
     /// QA 浮窗是否被用户钉住（pinned）。pinned=true 时不自动隐藏。
@@ -41,6 +46,7 @@ impl Default for QaSessionState {
             cancelled: false,
             selection: None,
             front_app: None,
+            qa_focus_target: None,
             session_id: initial_session_id(),
             pinned: false,
             panel_visible: false,
@@ -85,6 +91,9 @@ pub(super) fn open_qa_panel(inner: &Arc<Inner>) {
         state.messages.clear();
         state.selection = None;
         state.front_app = capture_frontmost_app();
+        // 在 show_qa_window 抢前台之前抓一下：每次 begin_qa_session 抓选区时拿这个 HWND
+        // 临时把焦点还回去，让 simulate_copy 跑在用户原 app 上。issue #466 focus-dance。
+        state.qa_focus_target = capture_focus_target();
     }
     // 主听写 phase 是 Idle 才需要 sweep capsule —— 这里的语义是清掉「上一次 dictation
     // Done 状态残留」的 message / insertedChars，让 QA 自己的 capsule 状态从干净起跑
@@ -119,6 +128,7 @@ pub(super) fn close_qa_panel(inner: &Arc<Inner>) {
         state.messages.clear();
         state.selection = None;
         state.front_app = None;
+        state.qa_focus_target = None;
         state.phase = QaPhase::Idle;
         state.cancelled = false;
     }

@@ -85,6 +85,20 @@ pub fn run() {
                 dispatch_cli_intent(app, intent);
                 return;
             }
+            // 静默启动模式下：第二次启动（Win11 的「登录时重新打开应用」、autostart 双触发、
+            // 或用户手动再点图标）也不弹主窗口，否则 start_minimized=true 在 Win11 上整体失效。
+            // 用户想看主窗口走托盘菜单 / 托盘左键。issue #468。
+            if let Some(coordinator) = app
+                .try_state::<Arc<coordinator::Coordinator>>()
+                .map(|s| Arc::clone(&*s))
+            {
+                if coordinator.prefs().get().start_minimized {
+                    log::info!(
+                        "[single-instance] start_minimized=true → skipping show on relaunch"
+                    );
+                    return;
+                }
+            }
             log::info!(
                 "[single-instance] another instance launched, focusing existing main window"
             );
@@ -1117,24 +1131,38 @@ pub(crate) fn hide_qa_window<R: tauri::Runtime>(app: &AppHandle<R>) {
     }
 }
 
+/// 抓完选区后把焦点重新交回 QA 浮窗（Windows focus-dance 下半场）。begin_qa_session
+/// 在 capture_selection 跑完时调；非 Windows 平台是 no-op。issue #466。
+#[cfg(target_os = "windows")]
+pub(crate) fn refocus_qa_window<R: tauri::Runtime>(app: &AppHandle<R>) {
+    if let Some(window) = app.get_webview_window("qa") {
+        let _ = show_qa_window_no_activate(&window);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn refocus_qa_window<R: tauri::Runtime>(_app: &AppHandle<R>) {}
+
 #[cfg(target_os = "windows")]
 fn show_qa_window_no_activate<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) -> bool {
-    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    use windows::Win32::Foundation::HWND;
-    use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_SHOWNOACTIVATE};
-
-    let Ok(handle) = window.window_handle() else {
-        return false;
-    };
-    let RawWindowHandle::Win32(raw) = handle.as_raw() else {
-        return false;
-    };
-    let hwnd = HWND(raw.hwnd.get() as *mut _);
-    if hwnd.0.is_null() {
+    // 函数名沿用历史命名，实际行为已切到「show + focus」—— 让 QA webview 真正拿到键盘
+    // 焦点，ESC 才能到 React 监听、X 按钮 first-click 才不会被 OS 当作激活点击吃掉。
+    //
+    // 走 Tauri 的 show() / set_focus() 而不是 Win32 SetForegroundWindow + SetFocus
+    // 的原因（pr_agent 关注点二轮回应）：
+    //   - 直接 SetFocus(host_hwnd) 不保证 WebView2 child 收键盘事件，WebView2 子窗口
+    //     有自己的 focus 模型。Tauri 内部走 webview 专用路径，能把焦点真正送到 webview。
+    //   - SetForegroundWindow 在 Win11 focus-stealing prevention 下可能被拒。Tauri
+    //     2.x 在跨平台 abstraction 里做了兜底（按 SPI 临时调整 / attach input queue）。
+    //
+    // 对 issue #164 "QA 浮窗不抢前台 app 焦点"的取舍：浮窗出现时会短暂成为前台，
+    // 但 begin_qa_session 抓选区前 focus-dance 会把焦点临时还给用户原 app（见
+    // coordinator.rs 同 issue 注释），抓完再 refocus_qa_window 收回 —— 选区路径
+    // 仍能正常工作，issue #164 在「QA 出现的那一帧」短暂被违背是 #466 修复的代价。
+    if window.show().is_err() {
         return false;
     }
-
-    let _ = unsafe { ShowWindow(hwnd, SW_SHOWNOACTIVATE) };
+    let _ = window.set_focus();
     true
 }
 

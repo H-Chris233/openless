@@ -319,37 +319,71 @@ mod windows_impl {
     }
 
     pub fn restore_profile(snapshot: &ImeProfileSnapshot) -> WindowsImeProfileResult<()> {
+        // 必须与 activate_openless_profile 路径对称：激活同时调了 legacy
+        // ITfInputProcessorProfiles 的 ChangeCurrentLanguage + ActivateLanguageProfile，
+        // 单独调现代 ITfInputProcessorProfileMgr::ActivateProfile 不会更新 legacy
+        // current language / active profile 状态，OS 仍认 OpenLess 是当前输入法 →
+        // 用户的输入法切不回去。issue #469。
+        //
+        // 现代 ActivateProfile 失败降级为 warn：legacy 两步成功后，OS 视觉层已经把用户
+        // 原 IME 切回（语言指示器、键盘事件路由都走 legacy 视图）；现代 API 失败只是内部
+        // bookkeeping 不同步，不会让用户看到"还停在 OpenLess"。所以这一步降级为 warn，
+        // 不让 caller 把"已经切回了但 bookkeeping 慢"误判成"切回完全失败"。pr_agent
+        // partial-restore 关注点回应。
         match snapshot.kind() {
             ImeProfileKind::TextService => {
                 let clsid = parse_required_guid("text service CLSID", snapshot.clsid())?;
                 let profile_guid =
                     parse_required_guid("text service profile GUID", snapshot.profile_guid())?;
+                let lang_id = snapshot.lang_id();
 
-                with_profile_manager(|manager| unsafe {
+                with_input_processor_profiles(|profiles| unsafe {
+                    profiles.ChangeCurrentLanguage(lang_id)?;
+                    profiles.ActivateLanguageProfile(&clsid, lang_id, &profile_guid)
+                })?;
+
+                let modern_result = with_profile_manager(|manager| unsafe {
                     manager.ActivateProfile(
                         TF_PROFILETYPE_INPUTPROCESSOR,
-                        snapshot.lang_id(),
+                        lang_id,
                         &clsid,
                         &profile_guid,
                         null_hkl(),
                         PROFILE_RESTORE_FLAGS,
                     )
-                })
+                });
+                if let Err(err) = modern_result {
+                    log::warn!(
+                        "[windows-ime] legacy restore OK but modern ActivateProfile failed: {err}"
+                    );
+                }
+                Ok(())
             }
             ImeProfileKind::KeyboardLayout => {
                 let hkl = HKL(snapshot.hkl().unwrap_or_default() as *mut c_void);
                 let zero_guid = GUID::zeroed();
+                let lang_id = snapshot.lang_id();
 
-                with_profile_manager(|manager| unsafe {
+                with_input_processor_profiles(|profiles| unsafe {
+                    profiles.ChangeCurrentLanguage(lang_id)
+                })?;
+
+                let modern_result = with_profile_manager(|manager| unsafe {
                     manager.ActivateProfile(
                         TF_PROFILETYPE_KEYBOARDLAYOUT,
-                        snapshot.lang_id(),
+                        lang_id,
                         &zero_guid,
                         &zero_guid,
                         hkl,
                         PROFILE_RESTORE_FLAGS,
                     )
-                })
+                });
+                if let Err(err) = modern_result {
+                    log::warn!(
+                        "[windows-ime] legacy restore OK but modern ActivateProfile (keyboard) failed: {err}"
+                    );
+                }
+                Ok(())
             }
         }
     }

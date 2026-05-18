@@ -8,6 +8,7 @@ import {
   checkAccessibilityPermission,
   checkMicrophonePermission,
   getHotkeyStatus,
+  getSettings,
   handleWindowHotkeyEvent,
   isTauri,
 } from './lib/ipc';
@@ -43,14 +44,26 @@ export function App({ isCapsule, isQa }: AppProps) {
     let cancelled = false;
     requestAnimationFrame(() => {
       if (cancelled) return;
-      import('@tauri-apps/api/window')
-        .then(async ({ getCurrentWindow }) => {
-          const currentWindow = getCurrentWindow();
-          if (!(await currentWindow.isVisible())) {
-            await currentWindow.show();
-          }
-        })
-        .catch(error => console.warn('[startup] show main window failed', error));
+      (async () => {
+        // 尊重 prefs.startMinimized：开了静默启动就别在前端强 show 主窗口。否则
+        // Rust 端 setup() 抑制掉的窗口，会被这条 useEffect 在 webview 加载完成后
+        // 再通过 IPC 拉出来 —— issue #468 在 Rust 修复后用户仍能在 Win11 上复现
+        // 的最后一条路径（Rust log 里看不到，因为走的是 plugin-window 的 IPC）。
+        try {
+          const prefs = await getSettings();
+          if (prefs.startMinimized) return;
+        } catch (err) {
+          // 读 prefs 失败兜底走原有 show 行为：让权限探测失败的用户也能进 UI，
+          // 避免透明 / 空白窗口前卡死（issue #163 引入这个 show 的原始意图）。
+          console.warn('[startup] read startMinimized failed, falling back to show', err);
+        }
+        const { getCurrentWindow } = await import('@tauri-apps/api/window');
+        if (cancelled) return;
+        const currentWindow = getCurrentWindow();
+        if (!(await currentWindow.isVisible())) {
+          await currentWindow.show();
+        }
+      })().catch(error => console.warn('[startup] show main window failed', error));
     });
     return () => {
       cancelled = true;

@@ -94,6 +94,23 @@ fn capsule_show_strategy_for_platform() -> CapsuleShowStrategy {
 }
 
 static CAPSULE_NO_ACTIVATE_FALLBACK_WARNED: AtomicBool = AtomicBool::new(false);
+static CAPSULE_SUPPRESSED_BY_TOGGLE_LOGGED: AtomicBool = AtomicBool::new(false);
+static CAPSULE_FIRST_SHOW_LOGGED: AtomicBool = AtomicBool::new(false);
+
+/// 给 #470 诊断日志用的 capsule 状态短名。显式枚举每个变体到 &'static str，
+/// 不走 `Debug` —— 哪天 CapsuleState 加了 `String` 字段，`:?` 会把 ASR / polish
+/// 内容意外灌进日志（pr_agent 提的 forward-looking 隐患）；这里只输出状态名。
+fn capsule_state_log_name(state: CapsuleState) -> &'static str {
+    match state {
+        CapsuleState::Idle => "idle",
+        CapsuleState::Recording => "recording",
+        CapsuleState::Transcribing => "transcribing",
+        CapsuleState::Polishing => "polishing",
+        CapsuleState::Done => "done",
+        CapsuleState::Cancelled => "cancelled",
+        CapsuleState::Error => "error",
+    }
+}
 
 fn show_capsule_window_for_recording<R: tauri::Runtime>(
     app: &AppHandle<R>,
@@ -2617,8 +2634,39 @@ async fn begin_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
     inner.qa_stream_cancelled.store(false, Ordering::SeqCst);
 
     // 抓选区。每轮按 Option 都重新抓一次：用户多轮提问中可以重新选别处文字。
-    // 浮窗 focus:false，原 app 仍是 frontmost，AX/Cmd+C fallback 都能拿到。
+    //
+    // - macOS：浮窗走 orderFrontRegardless，不成为 key window，原 app 仍是 frontmost，
+    //   AX/Cmd+C fallback 都能拿到。
+    // - Windows：#466 修复后 show_qa_window_no_activate 主动抓焦点，QA 此刻已是前台，
+    //   simulate_copy 会跑在 QA 自己 webview 上 → 抓不到。focus-dance 上半场：把焦点临时
+    //   还给"用户原 app 的 HWND"。
+    //
+    //   多轮场景的目标刷新：用户开 QA 后可能 Alt+Tab 切到别的 app 选新文字。如果还死认
+    //   open_qa_panel 时记下的初始 HWND，会把焦点抢回错的 app（pr_agent stale-focus 关注点）。
+    //   策略：每轮先看当前前台是不是本进程的窗口（QA / capsule / main）—— 是 → 用户没切
+    //   走，沿用 saved；不是 → 用户切到了真正的外部 app，刷新 saved 为当前 HWND。
+    //   抓完选区后下半场再把焦点交还 QA，让 ESC/X 继续可用。
+    #[cfg(target_os = "windows")]
+    {
+        // 合并两次 lock：原来分 lock #1 写 + lock #2 读，两者之间 close_qa_panel 在别的
+        // 线程把 qa_focus_target 清成 None 会被覆盖回旧 HWND。Cloud 评审指出的 TOCTOU。
+        // 单次加锁里既写最新外部前台、再读出来交给后面的 restore_focus_target_if_possible
+        // —— capture_external_focus_target() 内部只调 GetForegroundWindow / pid 查询，
+        // 不会反向取 qa_state 锁，持锁期间调用安全。
+        let saved_target = {
+            let mut state = inner.qa_state.lock();
+            if let Some(current_external) = capture_external_focus_target() {
+                state.qa_focus_target = Some(current_external);
+            }
+            state.qa_focus_target
+        };
+        let _ = restore_focus_target_if_possible(saved_target);
+    }
     let selection = capture_selection();
+    #[cfg(target_os = "windows")]
+    if let Some(app) = inner.app.lock().clone() {
+        crate::refocus_qa_window(&app);
+    }
     let selection_preview_text = selection.as_ref().map(|s| s.text.clone());
     inner.qa_state.lock().selection = selection.clone();
 
@@ -3929,6 +3977,33 @@ fn schedule_capsule_idle(inner: &Arc<Inner>, delay_ms: u64) {
     });
 }
 
+/// 与 capture_focus_target 类似，但前台窗口属于本进程（即用户停在 QA / capsule / main
+/// 等自家窗口）时返回 None，让 caller 区分"用户没切到别处" vs "用户切到了另一个真正的
+/// 外部 app"。issue #466 多轮场景下用来刷新 qa_focus_target。
+#[cfg(target_os = "windows")]
+fn capture_external_focus_target() -> Option<usize> {
+    use windows::Win32::System::Threading::GetCurrentProcessId;
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.0.is_null() {
+            return None;
+        }
+        let mut pid: u32 = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid == GetCurrentProcessId() {
+            return None;
+        }
+        Some(hwnd.0 as usize)
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn capture_external_focus_target() -> Option<usize> {
+    None
+}
+
 #[cfg(target_os = "windows")]
 fn capture_focus_target() -> Option<usize> {
     use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
@@ -4304,12 +4379,33 @@ fn emit_capsule(
         // 处理，不依赖把 Done/Cancelled/Error 打成 invisible。详见 PR #140 评论。
         maybe_position_capsule_bottom_center(&inner_for_main, &window, translation);
         if show_capsule && visible {
+            // 用户报"看不到胶囊"时第一时间能在 log 里确认：胶囊路径有跑、show_capsule
+            // 开关是 true、当前进入 visible 帧 —— 排除 prefs 没存住 / emit_capsule 没触
+            // 发 / state 一直 Idle 这几类常见 root cause。issue #470。
+            if !CAPSULE_FIRST_SHOW_LOGGED.swap(true, Ordering::SeqCst) {
+                log::info!(
+                    "[capsule] first show this session: show_capsule=true visible=true state={}",
+                    capsule_state_log_name(state)
+                );
+            }
             show_capsule_window_for_recording(&app_for_main, &window);
             // macOS/Windows 优先走 no-activate show，避免录音胶囊抢走当前工作 app 焦点。
             // 若 fallback 到 show()，OpenLess 已是前台 app 时再把 key window 还给 main。
             #[cfg(target_os = "macos")]
             crate::restore_main_window_key_if_active(&app_for_main);
         } else {
+            // show_capsule 开关被用户关掉但本次确实想显示（visible=true）的情况：
+            // 一次性 info log，让用户报"胶囊没显示"时能在日志里一眼看到根因 —— 维护者
+            // 不必再让用户"去打开设置确认"。issue #470。
+            if !show_capsule
+                && visible
+                && !CAPSULE_SUPPRESSED_BY_TOGGLE_LOGGED.swap(true, Ordering::SeqCst)
+            {
+                log::info!(
+                    "[capsule] suppressed by user toggle: show_capsule=false visible=true state={}",
+                    capsule_state_log_name(state)
+                );
+            }
             hide_capsule_window_if_present();
             let _ = window.hide();
         }
