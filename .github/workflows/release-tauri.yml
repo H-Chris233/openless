@@ -345,19 +345,28 @@ jobs:
         shell: bash
         working-directory: 'openless-all/scripts/linux-fcitx5-plugin'
         run: |
-          # v1.3.4-4 / -5 在此步反复挂，错误是 "E: Unable to locate package fcitx5-dev"。
-          # 同一 job 里前面的 "Install Linux bundle deps" 步骤已 apt-get update 过，
-          # universe 也是 ubuntu-22.04 默认启用 —— 但 GitHub Actions runner 镜像在
-          # 22.04 弃用过渡期里偶发 apt 元数据漂移。这里多加三层防御：
-          #   1) 显式启用 universe（已启用则 no-op）
-          #   2) 在本步骤内重新 apt-get update，独立于上游 step 的 cache 状态
-          #   3) 失败时 apt-cache search 打印实际可见包名，便于以后排查
+          # v1.3.4-3 之后 Ubuntu 22.04 universe 把 fcitx5-dev 这个 meta 包移除了
+          # （v1.3.4-4/-5/-6 在此步连挂三次，错误 "Unable to locate package fcitx5-dev"）。
+          # v1.3.4-6 加的 apt-cache search 诊断显示，22.04 jammy 实际只剩拆分后的
+          # libfcitx5{core,utils,config}-dev / fcitx5-modules-dev 等子包，
+          # 但 fcitx5-dev 这个 umbrella 包确认已不在源里。
+          #
+          # CMakeLists.txt 实际只需要：
+          #   find_package(Fcitx5Core)    → libfcitx5core-dev
+          #   find_package(Fcitx5Utils)   → libfcitx5utils-dev
+          #   find_package(Fcitx5Module)  → fcitx5-modules-dev
+          # 另外 fcitx5 自己的 CMake config 文件依赖 KDE ECM。
+          # 保留 add-apt-repository universe + 本步骤内 apt-get update 作为通用防御。
           sudo add-apt-repository -y universe || true
           sudo apt-get update
-          if ! sudo apt-get install -y cmake fcitx5-dev; then
-            echo "::error::fcitx5-dev install failed. Diagnostics ↓"
-            echo "--- apt-cache policy fcitx5-dev ---"
-            apt-cache policy fcitx5-dev || true
+          if ! sudo apt-get install -y \
+              cmake \
+              extra-cmake-modules \
+              libfcitx5core-dev \
+              libfcitx5utils-dev \
+              libfcitx5config-dev \
+              fcitx5-modules-dev; then
+            echo "::error::fcitx5 dev packages install failed. Diagnostics ↓"
             echo "--- apt-cache search fcitx5 ---"
             apt-cache search fcitx5 || true
             echo "--- /etc/os-release ---"
