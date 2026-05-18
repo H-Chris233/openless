@@ -90,6 +90,8 @@ export function Pill({ children, tone = 'default', size = 'md', style }: PillPro
         color: t.color,
         border: t.bd === 'transparent' ? '0.5px solid transparent' : `0.5px solid ${t.bd}`,
         fontWeight: 500,
+        whiteSpace: 'nowrap',
+        flexShrink: 0,
         ...sz,
         ...style,
       }}

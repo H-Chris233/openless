@@ -126,7 +126,11 @@ export function PermissionsSection() {
       >
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', minWidth: 0, justifyContent: 'flex-end', width: '100%' }}>
           {hotkey?.message && (
-            <span style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            <span style={{
+              fontSize: 11.5, color: 'var(--ol-ink-4)',
+              whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+              minWidth: 0, flex: '0 1 auto',
+            }}>
               {hotkey.message}
             </span>
           )}
@@ -140,7 +144,11 @@ export function PermissionsSection() {
         >
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', minWidth: 0, justifyContent: 'flex-end', width: '100%' }}>
             {windowsIme && (
-              <span style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+              <span style={{
+                fontSize: 11.5, color: 'var(--ol-ink-4)',
+                whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                minWidth: 0, flex: '0 1 auto',
+              }}>
                 {t(`settings.permissions.windowsIme.${windowsIme.state}`)}
               </span>
             )}

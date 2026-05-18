@@ -156,9 +156,13 @@ export function AdvancedSection() {
       </Card>
 
       <Card>
-        {/* 标题 + 右上角 inline 警告小字（替换原琥珀大警告条）。 */}
+        {/* 标题 + 右上角 inline 警告小字（替换原琥珀大警告条）。
+            Windows：标题区整体灰显 —— "本地 ASR 模型（实验性）" 在 Win 上几乎只有
+            Qwen3 占位、本平台暂不支持；Foundry 走的是另一条独立路径，不属于"实验性"
+            框架。灰显视觉让用户知道这条"实验性"主线在 Win 不可用，关注点转到下方
+            Foundry 行。 */}
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, marginBottom: 14 }}>
-          <div style={{ minWidth: 0 }}>
+          <div style={{ minWidth: 0, opacity: isWin ? 0.45 : 1 }}>
             <div style={{ fontSize: 13, fontWeight: 600 }}>{t('settings.advanced.localAsrTitle')}</div>
             <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', marginTop: 2 }}>
               {t('settings.advanced.localAsrDesc')}
@@ -173,6 +177,7 @@ export function AdvancedSection() {
             flexShrink: 0,
             maxWidth: '52%',
             paddingTop: 2,
+            opacity: isWin ? 0.45 : 1,
           }}>
             ⚠️ {t('settings.advanced.localAsrWarningShort')}
           </div>
@@ -188,20 +193,24 @@ export function AdvancedSection() {
                 + 不可点 + desc=notSupportedHere，跟"本平台不可用"视觉一致。跨平台
                 异常（Windows profile 同步到 local-qwen3）时 active 状态靠下方独立
                 "禁用本地 ASR" 行兜底，避免 Toggle ON + desc 说不支持的自相矛盾感
-                （pr_agent #403 'Stale Windows state' 修法）。 */}
-            <SettingRow
-              label={t('settings.providers.presets.asrLocalQwen3')}
-              desc={isMac ? t('settings.advanced.qwen3Desc') : t('settings.advanced.notSupportedHere')}>
-              <div style={{ display: 'flex', justifyContent: 'flex-end', width: '100%' }}>
-                <Toggle
-                  on={isMac && isOnLocalQwen3}
-                  onToggle={isMac && !busy && pendingTarget === null ? (next) => {
-                    if (next) requestEnable('local-qwen3');
-                    else void performSwitch('volcengine');
-                  } : undefined}
-                />
-              </div>
-            </SettingRow>
+                （pr_agent #403 'Stale Windows state' 修法）。
+                Windows 整行灰显，跟"本地 ASR 实验性"标题区视觉对齐 —— 用户一眼看出
+                这条线在 Win 上不能用，关注点落到下方 Foundry 行。 */}
+            <div style={{ opacity: isWin ? 0.45 : 1 }}>
+              <SettingRow
+                label={t('settings.providers.presets.asrLocalQwen3')}
+                desc={isMac ? t('settings.advanced.qwen3Desc') : t('settings.advanced.notSupportedHere')}>
+                <div style={{ display: 'flex', justifyContent: 'flex-end', width: '100%' }}>
+                  <Toggle
+                    on={isMac && isOnLocalQwen3}
+                    onToggle={isMac && !busy && pendingTarget === null ? (next) => {
+                      if (next) requestEnable('local-qwen3');
+                      else void performSwitch('volcengine');
+                    } : undefined}
+                  />
+                </div>
+              </SettingRow>
+            </div>
 
             {/* Foundry 行 —— 仅 Windows 露出（macOS 不展示 Windows 端模型内容）。 */}
             {isWin && (
