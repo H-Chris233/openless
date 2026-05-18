@@ -16,7 +16,6 @@ import {
 import { createHotkeyRecorderState, orderHotkeyCodes, updateHotkeyRecorderState } from '../lib/hotkeyRecorder';
 import {
   isTauri,
-  isWaylandCliMode,
   listMicrophoneDevices,
   openExternal,
   listProviderModels,
@@ -200,24 +199,6 @@ function RecordingSection() {
   const [microphoneDevicesLoaded, setMicrophoneDevicesLoaded] = useState(false);
   const [microphoneDevicesError, setMicrophoneDevicesError] = useState<string | null>(null);
   const [microphonePickerOpen, setMicrophonePickerOpen] = useState(false);
-  // Wayland 下 rdev 监听不可用（issue #420）。改用 pull 模型：mount 时 invoke 拉状态。
-  // 不能依赖一次性 event — Settings 模态是按需 mount，emit 早在 setup 阶段发完了。
-  // XDG_SESSION_TYPE 在进程生命周期内不会变，拉一次即可，无需 polling 或 listener。
-  const [waylandCliMode, setWaylandCliMode] = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    void isWaylandCliMode()
-      .then(value => {
-        if (!cancelled) setWaylandCliMode(value);
-      })
-      .catch((err: unknown) => {
-        console.warn('[settings] is_wayland_cli_mode query failed', err);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   const loadMicrophoneDevices = useCallback(async (
     signal?: { cancelled: boolean },
@@ -383,11 +364,10 @@ function RecordingSection() {
             {t('settings.recording.migrationNoticeTitle')}
           </div>
           <div style={{ fontSize: 11.5, color: 'var(--ol-ink-3)', lineHeight: 1.55 }}>
-            {t('settings.recording.migrationNoticeDesc')}
+                        {t('settings.recording.migrationNoticeDesc')}
           </div>
         </div>
       )}
-      {waylandCliMode && <WaylandHotkeyCallout />}
       <SettingRow label={t('settings.recording.hotkeyLabel')} desc={hotkeyDesc}>
         <ShortcutRecorder
           value={prefs.dictationHotkey}
@@ -634,171 +614,6 @@ function RecordingSection() {
       </SettingRow>
     </Collapsible>
     </>
-  );
-}
-
-/// Wayland 引导 callout：告诉用户绑桌面环境快捷键到 `openless --toggle-dictation`。
-/// 显示条件由父组件控制（mount 时 invoke `is_wayland_cli_mode` 拉状态后渲染）。
-/// 文案逐桌面环境列出步骤，每段 ≤ 5 行，详细的命令在 README 里。
-function WaylandHotkeyCallout() {
-  const { t } = useTranslation();
-  const [helpOpen, setHelpOpen] = useState(false);
-  // 三条命令各自独立的"已复制"反馈。用 string 而非 boolean 数组，
-  // 避免 stale state（重复点击不同按钮时旧 timer 把别人擦掉）。
-  const [copiedCommand, setCopiedCommand] = useState<string | null>(null);
-
-  const onCopy = useCallback(async (command: string) => {
-    try {
-      await navigator.clipboard.writeText(command);
-      setCopiedCommand(command);
-      // 1.5s 后还原按钮文案；同时校验仍是这条命令，避免被后点的覆盖。
-      setTimeout(() => {
-        setCopiedCommand(prev => (prev === command ? null : prev));
-      }, 1500);
-    } catch (err) {
-      console.warn('[wayland-callout] clipboard write failed', err);
-    }
-  }, []);
-
-  // 三条 CLI 命令 + 用途短标签。aeoform 在 #420 反馈 1.3.1-19 没提
-  // --toggle-qa / --cancel-dictation，本次补全。
-  const commandRows: Array<readonly [string, string]> = [
-    ['openless --toggle-dictation', t('settings.recording.wayland.commandToggleDictationLabel')],
-    ['openless --toggle-qa', t('settings.recording.wayland.commandToggleQaLabel')],
-    ['openless --cancel-dictation', t('settings.recording.wayland.commandCancelDictationLabel')],
-  ];
-
-  const helpEntries: Array<readonly [string, string]> = [
-    [t('settings.recording.wayland.gnomeTitle'), t('settings.recording.wayland.gnomeSteps')],
-    [t('settings.recording.wayland.kdeTitle'), t('settings.recording.wayland.kdeSteps')],
-    [t('settings.recording.wayland.hyprlandTitle'), t('settings.recording.wayland.hyprlandSteps')],
-    [t('settings.recording.wayland.swayTitle'), t('settings.recording.wayland.swaySteps')],
-  ];
-
-  return (
-    <div
-      style={{
-        marginTop: 10,
-        marginBottom: 8,
-        padding: '12px 14px',
-        borderRadius: 10,
-        background: 'rgba(217,119,6,0.08)',
-        border: '0.5px solid rgba(217,119,6,0.22)',
-      }}
-    >
-      <div style={{ fontSize: 12.5, fontWeight: 600, color: '#b45309', marginBottom: 4 }}>
-        {t('settings.recording.wayland.calloutTitle')}
-      </div>
-      <div style={{ fontSize: 11.5, color: 'var(--ol-ink-3)', lineHeight: 1.55, marginBottom: 8 }}>
-        {t('settings.recording.wayland.calloutBody')}
-      </div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 8 }}>
-        {commandRows.map(([command, label]) => (
-          <div
-            key={command}
-            style={{ display: 'flex', alignItems: 'center', gap: 10 }}
-          >
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 8,
-                padding: '8px 10px',
-                borderRadius: 8,
-                background: 'rgba(255,255,255,0.7)',
-                border: '0.5px solid rgba(0,0,0,0.08)',
-                flex: 1,
-                minWidth: 0,
-              }}
-            >
-              <code
-                style={{
-                  flex: 1,
-                  minWidth: 0,
-                  fontSize: 12,
-                  fontFamily: 'ui-monospace, SF Mono, Menlo, Consolas, monospace',
-                  color: 'var(--ol-ink)',
-                  userSelect: 'all',
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                }}
-              >
-                {command}
-              </code>
-              <button
-                type="button"
-                onClick={() => onCopy(command)}
-                style={{
-                  padding: '4px 10px',
-                  fontSize: 11,
-                  fontWeight: 500,
-                  border: '0.5px solid rgba(0,0,0,0.12)',
-                  borderRadius: 6,
-                  background: '#fff',
-                  color: 'var(--ol-ink-2)',
-                  cursor: 'pointer',
-                  fontFamily: 'inherit',
-                  flexShrink: 0,
-                }}
-              >
-                {copiedCommand === command
-                  ? t('settings.recording.wayland.copyButtonCopied')
-                  : t('settings.recording.wayland.copyButton')}
-              </button>
-            </div>
-            <span
-              style={{
-                fontSize: 11,
-                color: 'var(--ol-ink-3)',
-                whiteSpace: 'nowrap',
-                flexShrink: 0,
-              }}
-            >
-              {label}
-            </span>
-          </div>
-        ))}
-      </div>
-      <button
-        type="button"
-        onClick={() => setHelpOpen(prev => !prev)}
-        style={{
-          padding: 0,
-          background: 'transparent',
-          border: 0,
-          color: '#b45309',
-          fontSize: 11.5,
-          fontWeight: 500,
-          cursor: 'pointer',
-          fontFamily: 'inherit',
-        }}
-      >
-        {helpOpen ? '▾ ' : '▸ '}
-        {t('settings.recording.wayland.helpToggle')}
-      </button>
-      {helpOpen && (
-        <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {helpEntries.map(([title, body]) => (
-            <div key={title}>
-              <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--ol-ink-2)', marginBottom: 2 }}>
-                {title}
-              </div>
-              <div
-                style={{
-                  fontSize: 11,
-                  color: 'var(--ol-ink-3)',
-                  lineHeight: 1.55,
-                  whiteSpace: 'pre-line',
-                }}
-              >
-                {body}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
   );
 }
 

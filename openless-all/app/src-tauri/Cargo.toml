@@ -50,7 +50,6 @@ global-hotkey = "0.6"
 cpal = "0.15"
 enigo = "0.2"
 arboard = "3"
-rdev = "0.5"
 
 [target.'cfg(target_os = "macos")'.dependencies.keyring]
 version = "3.6.3"
@@ -62,6 +61,8 @@ version = "3.6.3"
 default-features = false
 features = ["windows-native"]
 
+[target.'cfg(target_os = "linux")'.dependencies]
+dbus = "0.9"
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies.keyring]
 version = "3.6.3"
 default-features = false

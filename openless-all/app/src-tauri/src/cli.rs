@@ -1,9 +1,6 @@
 //! 极简 CLI 参数解析 — 用于支持桌面环境快捷键调起 OpenLess 触发听写 / QA。
 //!
-//! 这条路径的来历：Linux Wayland 协议层面禁止"应用监听全局键盘"（除了焦点窗口），
-//! 因此 rdev 在 Wayland 上必然失效（issue #420）。本仓库不为 Wayland 引入门户
-//! GlobalShortcuts（GNOME 尚未原生落地，引入会增加合成器分裂的维护负担——见
-//! `docs/issue-420-wayland-hotkey-research.md` 3.1 节），改走桌面环境快捷键 →
+//! 这条路径的来历：Linux 上 fcitx5 插件提供了热键 + 文字提交的完整方案，
 //! `openless --toggle-dictation` → tauri-plugin-single-instance 转发的 CLI 路径。
 //! macOS / Windows 上仍走原生 hotkey 监听器，CLI 是补充而非替代。
 //!

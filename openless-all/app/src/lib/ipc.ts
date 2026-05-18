@@ -507,12 +507,6 @@ export function getHotkeyCapability(): Promise<HotkeyCapability> {
   return invokeOrMock('get_hotkey_capability', undefined, () => mockHotkeyCapability);
 }
 
-// Linux/Wayland 检测：rdev 监听在 Wayland 协议层面失败（issue #420），需引导用户
-// 把 `openless --toggle-dictation` 绑到桌面环境快捷键。浏览器 / 非 Tauri 环境下永远 false。
-export function isWaylandCliMode(): Promise<boolean> {
-  return invokeOrMock('is_wayland_cli_mode', undefined, () => false);
-}
-
 export function getWindowsImeStatus(): Promise<WindowsImeStatus> {
   return invokeOrMock('get_windows_ime_status', undefined, () => mockWindowsImeStatus);
 }

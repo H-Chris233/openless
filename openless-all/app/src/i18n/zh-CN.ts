@@ -569,24 +569,6 @@ export const zhCN = {
       startupAtBoot: '开机自启',
       startupAtBootDesc: '登录系统时自动启动 OpenLess。',
       startupAtBootError: '开机自启切换失败：{{message}}',
-      wayland: {
-        calloutTitle: '检测到 Wayland 桌面环境',
-        calloutBody: 'Wayland 出于安全考虑不允许应用监听全局快捷键。请在系统设置中为下面的命令分别创建自定义快捷键（QA 与取消录音命令可选）：',
-        copyButton: '复制',
-        copyButtonCopied: '已复制',
-        commandToggleDictationLabel: '开始 / 停止录音',
-        commandToggleQaLabel: '打开 / 关闭 QA 面板',
-        commandCancelDictationLabel: '取消当前录音',
-        helpToggle: '查看各桌面环境配置步骤',
-        gnomeTitle: 'GNOME',
-        gnomeSteps: '设置 → 键盘 → 查看和自定义快捷键 → 自定义快捷键 → 添加快捷键。重复添加 1-3 组，命令处分别填入上方命令，再录入想用的按键组合。',
-        kdeTitle: 'KDE Plasma',
-        kdeSteps: '系统设置 → 键盘 → 快捷键 → 添加新的 → 命令/URL，动作处分别粘贴上方命令并录入不同触发键，保存即可。',
-        hyprlandTitle: 'Hyprland',
-        hyprlandSteps: '编辑 ~/.config/hypr/hyprland.conf，加入下面任意 1-3 行后执行 hyprctl reload：\nbind = SUPER, Y, exec, openless --toggle-dictation\nbind = SUPER, U, exec, openless --toggle-qa\nbind = SUPER, I, exec, openless --cancel-dictation',
-        swayTitle: 'sway',
-        swaySteps: '编辑 ~/.config/sway/config，加入下面任意 1-3 行后执行 swaymsg reload：\nbindsym $mod+y exec openless --toggle-dictation\nbindsym $mod+u exec openless --toggle-qa\nbindsym $mod+i exec openless --cancel-dictation',
-      },
     },
     providers: {
       llmTitle: 'LLM 模型（润色）',
@@ -730,7 +712,7 @@ export const zhCN = {
       streamingInsertHintWindows:
         'SendInput Unicode 直接送字符，绕过 TSF / IME，不切输入法。',
       streamingInsertHintLinux:
-        'X11 使用 enigo + XTest 合成按键；Wayland 下会自动关闭流式输入，并保留到剪贴板供手动粘贴。',
+        '通过 fcitx5 插件提交文字；流式输入使用 enigo + XTest 合成按键。',
       streamingInsertSaveClipboardLabel: '同步到剪贴板',
       streamingInsertSaveClipboardHint: '插入成功后把最终文本写入剪贴板，方便 Cmd+V 再次粘贴；关闭后流式过程不动剪贴板。',
       localAsrTitle: '本地 ASR 模型（实验性）',
@@ -899,7 +881,7 @@ export const zhCN = {
     adapter: {
       macEventTap: 'macOS Event Tap',
       windowsLowLevel: 'Windows 低层键盘 hook',
-      rdev: 'rdev 监听器',
+      fcitx5: 'fcitx5 输入法插件',
     },
   },
   localAsr: {

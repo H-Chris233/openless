@@ -571,24 +571,6 @@ export const en: typeof zhCN = {
       startupAtBoot: 'Launch at login',
       startupAtBootDesc: 'Start OpenLess automatically when you sign in.',
       startupAtBootError: 'Failed to toggle launch at login: {{message}}',
-      wayland: {
-        calloutTitle: 'Wayland desktop detected',
-        calloutBody: 'Wayland forbids apps from listening for global shortcuts. Please create a custom shortcut for each command below in your system settings (QA and cancel commands are optional):',
-        copyButton: 'Copy',
-        copyButtonCopied: 'Copied',
-        commandToggleDictationLabel: 'Start / stop dictation',
-        commandToggleQaLabel: 'Open / close QA panel',
-        commandCancelDictationLabel: 'Cancel current dictation',
-        helpToggle: 'Setup steps for each desktop environment',
-        gnomeTitle: 'GNOME',
-        gnomeSteps: 'Settings → Keyboard → View and Customize Shortcuts → Custom Shortcuts → Add Shortcut. Repeat 1–3 times, pasting each command above and recording the key combination you want.',
-        kdeTitle: 'KDE Plasma',
-        kdeSteps: 'System Settings → Keyboard → Shortcuts → Add New → Command/URL. Repeat for each command above, recording different trigger keys, then Apply.',
-        hyprlandTitle: 'Hyprland',
-        hyprlandSteps: 'Edit ~/.config/hypr/hyprland.conf, add any 1–3 of the lines below, then run hyprctl reload:\nbind = SUPER, Y, exec, openless --toggle-dictation\nbind = SUPER, U, exec, openless --toggle-qa\nbind = SUPER, I, exec, openless --cancel-dictation',
-        swayTitle: 'sway',
-        swaySteps: 'Edit ~/.config/sway/config, add any 1–3 of the lines below, then run swaymsg reload:\nbindsym $mod+y exec openless --toggle-dictation\nbindsym $mod+u exec openless --toggle-qa\nbindsym $mod+i exec openless --cancel-dictation',
-      },
     },
     providers: {
       llmTitle: 'LLM (polishing)',
@@ -732,7 +714,7 @@ export const en: typeof zhCN = {
       streamingInsertHintWindows:
         'SendInput Unicode types directly, bypassing TSF / IME — no input-method switching needed.',
       streamingInsertHintLinux:
-        'Uses enigo + XTest on X11. On Wayland, streaming insertion is disabled and output is kept in the clipboard for manual paste.',
+        'Uses fcitx5 plugin for text submission; streaming insertion uses enigo + XTest for keystroke synthesis.',
       streamingInsertSaveClipboardLabel: 'Copy to clipboard',
       streamingInsertSaveClipboardHint: 'After a successful insert, write the final text to the clipboard so Cmd+V can paste it again. Off = clipboard is never touched.',
       localAsrTitle: 'Local ASR models (experimental)',
@@ -901,7 +883,7 @@ export const en: typeof zhCN = {
     adapter: {
       macEventTap: 'macOS Event Tap',
       windowsLowLevel: 'Windows low-level keyboard hook',
-      rdev: 'rdev listener',
+      fcitx5: 'fcitx5 input method plugin',
     },
   },
   localAsr: {

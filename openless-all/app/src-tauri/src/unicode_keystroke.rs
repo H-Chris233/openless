@@ -14,9 +14,7 @@
 //!   必须 `switch_to_ascii` 切到 ABC，session 结束再 `restore_input_source` 切回。
 //! - **Windows**：`SendInput(KEYEVENTF_UNICODE)` 直接发 UTF-16 scancode。TSF 不拦
 //!   Unicode 事件（与 keyboard layout / IME 解耦），所以不需要切输入法。
-//! - **Linux**：enigo `Keyboard::text(...)`。X11 走 XTest 稳定；Wayland 看 compositor
-//!   是否给 libei 权限，stock GNOME-Wayland 经常拒绝，调用方应当容忍失败回落到一次性。
-//!   不切输入法 —— Linux 的 fcitx / ibus 与 enigo 的交互非常碎，v1 不尝试。
+//! - **Linux**：走 fcitx5 插件 commitString 直写（DBus）或剪贴板回落。
 //!
 //! ## 已知坑（macOS）
 //!
@@ -412,39 +410,24 @@ mod windows_impl {
 #[cfg(target_os = "linux")]
 mod linux_impl {
     use super::{TisError, TypeError};
-    use enigo::{Enigo, Keyboard, Settings};
+    #[allow(unused_imports)]
     use tauri::{AppHandle, Runtime};
 
     pub struct PreviousInputSource;
 
-    /// 用 enigo 逐字符发出 chunk。X11 上走 XTest 稳定；Wayland 上看 compositor 是否
-    /// 给 libei 权限，stock GNOME-Wayland 通常拒绝 —— 失败时尽量返回已成功字符数，
-    /// 让调用方的 history / clipboard 与实际落屏内容一致。
-    ///
-    /// 不处理 fcitx / ibus 输入法切换 —— Linux 输入法栈与 X11 合成事件的交互非常
-    /// 碎片化，v1 实验阶段直接交给用户保证当前输入源是英文键盘。
+    /// 通过 fcitx5 插件一次性提交整段文字（支持中文、Wayland/X11 均可）。
+    /// 如果插件未加载返回 Err，调用方降级到剪贴板拷贝。
     pub fn type_unicode_chunk(text: &str) -> Result<usize, TypeError> {
         if text.is_empty() {
             return Ok(0);
         }
-        let mut enigo =
-            Enigo::new(&Settings::default()).map_err(|e| TypeError::EnigoInit(e.to_string()))?;
-        let mut typed_chars = 0;
-        for ch in text.chars() {
-            if let Err(e) = enigo.text(&ch.to_string()) {
-                let source = TypeError::EnigoText(e.to_string());
-                return if typed_chars == 0 {
-                    Err(source)
-                } else {
-                    Err(TypeError::Partial {
-                        typed_chars,
-                        source: Box::new(source),
-                    })
-                };
-            }
-            typed_chars += 1;
+        if crate::linux_fcitx::commit_text(text).is_ok() {
+            Ok(text.chars().count())
+        } else {
+            Err(TypeError::EnigoText(
+                "fcitx5 plugin unavailable, try clipboard fallback".into(),
+            ))
         }
-        Ok(typed_chars)
     }
 
     pub async fn switch_to_ascii<R: Runtime>(
