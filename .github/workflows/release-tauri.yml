@@ -376,15 +376,25 @@ jobs:
             exit 1
           fi
           mkdir -p build && cd build
-          cmake .. 2>&1
+          # 显式 CMAKE_INSTALL_PREFIX=/usr：fcitx5 在 Ubuntu 上的运行时插件搜索
+          # 路径是 /usr/lib/<arch>/fcitx5/，默认 prefix=/usr/local 会让 .deb 把
+          # 插件安到 /usr/local/lib/fcitx5/，fcitx5 永远找不到。
+          # 历史上 v1.3.4-3 也是这条 bug 路径，只是 cmake -LA 那行先挂掉，没人意识到。
+          cmake .. -DCMAKE_INSTALL_PREFIX=/usr 2>&1 | tee cmake-configure.log
           make
-          # 从 cmake 缓存中读出 distro 实际的插件安装路径（multiarch 感知）。
-          FCITX_ADDON_DIR=$(cmake -LA . 2>/dev/null \
-            | grep "^FCITX_INSTALL_ADDONDIR:" \
-            | cut -d= -f2)
-          FCITX_PKGDATA_DIR=$(cmake -LA . 2>/dev/null \
-            | grep "^FCITX_INSTALL_PKGDATADIR:" \
-            | cut -d= -f2)
+          # v1.3.4-7 暴露：fcitx5 5.0.14 把 FCITX_INSTALL_* 设为普通变量而非 CACHE，
+          # `cmake -LA` 抓不到 → grep 退码 1 → set -e -o pipefail 整步退出。
+          # 改从 configure 阶段 message(STATUS ...) 的输出抓（CMakeLists.txt 已经打印）。
+          FCITX_ADDON_DIR=$(grep "FCITX_INSTALL_ADDONDIR:" cmake-configure.log \
+            | tail -1 | sed -E 's/^[^:]*: ([^ ]+).*/\1/')
+          FCITX_PKGDATA_DIR=$(grep "FCITX_INSTALL_PKGDATADIR:" cmake-configure.log \
+            | tail -1 | sed -E 's/^[^:]*: ([^ ]+).*/\1/')
+          if [ -z "$FCITX_ADDON_DIR" ] || [ -z "$FCITX_PKGDATA_DIR" ]; then
+            echo "::error::Failed to extract FCITX_INSTALL_* paths from cmake configure log"
+            echo "--- cmake-configure.log (last 50 lines) ---"
+            tail -50 cmake-configure.log
+            exit 1
+          fi
           echo "Detected: addon=$FCITX_ADDON_DIR  pkgdata=$FCITX_PKGDATA_DIR"
           echo "FCITX_ADDON_DIR=$FCITX_ADDON_DIR" >> "$GITHUB_ENV"
           echo "FCITX_ADDON_CONF_DIR=${FCITX_PKGDATA_DIR}/addon" >> "$GITHUB_ENV"
