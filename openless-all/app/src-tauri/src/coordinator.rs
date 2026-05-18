@@ -80,6 +80,9 @@ enum CapsuleShowStrategy {
 }
 
 fn capsule_show_strategy_for_platform() -> CapsuleShowStrategy {
+    // ⚠️ 如果改下面的 cfg 列表，**必须**同步更新单元测试
+    // `capsule_show_strategy_matches_platform_activation_contract` 的两组 cfg —
+    // 否则 Linux CI 直接红（PR #451 即是这种漏改）。
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     {
         CapsuleShowStrategy::NoActivate
@@ -3607,13 +3610,16 @@ mod tests {
 
     #[test]
     fn capsule_show_strategy_matches_platform_activation_contract() {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        // 平台列表必须与 capsule_show_strategy_for_platform 的 cfg 完全一致：
+        // 改实现里的 #[cfg] 时，一并改这两个 #[cfg]，否则 Linux CI 直接红
+        // （fcitx5 PR #451 把 Linux 加进 NoActivate 但漏改本测试，CI 失败）。
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         assert_eq!(
             capsule_show_strategy_for_platform(),
             CapsuleShowStrategy::NoActivate
         );
 
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         assert_eq!(
             capsule_show_strategy_for_platform(),
             CapsuleShowStrategy::FallbackShow
