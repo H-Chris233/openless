@@ -313,7 +313,6 @@ mod macos_impl {
 #[cfg(target_os = "windows")]
 mod windows_impl {
     use super::{TisError, TypeError};
-    use std::time::Duration;
     use tauri::{AppHandle, Runtime};
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
@@ -322,11 +321,6 @@ mod windows_impl {
 
     /// Windows / Linux 上没有 input source 概念，token 留空。Send/Sync 自动派生。
     pub struct PreviousInputSource;
-
-    /// 同一个会话内 keyDown/keyUp 之间的微延迟。Windows SendInput Unicode 在大多数
-    /// 应用上不需要延迟，但 Chromium 系（Edge / VSCode）观察到偶尔丢字，保留 1ms
-    /// 兜底跟 macOS 对齐。
-    const INTER_KEYSTROKE_DELAY: Duration = Duration::from_millis(1);
 
     pub fn type_unicode_chunk(text: &str) -> Result<usize, TypeError> {
         if text.is_empty() {
@@ -344,7 +338,6 @@ mod windows_impl {
                 }
             }
             typed_chars += 1;
-            std::thread::sleep(INTER_KEYSTROKE_DELAY);
         }
         Ok(typed_chars)
     }
