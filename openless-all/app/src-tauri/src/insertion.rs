@@ -386,15 +386,30 @@ fn insertion_success_status() -> InsertStatus {
 
 #[cfg(target_os = "windows")]
 mod windows_unicode {
+    use std::time::Duration;
+
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
         KEYEVENTF_UNICODE, VIRTUAL_KEY,
     };
 
+    const SENDINPUT_CHUNK_CHARS: usize = 16;
+    const SENDINPUT_CHUNK_DELAY: Duration = Duration::from_millis(12);
+
     pub fn send_text(text: &str) -> Result<(), String> {
-        for unit in text.encode_utf16() {
-            send_utf16_unit(unit, false)?;
-            send_utf16_unit(unit, true)?;
+        let mut sent_in_chunk = 0usize;
+        let mut chars = text.chars().peekable();
+        while let Some(ch) = chars.next() {
+            let mut buf = [0u16; 2];
+            for unit in ch.encode_utf16(&mut buf) {
+                send_utf16_unit(*unit, false)?;
+                send_utf16_unit(*unit, true)?;
+            }
+            sent_in_chunk += 1;
+            if sent_in_chunk >= SENDINPUT_CHUNK_CHARS && chars.peek().is_some() {
+                std::thread::sleep(SENDINPUT_CHUNK_DELAY);
+                sent_in_chunk = 0;
+            }
         }
         Ok(())
     }

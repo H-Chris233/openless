@@ -544,7 +544,7 @@ export const zhCN = {
       comboClear: '清除',
       comboConflict: '该快捷键组合不可用',
       allowNonTsfFallbackLabel: '允许非 TSF 兜底',
-      allowNonTsfFallbackDesc: 'Windows：TSF 失败时先改用快捷键粘贴；剪贴板写入失败时才退到 Unicode SendInput。',
+      allowNonTsfFallbackDesc: 'Windows：TSF 失败时使用分批 Unicode SendInput；如果仍失败，再复制到剪贴板。',
       historyGroupTitle: '历史与上下文',
       historyRetentionLabel: '历史保留天数',
       historyRetentionDesc: '超过保留天数的历史在写入新条目时被清理；0 = 不按时间清理。',

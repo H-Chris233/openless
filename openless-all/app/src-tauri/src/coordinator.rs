@@ -2026,45 +2026,29 @@ fn should_try_non_tsf_insertion_fallback(
 fn insert_via_non_tsf_fallback(
     inner: &Arc<Inner>,
     polished: &str,
-    restore_clipboard: bool,
-    paste_shortcut: PasteShortcut,
+    _restore_clipboard: bool,
+    _paste_shortcut: PasteShortcut,
 ) -> InsertStatus {
-    let mut retried_unicode = false;
     let status = finish_non_tsf_insertion_fallback(
-        || {
-            inner.inserter.insert_via_clipboard_fallback(
-                polished,
-                restore_clipboard,
-                paste_shortcut,
-            )
-        },
-        || {
-            retried_unicode = true;
-            inner.inserter.insert_via_unicode_keystrokes(polished)
-        },
+        || inner.inserter.insert_via_unicode_keystrokes(polished),
+        || inner.inserter.copy_fallback(polished),
     );
 
-    if retried_unicode {
-        if status == InsertStatus::Inserted {
+    match status {
+        InsertStatus::Inserted => {
             log::warn!(
-                "[windows-ime] TSF unavailable; clipboard write failed, inserted via Unicode SendInput"
-            );
-        } else {
-            log::warn!(
-                "[windows-ime] TSF unavailable; clipboard write failed and Unicode SendInput fallback also failed"
+                "[windows-ime] TSF unavailable; inserted via paced Unicode SendInput fallback"
             );
         }
-    } else {
-        match status {
-            InsertStatus::PasteSent => {
-                log::info!("[windows-ime] TSF unavailable; attempted shortcut paste fallback");
-            }
-            InsertStatus::CopiedFallback => {
-                log::warn!(
-                    "[windows-ime] TSF unavailable; left text on clipboard, skipped Unicode SendInput retry"
-                );
-            }
-            InsertStatus::Inserted | InsertStatus::Failed => {}
+        InsertStatus::CopiedFallback => {
+            log::warn!(
+                "[windows-ime] TSF unavailable; Unicode SendInput failed, left text on clipboard"
+            );
+        }
+        InsertStatus::PasteSent | InsertStatus::Failed => {
+            log::warn!(
+                "[windows-ime] TSF unavailable; Unicode SendInput fallback failed and copy fallback failed"
+            );
         }
     }
 
@@ -2072,24 +2056,24 @@ fn insert_via_non_tsf_fallback(
 }
 
 #[cfg(any(target_os = "windows", test))]
-fn finish_non_tsf_insertion_fallback<C, U>(
-    mut clipboard_fallback: C,
+fn finish_non_tsf_insertion_fallback<U, C>(
     mut unicode_fallback: U,
+    mut copy_fallback: C,
 ) -> InsertStatus
 where
-    C: FnMut() -> InsertStatus,
     U: FnMut() -> InsertStatus,
+    C: FnMut() -> InsertStatus,
 {
-    match clipboard_fallback() {
-        InsertStatus::Failed => match unicode_fallback() {
-            InsertStatus::Inserted => InsertStatus::Inserted,
-            // 这里的 Unicode fallback 没有经过剪贴板复制；若它失败，不能再伪装成
-            // "已复制，请 Ctrl+V"。
-            InsertStatus::PasteSent | InsertStatus::CopiedFallback | InsertStatus::Failed => {
-                InsertStatus::Failed
+    match unicode_fallback() {
+        InsertStatus::Inserted => InsertStatus::Inserted,
+        InsertStatus::PasteSent | InsertStatus::CopiedFallback | InsertStatus::Failed => {
+            match copy_fallback() {
+                InsertStatus::CopiedFallback => InsertStatus::CopiedFallback,
+                InsertStatus::Inserted | InsertStatus::PasteSent | InsertStatus::Failed => {
+                    InsertStatus::Failed
+                }
             }
-        },
-        status => status,
+        }
     }
 }
 
@@ -2099,48 +2083,48 @@ mod non_tsf_fallback_tests {
     use crate::types::InsertStatus;
 
     #[test]
-    fn clipboard_copy_stops_before_unicode_retry() {
-        let mut unicode_called = false;
+    fn unicode_fallback_runs_before_copy_fallback() {
+        let mut copy_called = false;
         let status = finish_non_tsf_insertion_fallback(
-            || InsertStatus::CopiedFallback,
+            || InsertStatus::Inserted,
             || {
-                unicode_called = true;
-                InsertStatus::Inserted
-            },
-        );
-
-        assert_eq!(status, InsertStatus::CopiedFallback);
-        assert!(!unicode_called);
-    }
-
-    #[test]
-    fn unicode_retry_runs_only_after_clipboard_failure() {
-        let mut unicode_called = false;
-        let status = finish_non_tsf_insertion_fallback(
-            || InsertStatus::Failed,
-            || {
-                unicode_called = true;
-                InsertStatus::Inserted
-            },
-        );
-
-        assert_eq!(status, InsertStatus::Inserted);
-        assert!(unicode_called);
-    }
-
-    #[test]
-    fn double_failure_does_not_pretend_text_was_copied() {
-        let mut unicode_called = false;
-        let status = finish_non_tsf_insertion_fallback(
-            || InsertStatus::Failed,
-            || {
-                unicode_called = true;
+                copy_called = true;
                 InsertStatus::CopiedFallback
             },
         );
 
+        assert_eq!(status, InsertStatus::Inserted);
+        assert!(!copy_called);
+    }
+
+    #[test]
+    fn copy_fallback_runs_after_unicode_failure() {
+        let mut copy_called = false;
+        let status = finish_non_tsf_insertion_fallback(
+            || InsertStatus::Failed,
+            || {
+                copy_called = true;
+                InsertStatus::CopiedFallback
+            },
+        );
+
+        assert_eq!(status, InsertStatus::CopiedFallback);
+        assert!(copy_called);
+    }
+
+    #[test]
+    fn double_failure_does_not_pretend_text_was_copied() {
+        let mut copy_called = false;
+        let status = finish_non_tsf_insertion_fallback(
+            || InsertStatus::Failed,
+            || {
+                copy_called = true;
+                InsertStatus::Failed
+            },
+        );
+
         assert_eq!(status, InsertStatus::Failed);
-        assert!(unicode_called);
+        assert!(copy_called);
     }
 }
 
