@@ -1,4 +1,5 @@
 import { type CSSProperties, useEffect, useRef, useState } from 'react';
+import { AnimatePresence, motion } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
 import {
   createStylePackFromTemplate,
@@ -591,11 +592,21 @@ export function Style() {
           </div>
           <div className="ol-thinscroll" style={{ padding: 18, overflow: 'auto', flex: '1 1 0', minHeight: 0 }}>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 12 }}>
+            <AnimatePresence mode="sync">
             {bodyPacks.map(pack => {
               const isBuiltin = pack.kind === 'builtin';
               return (
-                <div
+                <motion.div
                   key={pack.id}
+                  layout
+                  initial={{ opacity: 0, scale: 0.85 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 0.85 }}
+                  transition={{
+                    layout: { type: 'spring', damping: 25, stiffness: 220 },
+                    opacity: { duration: 0.2 },
+                    scale: { duration: 0.2 }
+                  }}
                   style={{
                     display: 'flex',
                     flexDirection: 'column',
@@ -720,14 +731,23 @@ export function Style() {
                       {t('style.pack.edit')}
                     </Btn>
                   </div>
-                </div>
+                </motion.div>
               );
             })}
-            <button
+            <motion.button
+              key="add-new-pack-btn"
+              layout
+              initial={{ opacity: 0, scale: 0.85 }}
+              animate={{ opacity: 1, scale: 1 }}
+              transition={{
+                layout: { type: 'spring', damping: 25, stiffness: 220 },
+                opacity: { duration: 0.2 },
+                scale: { duration: 0.2 }
+              }}
               type="button"
-              onClick={() => void handleCreateFromTemplate()}
               disabled={busy === 'creating'}
               aria-label={t('style.pack.addPackTileTitle')}
+              onClick={() => void handleCreateFromTemplate()}
               style={{
                 display: 'flex',
                 flexDirection: 'column',
@@ -758,16 +778,22 @@ export function Style() {
               </div>
               <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--ol-ink-2)' }}>{t('style.pack.addPackTileTitle')}</div>
               <div style={{ fontSize: 12, color: 'var(--ol-ink-4)', lineHeight: 1.55, maxWidth: 220 }}>{t('style.pack.addPackTileHint')}</div>
-            </button>
+            </motion.button>
+            </AnimatePresence>
           </div>
         </div>
       </Card>
 
+      <AnimatePresence>
       {editorOpen && (
         <>
-          <div
+          <motion.div
             aria-hidden="true"
             onClick={closeEditor}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.2, ease: "easeOut" }}
             style={{
               position: 'fixed',
               inset: 0,
@@ -775,15 +801,16 @@ export function Style() {
               backdropFilter: 'blur(8px) saturate(140%)',
               WebkitBackdropFilter: 'blur(8px) saturate(140%)',
               zIndex: 40,
-              animation: editorClosing
-                ? 'ol-modal-backdrop-out 0.2s var(--ol-motion-soft) forwards'
-                : 'ol-modal-backdrop-in 0.2s var(--ol-motion-soft) both',
             }}
           />
-          <div
+          <motion.div
             role="dialog"
             aria-modal="true"
             aria-label={t('style.pack.editorTitle')}
+            initial={{ x: '100%', opacity: 0 }}
+            animate={{ x: 0, opacity: 1 }}
+            exit={{ x: '100%', opacity: 0 }}
+            transition={{ type: 'spring', damping: 26, stiffness: 280 }}
             style={{
               position: 'fixed',
               top: 16,
@@ -791,9 +818,6 @@ export function Style() {
               bottom: 16,
               width: 'min(760px, calc(100vw - 32px))',
               zIndex: 41,
-              animation: editorClosing
-                ? 'ol-modal-drawer-out 0.2s var(--ol-motion-soft) forwards'
-                : 'ol-modal-drawer-in 0.28s var(--ol-motion-spring) both',
             }}
           >
             <Card
@@ -1144,9 +1168,10 @@ export function Style() {
                 </div>
               )}
             </Card>
-          </div>
+          </motion.div>
         </>
       )}
+      </AnimatePresence>
     </>
   );
 }

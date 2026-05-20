@@ -3,6 +3,14 @@
 
 import type { CSSProperties, ReactNode } from 'react';
 
+export function SectionTitle({ children, style }: { children: ReactNode; style?: CSSProperties }) {
+  return <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--ol-ink)', marginBottom: 6, letterSpacing: '-0.01em', ...style }}>{children}</div>;
+}
+
+export function SectionDesc({ children, style }: { children: ReactNode; style?: CSSProperties }) {
+  return <div style={{ fontSize: 12.5, color: 'var(--ol-ink-3)', lineHeight: 1.6, marginBottom: 16, ...style }}>{children}</div>;
+}
+
 interface SettingRowProps {
   label: string;
   desc?: string;
@@ -12,12 +20,12 @@ interface SettingRowProps {
 
 export function SettingRow({ label, desc, children, controlWidth }: SettingRowProps) {
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 180px) minmax(0, 1fr)', gap: 16, padding: '14px 0', borderTop: '0.5px solid var(--ol-line-soft)' }}>
-      <div style={{ minWidth: 0 }}>
+    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 180px) minmax(0, 1fr)', gap: 16, padding: '14px 0', borderTop: '0.5px solid var(--ol-line-soft)', alignItems: desc ? 'flex-start' : 'center' }}>
+      <div style={{ minWidth: 0, alignSelf: desc ? 'flex-start' : 'center' }}>
         <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--ol-ink)' }}>{label}</div>
         {desc && <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', marginTop: 4, lineHeight: 1.5 }}>{desc}</div>}
       </div>
-      <div style={{ display: 'flex', alignItems: 'flex-start', minWidth: 0, width: controlWidth ?? 'auto' }}>{children}</div>
+      <div style={{ display: 'flex', alignItems: 'center', minWidth: 0, width: controlWidth ?? 'auto' }}>{children}</div>
     </div>
   );
 }
@@ -27,17 +35,18 @@ export function Toggle({ on, onToggle }: { on: boolean; onToggle?: (next: boolea
     <button
       onClick={() => onToggle?.(!on)}
       style={{
-        position: 'relative', width: 32, height: 18, borderRadius: 999, border: 0,
+        position: 'relative', width: 36, height: 20, borderRadius: 999, border: 0,
         background: on ? 'var(--ol-blue)' : 'rgba(0,0,0,0.15)',
+        boxShadow: 'inset 0 1px 2px rgba(0,0,0,0.06)',
         cursor: 'default',
         transition: 'background 0.16s var(--ol-motion-quick)',
       }}
     >
       <span
         style={{
-          position: 'absolute', top: 2, left: on ? 16 : 2,
-          width: 14, height: 14, borderRadius: 999, background: '#fff',
-          boxShadow: '0 1px 2px rgba(0,0,0,.25)', transition: 'left .16s var(--ol-motion-spring)',
+          position: 'absolute', top: 2, left: on ? 18 : 2,
+          width: 16, height: 16, borderRadius: 999, background: '#fff',
+          boxShadow: '0 1px 2px rgba(0,0,0,.25), 0 0 0 0.5px rgba(0,0,0,.04)', transition: 'left .16s var(--ol-motion-spring)',
         }}
       />
     </button>

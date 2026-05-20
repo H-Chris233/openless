@@ -1,7 +1,5 @@
 /* OpenLess design tokens — black + white + electric blue accent, glassy */
 
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-
 :root {
   /* Palette — neutrals */
   --ol-white: #ffffff;
@@ -52,8 +50,8 @@
   --ol-r-pill: 999px;
 
   /* Typography */
-  --ol-font-sans: 'Inter', 'PingFang SC', 'Microsoft YaHei', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-  --ol-font-mono: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+  --ol-font-sans: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  --ol-font-mono: "SF Mono", "Cascadia Code", Consolas, monospace;
 
   /* Status colors (sparse use only) */
   --ol-ok: #16a34a;
