@@ -1561,8 +1561,6 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
     let restore_clipboard = prefs.restore_clipboard_after_paste;
     let allow_non_tsf_insertion_fallback = prefs.allow_non_tsf_insertion_fallback;
     let paste_shortcut = prefs.paste_shortcut;
-    #[cfg(target_os = "windows")]
-    let windows_non_tsf_fallback_mode = prefs.windows_non_tsf_fallback_mode;
     // 流式路径下，字符已经通过 Unicode keystroke 落到光标处，跳过 inserter.insert。
     let status = if already_streamed {
         log::info!(
@@ -1582,7 +1580,6 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                 restore_clipboard,
                 allow_non_tsf_insertion_fallback,
                 paste_shortcut,
-                windows_non_tsf_fallback_mode,
                 ime_target,
             )
             .await
