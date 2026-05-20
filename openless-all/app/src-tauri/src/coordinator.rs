@@ -2026,16 +2026,107 @@ fn should_try_non_tsf_insertion_fallback(
 fn insert_via_non_tsf_fallback(
     inner: &Arc<Inner>,
     polished: &str,
-    restore_clipboard: bool,
-    paste_shortcut: PasteShortcut,
+    _restore_clipboard: bool,
+    _paste_shortcut: PasteShortcut,
 ) -> InsertStatus {
-    if inner.inserter.insert_via_unicode_keystrokes(polished) == InsertStatus::Inserted {
-        log::info!("[windows-ime] TSF unavailable; inserted via Unicode SendInput");
-        InsertStatus::Inserted
-    } else {
-        inner
-            .inserter
-            .insert_via_clipboard_fallback(polished, restore_clipboard, paste_shortcut)
+    let status = finish_non_tsf_insertion_fallback(
+        || inner.inserter.insert_via_unicode_keystrokes(polished),
+        || inner.inserter.copy_fallback(polished),
+    );
+
+    match status {
+        InsertStatus::Inserted => {
+            log::warn!(
+                "[windows-ime] TSF unavailable; inserted via paced Unicode SendInput fallback"
+            );
+        }
+        InsertStatus::CopiedFallback => {
+            log::warn!(
+                "[windows-ime] TSF unavailable; Unicode SendInput failed, left text on clipboard"
+            );
+        }
+        InsertStatus::PasteSent | InsertStatus::Failed => {
+            log::warn!(
+                "[windows-ime] TSF unavailable; Unicode SendInput fallback failed and copy fallback failed"
+            );
+        }
+    }
+
+    status
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn finish_non_tsf_insertion_fallback<U, C>(
+    mut unicode_fallback: U,
+    mut copy_only_fallback: C,
+) -> InsertStatus
+where
+    U: FnMut() -> InsertStatus,
+    C: FnMut() -> InsertStatus,
+{
+    match unicode_fallback() {
+        InsertStatus::Inserted => InsertStatus::Inserted,
+        InsertStatus::PasteSent | InsertStatus::CopiedFallback | InsertStatus::Failed => {
+            match copy_only_fallback() {
+                InsertStatus::CopiedFallback => InsertStatus::CopiedFallback,
+                // TextInserter::copy_fallback is copy-only: success is CopiedFallback.
+                // Treat any other status as failure so this helper never invents an insert.
+                InsertStatus::Inserted | InsertStatus::PasteSent | InsertStatus::Failed => {
+                    InsertStatus::Failed
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod non_tsf_fallback_tests {
+    use super::finish_non_tsf_insertion_fallback;
+    use crate::types::InsertStatus;
+
+    #[test]
+    fn unicode_fallback_runs_before_copy_fallback() {
+        let mut copy_called = false;
+        let status = finish_non_tsf_insertion_fallback(
+            || InsertStatus::Inserted,
+            || {
+                copy_called = true;
+                InsertStatus::CopiedFallback
+            },
+        );
+
+        assert_eq!(status, InsertStatus::Inserted);
+        assert!(!copy_called);
+    }
+
+    #[test]
+    fn copy_fallback_runs_after_unicode_failure() {
+        let mut copy_called = false;
+        let status = finish_non_tsf_insertion_fallback(
+            || InsertStatus::Failed,
+            || {
+                copy_called = true;
+                InsertStatus::CopiedFallback
+            },
+        );
+
+        assert_eq!(status, InsertStatus::CopiedFallback);
+        assert!(copy_called);
+    }
+
+    #[test]
+    fn double_failure_does_not_pretend_text_was_copied() {
+        let mut copy_called = false;
+        let status = finish_non_tsf_insertion_fallback(
+            || InsertStatus::Failed,
+            || {
+                copy_called = true;
+                InsertStatus::Failed
+            },
+        );
+
+        assert_eq!(status, InsertStatus::Failed);
+        assert!(copy_called);
     }
 }
 

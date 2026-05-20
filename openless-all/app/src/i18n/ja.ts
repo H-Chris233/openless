@@ -548,7 +548,7 @@ export const ja: typeof zhCN = {
       comboClear: 'クリア',
       comboConflict: 'このショートカットの組み合わせは使用できません',
       allowNonTsfFallbackLabel: '非 TSF フォールバックを許可',
-      allowNonTsfFallbackDesc: 'Windows：TSF 入力が失敗した時に Unicode SendInput / ショートカットペーストへの切替を許可。',
+      allowNonTsfFallbackDesc: 'Windows：TSF 入力が失敗した時は分割した Unicode SendInput を使い、それも失敗した場合はクリップボードへコピーします。',
       historyGroupTitle: '履歴とコンテキスト',
       historyRetentionLabel: '履歴保持期間（日）',
       historyRetentionDesc: '保持日数を超えた履歴は新規書き込み時に削除されます。0 = 時間で削除しない。',

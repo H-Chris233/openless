@@ -546,7 +546,7 @@ export const zhTW: typeof zhCN = {
       pasteShortcutCtrlShiftV: 'Ctrl+Shift+V（kitty / alacritty / wezterm / 多數終端）',
       pasteShortcutShiftInsert: 'Shift+Insert（xterm / urxvt）',
       allowNonTsfFallbackLabel: '允許非 TSF 兜底',
-      allowNonTsfFallbackDesc: 'Windows：TSF 失敗時改用 Unicode SendInput / 快捷鍵粘貼。',
+      allowNonTsfFallbackDesc: 'Windows：TSF 失敗時使用分批 Unicode SendInput；如果仍失敗，再複製到剪貼簿。',
       historyGroupTitle: '歷史與上下文',
       historyRetentionLabel: '歷史保留天數',
       historyRetentionDesc: '超過保留天數的歷史在寫入新條目時被清理；0 = 不按時間清理。',
