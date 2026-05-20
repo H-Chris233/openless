@@ -101,8 +101,7 @@ impl WhisperBatchASR {
             .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
             .collect();
         let wav = encode_wav_16k_mono(&samples);
-        let base_url = self.base_url.trim_end_matches('/');
-        let url = format!("{}/audio/transcriptions", base_url);
+        let url = transcription_url(&self.base_url)?;
 
         let wav_part = reqwest::multipart::Part::bytes(wav)
             .file_name("audio.wav")
@@ -171,6 +170,23 @@ fn split_pcm_by_duration(pcm: &[u8], max_chunk_duration_ms: Option<u64>) -> Vec<
     }
 
     pcm.chunks(bytes_per_chunk).collect()
+}
+
+fn transcription_url(base_url: &str) -> Result<String> {
+    let parsed = reqwest::Url::parse(base_url.trim()).context("parse Whisper base URL")?;
+    let mut url = parsed.clone();
+    let path = parsed.path().trim_end_matches('/');
+    let next_path = if path.ends_with("/audio/transcriptions") {
+        path.to_string()
+    } else if path.ends_with("/audio") {
+        format!("{path}/transcriptions")
+    } else if let Some(prefix) = path.strip_suffix("/chat/completions") {
+        format!("{prefix}/audio/transcriptions")
+    } else {
+        format!("{path}/audio/transcriptions")
+    };
+    url.set_path(&next_path);
+    Ok(url.to_string())
 }
 
 fn join_transcript_chunks(chunks: &[String]) -> String {
@@ -463,6 +479,29 @@ mod tests {
     }
 
     #[test]
+    fn transcription_url_accepts_base_audio_or_full_endpoint() {
+        assert_eq!(
+            transcription_url("https://open.bigmodel.cn/api/paas/v4").unwrap(),
+            "https://open.bigmodel.cn/api/paas/v4/audio/transcriptions"
+        );
+        assert_eq!(
+            transcription_url("https://open.bigmodel.cn/api/paas/v4/audio").unwrap(),
+            "https://open.bigmodel.cn/api/paas/v4/audio/transcriptions"
+        );
+        assert_eq!(
+            transcription_url("https://open.bigmodel.cn/api/paas/v4/audio/transcriptions").unwrap(),
+            "https://open.bigmodel.cn/api/paas/v4/audio/transcriptions"
+        );
+        assert_eq!(
+            transcription_url(
+                "https://open.bigmodel.cn/api/paas/v4/audio/transcriptions?api-version=2026-01-01"
+            )
+            .unwrap(),
+            "https://open.bigmodel.cn/api/paas/v4/audio/transcriptions?api-version=2026-01-01"
+        );
+    }
+
+    #[test]
     fn join_transcript_chunks_skips_empty_chunks() {
         let chunks = vec![" hello ".to_string(), "".to_string(), "world".to_string()];
         assert_eq!(join_transcript_chunks(&chunks), "hello world");
@@ -571,6 +610,7 @@ mod tests {
                         Err(err) => panic!("accept ASR test request failed: {err}"),
                     }
                 };
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
