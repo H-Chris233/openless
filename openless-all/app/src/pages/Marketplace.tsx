@@ -580,8 +580,13 @@ export function Marketplace() {
 
       {loadError && (
         <Card padding={16} style={{ marginBottom: 12, borderColor: 'var(--ol-err)' }}>
-          <div style={{ fontSize: 12, color: 'var(--ol-err)' }}>
-            {t('marketplace.loadFailed', { err: loadError })}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+            <div style={{ fontSize: 12, color: 'var(--ol-err)', flex: 1, wordBreak: 'break-word' }}>
+              {t('marketplace.loadFailed', { err: loadError })}
+            </div>
+            <Btn variant="blue" size="sm" onClick={() => void refresh()}>
+              {t('common.retry') ?? '重试'}
+            </Btn>
           </div>
         </Card>
       )}

@@ -511,6 +511,18 @@ export function getWindowsImeStatus(): Promise<WindowsImeStatus> {
   return invokeOrMock('get_windows_ime_status', undefined, () => mockWindowsImeStatus);
 }
 
+export interface NetworkCheckResult {
+  online: boolean;
+  latencyMs: number | null;
+}
+
+export function checkNetwork(): Promise<NetworkCheckResult> {
+  return invokeOrMock<NetworkCheckResult>('check_network', undefined, () => ({
+    online: true,
+    latencyMs: 42,
+  }));
+}
+
 export function listMicrophoneDevices(): Promise<MicrophoneDevice[]> {
   return invokeOrMock('list_microphone_devices', undefined, () => mockMicrophoneDevices);
 }
