@@ -17,7 +17,9 @@ use tauri::{async_runtime, AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
 #[cfg(target_os = "windows")]
-use crate::asr::local::{foundry, FoundryLocalRuntime, FoundryLocalWhisperAsr};
+use crate::asr::local::{
+    foundry, sherpa, FoundryLocalRuntime, FoundryLocalWhisperAsr, SherpaOnnxAsr, SherpaOnnxRuntime,
+};
 use crate::asr::{
     BailianCredentials, BailianRealtimeASR, DictionaryHotword, RawTranscript,
     VolcengineCredentials, VolcengineStreamingASR, WhisperBatchASR,
@@ -140,6 +142,10 @@ enum ActiveAsr {
     Bailian(Arc<BailianRealtimeASR>),
     #[cfg(target_os = "windows")]
     FoundryLocalWhisper(Arc<FoundryLocalWhisperAsr>),
+    /// Windows sherpa-onnx 本地 ASR（M1 骨架，详见
+    /// `docs/windows-sherpa-onnx-asr-plan.md`）。
+    #[cfg(target_os = "windows")]
+    SherpaOnnxLocal(Arc<SherpaOnnxAsr>),
     /// 本地 Qwen3-ASR；只在 macOS + 模型已下载时可达。
     #[cfg(target_os = "macos")]
     Local(Arc<crate::asr::local::LocalQwenAsr>),
@@ -149,6 +155,10 @@ fn asr_transcribe_uses_global_timeout(asr: &ActiveAsr) -> bool {
     match asr {
         #[cfg(target_os = "windows")]
         ActiveAsr::FoundryLocalWhisper(_) => false,
+        // sherpa-onnx 首次加载 / 下载 / 推理的耗时类似 Foundry，不走
+        // COORDINATOR_GLOBAL_TIMEOUT；各 provider 自己里面控制細粒度超时。
+        #[cfg(target_os = "windows")]
+        ActiveAsr::SherpaOnnxLocal(_) => false,
         _ => true,
     }
 }
@@ -176,6 +186,11 @@ struct Inner {
     local_asr_cache: Arc<crate::asr::local::LocalAsrCache>,
     #[cfg(target_os = "windows")]
     foundry_local_runtime: Arc<FoundryLocalRuntime>,
+    /// Windows sherpa-onnx 本地 ASR runtime（M1 骨架）。与 Foundry 同处一个
+    /// 位置、同一 lifecycle 语义；上层通过 `ActiveAsr::SherpaOnnxLocal` 后只调
+    /// runtime，不会跨模块调。
+    #[cfg(target_os = "windows")]
+    sherpa_onnx_runtime: Arc<SherpaOnnxRuntime>,
     recorder: Mutex<Option<SessionResource<Recorder>>>,
     /// 当前 dictation / QA session 的 wav 归档是否真的被写到磁盘上。
     /// 由 Recorder::start 返回值 (archive_active) 写入；history.append 路径读取，
@@ -243,7 +258,10 @@ impl Coordinator {
     pub fn new() -> Self {
         #[cfg(target_os = "windows")]
         {
-            Self::new_with_foundry_runtime(Arc::new(FoundryLocalRuntime::new()))
+            Self::new_with_local_runtimes(
+                Arc::new(FoundryLocalRuntime::new()),
+                Arc::new(SherpaOnnxRuntime::new()),
+            )
         }
 
         #[cfg(not(target_os = "windows"))]
@@ -294,8 +312,19 @@ impl Coordinator {
         }
     }
 
+    /// 保留旧构造函数：现有调用点（含单元测试）只传 Foundry runtime，
+    /// sherpa-onnx runtime 采用默认骨架实例。入产后（lib.rs）请走
+    /// `new_with_local_runtimes`，确保 Tauri State 共享同一个 Arc。
     #[cfg(target_os = "windows")]
     pub fn new_with_foundry_runtime(foundry_local_runtime: Arc<FoundryLocalRuntime>) -> Self {
+        Self::new_with_local_runtimes(foundry_local_runtime, Arc::new(SherpaOnnxRuntime::new()))
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn new_with_local_runtimes(
+        foundry_local_runtime: Arc<FoundryLocalRuntime>,
+        sherpa_onnx_runtime: Arc<SherpaOnnxRuntime>,
+    ) -> Self {
         let history = HistoryStore::new().unwrap_or_else(|e| {
             log::error!("[coord] HistoryStore init failed: {e}; falling back to empty");
             HistoryStore::new().expect("history store init")
@@ -339,6 +368,7 @@ impl Coordinator {
                 qa_stream_cancelled: Arc::new(AtomicBool::new(false)),
                 local_asr_cache: Arc::new(crate::asr::local::LocalAsrCache::new()),
                 foundry_local_runtime,
+                sherpa_onnx_runtime,
                 shutdown: AtomicBool::new(false),
             }),
         }
@@ -2208,6 +2238,17 @@ fn ensure_asr_credentials() -> Result<(), String> {
         }
     }
 
+    if crate::asr::local::sherpa::is_sherpa_onnx_local(&active_asr) {
+        #[cfg(not(target_os = "windows"))]
+        {
+            return Err("sherpa-onnx local ASR 当前仅支持 Windows".to_string());
+        }
+        #[cfg(target_os = "windows")]
+        {
+            return Ok(());
+        }
+    }
+
     if is_whisper_compatible_provider(&active_asr) || is_bailian_provider(&active_asr) {
         let api_key = CredentialsVault::get(CredentialAccount::AsrApiKey)
             .ok()
@@ -2235,6 +2276,7 @@ fn is_keyless_local_asr_provider(id: &str) -> bool {
     #[cfg(target_os = "windows")]
     {
         crate::asr::local::foundry::is_foundry_local_whisper(id)
+            || crate::asr::local::sherpa::is_sherpa_onnx_local(id)
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -2303,6 +2345,32 @@ fn schedule_foundry_local_asr_release(inner: &Arc<Inner>, session_id: SessionId)
         }
         if let Err(error) = runtime.release_now().await {
             log::warn!("[foundry-asr] scheduled release failed: {error:#}");
+        }
+    });
+}
+
+#[cfg(target_os = "windows")]
+fn sherpa_onnx_release_keep_secs(inner: &Arc<Inner>) -> u32 {
+    inner.prefs.get().sherpa_onnx_keep_loaded_secs
+}
+
+/// 与 `schedule_foundry_local_asr_release` 同形：session_id 老旧则不释放，
+/// 避免下一轮 session 重加载同一个模型。M1 阶段 runtime 是骨架，`release_now`
+/// 只清 alias state，不会报错。
+#[cfg(target_os = "windows")]
+fn schedule_sherpa_onnx_release(inner: &Arc<Inner>, session_id: SessionId) {
+    let keep_secs = sherpa_onnx_release_keep_secs(inner);
+    let runtime = Arc::clone(&inner.sherpa_onnx_runtime);
+    let inner = Arc::clone(inner);
+    tauri::async_runtime::spawn(async move {
+        if keep_secs > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(keep_secs as u64)).await;
+        }
+        if !foundry_release_session_is_current(&inner, session_id) {
+            return;
+        }
+        if let Err(error) = runtime.release_now().await {
+            log::warn!("[sherpa-asr] scheduled release failed: {error:#}");
         }
     });
 }
@@ -3442,17 +3510,28 @@ mod tests {
     }
 
     #[test]
-    fn foundry_local_provider_is_keyless_and_not_whisper_compatible() {
+    fn windows_local_providers_are_keyless_and_not_whisper_compatible() {
         #[cfg(target_os = "windows")]
         assert!(is_keyless_local_asr_provider(
             crate::asr::local::foundry::PROVIDER_ID
+        ));
+        #[cfg(target_os = "windows")]
+        assert!(is_keyless_local_asr_provider(
+            crate::asr::local::sherpa::PROVIDER_ID
         ));
         #[cfg(not(target_os = "windows"))]
         assert!(!is_keyless_local_asr_provider(
             crate::asr::local::foundry::PROVIDER_ID
         ));
+        #[cfg(not(target_os = "windows"))]
+        assert!(!is_keyless_local_asr_provider(
+            crate::asr::local::sherpa::PROVIDER_ID
+        ));
         assert!(!is_whisper_compatible_provider(
             crate::asr::local::foundry::PROVIDER_ID
+        ));
+        assert!(!is_whisper_compatible_provider(
+            crate::asr::local::sherpa::PROVIDER_ID
         ));
     }
 
@@ -4058,6 +4137,13 @@ fn local_qwen_transcribe_timeout(audio_secs: f64) -> std::time::Duration {
         .saturating_add(10)
         .max(COORDINATOR_GLOBAL_TIMEOUT_SECS);
     std::time::Duration::from_secs(secs)
+}
+
+/// sherpa-onnx M1 阶段超时与 Foundry 同档。M2 接入真实推理后视 CPU 模型
+/// 实际耗时再调（中文 SenseVoice small int8 在 4 核 CPU 上一般 < 3s/30s 音频）。
+#[cfg(target_os = "windows")]
+fn sherpa_audio_transcribe_timeout_duration() -> std::time::Duration {
+    std::time::Duration::from_secs(COORDINATOR_GLOBAL_TIMEOUT_SECS)
 }
 
 /// 检查 begin_session 的 await 间隙是否被 cancel_session 打断。

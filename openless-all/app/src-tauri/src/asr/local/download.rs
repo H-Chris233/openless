@@ -224,7 +224,7 @@ impl DownloadManager {
     }
 }
 
-fn build_client() -> Result<reqwest::Client> {
+pub(crate) fn build_client() -> Result<reqwest::Client> {
     // native-tls (macOS=SecureTransport) 不像 rustls 那样把 CDN unclean close
     // 当致命错误。
     //
@@ -476,6 +476,9 @@ const PARALLEL_FILES: usize = 3;
 pub fn partial_actual_size(partial: &Path) -> u64 {
     let total_size = match std::fs::metadata(partial) {
         Ok(m) => m.len(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return 0;
+        }
         Err(e) => {
             eprintln!(
                 "[local-asr] partial_actual_size: stat partial failed ({}): {}",
@@ -525,7 +528,7 @@ pub fn partial_actual_size(partial: &Path) -> u64 {
     total
 }
 
-async fn download_one(
+pub(crate) async fn download_one(
     client: &reqwest::Client,
     url: &str,
     dest: &Path,

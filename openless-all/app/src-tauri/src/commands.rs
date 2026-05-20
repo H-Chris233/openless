@@ -11,7 +11,15 @@ use crate::asr::local::foundry::{
     model_alias_is_known, FoundryCatalogModel, FoundryPrepareProgressPayload, FoundryRuntimeStatus,
     DEFAULT_MODEL_ALIAS, PROVIDER_ID as FOUNDRY_LOCAL_PROVIDER_ID,
 };
-use crate::asr::local::FoundryLocalRuntime;
+use crate::asr::local::sherpa::{
+    model_alias_is_known as sherpa_model_alias_is_known, SherpaCatalogModel,
+    SherpaPrepareProgressPayload, SherpaRuntimeStatus,
+    DEFAULT_MODEL_ALIAS as SHERPA_DEFAULT_MODEL_ALIAS,
+};
+use crate::asr::local::sherpa_download::{
+    fetch_remote_info as fetch_sherpa_remote_info, SherpaDownloadManager, SherpaRemoteInfo,
+};
+use crate::asr::local::{FoundryLocalRuntime, SherpaOnnxRuntime};
 use crate::coordinator::Coordinator;
 use crate::permissions::{self, PermissionStatus};
 use crate::persistence::{
@@ -67,6 +75,7 @@ pub fn get_default_style_system_prompts() -> StyleSystemPrompts {
 }
 
 trait SettingsWriter {
+    fn read_settings(&self) -> UserPreferences;
     fn write_settings(&self, prefs: UserPreferences) -> Result<(), String>;
     fn refresh_dictation_hotkey(&self);
     fn refresh_qa_hotkey(&self);
@@ -77,6 +86,10 @@ trait SettingsWriter {
 }
 
 impl SettingsWriter for Coordinator {
+    fn read_settings(&self) -> UserPreferences {
+        self.prefs().get()
+    }
+
     fn write_settings(&self, prefs: UserPreferences) -> Result<(), String> {
         self.prefs().set(prefs).map_err(|e| e.to_string())
     }
@@ -107,6 +120,10 @@ impl SettingsWriter for Coordinator {
 }
 
 impl<T: SettingsWriter + ?Sized> SettingsWriter for Arc<T> {
+    fn read_settings(&self) -> UserPreferences {
+        (**self).read_settings()
+    }
+
     fn write_settings(&self, prefs: UserPreferences) -> Result<(), String> {
         (**self).write_settings(prefs)
     }
@@ -140,15 +157,35 @@ fn persist_settings<T: SettingsWriter>(
     coord: &T,
     mut prefs: UserPreferences,
 ) -> Result<(), String> {
+    let mut previous = coord.read_settings();
+    sync_dictation_hotkey_legacy_fields(&mut previous);
     sync_dictation_hotkey_legacy_fields(&mut prefs);
     reject_hotkey_collisions(&prefs)?;
+    let dictation_shortcut_changed = previous.dictation_hotkey != prefs.dictation_hotkey;
+    let dictation_mode_changed = previous.hotkey.mode != prefs.hotkey.mode;
+    let qa_changed = previous.qa_hotkey != prefs.qa_hotkey;
+    let translation_changed = previous.translation_hotkey != prefs.translation_hotkey;
+    let switch_style_changed = previous.switch_style_hotkey != prefs.switch_style_hotkey;
+    let open_app_changed = previous.open_app_hotkey != prefs.open_app_hotkey;
     coord.write_settings(prefs)?;
-    coord.refresh_dictation_hotkey();
-    coord.refresh_qa_hotkey();
-    coord.refresh_combo_hotkey();
-    coord.refresh_translation_hotkey();
-    coord.refresh_switch_style_hotkey();
-    coord.refresh_open_app_hotkey();
+    if dictation_shortcut_changed || dictation_mode_changed {
+        coord.refresh_dictation_hotkey();
+    }
+    if dictation_shortcut_changed {
+        coord.refresh_combo_hotkey();
+    }
+    if qa_changed {
+        coord.refresh_qa_hotkey();
+    }
+    if translation_changed {
+        coord.refresh_translation_hotkey();
+    }
+    if switch_style_changed {
+        coord.refresh_switch_style_hotkey();
+    }
+    if open_app_changed {
+        coord.refresh_open_app_hotkey();
+    }
     Ok(())
 }
 
@@ -571,7 +608,10 @@ fn asr_configured_for_provider(provider: &str, snap: &CredentialsSnapshot) -> bo
     if provider == "volcengine" {
         return volcengine_configured(snap);
     }
-    if provider == crate::asr::local::PROVIDER_ID || active_foundry_asr_is_supported(provider) {
+    if provider == crate::asr::local::PROVIDER_ID
+        || active_foundry_asr_is_supported(provider)
+        || active_sherpa_asr_is_supported(provider)
+    {
         // 本地 ASR 不依赖云端凭据。
         return true;
     }
@@ -637,12 +677,14 @@ fn configured(field: &Option<String>) -> bool {
 struct LocalAsrReleasePlan {
     qwen: bool,
     foundry: bool,
+    sherpa: bool,
 }
 
 fn local_asr_release_plan_for_provider(provider: &str) -> LocalAsrReleasePlan {
     LocalAsrReleasePlan {
         qwen: provider != crate::asr::local::PROVIDER_ID,
         foundry: provider != FOUNDRY_LOCAL_PROVIDER_ID,
+        sherpa: provider != crate::asr::local::sherpa::PROVIDER_ID,
     }
 }
 
@@ -654,6 +696,18 @@ async fn release_foundry_runtime_if_inactive(
         runtime.request_cancel_prepare();
         if let Err(error) = runtime.release_now().await {
             log::warn!("[foundry-asr] release inactive runtime failed: {error:#}");
+        }
+    }
+}
+
+async fn release_sherpa_runtime_if_inactive(
+    runtime: &Arc<SherpaOnnxRuntime>,
+    release_sherpa: bool,
+) {
+    if release_sherpa {
+        runtime.request_cancel_prepare();
+        if let Err(error) = runtime.release_now().await {
+            log::warn!("[sherpa-asr] release inactive runtime failed: {error:#}");
         }
     }
 }
@@ -673,10 +727,19 @@ pub fn set_credential(window: Window, account: String, value: String) -> Result<
 pub async fn set_active_asr_provider(
     coord: CoordinatorState<'_>,
     runtime: State<'_, Arc<FoundryLocalRuntime>>,
+    sherpa_runtime: State<'_, Arc<SherpaOnnxRuntime>>,
     provider: String,
 ) -> Result<(), String> {
     if provider == FOUNDRY_LOCAL_PROVIDER_ID && !active_foundry_asr_is_supported(&provider) {
         return Err("Foundry Local Whisper is only available on Windows".to_string());
+    }
+    if provider == crate::asr::local::sherpa::PROVIDER_ID
+        && !active_sherpa_asr_is_supported(&provider)
+    {
+        return Err("sherpa-onnx local ASR is only available on Windows".to_string());
+    }
+    if CredentialsVault::get_active_asr() == provider {
+        return Ok(());
     }
     CredentialsVault::set_active_asr_provider(&provider).map_err(|e| e.to_string())?;
     let release_plan = local_asr_release_plan_for_provider(&provider);
@@ -691,6 +754,7 @@ pub async fn set_active_asr_provider(
         coord.release_local_asr_engine();
     }
     release_foundry_runtime_if_inactive(runtime.inner(), release_plan.foundry).await;
+    release_sherpa_runtime_if_inactive(sherpa_runtime.inner(), release_plan.sherpa).await;
     Ok(())
 }
 
@@ -927,13 +991,27 @@ async fn validate_bailian_asr_provider() -> Result<(), String> {
 }
 
 fn active_asr_is_keyless_for_validation(provider: &str) -> bool {
-    provider == crate::asr::local::PROVIDER_ID || active_foundry_asr_is_supported(provider)
+    provider == crate::asr::local::PROVIDER_ID
+        || active_foundry_asr_is_supported(provider)
+        || active_sherpa_asr_is_supported(provider)
 }
 
 fn active_foundry_asr_is_supported(provider: &str) -> bool {
     #[cfg(target_os = "windows")]
     {
         provider == FOUNDRY_LOCAL_PROVIDER_ID
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = provider;
+        false
+    }
+}
+
+fn active_sherpa_asr_is_supported(provider: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        provider == crate::asr::local::sherpa::PROVIDER_ID
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -2271,6 +2349,9 @@ pub fn foundry_local_asr_set_model(
 ) -> Result<(), String> {
     validate_foundry_model_alias(&model_alias)?;
     let mut prefs = coord.prefs().get();
+    if prefs.foundry_local_asr_model == model_alias {
+        return Ok(());
+    }
     prefs.foundry_local_asr_model = model_alias;
     coord.prefs().set(prefs).map_err(|e| e.to_string())
 }
@@ -2282,6 +2363,9 @@ pub fn foundry_local_asr_set_language_hint(
 ) -> Result<(), String> {
     let normalized = normalize_foundry_language_hint(&language_hint)?;
     let mut prefs = coord.prefs().get();
+    if prefs.foundry_local_asr_language_hint == normalized {
+        return Ok(());
+    }
     prefs.foundry_local_asr_language_hint = normalized;
     coord.prefs().set(prefs).map_err(|e| e.to_string())
 }
@@ -2292,7 +2376,11 @@ pub fn foundry_local_asr_set_runtime_source(
     source: String,
 ) -> Result<(), String> {
     let mut prefs = coord.prefs().get();
-    prefs.foundry_local_runtime_source = normalize_foundry_runtime_source(&source);
+    let normalized = normalize_foundry_runtime_source(&source);
+    if prefs.foundry_local_runtime_source == normalized {
+        return Ok(());
+    }
+    prefs.foundry_local_runtime_source = normalized;
     coord.prefs().set(prefs).map_err(|e| e.to_string())
 }
 
@@ -2347,6 +2435,237 @@ pub async fn foundry_local_asr_release(
 fn emit_foundry_prepare_progress(app: &AppHandle, payload: FoundryPrepareProgressPayload) {
     if let Err(error) = app.emit("foundry-local-asr-prepare-progress", payload) {
         log::warn!("[foundry-asr] emit prepare progress failed: {error}");
+    }
+}
+
+// ───────────────────── Windows local ASR (sherpa-onnx-local, M1 骨架) ─────────────────────
+//
+// 命令形态与 Foundry 同形，让前端命令封装可以复用同一种 hook 模式；M1 阶段
+// 不做下载 / 不接 sherpa-onnx crate / 不做实际推理，详见
+// `docs/windows-sherpa-onnx-asr-plan.md`。
+
+fn active_sherpa_model_from_prefs(prefs: &UserPreferences) -> String {
+    if sherpa_model_alias_is_known(&prefs.sherpa_onnx_model) {
+        prefs.sherpa_onnx_model.clone()
+    } else {
+        SHERPA_DEFAULT_MODEL_ALIAS.to_string()
+    }
+}
+
+fn validate_sherpa_model_alias(model_alias: &str) -> Result<(), String> {
+    if sherpa_model_alias_is_known(model_alias) {
+        Ok(())
+    } else {
+        Err(format!("unknown sherpa-onnx model alias: {model_alias}"))
+    }
+}
+
+fn normalize_sherpa_language_hint(language_hint: &str) -> Result<String, String> {
+    let normalized = language_hint.trim().to_lowercase();
+    if normalized.is_empty()
+        || normalized
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c == '-')
+    {
+        Ok(normalized)
+    } else {
+        Err("language hint must be empty or BCP-47 lowercase code".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn sherpa_onnx_asr_status(
+    coord: CoordinatorState<'_>,
+    runtime: State<'_, Arc<SherpaOnnxRuntime>>,
+) -> Result<SherpaRuntimeStatus, String> {
+    let prefs = coord.prefs().get();
+    let active_model = active_sherpa_model_from_prefs(&prefs);
+    Ok(runtime.status_snapshot(&active_model).await)
+}
+
+#[tauri::command]
+pub async fn sherpa_onnx_asr_catalog(
+    runtime: State<'_, Arc<SherpaOnnxRuntime>>,
+) -> Result<Vec<SherpaCatalogModel>, String> {
+    runtime
+        .catalog_snapshot()
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+pub async fn sherpa_onnx_asr_fetch_remote_info(
+    model_alias: String,
+    mirror: Option<String>,
+) -> Result<SherpaRemoteInfo, String> {
+    validate_sherpa_model_alias(&model_alias)?;
+    let mirror = mirror.as_deref().map(Mirror::from_str).unwrap_or_default();
+    fetch_sherpa_remote_info(&model_alias, mirror)
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+pub fn sherpa_onnx_asr_download_model(
+    app: AppHandle,
+    manager: State<'_, Arc<SherpaDownloadManager>>,
+    model_alias: String,
+    mirror: Option<String>,
+) -> Result<(), String> {
+    validate_sherpa_model_alias(&model_alias)?;
+    let mirror = mirror.as_deref().map(Mirror::from_str).unwrap_or_default();
+    manager.start(app, model_alias, mirror);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn sherpa_onnx_asr_cancel_download(
+    manager: State<'_, Arc<SherpaDownloadManager>>,
+    model_alias: String,
+) -> Result<(), String> {
+    validate_sherpa_model_alias(&model_alias)?;
+    manager.cancel(&model_alias);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn sherpa_onnx_asr_set_model(
+    coord: CoordinatorState<'_>,
+    model_alias: String,
+) -> Result<(), String> {
+    validate_sherpa_model_alias(&model_alias)?;
+    let mut prefs = coord.prefs().get();
+    if prefs.sherpa_onnx_model == model_alias {
+        return Ok(());
+    }
+    prefs.sherpa_onnx_model = model_alias;
+    coord.prefs().set(prefs).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn sherpa_onnx_asr_set_language_hint(
+    coord: CoordinatorState<'_>,
+    language_hint: String,
+) -> Result<(), String> {
+    let normalized = normalize_sherpa_language_hint(&language_hint)?;
+    let mut prefs = coord.prefs().get();
+    if prefs.sherpa_onnx_language_hint == normalized {
+        return Ok(());
+    }
+    prefs.sherpa_onnx_language_hint = normalized;
+    coord.prefs().set(prefs).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn sherpa_onnx_asr_prepare(
+    app: AppHandle,
+    runtime: State<'_, Arc<SherpaOnnxRuntime>>,
+    model_alias: String,
+) -> Result<String, String> {
+    validate_sherpa_model_alias(&model_alias)?;
+    let progress_app = app.clone();
+    let result = runtime
+        .ensure_loaded_with_progress(&model_alias, move |payload| {
+            emit_sherpa_prepare_progress(&progress_app, payload);
+        })
+        .await;
+    match result {
+        Ok(loaded) => Ok(loaded),
+        Err(error) => {
+            let message = format!("{error:#}");
+            emit_sherpa_prepare_progress(
+                &app,
+                SherpaPrepareProgressPayload::failed(
+                    model_alias,
+                    "sherpa-onnx prepare failed",
+                    message.clone(),
+                ),
+            );
+            Err(message)
+        }
+    }
+}
+
+#[tauri::command]
+pub fn sherpa_onnx_asr_cancel_prepare(
+    runtime: State<'_, Arc<SherpaOnnxRuntime>>,
+) -> Result<(), String> {
+    runtime.request_cancel_prepare();
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn sherpa_onnx_asr_release(
+    runtime: State<'_, Arc<SherpaOnnxRuntime>>,
+) -> Result<(), String> {
+    runtime.release_now().await.map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+pub fn sherpa_onnx_asr_model_dir(model_alias: String) -> Result<String, String> {
+    validate_sherpa_model_alias(&model_alias)?;
+    SherpaOnnxRuntime::model_dir_for_alias(&model_alias)
+        .map(|path| path.display().to_string())
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+pub async fn sherpa_onnx_asr_delete_model(
+    runtime: State<'_, Arc<SherpaOnnxRuntime>>,
+    model_alias: String,
+) -> Result<(), String> {
+    validate_sherpa_model_alias(&model_alias)?;
+    runtime
+        .delete_model(&model_alias)
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+pub fn sherpa_onnx_asr_reveal_model_dir(model_alias: String) -> Result<(), String> {
+    validate_sherpa_model_alias(&model_alias)?;
+    let dir = SherpaOnnxRuntime::model_dir_for_alias(&model_alias).map_err(|e| format!("{e:#}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create {} failed: {e}", dir.display()))?;
+    open_path_in_file_manager(&dir)
+}
+
+#[cfg(target_os = "windows")]
+fn open_path_in_file_manager(path: &std::path::Path) -> Result<(), String> {
+    use windows::core::PCWSTR;
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    fn wide_null(value: &str) -> Vec<u16> {
+        value.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    let operation = wide_null("open");
+    let target = wide_null(&path.display().to_string());
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            PCWSTR(operation.as_ptr()),
+            PCWSTR(target.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    if result.0 as isize <= 32 {
+        Err(format!("ShellExecuteW failed: {}", result.0 as isize))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn open_path_in_file_manager(_path: &std::path::Path) -> Result<(), String> {
+    Err("sherpa-onnx model directory is only supported on Windows".to_string())
+}
+
+fn emit_sherpa_prepare_progress(app: &AppHandle, payload: SherpaPrepareProgressPayload) {
+    if let Err(error) = app.emit("sherpa-onnx-asr-prepare-progress", payload) {
+        log::warn!("[sherpa-asr] emit prepare progress failed: {error}");
     }
 }
 
@@ -2918,6 +3237,7 @@ mod tests {
         llm_configured_for_provider, local_asr_release_plan_for_provider, models_url,
         normalize_foundry_language_hint, parse_gemini_model_ids, parse_latest_beta_from_atom,
         parse_model_ids, persist_settings, release_foundry_runtime_if_inactive,
+        release_sherpa_runtime_if_inactive,
         validate_foundry_model_alias, ProviderConfig, SettingsWriter,
     };
     use crate::persistence::CredentialsSnapshot;
@@ -2935,6 +3255,9 @@ mod tests {
         dictation_refreshes: Mutex<u32>,
         qa_refreshes: Mutex<u32>,
         combo_refreshes: Mutex<u32>,
+        translation_refreshes: Mutex<u32>,
+        switch_style_refreshes: Mutex<u32>,
+        open_app_refreshes: Mutex<u32>,
     }
 
     fn snapshot() -> CredentialsSnapshot {
@@ -2984,9 +3307,19 @@ mod tests {
             crate::asr::local::foundry::PROVIDER_ID,
             &snapshot()
         ));
+        #[cfg(target_os = "windows")]
+        assert!(asr_configured_for_provider(
+            crate::asr::local::sherpa::PROVIDER_ID,
+            &snapshot()
+        ));
         #[cfg(not(target_os = "windows"))]
         assert!(!asr_configured_for_provider(
             crate::asr::local::foundry::PROVIDER_ID,
+            &snapshot()
+        ));
+        #[cfg(not(target_os = "windows"))]
+        assert!(!asr_configured_for_provider(
+            crate::asr::local::sherpa::PROVIDER_ID,
             &snapshot()
         ));
     }
@@ -3018,9 +3351,17 @@ mod tests {
         assert!(active_asr_is_keyless_for_validation(
             crate::asr::local::foundry::PROVIDER_ID
         ));
+        #[cfg(target_os = "windows")]
+        assert!(active_asr_is_keyless_for_validation(
+            crate::asr::local::sherpa::PROVIDER_ID
+        ));
         #[cfg(not(target_os = "windows"))]
         assert!(!active_asr_is_keyless_for_validation(
             crate::asr::local::foundry::PROVIDER_ID
+        ));
+        #[cfg(not(target_os = "windows"))]
+        assert!(!active_asr_is_keyless_for_validation(
+            crate::asr::local::sherpa::PROVIDER_ID
         ));
         assert!(!active_asr_is_keyless_for_validation("volcengine"));
         assert!(!active_asr_is_keyless_for_validation("whisper"));
@@ -3031,14 +3372,22 @@ mod tests {
         let qwen = local_asr_release_plan_for_provider(crate::asr::local::PROVIDER_ID);
         assert!(!qwen.qwen);
         assert!(qwen.foundry);
+        assert!(qwen.sherpa);
 
         let foundry = local_asr_release_plan_for_provider(crate::asr::local::foundry::PROVIDER_ID);
         assert!(foundry.qwen);
         assert!(!foundry.foundry);
+        assert!(foundry.sherpa);
+
+        let sherpa = local_asr_release_plan_for_provider(crate::asr::local::sherpa::PROVIDER_ID);
+        assert!(sherpa.qwen);
+        assert!(sherpa.foundry);
+        assert!(!sherpa.sherpa);
 
         let cloud = local_asr_release_plan_for_provider("volcengine");
         assert!(cloud.qwen);
         assert!(cloud.foundry);
+        assert!(cloud.sherpa);
     }
 
     #[cfg(target_os = "windows")]
@@ -3049,6 +3398,17 @@ mod tests {
         release_foundry_runtime_if_inactive(&runtime, true).await;
 
         assert!(runtime.cancel_prepare_requested_for_tests());
+    }
+
+    #[tokio::test]
+    async fn provider_switch_release_requests_sherpa_prepare_cancel_first() {
+        let runtime = std::sync::Arc::new(crate::asr::local::SherpaOnnxRuntime::new());
+
+        release_sherpa_runtime_if_inactive(&runtime, true).await;
+
+        assert!(runtime.cancel_prepare_requested_for_tests());
+        let status = runtime.status_snapshot("sense-voice-small-zh").await;
+        assert!(!status.runtime_ready);
     }
 
     #[test]
@@ -3154,6 +3514,10 @@ mod tests {
     }
 
     impl SettingsWriter for FakeSettingsWriter {
+        fn read_settings(&self) -> UserPreferences {
+            self.saved.lock().unwrap().clone().unwrap_or_default()
+        }
+
         fn write_settings(&self, prefs: UserPreferences) -> Result<(), String> {
             *self.saved.lock().unwrap() = Some(prefs);
             Ok(())
@@ -3171,9 +3535,17 @@ mod tests {
             *self.combo_refreshes.lock().unwrap() += 1;
         }
 
-        fn refresh_translation_hotkey(&self) {}
-        fn refresh_switch_style_hotkey(&self) {}
-        fn refresh_open_app_hotkey(&self) {}
+        fn refresh_translation_hotkey(&self) {
+            *self.translation_refreshes.lock().unwrap() += 1;
+        }
+
+        fn refresh_switch_style_hotkey(&self) {
+            *self.switch_style_refreshes.lock().unwrap() += 1;
+        }
+
+        fn refresh_open_app_hotkey(&self) {
+            *self.open_app_refreshes.lock().unwrap() += 1;
+        }
     }
 
     #[test]
@@ -3282,18 +3654,36 @@ mod tests {
     }
 
     #[test]
-    fn persist_settings_refreshes_both_hotkey_pipelines() {
+    fn persist_settings_refreshes_changed_hotkey_pipelines() {
         let writer = FakeSettingsWriter::default();
+        let previous = UserPreferences::default();
+        *writer.saved.lock().unwrap() = Some(previous);
         let prefs = UserPreferences {
-            hotkey: HotkeyBinding {
-                trigger: HotkeyTrigger::RightControl,
-                mode: HotkeyMode::Toggle,
-                ..Default::default()
+            dictation_hotkey: ShortcutBinding {
+                primary: "D".to_string(),
+                modifiers: vec!["ctrl".to_string()],
             },
             qa_hotkey: Some(ShortcutBinding {
-                primary: ";".to_string(),
-                modifiers: vec!["ctrl".to_string(), "shift".to_string()],
+                primary: "Q".to_string(),
+                modifiers: vec!["ctrl".to_string(), "alt".to_string()],
             }),
+            translation_hotkey: ShortcutBinding {
+                primary: "T".to_string(),
+                modifiers: vec!["ctrl".to_string(), "alt".to_string()],
+            },
+            switch_style_hotkey: ShortcutBinding {
+                primary: "S".to_string(),
+                modifiers: vec!["ctrl".to_string(), "alt".to_string()],
+            },
+            open_app_hotkey: ShortcutBinding {
+                primary: "O".to_string(),
+                modifiers: vec!["ctrl".to_string(), "alt".to_string()],
+            },
+            hotkey: HotkeyBinding {
+                trigger: HotkeyTrigger::Custom,
+                mode: HotkeyMode::Hold,
+                ..Default::default()
+            },
             ..Default::default()
         };
 
@@ -3305,15 +3695,54 @@ mod tests {
             .unwrap()
             .clone()
             .expect("settings saved");
-        assert_eq!(saved.hotkey.trigger, HotkeyTrigger::RightOption);
+        assert_eq!(saved.hotkey.trigger, HotkeyTrigger::Custom);
         assert_eq!(saved.hotkey.mode, prefs.hotkey.mode);
         assert_eq!(
-            saved.qa_hotkey.unwrap().primary,
-            prefs.qa_hotkey.unwrap().primary
+            saved.dictation_hotkey.primary,
+            prefs.dictation_hotkey.primary
         );
+        assert_eq!(saved.qa_hotkey.unwrap().primary, "Q");
         assert_eq!(*writer.dictation_refreshes.lock().unwrap(), 1);
-        assert_eq!(*writer.qa_refreshes.lock().unwrap(), 1);
         assert_eq!(*writer.combo_refreshes.lock().unwrap(), 1);
+        assert_eq!(*writer.qa_refreshes.lock().unwrap(), 1);
+        assert_eq!(*writer.translation_refreshes.lock().unwrap(), 1);
+        assert_eq!(*writer.switch_style_refreshes.lock().unwrap(), 1);
+        assert_eq!(*writer.open_app_refreshes.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn persist_settings_skips_hotkey_refresh_when_shortcuts_unchanged() {
+        let writer = FakeSettingsWriter::default();
+        let previous = UserPreferences::default();
+        *writer.saved.lock().unwrap() = Some(previous.clone());
+        let prefs = UserPreferences {
+            active_asr_provider: "whisper".to_string(),
+            microphone_device_name: "External Mic".to_string(),
+            hotkey: previous.hotkey,
+            dictation_hotkey: previous.dictation_hotkey,
+            qa_hotkey: previous.qa_hotkey,
+            translation_hotkey: previous.translation_hotkey,
+            switch_style_hotkey: previous.switch_style_hotkey,
+            open_app_hotkey: previous.open_app_hotkey,
+            ..Default::default()
+        };
+
+        persist_settings(&writer, prefs.clone()).unwrap();
+
+        let saved = writer
+            .saved
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("settings saved");
+        assert_eq!(saved.active_asr_provider, prefs.active_asr_provider);
+        assert_eq!(saved.microphone_device_name, prefs.microphone_device_name);
+        assert_eq!(*writer.dictation_refreshes.lock().unwrap(), 0);
+        assert_eq!(*writer.combo_refreshes.lock().unwrap(), 0);
+        assert_eq!(*writer.qa_refreshes.lock().unwrap(), 0);
+        assert_eq!(*writer.translation_refreshes.lock().unwrap(), 0);
+        assert_eq!(*writer.switch_style_refreshes.lock().unwrap(), 0);
+        assert_eq!(*writer.open_app_refreshes.lock().unwrap(), 0);
     }
 
     #[test]
