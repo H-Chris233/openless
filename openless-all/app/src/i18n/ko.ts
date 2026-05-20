@@ -548,7 +548,7 @@ export const ko: typeof zhCN = {
       comboClear: '지우기',
       comboConflict: '이 단축키 조합은 사용할 수 없습니다',
       allowNonTsfFallbackLabel: '비 TSF 폴백 허용',
-      allowNonTsfFallbackDesc: 'Windows: TSF 입력 실패 시 Unicode SendInput / 단축키 붙여넣기로 전환 허용.',
+      allowNonTsfFallbackDesc: 'Windows: TSF 입력이 실패하면 먼저 단축키 붙여넣기를 시도하고, 클립보드 쓰기까지 실패한 경우에만 Unicode SendInput으로 전환.',
       historyGroupTitle: '기록 및 컨텍스트',
       historyRetentionLabel: '기록 보관 기간(일)',
       historyRetentionDesc: '보관 기간을 초과한 기록은 새 항목 작성 시 정리됩니다. 0 = 시간 기반 정리 비활성화.',

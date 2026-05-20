@@ -114,39 +114,7 @@ async fn run_streaming_polish(
     // from what the user actually sees\"。
     let (tx, rx) = std::sync::mpsc::channel::<String>();
     let typer_handle = tokio::task::spawn_blocking(move || {
-        let mut typed_text = String::new();
-        let mut first_failure: Option<String> = None;
-        let mut pending = String::new();
-        while let Ok(delta) = rx.recv() {
-            pending.push_str(&delta);
-            let flush_at = std::time::Instant::now() + STREAMING_INSERT_FLUSH_INTERVAL;
-            loop {
-                let now = std::time::Instant::now();
-                if now >= flush_at {
-                    break;
-                }
-                match rx.recv_timeout(flush_at.duration_since(now)) {
-                    Ok(delta) => pending.push_str(&delta),
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
-                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                        first_failure =
-                            flush_streaming_insert_buffer(&mut pending, &mut typed_text);
-                        return (typed_text, first_failure);
-                    }
-                }
-            }
-            first_failure = flush_streaming_insert_buffer(&mut pending, &mut typed_text);
-            if first_failure.is_some() {
-                // 一旦类型链路出错（如 Secure Input 启用），后续 delta 全部丢弃，但仍
-                // 把 mpsc drain 完，避免发送端阻塞。
-                while rx.recv().is_ok() {}
-                break;
-            }
-        }
-        if first_failure.is_none() {
-            first_failure = flush_streaming_insert_buffer(&mut pending, &mut typed_text);
-        }
-        (typed_text, first_failure)
+        drain_streaming_insert_deltas(rx, STREAMING_INSERT_FLUSH_INTERVAL)
     });
 
     // 3. 调流式润色，on_delta 塞 mpsc；should_cancel 检查 dictation 取消旗。
@@ -283,13 +251,77 @@ async fn run_streaming_polish(
     }
 }
 
+fn drain_streaming_insert_deltas(
+    rx: std::sync::mpsc::Receiver<String>,
+    flush_interval: std::time::Duration,
+) -> (String, Option<String>) {
+    drain_streaming_insert_deltas_with(rx, flush_interval, flush_streaming_insert_buffer)
+}
+
+fn drain_streaming_insert_deltas_with<F>(
+    rx: std::sync::mpsc::Receiver<String>,
+    flush_interval: std::time::Duration,
+    mut flush_pending: F,
+) -> (String, Option<String>)
+where
+    F: FnMut(&mut String, &mut String) -> Option<String>,
+{
+    let mut typed_text = String::new();
+    let mut first_failure: Option<String> = None;
+    let mut pending = String::new();
+    while let Ok(delta) = rx.recv() {
+        pending.push_str(&delta);
+        let flush_at = std::time::Instant::now() + flush_interval;
+        loop {
+            let now = std::time::Instant::now();
+            if now >= flush_at {
+                break;
+            }
+            match rx.recv_timeout(flush_at.duration_since(now)) {
+                Ok(delta) => pending.push_str(&delta),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    first_failure = flush_pending(&mut pending, &mut typed_text);
+                    return (typed_text, first_failure);
+                }
+            }
+        }
+        first_failure = flush_pending(&mut pending, &mut typed_text);
+        if first_failure.is_some() {
+            // 一旦类型链路出错（如 Secure Input 启用），后续 delta 全部丢弃，但仍
+            // 把 mpsc drain 完，避免发送端阻塞。
+            while rx.recv().is_ok() {}
+            break;
+        }
+    }
+    if first_failure.is_none() {
+        first_failure = flush_pending(&mut pending, &mut typed_text);
+    }
+    (typed_text, first_failure)
+}
+
 fn flush_streaming_insert_buffer(pending: &mut String, typed_text: &mut String) -> Option<String> {
+    flush_streaming_insert_buffer_with(
+        pending,
+        typed_text,
+        crate::unicode_keystroke::type_unicode_chunk,
+    )
+}
+
+fn flush_streaming_insert_buffer_with<F>(
+    pending: &mut String,
+    typed_text: &mut String,
+    mut type_chunk: F,
+) -> Option<String>
+where
+    F: FnMut(&str) -> Result<usize, crate::unicode_keystroke::TypeError>,
+{
     if pending.is_empty() {
         return None;
     }
     let delta = std::mem::take(pending);
     let delta_chars = delta.chars().count();
-    match crate::unicode_keystroke::type_unicode_chunk(&delta) {
+    match type_chunk(&delta) {
         Ok(typed_chars) => {
             let appended = append_typed_prefix(typed_text, &delta, typed_chars);
             if appended < delta_chars {
@@ -362,9 +394,7 @@ fn streaming_insert_eligible(
     mode: PolishMode,
     raw_uses_llm: bool,
 ) -> bool {
-    streaming_insert_enabled
-        && !translation_active
-        && (mode != PolishMode::Raw || raw_uses_llm)
+    streaming_insert_enabled && !translation_active && (mode != PolishMode::Raw || raw_uses_llm)
 }
 
 fn default_done_message(status: InsertStatus, polish_failed: bool) -> Option<String> {
@@ -1728,8 +1758,8 @@ fn append_typed_prefix(target: &mut String, delta: &str, typed_chars: usize) -> 
 #[cfg(test)]
 mod tests {
     use super::{
-        append_typed_prefix, default_done_message, dictation_error_code,
-        finalize_polished_text, streaming_insert_eligible,
+        append_typed_prefix, default_done_message, drain_streaming_insert_deltas_with,
+        finalize_polished_text, flush_streaming_insert_buffer_with, streaming_insert_eligible,
     };
     use crate::types::{ChineseScriptPreference, CorrectionRule, InsertStatus, PolishMode};
 
@@ -1835,5 +1865,62 @@ mod tests {
             default_done_message(InsertStatus::Inserted, true),
             Some("润色失败，已插入原文".to_string())
         );
+    }
+
+    #[test]
+    fn streaming_insert_batches_queued_deltas_before_flush() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send("你".to_string()).unwrap();
+        tx.send("好".to_string()).unwrap();
+        tx.send("🙂".to_string()).unwrap();
+        drop(tx);
+
+        let mut flushed = Vec::new();
+        let (typed, failure) = drain_streaming_insert_deltas_with(
+            rx,
+            std::time::Duration::from_millis(50),
+            |pending, typed_text| {
+                flushed.push(pending.clone());
+                typed_text.push_str(pending);
+                pending.clear();
+                None
+            },
+        );
+
+        assert_eq!(flushed, vec!["你好🙂".to_string()]);
+        assert_eq!(typed, "你好🙂");
+        assert_eq!(failure, None);
+    }
+
+    #[test]
+    fn flush_streaming_insert_buffer_keeps_partial_unicode_prefix() {
+        let mut pending = "a你🙂b".to_string();
+        let mut typed = String::new();
+
+        let failure = flush_streaming_insert_buffer_with(&mut pending, &mut typed, |_| {
+            Err(crate::unicode_keystroke::TypeError::Partial {
+                typed_chars: 3,
+                source: Box::new(platform_type_error()),
+            })
+        });
+
+        assert_eq!(typed, "a你🙂");
+        assert!(pending.is_empty());
+        assert!(failure.is_some());
+    }
+
+    #[cfg(target_os = "macos")]
+    fn platform_type_error() -> crate::unicode_keystroke::TypeError {
+        crate::unicode_keystroke::TypeError::EventAllocFailed
+    }
+
+    #[cfg(target_os = "windows")]
+    fn platform_type_error() -> crate::unicode_keystroke::TypeError {
+        crate::unicode_keystroke::TypeError::SendInputFailed("fail".into())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn platform_type_error() -> crate::unicode_keystroke::TypeError {
+        crate::unicode_keystroke::TypeError::EnigoText("fail".into())
     }
 }

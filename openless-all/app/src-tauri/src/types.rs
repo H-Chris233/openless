@@ -544,7 +544,8 @@ pub struct UserPreferences {
     /// 行为一致，不破坏既有用户。
     #[serde(default)]
     pub paste_shortcut: PasteShortcut,
-    /// Windows: 是否允许 TSF 失败后继续使用 SendInput / 粘贴类非 TSF 兜底。
+    /// Windows: 是否允许 TSF 失败后继续使用快捷键粘贴 / 剪贴板兜底。
+    /// 仅在剪贴板写入失败时才再试 Unicode SendInput，避免长文本注入卡顿。
     /// 默认开启以保持可用性；关闭后可验证文本是否真正由 TSF 上屏。
     #[serde(default = "default_true")]
     pub allow_non_tsf_insertion_fallback: bool,

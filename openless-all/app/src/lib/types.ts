@@ -230,7 +230,7 @@ export interface UserPreferences {
    *  等终端只接受 Ctrl+Shift+V，硬编码 Ctrl+V 会被吞掉，听写文本只剩在剪贴板里。
    *  macOS 走 AX 直写不受影响。默认 'ctrlV' 与历史行为一致。 */
   pasteShortcut: PasteShortcut;
-  /** Windows：TSF 失败后是否允许 SendInput / 粘贴类非 TSF 兜底。关闭后可验证是否真实 TSF 上屏。 */
+  /** Windows：TSF 失败后是否允许快捷键粘贴 / 剪贴板兜底。仅在剪贴板写失败时才再试 SendInput。关闭后可验证是否真实 TSF 上屏。 */
   allowNonTsfInsertionFallback: boolean;
   /** 用户的工作语言（多选，原生名）；作为前提注入 LLM polish/translate prompt 头部。 */
   workingLanguages: string[];

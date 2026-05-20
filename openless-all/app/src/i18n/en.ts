@@ -546,7 +546,7 @@ export const en: typeof zhCN = {
       comboClear: 'Clear',
       comboConflict: 'This shortcut combination is not available',
       allowNonTsfFallbackLabel: 'Allow non-TSF fallback',
-      allowNonTsfFallbackDesc: 'Windows: when TSF insertion fails, allow Unicode SendInput / shortcut paste.',
+      allowNonTsfFallbackDesc: 'Windows: when TSF insertion fails, try shortcut paste first; only fall back to Unicode SendInput if clipboard write fails.',
       historyGroupTitle: 'History & context',
       historyRetentionLabel: 'History retention (days)',
       historyRetentionDesc: 'Entries older than this are pruned on new writes; 0 = no time-based pruning.',
