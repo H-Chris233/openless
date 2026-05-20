@@ -12,8 +12,11 @@
 // dev 上传需要 prefs.marketplaceDevLogin（GitHub login 风格）—— 空时上传按钮 disabled。
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useAutoAnimate } from '@formkit/auto-animate/react';
+import { AnimatePresence, motion } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
 import { Icon } from '../components/Icon';
+import { SavedToast } from '../components/SavedToast';
 import {
   fetchMarketplaceDetail,
   githubDeviceFlowPoll,
@@ -41,6 +44,7 @@ type SortMode = 'popular' | 'new' | 'liked';
 export function Marketplace() {
   const { t } = useTranslation();
   const { prefs, updatePrefs } = useHotkeySettings();
+  const [listRef] = useAutoAnimate<HTMLDivElement>({ duration: 300, easing: 'cubic-bezier(0.175, 0.885, 0.32, 1.275)' });
 
   // 启动时尝试读缓存：上次默认视图（popular + 空 query）的列表，秒呈现。后台 refresh 校准。
   const [items, setItems] = useState<MarketplaceListItem[]>(() => readMarketplaceListCache() ?? []);
@@ -53,26 +57,7 @@ export function Marketplace() {
   const [detail, setDetail] = useState<MarketplaceDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [actionMsg, setActionMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
-  // leaving=true 触发右滑出动画；动画跑完再真正 setActionMsg(null) 卸载 DOM。
-  const [actionLeaving, setActionLeaving] = useState(false);
-  // 自动消失：ok 2.4s、err 4s 后切 leaving；leaving 持续 ~280ms 等动画结束。
-  useEffect(() => {
-    if (!actionMsg) return;
-    setActionLeaving(false);
-    const dwellMs = actionMsg.kind === 'ok' ? 2400 : 4000;
-    const exitDelay = 280;
-    const leaveId = window.setTimeout(() => setActionLeaving(true), dwellMs);
-    const dropId = window.setTimeout(() => setActionMsg(null), dwellMs + exitDelay);
-    return () => {
-      window.clearTimeout(leaveId);
-      window.clearTimeout(dropId);
-    };
-  }, [actionMsg]);
-  const dismissActionMsg = () => {
-    // 用户点击立即触发右滑出。
-    setActionLeaving(true);
-    window.setTimeout(() => setActionMsg(null), 280);
-  };
+  const dismissActionMsg = useCallback(() => setActionMsg(null), []);
 
   const [showUpload, setShowUpload] = useState(false);
   const [uploadOriginPackId, setUploadOriginPackId] = useState<string | null>(null);
@@ -587,51 +572,10 @@ export function Marketplace() {
       </div>
 
       {actionMsg && (
-        <div
-          role={actionMsg.kind === 'err' ? 'alert' : 'status'}
-          onClick={dismissActionMsg}
-          className={actionLeaving ? 'ol-marketplace-toast ol-marketplace-toast-leave' : 'ol-marketplace-toast'}
-          style={{
-            // 锚到风格市场 modal 内容区的右下角。
-            position: 'absolute',
-            right: 20,
-            bottom: 20,
-            maxWidth: 280,
-            padding: '7px 12px',
-            borderRadius: 10,
-            fontSize: 11.5,
-            lineHeight: 1.4,
-            background: actionMsg.kind === 'ok' ? 'rgba(37,99,235,0.95)' : 'rgba(220,38,38,0.95)',
-            color: '#fff',
-            boxShadow: '0 10px 24px -8px rgba(15,17,22,.32), 0 0 0 0.5px rgba(0,0,0,.06)',
-            backdropFilter: 'blur(8px) saturate(140%)',
-            WebkitBackdropFilter: 'blur(8px) saturate(140%)',
-            cursor: 'pointer',
-            zIndex: 4,
-            whiteSpace: 'nowrap',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-          }}
-        >
-          {actionMsg.text}
-          <style>{`
-            @keyframes ol-mkt-toast-in {
-              from { opacity: 0; transform: translateX(120%); }
-              to   { opacity: 1; transform: translateX(0); }
-            }
-            @keyframes ol-mkt-toast-out {
-              from { opacity: 1; transform: translateX(0); }
-              to   { opacity: 0; transform: translateX(120%); }
-            }
-            .ol-marketplace-toast {
-              animation: ol-mkt-toast-in .26s cubic-bezier(.34,1.56,.64,1);
-              will-change: transform, opacity;
-            }
-            .ol-marketplace-toast-leave {
-              animation: ol-mkt-toast-out .26s cubic-bezier(.4,0,1,1) forwards;
-            }
-          `}</style>
-        </div>
+        <SavedToast
+          saveState={actionMsg.kind === 'ok' ? 'saved' : 'failed'}
+          message={actionMsg.text}
+        />
       )}
 
       {loadError && (
@@ -662,8 +606,18 @@ export function Marketplace() {
           </Card>
         ) : (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 12 }}>
+            <AnimatePresence mode="sync">
             {visibleItems.map(p => (
-              <button
+              <motion.button
+                layout
+                initial={{ opacity: 0, scale: 0.85 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.85 }}
+                transition={{
+                  layout: { type: 'spring', damping: 25, stiffness: 220 },
+                  opacity: { duration: 0.2 },
+                  scale: { duration: 0.2 }
+                }}
                 key={p.id}
                 onClick={() => void openDetail(p.id)}
                 style={{
@@ -701,8 +655,9 @@ export function Marketplace() {
                     {' '}{p.likeCount} · ↓ {p.downloadCount}
                   </span>
                 </div>
-              </button>
+              </motion.button>
             ))}
+            </AnimatePresence>
           </div>
         )}
       </div>
@@ -768,10 +723,25 @@ export function Marketplace() {
                   )}
                 </div>
                 <div style={{ display: 'flex', gap: 8 }}>
-                  <Btn variant="ghost" size="sm" onClick={() => void onLike()}>
+                  <motion.button
+                    whileTap={{ scale: 0.75 }}
+                    transition={{ type: 'spring', stiffness: 400, damping: 17 }}
+                    onClick={() => void onLike()}
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      background: 'transparent',
+                      border: 'none',
+                      cursor: 'pointer',
+                      padding: '4px 8px',
+                      borderRadius: 8,
+                      fontSize: 12,
+                      fontWeight: 500,
+                      color: 'var(--ol-ink-2)'
+                    }}
+                  >
                     <span
-                      key={`star-${detail.id}-${likedIds.has(detail.id) ? 'on' : 'off'}`}
-                      className="ol-star-pop"
                       style={{
                         color: likedIds.has(detail.id) ? '#ef4444' : 'inherit',
                         marginRight: 4,
@@ -781,7 +751,7 @@ export function Marketplace() {
                       {likedIds.has(detail.id) ? '★' : '☆'}
                     </span>
                     {detail.likeCount}
-                  </Btn>
+                  </motion.button>
                   <Btn variant="ghost" size="sm" onClick={() => setSelectedId(null)}>
                     {t('common.cancel')}
                   </Btn>
@@ -790,15 +760,6 @@ export function Marketplace() {
                   </Btn>
                 </div>
               </div>
-              <style>{`
-                @keyframes ol-heart-pop-keyframes {
-                  0%   { transform: scale(1); }
-                  35%  { transform: scale(1.45); }
-                  60%  { transform: scale(.85); }
-                  100% { transform: scale(1); }
-                }
-                .ol-star-pop { animation: ol-heart-pop-keyframes .32s var(--ol-motion-spring, cubic-bezier(.34,1.56,.64,1)); }
-              `}</style>
             </>
           )}
         </Modal>
@@ -1139,7 +1100,7 @@ export function Marketplace() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
               <div style={{ fontSize: 13, color: 'var(--ol-ink-2)', lineHeight: 1.6 }}>
                 {(() => {
-                  const parts = t('marketplace.oauth.browserHint', { uri: ' URI ' }).split(' URI ');
+                  const parts = t('marketplace.oauth.browserHint', { uri: ' URI ' }).split(' URI ');
                   return (
                     <>
                       {parts[0]}
