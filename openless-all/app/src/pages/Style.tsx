@@ -536,13 +536,9 @@ export function Style() {
         )}
       />
 
-      {/* 视口锚定（position: fixed）—— 编辑器展开后滚动到下方时仍可见。
-          放在 bottom-right 避免压在「导入 ZIP」按钮上挡文字。 */}
-      <SavedToast
-        saveState={saveState}
-        message={saveMessage}
-        offsetStyle={{ position: 'fixed', bottom: 32, right: 32, top: 'auto' }}
-      />
+      {/* 控制台卡右上角锚定 —— 与「风格市场 / 刷新 / 导入 ZIP」按钮同区；
+          淡蓝 pill 只闪现 0.8s，不长期遮挡按钮。 */}
+      <SavedToast saveState={saveState} message={saveMessage} />
 
       {marketplaceOpen && (
         <MarketplaceModal

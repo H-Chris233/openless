@@ -204,11 +204,14 @@ export function SettingsModal({ os: _os, onClose, initialSettingsSection }: Sett
             section 标题都不会跟着内容一起飘。 */}
         <div style={{ flex: 1, minWidth: 0, overflow: 'hidden', position: 'relative', display: 'flex', flexDirection: 'column' }}>
           {/* "已保存"toast 在内容区右上角；right:54 避开 28×28 关闭按钮 + 12px gap。
+              弹窗内用 absolute 锚内容区、从上方滑入 / 滑回 —— 外层 overflow:hidden
+              会把它裁在面板顶边，读感即"从屏幕外上方来、回上方去"。
               CredentialField 等通过 emitSaved 发事件，useSavedToastListener 接收。 */}
           <SavedToast
             saveState={savedToast.state}
             message={savedToast.message}
-            offsetStyle={{ top: 16, right: 54 }}
+            slideFrom="top"
+            offsetStyle={{ position: 'absolute', top: 16, right: 54 }}
           />
           <button
             onClick={onClose}
