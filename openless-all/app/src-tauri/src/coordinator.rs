@@ -44,12 +44,12 @@ use crate::polish::{
 use crate::qa_hotkey::{QaHotkeyError, QaHotkeyEvent, QaHotkeyMonitor};
 use crate::recorder::{Recorder, RecorderError};
 use crate::selection::capture_selection;
-#[cfg(target_os = "windows")]
-use crate::types::PasteShortcut;
 use crate::types::{
     CapsulePayload, CapsuleState, ChineseScriptPreference, DictationSession, HotkeyCapability,
     HotkeyStatus, HotkeyStatusState, InsertStatus, OutputLanguagePreference, PolishMode,
 };
+#[cfg(target_os = "windows")]
+use crate::types::{PasteShortcut, WindowsNonTsfFallbackMode};
 #[cfg(target_os = "windows")]
 use crate::windows_ime_ipc::ImeSubmitTarget;
 #[cfg(target_os = "windows")]
@@ -1970,6 +1970,7 @@ async fn insert_with_windows_ime_first(
     restore_clipboard: bool,
     allow_non_tsf_insertion_fallback: bool,
     paste_shortcut: PasteShortcut,
+    fallback_mode: WindowsNonTsfFallbackMode,
     ime_target: Option<ImeSubmitTarget>,
 ) -> InsertStatus {
     let prepared = {
@@ -1982,7 +1983,13 @@ async fn insert_with_windows_ime_first(
             allow_non_tsf_insertion_fallback,
             InsertStatus::Failed,
         ) {
-            return insert_via_non_tsf_fallback(inner, polished, restore_clipboard, paste_shortcut);
+            return insert_via_non_tsf_fallback(
+                inner,
+                polished,
+                restore_clipboard,
+                paste_shortcut,
+                fallback_mode,
+            );
         }
         log::warn!("[windows-ime] non-TSF insertion fallback is disabled; failing insert");
         return InsertStatus::Failed;
@@ -2007,7 +2014,13 @@ async fn insert_with_windows_ime_first(
     if ime_status == InsertStatus::Inserted {
         ime_status
     } else if should_try_non_tsf_insertion_fallback(allow_non_tsf_insertion_fallback, ime_status) {
-        insert_via_non_tsf_fallback(inner, polished, restore_clipboard, paste_shortcut)
+        insert_via_non_tsf_fallback(
+            inner,
+            polished,
+            restore_clipboard,
+            paste_shortcut,
+            fallback_mode,
+        )
     } else {
         log::warn!("[windows-ime] TSF did not insert; non-TSF insertion fallback is disabled");
         InsertStatus::Failed
@@ -2024,6 +2037,27 @@ fn should_try_non_tsf_insertion_fallback(
 
 #[cfg(target_os = "windows")]
 fn insert_via_non_tsf_fallback(
+    inner: &Arc<Inner>,
+    polished: &str,
+    restore_clipboard: bool,
+    paste_shortcut: PasteShortcut,
+    fallback_mode: WindowsNonTsfFallbackMode,
+) -> InsertStatus {
+    match fallback_mode {
+        WindowsNonTsfFallbackMode::ClipboardPaste => insert_via_clipboard_first_non_tsf_fallback(
+            inner,
+            polished,
+            restore_clipboard,
+            paste_shortcut,
+        ),
+        WindowsNonTsfFallbackMode::UnicodeKeystrokes => {
+            insert_via_unicode_first_non_tsf_fallback(inner, polished)
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn insert_via_clipboard_first_non_tsf_fallback(
     inner: &Arc<Inner>,
     polished: &str,
     restore_clipboard: bool,
@@ -2071,6 +2105,32 @@ fn insert_via_non_tsf_fallback(
     status
 }
 
+#[cfg(target_os = "windows")]
+fn insert_via_unicode_first_non_tsf_fallback(inner: &Arc<Inner>, polished: &str) -> InsertStatus {
+    let status = finish_unicode_first_non_tsf_insertion_fallback(
+        || inner.inserter.insert_via_unicode_keystrokes(polished),
+        || inner.inserter.copy_fallback(polished),
+    );
+
+    match status {
+        InsertStatus::Inserted => {
+            log::warn!("[windows-ime] TSF unavailable; inserted via Unicode SendInput fallback");
+        }
+        InsertStatus::CopiedFallback => {
+            log::warn!(
+                "[windows-ime] TSF unavailable; Unicode SendInput failed, left text on clipboard"
+            );
+        }
+        InsertStatus::PasteSent | InsertStatus::Failed => {
+            log::warn!(
+                "[windows-ime] TSF unavailable; Unicode SendInput fallback failed and copy fallback failed"
+            );
+        }
+    }
+
+    status
+}
+
 #[cfg(any(target_os = "windows", test))]
 fn finish_non_tsf_insertion_fallback<C, U>(
     mut clipboard_fallback: C,
@@ -2093,9 +2153,33 @@ where
     }
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn finish_unicode_first_non_tsf_insertion_fallback<U, C>(
+    mut unicode_fallback: U,
+    mut copy_fallback: C,
+) -> InsertStatus
+where
+    U: FnMut() -> InsertStatus,
+    C: FnMut() -> InsertStatus,
+{
+    match unicode_fallback() {
+        InsertStatus::Inserted => InsertStatus::Inserted,
+        InsertStatus::PasteSent | InsertStatus::CopiedFallback | InsertStatus::Failed => {
+            match copy_fallback() {
+                InsertStatus::CopiedFallback => InsertStatus::CopiedFallback,
+                InsertStatus::Inserted | InsertStatus::PasteSent | InsertStatus::Failed => {
+                    InsertStatus::Failed
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod non_tsf_fallback_tests {
-    use super::finish_non_tsf_insertion_fallback;
+    use super::{
+        finish_non_tsf_insertion_fallback, finish_unicode_first_non_tsf_insertion_fallback,
+    };
     use crate::types::InsertStatus;
 
     #[test]
@@ -2141,6 +2225,36 @@ mod non_tsf_fallback_tests {
 
         assert_eq!(status, InsertStatus::Failed);
         assert!(unicode_called);
+    }
+
+    #[test]
+    fn unicode_first_mode_copies_text_when_unicode_fails() {
+        let mut copy_called = false;
+        let status = finish_unicode_first_non_tsf_insertion_fallback(
+            || InsertStatus::Failed,
+            || {
+                copy_called = true;
+                InsertStatus::CopiedFallback
+            },
+        );
+
+        assert_eq!(status, InsertStatus::CopiedFallback);
+        assert!(copy_called);
+    }
+
+    #[test]
+    fn unicode_first_mode_does_not_copy_after_success() {
+        let mut copy_called = false;
+        let status = finish_unicode_first_non_tsf_insertion_fallback(
+            || InsertStatus::Inserted,
+            || {
+                copy_called = true;
+                InsertStatus::CopiedFallback
+            },
+        );
+
+        assert_eq!(status, InsertStatus::Inserted);
+        assert!(!copy_called);
     }
 }
 

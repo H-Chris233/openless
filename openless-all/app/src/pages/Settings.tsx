@@ -34,6 +34,7 @@ import type {
   HotkeyTrigger,
   MicrophoneDevice,
   PasteShortcut,
+  WindowsNonTsfFallbackMode,
 } from '../lib/types';
 import { emitSaved } from '../lib/savedEvent';
 import { useHotkeySettings } from '../state/HotkeySettingsContext';
@@ -281,6 +282,8 @@ function RecordingSection() {
     savePrefs({ ...prefs, pasteShortcut });
   const onAllowNonTsfFallbackChange = (allowNonTsfInsertionFallback: boolean) =>
     savePrefs({ ...prefs, allowNonTsfInsertionFallback });
+  const onWindowsNonTsfFallbackModeChange = (windowsNonTsfFallbackMode: WindowsNonTsfFallbackMode) =>
+    savePrefs({ ...prefs, windowsNonTsfFallbackMode });
   // 历史保留 / 对话感知 polish 上下文窗口都用裸 number input；空字符串时回滚到默认值。
   // 范围限制：retention 0-365 天，context window 0-60 分钟（再大的值对实际对话场景没意义且白烧 token）。
   const clamp = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n));
@@ -504,6 +507,29 @@ function RecordingSection() {
           <Toggle
             on={prefs.allowNonTsfInsertionFallback}
             onToggle={onAllowNonTsfFallbackChange}
+          />
+        </SettingRow>
+      )}
+      {capability.adapter === 'windowsLowLevel' && prefs.allowNonTsfInsertionFallback && (
+        <SettingRow
+          label={t('settings.recording.windowsNonTsfFallbackModeLabel')}
+          desc={t('settings.recording.windowsNonTsfFallbackModeDesc')}
+        >
+          <SelectLite
+            value={prefs.windowsNonTsfFallbackMode}
+            onChange={next => onWindowsNonTsfFallbackModeChange(next as WindowsNonTsfFallbackMode)}
+            options={[
+              {
+                value: 'clipboardPaste',
+                label: t('settings.recording.windowsNonTsfFallbackModeClipboardPaste'),
+              },
+              {
+                value: 'unicodeKeystrokes',
+                label: t('settings.recording.windowsNonTsfFallbackModeUnicodeKeystrokes'),
+              },
+            ]}
+            ariaLabel={t('settings.recording.windowsNonTsfFallbackModeLabel')}
+            style={{ ...inputStyle, maxWidth: 260 }}
           />
         </SettingRow>
       )}

@@ -60,6 +60,17 @@ pub enum PasteShortcut {
     ShiftInsert,
 }
 
+/// Windows TSF 不可用时的非 TSF 插入策略。
+/// `ClipboardPaste` 是默认安全路径：避免长文本逐字 SendInput 压垮目标应用；
+/// `UnicodeKeystrokes` 保留给会吞掉粘贴快捷键、但接受合成字符输入的应用。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum WindowsNonTsfFallbackMode {
+    #[default]
+    ClipboardPaste,
+    UnicodeKeystrokes,
+}
+
 /// Auto-update 渠道。决定 Settings → 关于 里展示哪一类版本信息。
 /// `Stable` 沿用 `tauri-plugin-updater` 的默认 endpoints（即 `tauri.conf.json`
 /// 里的 `latest-{{target}}-{{arch}}.json`），与发版 pipeline 对齐。
@@ -544,11 +555,15 @@ pub struct UserPreferences {
     /// 行为一致，不破坏既有用户。
     #[serde(default)]
     pub paste_shortcut: PasteShortcut,
-    /// Windows: 是否允许 TSF 失败后继续使用快捷键粘贴 / 剪贴板兜底。
-    /// 仅在剪贴板写入失败时才再试 Unicode SendInput，避免长文本注入卡顿。
+    /// Windows: 是否允许 TSF 失败后继续使用非 TSF 方式兜底。
+    /// 具体方式由 `windows_non_tsf_fallback_mode` 决定。
     /// 默认开启以保持可用性；关闭后可验证文本是否真正由 TSF 上屏。
     #[serde(default = "default_true")]
     pub allow_non_tsf_insertion_fallback: bool,
+    /// Windows: TSF 失败后的非 TSF 插入方式。默认剪贴板粘贴，避免 #491 的长文本
+    /// SendInput 压力；少数会吞粘贴快捷键的应用可手动切到 Unicode SendInput。
+    #[serde(default)]
+    pub windows_non_tsf_fallback_mode: WindowsNonTsfFallbackMode,
     /// 用户的工作语言（多选，原生名）。会作为前提注入 LLM polish/translate 的 system prompt 头部，
     /// 让模型知道该用户在哪些语言间工作。详见 issue #4。
     #[serde(default = "default_working_languages")]
@@ -755,6 +770,8 @@ struct UserPreferencesWire {
     #[serde(default)]
     paste_shortcut: PasteShortcut,
     allow_non_tsf_insertion_fallback: bool,
+    #[serde(default)]
+    windows_non_tsf_fallback_mode: WindowsNonTsfFallbackMode,
     working_languages: Vec<String>,
     translation_target_language: String,
     chinese_script_preference: ChineseScriptPreference,
@@ -829,6 +846,7 @@ impl Default for UserPreferencesWire {
             restore_clipboard_after_paste: prefs.restore_clipboard_after_paste,
             paste_shortcut: prefs.paste_shortcut,
             allow_non_tsf_insertion_fallback: prefs.allow_non_tsf_insertion_fallback,
+            windows_non_tsf_fallback_mode: prefs.windows_non_tsf_fallback_mode,
             working_languages: prefs.working_languages,
             translation_target_language: prefs.translation_target_language,
             chinese_script_preference: prefs.chinese_script_preference,
@@ -904,6 +922,7 @@ impl<'de> Deserialize<'de> for UserPreferences {
             restore_clipboard_after_paste: wire.restore_clipboard_after_paste,
             paste_shortcut: wire.paste_shortcut,
             allow_non_tsf_insertion_fallback: wire.allow_non_tsf_insertion_fallback,
+            windows_non_tsf_fallback_mode: wire.windows_non_tsf_fallback_mode,
             working_languages: wire.working_languages,
             translation_target_language: wire.translation_target_language,
             chinese_script_preference: wire.chinese_script_preference,
@@ -1591,6 +1610,7 @@ impl Default for UserPreferences {
             restore_clipboard_after_paste: true,
             paste_shortcut: PasteShortcut::default(),
             allow_non_tsf_insertion_fallback: true,
+            windows_non_tsf_fallback_mode: WindowsNonTsfFallbackMode::default(),
             working_languages: default_working_languages(),
             translation_target_language: String::new(),
             chinese_script_preference: ChineseScriptPreference::Auto,
@@ -2357,6 +2377,36 @@ mod tests {
             let json = format!(r#"{{ "pasteShortcut": "{raw}" }}"#);
             let prefs: UserPreferences = serde_json::from_str(&json).unwrap();
             assert_eq!(prefs.paste_shortcut, expected, "raw={raw}");
+        }
+    }
+
+    #[test]
+    fn windows_non_tsf_fallback_mode_defaults_to_clipboard_paste() {
+        let prefs = UserPreferences::default();
+        assert_eq!(
+            prefs.windows_non_tsf_fallback_mode,
+            WindowsNonTsfFallbackMode::ClipboardPaste
+        );
+
+        let from_empty: UserPreferences = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            from_empty.windows_non_tsf_fallback_mode,
+            WindowsNonTsfFallbackMode::ClipboardPaste
+        );
+    }
+
+    #[test]
+    fn windows_non_tsf_fallback_mode_round_trips_explicit_values() {
+        for (raw, expected) in [
+            ("clipboardPaste", WindowsNonTsfFallbackMode::ClipboardPaste),
+            (
+                "unicodeKeystrokes",
+                WindowsNonTsfFallbackMode::UnicodeKeystrokes,
+            ),
+        ] {
+            let json = format!(r#"{{ "windowsNonTsfFallbackMode": "{raw}" }}"#);
+            let prefs: UserPreferences = serde_json::from_str(&json).unwrap();
+            assert_eq!(prefs.windows_non_tsf_fallback_mode, expected, "raw={raw}");
         }
     }
 
