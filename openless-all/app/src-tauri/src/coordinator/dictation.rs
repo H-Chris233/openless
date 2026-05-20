@@ -741,6 +741,7 @@ pub(super) async fn begin_session(inner: &Arc<Inner>) -> Result<(), String> {
             base_url,
             model,
             whisper_prompt,
+            batch_asr_chunk_limit_ms(&active_asr),
         ));
         store_asr_for_session(
             inner,
@@ -828,6 +829,13 @@ pub(super) async fn begin_session(inner: &Arc<Inner>) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn batch_asr_chunk_limit_ms(provider_id: &str) -> Option<u64> {
+    match provider_id {
+        "zhipu" => Some(30_000),
+        _ => None,
+    }
 }
 
 pub(super) async fn start_recorder_for_starting(
@@ -1758,8 +1766,9 @@ fn append_typed_prefix(target: &mut String, delta: &str, typed_chars: usize) -> 
 #[cfg(test)]
 mod tests {
     use super::{
-        append_typed_prefix, default_done_message, drain_streaming_insert_deltas_with,
-        finalize_polished_text, flush_streaming_insert_buffer_with, streaming_insert_eligible,
+        append_typed_prefix, batch_asr_chunk_limit_ms, default_done_message,
+        drain_streaming_insert_deltas_with, finalize_polished_text,
+        flush_streaming_insert_buffer_with, streaming_insert_eligible,
     };
     use crate::types::{ChineseScriptPreference, CorrectionRule, InsertStatus, PolishMode};
 
@@ -1853,6 +1862,15 @@ mod tests {
             PolishMode::Light,
             false,
         ));
+    }
+
+    #[test]
+    fn batch_asr_chunk_limit_applies_only_to_zhipu() {
+        assert_eq!(batch_asr_chunk_limit_ms("zhipu"), Some(30_000));
+        assert_eq!(batch_asr_chunk_limit_ms("whisper"), None);
+        assert_eq!(batch_asr_chunk_limit_ms("siliconflow"), None);
+        assert_eq!(batch_asr_chunk_limit_ms("groq"), None);
+        assert_eq!(batch_asr_chunk_limit_ms("volcengine"), None);
     }
 
     #[test]

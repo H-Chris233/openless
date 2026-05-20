@@ -3999,6 +3999,7 @@ mod tests {
             "http://localhost".to_string(),
             "model".to_string(),
             None,
+            None,
         ));
         *coordinator.inner.asr.lock() = Some(SessionResource::new(
             session_id(2),
