@@ -2058,7 +2058,7 @@ fn insert_via_non_tsf_fallback(
 #[cfg(any(target_os = "windows", test))]
 fn finish_non_tsf_insertion_fallback<U, C>(
     mut unicode_fallback: U,
-    mut copy_fallback: C,
+    mut copy_only_fallback: C,
 ) -> InsertStatus
 where
     U: FnMut() -> InsertStatus,
@@ -2067,8 +2067,10 @@ where
     match unicode_fallback() {
         InsertStatus::Inserted => InsertStatus::Inserted,
         InsertStatus::PasteSent | InsertStatus::CopiedFallback | InsertStatus::Failed => {
-            match copy_fallback() {
+            match copy_only_fallback() {
                 InsertStatus::CopiedFallback => InsertStatus::CopiedFallback,
+                // TextInserter::copy_fallback is copy-only: success is CopiedFallback.
+                // Treat any other status as failure so this helper never invents an insert.
                 InsertStatus::Inserted | InsertStatus::PasteSent | InsertStatus::Failed => {
                     InsertStatus::Failed
                 }
