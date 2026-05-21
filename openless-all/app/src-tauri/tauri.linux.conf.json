@@ -1,0 +1,55 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "OpenLess",
+        "width": 1240,
+        "height": 800,
+        "minWidth": 980,
+        "minHeight": 640,
+        "resizable": true,
+        "decorations": true,
+        "transparent": false,
+        "shadow": true,
+        "visible": false,
+        "acceptFirstMouse": true
+      },
+      {
+        "label": "capsule",
+        "url": "index.html?window=capsule",
+        "title": "OpenLess Capsule",
+        "width": 220,
+        "height": 110,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "focus": false,
+        "visible": false,
+        "center": false,
+        "acceptFirstMouse": true
+      },
+      {
+        "label": "qa",
+        "url": "index.html?window=qa",
+        "title": "OpenLess QA",
+        "width": 380,
+        "height": 440,
+        "decorations": false,
+        "transparent": true,
+        "shadow": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "focus": false,
+        "visible": false,
+        "center": false,
+        "acceptFirstMouse": true
+      }
+    ]
+  }
+}
