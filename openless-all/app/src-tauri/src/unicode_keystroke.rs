@@ -313,11 +313,15 @@ mod macos_impl {
 #[cfg(target_os = "windows")]
 mod windows_impl {
     use super::{TisError, TypeError};
+    use std::time::Duration;
     use tauri::{AppHandle, Runtime};
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
         KEYEVENTF_UNICODE, VIRTUAL_KEY,
     };
+
+    const SENDINPUT_CHUNK_CHARS: usize = 16;
+    const SENDINPUT_CHUNK_DELAY: Duration = Duration::from_millis(12);
 
     /// Windows / Linux 上没有 input source 概念，token 留空。Send/Sync 自动派生。
     pub struct PreviousInputSource;
@@ -327,7 +331,9 @@ mod windows_impl {
             return Ok(0);
         }
         let mut typed_chars = 0;
-        for ch in text.chars() {
+        let mut sent_in_chunk = 0usize;
+        let mut chars = text.chars().peekable();
+        while let Some(ch) = chars.next() {
             let mut buf = [0u16; 2];
             for unit in ch.encode_utf16(&mut buf) {
                 if let Err(e) = send_utf16_unit(*unit, false) {
@@ -338,6 +344,11 @@ mod windows_impl {
                 }
             }
             typed_chars += 1;
+            sent_in_chunk += 1;
+            if sent_in_chunk >= SENDINPUT_CHUNK_CHARS && chars.peek().is_some() {
+                std::thread::sleep(SENDINPUT_CHUNK_DELAY);
+                sent_in_chunk = 0;
+            }
         }
         Ok(typed_chars)
     }
