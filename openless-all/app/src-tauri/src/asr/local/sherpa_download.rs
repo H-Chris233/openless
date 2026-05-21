@@ -231,11 +231,7 @@ pub fn downloaded_bytes(model_alias: &str) -> u64 {
         return 0;
     };
     if let Some(archive) = sherpa::release_archive_for_alias(model_alias) {
-        let dest = dir.join(archive.file_name);
-        if let Ok(meta) = std::fs::metadata(&dest) {
-            return meta.len();
-        }
-        return partial_actual_size(&dest.with_extension("partial"));
+        return downloaded_release_archive_bytes(&dir, model_alias, archive);
     }
     let Ok(files) = sherpa::download_files_for_alias(model_alias) else {
         return 0;
@@ -251,6 +247,47 @@ pub fn downloaded_bytes(model_alias: &str) -> u64 {
             }
         })
         .sum()
+}
+
+fn downloaded_release_archive_bytes(
+    dir: &Path,
+    model_alias: &str,
+    archive: sherpa::SherpaReleaseArchive,
+) -> u64 {
+    let dest = dir.join(archive.file_name);
+    if let Ok(meta) = std::fs::metadata(&dest) {
+        return meta.len();
+    }
+    let partial = partial_actual_size(&dest.with_extension("partial"));
+    if partial > 0 {
+        return partial;
+    }
+    if let Ok(files) = sherpa::required_files_for_alias(model_alias) {
+        let total: u64 = files
+            .iter()
+            .map(|f| path_size_recursive(&dir.join(f)))
+            .sum();
+        if total > 0 {
+            return total;
+        }
+    }
+    0
+}
+
+fn path_size_recursive(path: &Path) -> u64 {
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_file() => meta.len(),
+        Ok(meta) if meta.is_dir() => {
+            let mut total: u64 = 0;
+            if let Ok(entries) = std::fs::read_dir(path) {
+                for entry in entries.flatten() {
+                    total += path_size_recursive(&entry.path());
+                }
+            }
+            total
+        }
+        _ => 0,
+    }
 }
 
 async fn run_download(
