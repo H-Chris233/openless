@@ -17,9 +17,24 @@ export function AboutUpdateControl({ tagline }: { tagline: string }) {
           {u.checking ? t('settings.about.checkingUpdate') : t('settings.about.checkUpdateBtn')}
         </Btn>
       </div>
-      {(u.status === 'none' || u.status === 'error') && (
-        <div style={{ fontSize: 11, color: u.status === 'error' ? 'var(--ol-err)' : 'var(--ol-ink-4)', marginTop: 4 }}>
-          {u.status === 'none' ? t('settings.about.upToDate') : t('settings.about.updateError')}
+      {u.status === 'none' && (
+        <div style={{ fontSize: 11, color: 'var(--ol-ink-4)', marginTop: 4 }}>
+          {t('settings.about.upToDate')}
+        </div>
+      )}
+      {u.status === 'error' && (
+        <div style={{ marginTop: 4 }}>
+          <div style={{ fontSize: 11, color: 'var(--ol-err)' }}>
+            {t('settings.about.updateError')}
+          </div>
+          {u.errorMessage && (
+            <div style={{ fontSize: 10.5, color: 'var(--ol-ink-4)', marginTop: 2, wordBreak: 'break-word' }}>
+              {u.errorMessage}
+            </div>
+          )}
+          <Btn variant="ghost" size="sm" onClick={u.checkForUpdates} style={{ marginTop: 4 }}>
+            {t('settings.about.retryBtn') ?? t('common.retry') ?? '重试'}
+          </Btn>
         </div>
       )}
       {isDialogStatus(u.status) && (

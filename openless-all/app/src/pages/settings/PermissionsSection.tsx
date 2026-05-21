@@ -7,12 +7,14 @@ import { Icon } from '../../components/Icon';
 import {
   checkAccessibilityPermission,
   checkMicrophonePermission,
+  checkNetwork,
   getHotkeyStatus,
   getWindowsImeStatus,
   openSystemSettings,
   requestAccessibilityPermission,
   requestMicrophonePermission,
 } from '../../lib/ipc';
+import type { NetworkCheckResult } from '../../lib/ipc';
 import type {
   HotkeyCapability,
   HotkeyStatus,
@@ -30,6 +32,7 @@ export function PermissionsSection() {
   const [microphone, setMicrophone] = useState<PermissionStatus | 'loading'>('loading');
   const [hotkey, setHotkey] = useState<HotkeyStatus | null>(null);
   const [windowsIme, setWindowsIme] = useState<WindowsImeStatus | null>(null);
+  const [network, setNetwork] = useState<NetworkCheckResult | null>(null);
   const { capability } = useHotkeySettings();
 
   const refreshPermissions = async () => {
@@ -49,22 +52,34 @@ export function PermissionsSection() {
     setWindowsIme(await getWindowsImeStatus());
   };
 
+  const refreshNetwork = async () => {
+    try {
+      setNetwork(await checkNetwork());
+    } catch {
+      setNetwork({ online: false, latencyMs: null });
+    }
+  };
+
   useEffect(() => {
     refreshPermissions();
     refreshHotkey();
     refreshWindowsIme();
+    refreshNetwork();
     const hotkeyId = window.setInterval(refreshHotkey, 1000);
     // 麦克风检查会短暂打开输入流，避免每秒探测导致隐私指示器频繁闪烁。
     const permissionId = window.setInterval(refreshPermissions, 10000);
+    const networkId = window.setInterval(refreshNetwork, 30000);
     const onFocus = () => {
       refreshPermissions();
       refreshHotkey();
       refreshWindowsIme();
+      refreshNetwork();
     };
     window.addEventListener('focus', onFocus);
     return () => {
       window.clearInterval(hotkeyId);
       window.clearInterval(permissionId);
+      window.clearInterval(networkId);
       window.removeEventListener('focus', onFocus);
     };
   }, []);
@@ -157,8 +172,18 @@ export function PermissionsSection() {
         </SettingRow>
       )}
       <SettingRow label={t('settings.permissions.networkLabel')} desc={t('settings.permissions.networkDesc')}>
-        <div style={{ display: 'flex', justifyContent: 'flex-end', width: '100%' }}>
-          <Pill tone="ok"><Icon name="check" size={11} />{t('settings.permissions.networkOk')}</Pill>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'flex-end', width: '100%' }}>
+          {network && network.latencyMs != null && (
+            <span style={{ fontSize: 11, color: 'var(--ol-ink-4)' }}>
+              {network.latencyMs}ms
+            </span>
+          )}
+          <NetworkStatusPill status={network} />
+          {network && !network.online && (
+            <Btn variant="ghost" size="sm" onClick={refreshNetwork}>
+              {t('common.retry') ?? '重试'}
+            </Btn>
+          )}
         </div>
       </SettingRow>
     </Card>
@@ -205,6 +230,17 @@ function WindowsImeStatusPill({ status }: { status: WindowsImeStatus | null }) {
     return <Pill tone="ok"><Icon name="check" size={11} />{t('settings.permissions.windowsImeInstalled')}</Pill>;
   }
   return <Pill tone="outline">{t('settings.permissions.windowsImeUnavailable')}</Pill>;
+}
+
+function NetworkStatusPill({ status }: { status: NetworkCheckResult | null }) {
+  const { t } = useTranslation();
+  if (!status) {
+    return <Pill tone="default">{t('settings.permissions.checking')}</Pill>;
+  }
+  if (status.online) {
+    return <Pill tone="ok"><Icon name="check" size={11} />{t('settings.permissions.networkOk')}</Pill>;
+  }
+  return <Pill tone="outline">{t('settings.permissions.networkOffline') ?? '不可用'}</Pill>;
 }
 
 function adapterDisplayName(adapter: HotkeyCapability['adapter'] | HotkeyStatus['adapter']) {

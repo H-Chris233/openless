@@ -511,6 +511,38 @@ async fn resolve_beta_manifest_endpoints() -> Result<Vec<url::Url>, String> {
     Ok(vec![mirror_url, direct_url])
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkCheckResult {
+    pub online: bool,
+    pub latency_ms: Option<u64>,
+}
+
+#[tauri::command]
+pub async fn check_network() -> NetworkCheckResult {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build();
+    let client = match client {
+        Ok(c) => c,
+        Err(_) => return NetworkCheckResult { online: false, latency_ms: None },
+    };
+    let start = std::time::Instant::now();
+    let endpoints = [
+        "https://apic.openless.top/health",
+        "https://github.com",
+    ];
+    for url in &endpoints {
+        if let Ok(resp) = client.head(*url).send().await {
+            if resp.status().is_success() || resp.status().is_redirection() {
+                let ms = start.elapsed().as_millis() as u64;
+                return NetworkCheckResult { online: true, latency_ms: Some(ms) };
+            }
+        }
+    }
+    NetworkCheckResult { online: false, latency_ms: None }
+}
+
 #[tauri::command]
 pub fn get_hotkey_status(coord: CoordinatorState<'_>) -> HotkeyStatus {
     coord.hotkey_status()
@@ -3131,7 +3163,10 @@ pub struct GithubDeviceStartResponse {
 #[tauri::command]
 pub async fn github_device_flow_start() -> Result<GithubDeviceStartResponse, String> {
     let client_id = get_github_oauth_client_id()?;
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("build http client: {e}"))?;
     let resp = client
         .post("https://github.com/login/device/code")
         .header("Accept", "application/json")
@@ -3176,7 +3211,10 @@ pub async fn github_device_flow_poll(
     device_code: String,
 ) -> Result<GithubDevicePollResult, String> {
     let client_id = get_github_oauth_client_id()?;
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("build http client: {e}"))?;
     let token_resp = client
         .post("https://github.com/login/oauth/access_token")
         .header("Accept", "application/json")

@@ -285,6 +285,7 @@ pub fn run() {
             commands::set_update_channel,
             commands::fetch_latest_beta_release,
             commands::app_check_update_with_channel,
+            commands::check_network,
             commands::get_hotkey_status,
             commands::get_hotkey_capability,
             commands::set_shortcut_recording_active,

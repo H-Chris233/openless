@@ -244,10 +244,12 @@ function Pill({ os, state, level, insertedChars, message, onCancel, onConfirm }:
   const ambient = state === 'recording' ? Math.min(1, Math.max(0, level)) : 0;
   const scale = os === 'win' ? 1 : 1 + ambient * 0.018;
   const shadowAlpha = 0.20 + ambient * 0.10;
-  const useBackdrop = true;
 
   return (
+    // 假毛玻璃：半透明白底 + .ol-frost 噪点纹理 + 内描边高光 + 柔和阴影。
+    // 不写 backdrop-filter —— webview 模糊不了透明窗口背后的桌面（Tauri 上游限制）。
     <div
+      className="ol-frost"
       style={{
         display: 'inline-flex',
         alignItems: 'center',
@@ -258,13 +260,10 @@ function Pill({ os, state, level, insertedChars, message, onCancel, onConfirm }:
         height: metrics.height,
         boxSizing: metrics.boxSizing,
         borderRadius: 999,
-        background: 'rgba(255, 255, 255, 0.85)',
-        backdropFilter: useBackdrop ? 'blur(28px) saturate(180%)' : 'none',
-        WebkitBackdropFilter: useBackdrop ? 'blur(28px) saturate(180%)' : 'none',
         border: '1px solid rgba(255, 255, 255, 0.55)',
         boxShadow: os === 'win'
-          ? `0 10px 24px -14px rgba(0, 0, 0, ${(0.24 + ambient * 0.06).toFixed(3)}), 0 0 0 0.5px rgba(0, 0, 0, 0.08), inset 0 0.5px 0 rgba(255, 255, 255, 0.55)`
-          : `0 18px 50px -10px rgba(0, 0, 0, ${shadowAlpha.toFixed(3)}), 0 0 0 0.5px rgba(0, 0, 0, 0.08), inset 0 0.5px 0 rgba(255, 255, 255, 0.55)`,
+          ? `0 10px 24px -14px rgba(0, 0, 0, ${(0.24 + ambient * 0.06).toFixed(3)}), 0 0 0 0.5px rgba(0, 0, 0, 0.08), inset 0 1px 0 0 rgba(255, 255, 255, 0.8)`
+          : `0 18px 50px -10px rgba(0, 0, 0, ${shadowAlpha.toFixed(3)}), 0 0 0 0.5px rgba(0, 0, 0, 0.08), inset 0 1px 0 0 rgba(255, 255, 255, 0.8)`,
         color: 'var(--ol-ink)',
         fontFamily: 'var(--ol-font-sans)',
         transform: `scale(${scale.toFixed(4)})`,
