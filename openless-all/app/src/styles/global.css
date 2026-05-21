@@ -109,3 +109,38 @@ a { color: inherit; text-decoration: none; }
   }
 }
 
+/* ── 假毛玻璃面（qa 追问框 / capsule 语音胶囊等透明浮窗）─────────────────────
+   webview 拿不到透明窗口背后的桌面像素 —— CSS backdrop-filter 模糊不了桌面，
+   是 Tauri 已知的上游限制（issue #2827 / #10064 / #6876）。所以这里**不做
+   真实高斯模糊**：宿主元素保留半透明白底，这层 ::before 叠一张细颗粒噪点纹理
+   （磨砂质感来源）；内描边高光与柔和阴影由宿主自带的 box-shadow 提供。
+   纯静态 CSS，零运行时 / 动画开销，macOS / Windows / Linux 像素一致。
+   宿主元素自带 border-radius 即可，::before 噪点层 inherit 圆角；宿主不要再设
+   backdrop-filter（死代码）。 */
+.ol-frost {
+  position: relative;
+  isolation: isolate;
+  /* 体渐变 + 左上高光扫面 —— 半透明白底（~0.9），给磨砂面体积感而不是死平。 */
+  background:
+    radial-gradient(135% 86% at 15% -10%,
+      rgba(255, 255, 255, 0.97) 0%,
+      rgba(255, 255, 255, 0) 56%),
+    linear-gradient(161deg,
+      rgba(255, 255, 255, 0.93) 0%,
+      rgba(244, 247, 252, 0.88) 100%);
+}
+
+.ol-frost::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  /* 不透明灰度噪点，normal 混合 —— 这是"磨砂颗粒"的来源。opacity 直接等于颗粒
+     强度：0.1 几乎看不见，0.32 能明显看出磨砂质感又不脏。要更糙往 0.45 调。 */
+  background-image: var(--ol-frost-grain);
+  /* tile 与 SVG 视口同尺寸（100），stitchTiles 的无缝拼接才成立 */
+  background-size: 100px 100px;
+  opacity: 0.32;
+  pointer-events: none;
+}

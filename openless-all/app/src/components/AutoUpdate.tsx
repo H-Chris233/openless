@@ -15,7 +15,7 @@ import { useTranslation } from 'react-i18next';
 import { isTauri, restartApp } from '../lib/ipc';
 import { Btn } from '../pages/_atoms';
 
-const UPDATE_CHECK_TIMEOUT_MS = 8_000; // 缩短超时，让镜像站慢的情况能更快 fallback
+const UPDATE_CHECK_TIMEOUT_MS = 15_000;
 
 interface AppUpdateMetadata {
   rid: number;
@@ -44,6 +44,7 @@ export interface UseAutoUpdate {
   contentLength: number | null;
   checking: boolean;
   busy: boolean;
+  errorMessage: string | null;
   /** 触发"检查更新"。如果发现新版本，状态变为 'available'，需要 caller 渲染对话框让用户确认下载。 */
   checkForUpdates: () => Promise<void>;
   /** 用户在对话框里确认 → 下载 + 安装。完成后状态变为 'downloaded'，等用户点重启。 */
@@ -58,6 +59,7 @@ export function useAutoUpdate(): UseAutoUpdate {
   const [version, setVersion] = useState('');
   const [downloaded, setDownloaded] = useState(0);
   const [contentLength, setContentLength] = useState<number | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const checking = status === 'checking';
   const busy = status === 'downloading' || status === 'installing';
@@ -89,6 +91,7 @@ export function useAutoUpdate(): UseAutoUpdate {
   const checkForUpdates = async () => {
     setStatus('checking');
     setVersion('');
+    setErrorMessage(null);
     resetProgress();
     await closeUpdate();
     try {
@@ -120,6 +123,8 @@ export function useAutoUpdate(): UseAutoUpdate {
       setStatus('available');
     } catch (error) {
       console.error('[updater] failed to check update', error);
+      const msg = error instanceof Error ? error.message : String(error);
+      setErrorMessage(msg);
       setStatus('error');
     }
   };
@@ -146,6 +151,8 @@ export function useAutoUpdate(): UseAutoUpdate {
       setStatus('downloaded');
     } catch (error) {
       console.error('[updater] failed to install update', error);
+      const msg = error instanceof Error ? error.message : String(error);
+      setErrorMessage(msg);
       await closeUpdate();
       setStatus('error');
     }
@@ -167,6 +174,7 @@ export function useAutoUpdate(): UseAutoUpdate {
     contentLength,
     checking,
     busy,
+    errorMessage,
     checkForUpdates,
     installUpdate,
     dismissDialog,
