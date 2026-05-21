@@ -201,7 +201,7 @@ export function QaPanel() {
   }, [messages, status]);
 
   return (
-    <div style={shellStyle}>
+    <div className="ol-frost" style={shellStyle}>
       <Toolbar pinned={pinned} onTogglePin={onTogglePin} onClose={onClose} />
       <div ref={scrollRef} style={contentStyle}>
         {messages.length === 0 && status === 'idle' && (
@@ -611,6 +611,9 @@ function truncate(text: string, max: number): string {
 
 // ── 样式 ──────────────────────────────────────────────────────────────
 
+// 假毛玻璃外壳：玻璃质感（体渐变 + 高光扫面 + 噪点颗粒）全部由 .ol-frost 提供；
+// 这里只管布局 + 内描边高光 + 柔和阴影。webview 模糊不了透明窗口背后的桌面
+// （Tauri 上游限制），所以不写 background / backdrop-filter。
 const shellStyle: CSSProperties = {
   width: '100%',
   height: '100vh',
@@ -618,13 +621,8 @@ const shellStyle: CSSProperties = {
   flexDirection: 'column',
   borderRadius: 14,
   overflow: 'hidden',
-  // 浮窗 focus:false 在 macOS 上会让 backdrop-filter 不工作（透到桌面文字），所以
-  // 改成接近不透明的实色背景。blur 仅作锦上添花，不再依赖它保证可读性。
-  background: 'rgba(255, 255, 255, 0.97)',
-  backdropFilter: 'blur(24px) saturate(180%)',
-  WebkitBackdropFilter: 'blur(24px) saturate(180%)',
   border: '0.5px solid rgba(0, 0, 0, 0.08)',
-  boxShadow: 'var(--ol-shadow-lg)',
+  boxShadow: 'var(--ol-shadow-lg), inset 0 1px 0 0 rgba(255, 255, 255, 0.9)',
   fontFamily: 'var(--ol-font-sans)',
   color: 'var(--ol-ink)',
 };

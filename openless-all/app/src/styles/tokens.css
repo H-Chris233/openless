@@ -30,6 +30,13 @@
   --ol-glass-blur: 20px;
   --ol-glass-blur-strong: 36px;
 
+  /* 假毛玻璃噪点 —— qa 追问框 / capsule 语音胶囊等透明浮窗用。详见 global.css .ol-frost。
+     关键点：feColorMatrix 用 matrix 把分形噪点**去色 + 强制 alpha=1**（不透明灰度噪点）。
+     早期版本用 saturate=0 保留了 feTurbulence 的随机 alpha，噪点本身就半透明，再叠
+     ::before 的低 opacity，等于洗没了 —— 看不出磨砂颗粒。现在用不透明灰度噪点，由
+     ::before 的 opacity 单独、可控地决定颗粒强度。 */
+  --ol-frost-grain: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='100'%20height='100'%3E%3Cfilter%20id='g'%3E%3CfeTurbulence%20type='fractalNoise'%20baseFrequency='0.95'%20numOctaves='1'%20stitchTiles='stitch'/%3E%3CfeColorMatrix%20type='matrix'%20values='0.34%200.34%200.34%200%200%200.34%200.34%200.34%200%200%200.34%200.34%200.34%200%200%200%200%200%200%201'/%3E%3C/filter%3E%3Crect%20width='100'%20height='100'%20filter='url(%23g)'/%3E%3C/svg%3E");
+
   /* Motion */
   --ol-motion-spring: cubic-bezier(0.16, 1, 0.3, 1);
   --ol-motion-soft: cubic-bezier(0.22, 0.8, 0.22, 1);
