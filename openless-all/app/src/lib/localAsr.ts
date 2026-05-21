@@ -66,7 +66,15 @@ export interface FoundryLocalAsrStatus {
   error: string | null;
 }
 
-export type FoundryLocalAsrModelAlias = 'whisper-small' | 'whisper-base' | 'whisper-tiny';
+export const FOUNDRY_LOCAL_ASR_MODEL_ALIASES = [
+  'whisper-small',
+  'whisper-medium',
+  'whisper-large-v3-turbo',
+  'whisper-base',
+  'whisper-tiny',
+] as const;
+
+export type FoundryLocalAsrModelAlias = typeof FOUNDRY_LOCAL_ASR_MODEL_ALIASES[number];
 export type FoundryLocalAsrLanguageHint = '' | 'zh' | 'en';
 export type FoundryRuntimeSource = 'auto' | 'nuget' | 'ort-nightly';
 
@@ -94,8 +102,8 @@ export interface FoundryPrepareProgress {
 
 export interface FoundryLocalAsrModelOption {
   alias: FoundryLocalAsrModelAlias;
-  labelKey: string;
-  descKey: string;
+  labelKey: `localAsr.foundryModel${'Small' | 'Medium' | 'Large' | 'Base' | 'Tiny'}`;
+  descKey: `localAsr.foundryModel${'Small' | 'Medium' | 'Large' | 'Base' | 'Tiny'}Desc`;
 }
 
 export const FOUNDRY_LOCAL_ASR_MODELS: FoundryLocalAsrModelOption[] = [
@@ -103,6 +111,16 @@ export const FOUNDRY_LOCAL_ASR_MODELS: FoundryLocalAsrModelOption[] = [
     alias: 'whisper-small',
     labelKey: 'localAsr.foundryModelSmall',
     descKey: 'localAsr.foundryModelSmallDesc',
+  },
+  {
+    alias: 'whisper-medium',
+    labelKey: 'localAsr.foundryModelMedium',
+    descKey: 'localAsr.foundryModelMediumDesc',
+  },
+  {
+    alias: 'whisper-large-v3-turbo',
+    labelKey: 'localAsr.foundryModelLarge',
+    descKey: 'localAsr.foundryModelLargeDesc',
   },
   {
     alias: 'whisper-base',
@@ -122,6 +140,18 @@ const MOCK_FOUNDRY_CATALOG: FoundryLocalAsrCatalogModel[] = [
     displayName: 'Whisper Small',
     cached: false,
     fileSizeMb: 967,
+  },
+  {
+    alias: 'whisper-medium',
+    displayName: 'Whisper Medium',
+    cached: false,
+    fileSizeMb: 937,
+  },
+  {
+    alias: 'whisper-large-v3-turbo',
+    displayName: 'Whisper Large V3 Turbo',
+    cached: false,
+    fileSizeMb: 1285,
   },
   {
     alias: 'whisper-base',
