@@ -3071,6 +3071,8 @@ mod tests {
         assert!(
             validate_foundry_model_alias(crate::asr::local::foundry::DEFAULT_MODEL_ALIAS).is_ok()
         );
+        assert!(validate_foundry_model_alias("whisper-medium").is_ok());
+        assert!(validate_foundry_model_alias("whisper-large-v3-turbo").is_ok());
         assert!(validate_foundry_model_alias("whisper-large").is_err());
     }
 
@@ -3085,6 +3087,18 @@ mod tests {
             active_foundry_model_from_prefs(&prefs),
             crate::asr::local::foundry::DEFAULT_MODEL_ALIAS
         );
+    }
+
+    #[test]
+    fn foundry_active_model_pref_preserves_large_model_aliases() {
+        for alias in ["whisper-medium", "whisper-large-v3-turbo"] {
+            let prefs = UserPreferences {
+                foundry_local_asr_model: alias.to_string(),
+                ..Default::default()
+            };
+
+            assert_eq!(active_foundry_model_from_prefs(&prefs), alias);
+        }
     }
 
     #[test]
