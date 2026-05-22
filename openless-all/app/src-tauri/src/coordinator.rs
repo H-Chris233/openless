@@ -824,11 +824,13 @@ impl Coordinator {
                 #[cfg(target_os = "linux")]
                 {
                     let (qa_trigger, translation_trigger) = modifier_shortcut_triggers(&self.inner);
+                    let custom_key = custom_dictation_key_string(&self.inner);
                     crate::linux_fcitx::start_dictation_signal_listener(
                         fcitx_tx,
                         fcitx_binding.clone(),
                         qa_trigger,
                         translation_trigger,
+                        custom_key,
                     );
                     if fcitx_binding.trigger == crate::types::HotkeyTrigger::Custom {
                         sync_custom_dictation_to_plugin(&self.inner);
@@ -1109,11 +1111,13 @@ fn hotkey_supervisor_loop(inner: Arc<Inner>) {
                 #[cfg(target_os = "linux")]
                 {
                     let (qa_trigger, translation_trigger) = modifier_shortcut_triggers(&inner);
+                    let custom_key = custom_dictation_key_string(&inner);
                     crate::linux_fcitx::start_dictation_signal_listener(
                         fcitx_tx,
                         fcitx_binding.clone(),
                         qa_trigger,
                         translation_trigger,
+                        custom_key,
                     );
                     if fcitx_binding.trigger == crate::types::HotkeyTrigger::Custom {
                         sync_custom_dictation_to_plugin(&inner);
@@ -1696,6 +1700,17 @@ fn is_builtin_translation_shift(binding: &crate::types::ShortcutBinding) -> bool
 
 /// Linux: 从 prefs 读取自定义组合键，同步到 fcitx5 插件。
 #[cfg(target_os = "linux")]
+#[cfg(target_os = "linux")]
+fn custom_dictation_key_string(inner: &Arc<Inner>) -> Option<String> {
+    let prefs = inner.prefs.get();
+    let key_string = crate::linux_fcitx::binding_to_fcitx_key_string(&prefs.dictation_hotkey);
+    if key_string.is_empty() {
+        None
+    } else {
+        Some(key_string)
+    }
+}
+
 fn sync_custom_dictation_to_plugin(inner: &Arc<Inner>) {
     let prefs = inner.prefs.get();
     let dictation = &prefs.dictation_hotkey;

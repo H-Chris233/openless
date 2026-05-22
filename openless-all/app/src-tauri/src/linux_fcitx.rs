@@ -260,6 +260,7 @@ pub fn start_dictation_signal_listener(
     binding: crate::types::HotkeyBinding,
     qa_trigger: Option<crate::types::HotkeyTrigger>,
     translation_trigger: Option<crate::types::HotkeyTrigger>,
+    custom_trigger_key: Option<String>,
 ) {
     use std::time::Duration;
 
@@ -338,6 +339,7 @@ pub fn start_dictation_signal_listener(
             };
 
             let binding_for_name = binding.clone();
+            let custom_for_name = custom_trigger_key.clone();
             let qa_for_name = qa_trigger;
             let trans_for_name = translation_trigger;
             let _name_match = match conn.add_match(fcitx_rule, move |args: (String, String, String), _conn, _msg| {
@@ -346,7 +348,7 @@ pub fn start_dictation_signal_listener(
                     // fcitx5 已启动（或重启），重新同步所有快捷键绑定。
                     log::info!("[fcitx-hotkey] fcitx5 appeared on DBus, re-syncing bindings");
                     std::thread::sleep(Duration::from_secs(1)); // 等插件完全加载
-                    sync_binding_to_plugin(&binding_for_name);
+                    resync_main_binding(&binding_for_name, custom_for_name.as_deref());
                     sync_qa_binding(qa_for_name);
                     sync_translation_binding(trans_for_name);
                 }
@@ -363,7 +365,7 @@ pub fn start_dictation_signal_listener(
             for attempt in 0..10 {
                 if fcitx5_name_has_owner(&conn) {
                     log::info!("[fcitx-hotkey] fcitx5 available, syncing initial bindings (attempt {attempt})");
-                    sync_binding_to_plugin(&binding);
+                    resync_main_binding(&binding, custom_trigger_key.as_deref());
                     sync_qa_binding(qa_trigger);
                     sync_translation_binding(translation_trigger);
                     break;
@@ -393,11 +395,6 @@ pub fn start_dictation_signal_listener(
 #[cfg(target_os = "linux")]
 pub fn ensure_plugin_installed(app: &tauri::AppHandle) {
     use tauri::Manager;
-
-    if is_plugin_installed_on_disk() {
-        log::info!("[fcitx-install] Plugin already installed on disk");
-        return;
-    }
 
     let resource_dir = match app.path().resource_dir() {
         Ok(d) => d,
@@ -473,44 +470,18 @@ pub fn ensure_plugin_installed(app: &tauri::AppHandle) {
     );
 }
 
-#[cfg(target_os = "linux")]
-fn is_plugin_installed_on_disk() -> bool {
-    // 同时检查 .so 和 .conf：孤立的 .so 没有 addon 配置 fcitx5 也不会加载。
-    let pairs: &[(&str, &str)] = &[
-        (
-            "/usr/lib/x86_64-linux-gnu/fcitx5/libopenless.so",
-            "/usr/share/fcitx5/addon/openless.conf",
-        ),
-        (
-            "/usr/lib64/fcitx5/libopenless.so",
-            "/usr/share/fcitx5/addon/openless.conf",
-        ),
-        (
-            "/usr/local/lib/fcitx5/libopenless.so",
-            "/usr/local/share/fcitx5/addon/openless.conf",
-        ),
-        (
-            "/usr/lib/fcitx5/libopenless.so",
-            "/usr/share/fcitx5/addon/openless.conf",
-        ),
-    ];
-    for (so, conf) in pairs {
-        if std::path::Path::new(so).exists() && std::path::Path::new(conf).exists() {
-            return true;
+/// 同步主听写热键：自定义组合键走 SetCustomDictationTrigger，预设修饰键走 SetHotkeyRaw。
+fn resync_main_binding(binding: &crate::types::HotkeyBinding, custom_trigger_key: Option<&str>) {
+    if let Some(key_string) = custom_trigger_key {
+        if !key_string.is_empty() {
+            match set_custom_dictation_trigger(key_string) {
+                Ok(()) => log::info!("[fcitx] Resynced custom dictation trigger '{key_string}'"),
+                Err(e) => log::warn!("[fcitx] Failed to resync custom dictation trigger: {e}"),
+            }
+            return;
         }
     }
-
-    if let Ok(home) = std::env::var("HOME") {
-        let user_so = std::path::PathBuf::from(&home)
-            .join(".local").join("lib").join("fcitx5").join("libopenless.so");
-        let user_conf = std::path::PathBuf::from(&home)
-            .join(".local").join("share").join("fcitx5").join("addon").join("openless.conf");
-        if user_so.exists() && user_conf.exists() {
-            return true;
-        }
-    }
-
-    false
+    sync_binding_to_plugin(binding);
 }
 
 /// 检查 fcitx5 是否在 DBus 上注册了名称（即 fcitx5 进程是否在运行且 DBus 模块已加载）。
