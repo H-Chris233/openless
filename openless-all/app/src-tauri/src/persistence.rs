@@ -240,6 +240,13 @@ pub fn foundry_native_runtime_root() -> Result<PathBuf> {
 }
 
 #[cfg(target_os = "windows")]
+pub fn sherpa_onnx_models_root() -> Result<PathBuf> {
+    let dir = data_dir()?.join("models").join("sherpa-onnx");
+    ensure_dir(&dir)?;
+    Ok(dir)
+}
+
+#[cfg(target_os = "windows")]
 pub fn foundry_model_cache_root() -> Result<PathBuf> {
     let dir = foundry_local_root()?;
     ensure_dir(&dir)?;

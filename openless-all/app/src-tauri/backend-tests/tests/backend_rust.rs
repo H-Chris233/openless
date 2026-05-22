@@ -22,6 +22,15 @@ mod asr {
                 }
             }
         }
+
+        pub mod sherpa {
+            pub const DEFAULT_MODEL_ALIAS: &str = "sense-voice-small-zh";
+            pub const PROVIDER_ID: &str = "sherpa-onnx-local";
+
+            pub fn is_sherpa_onnx_local(id: &str) -> bool {
+                id == PROVIDER_ID
+            }
+        }
     }
 }
 
