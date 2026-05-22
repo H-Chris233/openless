@@ -1,8 +1,30 @@
 fn main() {
+    #[cfg(target_os = "windows")]
+    link_windows_common_controls_v6_manifest_dependency();
+
     #[cfg(target_os = "macos")]
     build_qwen_asr_macos();
 
     tauri_build::build();
+}
+
+#[cfg(target_os = "windows")]
+fn link_windows_common_controls_v6_manifest_dependency() {
+    let mut source_path = std::path::PathBuf::from(
+        std::env::var_os("OUT_DIR").expect("OUT_DIR must be set by Cargo"),
+    );
+    source_path.push("common-controls-v6-manifest-dependency.c");
+    std::fs::write(
+        &source_path,
+        r#"#pragma comment(linker, "/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
+int openless_common_controls_v6_manifest_dependency_anchor = 0;
+"#,
+    )
+    .expect("write common controls manifest dependency source");
+    cc::Build::new()
+        .file(&source_path)
+        .compile("openless_common_controls_v6_manifest_dependency");
+    println!("cargo:rustc-link-arg=/INCLUDE:openless_common_controls_v6_manifest_dependency_anchor");
 }
 
 /// 编译 vendored Open-Less/qwen-asr 的 C 源（仅 macOS）。

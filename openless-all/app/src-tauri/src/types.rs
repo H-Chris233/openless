@@ -613,6 +613,17 @@ pub struct UserPreferences {
     /// Windows Foundry Local Whisper 模型在 runtime 中保持加载多久。
     #[serde(default = "default_local_asr_keep_loaded_secs")]
     pub foundry_local_asr_keep_loaded_secs: u32,
+    /// Windows sherpa-onnx 本地 ASR（M1 实验 provider，详见
+    /// `docs/windows-sherpa-onnx-asr-plan.md`）当前激活的模型 alias。
+    #[serde(default = "default_sherpa_onnx_model")]
+    pub sherpa_onnx_model: String,
+    /// Windows sherpa-onnx 语言 hint（BCP-47 / ISO 639-1 小写）。空 = 自动。
+    #[serde(default)]
+    pub sherpa_onnx_language_hint: String,
+    /// Windows sherpa-onnx 模型在 runtime 中保持加载多久（秒），语义与
+    /// foundry/qwen3 一致。
+    #[serde(default = "default_local_asr_keep_loaded_secs")]
+    pub sherpa_onnx_keep_loaded_secs: u32,
     /// Auto-update 渠道偏好。stable = 跟正式版（默认）；beta = Settings 里多
     /// 一个手动下载 Beta 的入口。不影响 plugin-updater 的自动检查路径。
     #[serde(default)]
@@ -717,6 +728,10 @@ fn default_foundry_local_runtime_source() -> String {
     "auto".into()
 }
 
+fn default_sherpa_onnx_model() -> String {
+    crate::asr::local::sherpa::DEFAULT_MODEL_ALIAS.into()
+}
+
 fn default_active_asr_provider() -> String {
     #[cfg(target_os = "windows")]
     {
@@ -780,6 +795,12 @@ struct UserPreferencesWire {
     foundry_local_asr_language_hint: String,
     #[serde(default = "default_local_asr_keep_loaded_secs")]
     foundry_local_asr_keep_loaded_secs: u32,
+    #[serde(default = "default_sherpa_onnx_model")]
+    sherpa_onnx_model: String,
+    #[serde(default)]
+    sherpa_onnx_language_hint: String,
+    #[serde(default = "default_local_asr_keep_loaded_secs")]
+    sherpa_onnx_keep_loaded_secs: u32,
     #[serde(default)]
     update_channel: UpdateChannel,
     #[serde(default = "default_history_retention_days")]
@@ -846,6 +867,9 @@ impl Default for UserPreferencesWire {
             foundry_local_runtime_source: prefs.foundry_local_runtime_source,
             foundry_local_asr_language_hint: prefs.foundry_local_asr_language_hint,
             foundry_local_asr_keep_loaded_secs: prefs.foundry_local_asr_keep_loaded_secs,
+            sherpa_onnx_model: prefs.sherpa_onnx_model,
+            sherpa_onnx_language_hint: prefs.sherpa_onnx_language_hint,
+            sherpa_onnx_keep_loaded_secs: prefs.sherpa_onnx_keep_loaded_secs,
             update_channel: prefs.update_channel,
             history_retention_days: prefs.history_retention_days,
             polish_context_window_minutes: prefs.polish_context_window_minutes,
@@ -928,6 +952,9 @@ impl<'de> Deserialize<'de> for UserPreferences {
                 ),
             foundry_local_asr_language_hint: wire.foundry_local_asr_language_hint,
             foundry_local_asr_keep_loaded_secs: wire.foundry_local_asr_keep_loaded_secs,
+            sherpa_onnx_model: wire.sherpa_onnx_model,
+            sherpa_onnx_language_hint: wire.sherpa_onnx_language_hint,
+            sherpa_onnx_keep_loaded_secs: wire.sherpa_onnx_keep_loaded_secs,
             update_channel: wire.update_channel,
             history_retention_days: wire.history_retention_days,
             polish_context_window_minutes: wire.polish_context_window_minutes,
@@ -1608,6 +1635,9 @@ impl Default for UserPreferences {
             foundry_local_runtime_source: default_foundry_local_runtime_source(),
             foundry_local_asr_language_hint: String::new(),
             foundry_local_asr_keep_loaded_secs: default_local_asr_keep_loaded_secs(),
+            sherpa_onnx_model: default_sherpa_onnx_model(),
+            sherpa_onnx_language_hint: String::new(),
+            sherpa_onnx_keep_loaded_secs: default_local_asr_keep_loaded_secs(),
             update_channel: UpdateChannel::default(),
             history_retention_days: default_history_retention_days(),
             polish_context_window_minutes: default_polish_context_window_minutes(),
