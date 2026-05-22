@@ -12,7 +12,7 @@ import { invoke } from '@tauri-apps/api/core';
 import type { DownloadEvent } from '@tauri-apps/plugin-updater';
 import { Update } from '@tauri-apps/plugin-updater';
 import { useTranslation } from 'react-i18next';
-import { isTauri, restartApp } from '../lib/ipc';
+import { isTauri, restartApp, type UpdateChannel } from '../lib/ipc';
 import { Btn } from '../pages/_atoms';
 
 const UPDATE_CHECK_TIMEOUT_MS = 15_000;
@@ -45,8 +45,9 @@ export interface UseAutoUpdate {
   checking: boolean;
   busy: boolean;
   errorMessage: string | null;
-  /** 触发"检查更新"。如果发现新版本，状态变为 'available'，需要 caller 渲染对话框让用户确认下载。 */
-  checkForUpdates: () => Promise<void>;
+  /** 触发"检查更新"。如果发现新版本，状态变为 'available'，需要 caller 渲染对话框让用户确认下载。
+   *  `channel` 显式指定查哪个渠道；省略时由 Rust 端回落到 prefs.update_channel。 */
+  checkForUpdates: (channel?: UpdateChannel) => Promise<void>;
   /** 用户在对话框里确认 → 下载 + 安装。完成后状态变为 'downloaded'，等用户点重启。 */
   installUpdate: () => Promise<void>;
   /** 关闭对话框（仅在非 busy 状态可用）。 */
@@ -88,7 +89,7 @@ export function useAutoUpdate(): UseAutoUpdate {
     setContentLength(null);
   };
 
-  const checkForUpdates = async () => {
+  const checkForUpdates = async (channel?: UpdateChannel) => {
     setStatus('checking');
     setVersion('');
     setErrorMessage(null);
@@ -103,6 +104,7 @@ export function useAutoUpdate(): UseAutoUpdate {
       // Beta → fetch_latest_beta_release 拼出 -beta manifest URL 后再 check。
       const metadata = await invoke<AppUpdateMetadata | null>('app_check_update_with_channel', {
         timeoutMs: UPDATE_CHECK_TIMEOUT_MS,
+        channel: channel ?? null,
       });
       if (!metadata) {
         setStatus('none');

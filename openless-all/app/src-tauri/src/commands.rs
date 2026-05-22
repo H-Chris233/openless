@@ -13,6 +13,7 @@ use crate::asr::local::foundry::{
 };
 use crate::asr::local::FoundryLocalRuntime;
 use crate::coordinator::Coordinator;
+use crate::net;
 use crate::permissions::{self, PermissionStatus};
 use crate::persistence::{
     sync_style_pack_preferences, CredentialAccount, CredentialsSnapshot, CredentialsVault,
@@ -319,16 +320,13 @@ pub struct LatestBetaRelease {
 /// 返回 `Ok(None)` = 当前没发过 Beta 版；`Err(String)` = 网络/解析故障。
 #[tauri::command]
 pub async fn fetch_latest_beta_release() -> Result<Option<LatestBetaRelease>, String> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .user_agent(concat!("OpenLess/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|e| format!("build http client: {e}"))?;
-    let resp = client
-        .get("https://github.com/appergb/openless/releases.atom")
-        .send()
-        .await
-        .map_err(|e| format!("fetch releases.atom: {e}"))?;
+    let resp = net::send_with_retry(|| {
+        net::http()
+            .get("https://github.com/appergb/openless/releases.atom")
+            .timeout(std::time::Duration::from_secs(15))
+    })
+    .await
+    .map_err(|e| format!("fetch releases.atom: {e}"))?;
     if !resp.status().is_success() {
         return Err(format!("releases.atom status {}", resp.status()));
     }
@@ -408,17 +406,20 @@ pub struct AppUpdateMetadata {
     pub raw_json: serde_json::Value,
 }
 
-/// 按 prefs.update_channel 决定 manifest 来源，再走 plugin-updater 的标准 check 流程。
+/// 决定 manifest 来源后走 plugin-updater 的标准 check 流程。
+/// 渠道：显式传入 `channel` 时用它（关于页固定查 Stable、高级页 Beta 区查 Beta）；
+/// 不传则回落到 `prefs.update_channel`（后台 AutoUpdateGate 自动检查走这条）。
 /// 返回 None = 当前是最新；Some(metadata) = 有新版可装。
 #[tauri::command]
 pub async fn app_check_update_with_channel<R: tauri::Runtime>(
     coord: CoordinatorState<'_>,
     webview: tauri::Webview<R>,
     timeout_ms: Option<u64>,
+    channel: Option<UpdateChannel>,
 ) -> Result<Option<AppUpdateMetadata>, String> {
     use tauri_plugin_updater::UpdaterExt;
 
-    let channel = coord.prefs().get().update_channel;
+    let channel = channel.unwrap_or_else(|| coord.prefs().get().update_channel);
     let mut builder = webview.updater_builder();
     if let Some(ms) = timeout_ms {
         builder = builder.timeout(std::time::Duration::from_millis(ms));
@@ -483,27 +484,27 @@ pub struct NetworkCheckResult {
 
 #[tauri::command]
 pub async fn check_network() -> NetworkCheckResult {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build();
-    let client = match client {
-        Ok(c) => c,
-        Err(_) => return NetworkCheckResult { online: false, latency_ms: None },
-    };
+    // 探一个真实存在的接口。旧逻辑探 `/health` —— 这个接口实测返回 404，于是哪怕
+    // 链路完全正常也永远判定离线；且用 HEAD（后端只挂 GET）。改成 GET `/packs`，
+    // 走共享客户端 + 重试。只要拿到任意 HTTP 响应就说明链路通；连不上才算离线。
+    let url = format!("{MARKETPLACE_BASE_URL}/packs?limit=1");
     let start = std::time::Instant::now();
-    let endpoints = [
-        "https://apic.openless.top/health",
-        "https://github.com",
-    ];
-    for url in &endpoints {
-        if let Ok(resp) = client.head(*url).send().await {
-            if resp.status().is_success() || resp.status().is_redirection() {
-                let ms = start.elapsed().as_millis() as u64;
-                return NetworkCheckResult { online: true, latency_ms: Some(ms) };
-            }
-        }
+    match net::send_with_retry(|| {
+        net::http()
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(8))
+    })
+    .await
+    {
+        Ok(_) => NetworkCheckResult {
+            online: true,
+            latency_ms: Some(start.elapsed().as_millis() as u64),
+        },
+        Err(_) => NetworkCheckResult {
+            online: false,
+            latency_ms: None,
+        },
     }
-    NetworkCheckResult { online: false, latency_ms: None }
 }
 
 #[tauri::command]
@@ -976,31 +977,41 @@ fn active_foundry_asr_is_supported(provider: &str) -> bool {
 
 async fn validate_asr_transcription(config: &ProviderConfig, model: &str) -> Result<(), String> {
     const MAX_ASR_VALIDATE_BODY_BYTES: usize = 1024 * 1024;
+    const MAX_ATTEMPTS: u32 = 6;
     let url = asr_transcriptions_url(&config.base_url)?;
     let wav = encode_wav_16k_mono_silence(250);
-    let wav_part = reqwest::multipart::Part::bytes(wav)
-        .file_name("openless-asr-check.wav")
-        .mime_str("audio/wav")
-        .map_err(|e| format!("请求体构建失败: {e}"))?;
-    let form = reqwest::multipart::Form::new()
-        .part("file", wav_part)
-        .text("model", model.to_string());
     let client = http_client_builder(&url, 20)
         .build()
         .map_err(|_| "providerClientInitFailed".to_string())?;
-    let response = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {}", config.api_key))
-        .multipart(form)
-        .send()
-        .await
-        .map_err(|e| {
-            if e.is_timeout() {
-                "providerRequestTimeout".to_string()
-            } else {
-                "providerNetworkError".to_string()
+    // 连接 / 请求未送出类失败做指数退避重试 —— 这类失败请求尚未送达服务端，重试
+    // 安全。超时不重试（服务端可能已在处理）。multipart 是流式 body，每次重建。
+    let mut attempt: u32 = 0;
+    let response = loop {
+        attempt += 1;
+        let wav_part = reqwest::multipart::Part::bytes(wav.clone())
+            .file_name("openless-asr-check.wav")
+            .mime_str("audio/wav")
+            .map_err(|e| format!("请求体构建失败: {e}"))?;
+        let form = reqwest::multipart::Form::new()
+            .part("file", wav_part)
+            .text("model", model.to_string());
+        match client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", config.api_key))
+            .multipart(form)
+            .send()
+            .await
+        {
+            Ok(resp) => break resp,
+            Err(e) if e.is_timeout() => return Err("providerRequestTimeout".to_string()),
+            Err(e) if (e.is_connect() || e.is_request()) && attempt < MAX_ATTEMPTS => {
+                let backoff = (200u64 * 2u64.pow((attempt - 1).min(3))).min(900);
+                tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+                continue;
             }
-        })?;
+            Err(_) => return Err("providerNetworkError".to_string()),
+        }
+    };
     let status = response.status();
     if !status.is_success() {
         return Err(format!("providerHttpStatus:{}", status.as_u16()));
@@ -2492,13 +2503,13 @@ pub async fn marketplace_list(
     if let Some(n) = limit {
         url.query_pairs_mut().append_pair("limit", &n.to_string());
     }
-    let client = reqwest::Client::new();
-    let resp = client
-        .get(url)
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
-        .await
-        .map_err(|e| format!("marketplace request failed: {e}"))?;
+    let resp = net::send_with_retry(|| {
+        net::http()
+            .get(url.clone())
+            .timeout(std::time::Duration::from_secs(10))
+    })
+    .await
+    .map_err(|e| format!("marketplace request failed: {e}"))?;
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
@@ -2519,13 +2530,14 @@ pub async fn marketplace_detail(
     }
     let prefs = coord.prefs().get();
     let base = marketplace_url_from_prefs(&prefs);
-    let client = reqwest::Client::new();
-    let resp = client
-        .get(format!("{base}/packs/{pack_id}"))
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
-        .await
-        .map_err(|e| format!("marketplace request failed: {e}"))?;
+    let url = format!("{base}/packs/{pack_id}");
+    let resp = net::send_with_retry(|| {
+        net::http()
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(10))
+    })
+    .await
+    .map_err(|e| format!("marketplace request failed: {e}"))?;
     if !resp.status().is_success() {
         let status = resp.status();
         return Err(format!("marketplace HTTP {status}"));
@@ -2548,38 +2560,40 @@ pub async fn marketplace_install(
     }
     let prefs = coord.prefs().get();
     let base = marketplace_url_from_prefs(&prefs);
-    let client = reqwest::Client::new();
 
     // 先拉 detail 拿 authorLogin —— 装好后本地写 originAuthorLogin，
     // 后续编辑+发布时 backend 据此判 supersede（原作者）vs derivative（他人 fork）。
     let detail_url = format!("{base}/packs/{pack_id}");
-    let detail: serde_json::Value = client
-        .get(&detail_url)
-        .timeout(std::time::Duration::from_secs(15))
-        .send()
-        .await
-        .map_err(|e| format!("marketplace detail failed: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("marketplace detail HTTP error: {e}"))?
-        .json()
-        .await
-        .map_err(|e| format!("parse detail failed: {e}"))?;
+    let detail: serde_json::Value = net::send_with_retry(|| {
+        net::http()
+            .get(&detail_url)
+            .timeout(std::time::Duration::from_secs(15))
+    })
+    .await
+    .map_err(|e| format!("marketplace detail failed: {e}"))?
+    .error_for_status()
+    .map_err(|e| format!("marketplace detail HTTP error: {e}"))?
+    .json()
+    .await
+    .map_err(|e| format!("parse detail failed: {e}"))?;
     let origin_author_login = detail
         .get("authorLogin")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let bytes = client
-        .get(format!("{base}/packs/{pack_id}/download"))
-        .timeout(std::time::Duration::from_secs(30))
-        .send()
-        .await
-        .map_err(|e| format!("marketplace download failed: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("marketplace HTTP error: {e}"))?
-        .bytes()
-        .await
-        .map_err(|e| format!("read body failed: {e}"))?;
+    let download_url = format!("{base}/packs/{pack_id}/download");
+    let bytes = net::send_with_retry(|| {
+        net::http()
+            .get(&download_url)
+            .timeout(std::time::Duration::from_secs(30))
+    })
+    .await
+    .map_err(|e| format!("marketplace download failed: {e}"))?
+    .error_for_status()
+    .map_err(|e| format!("marketplace HTTP error: {e}"))?
+    .bytes()
+    .await
+    .map_err(|e| format!("read body failed: {e}"))?;
 
     // pack_id 已经过 UUID 白名单，拼临时文件路径安全。
     let tmp = std::env::temp_dir().join(format!("openless-marketplace-{pack_id}.zip"));
@@ -2634,7 +2648,8 @@ pub async fn marketplace_upload(
     let bytes = std::fs::read(&tmp).map_err(|e| format!("read exported zip: {e}"))?;
     let _ = std::fs::remove_file(&tmp);
 
-    let client = reqwest::Client::new();
+    // multipart 上传：表单是流式 body，不走 send_with_retry 的闭包重试；改用共享
+    // 客户端 —— 之前 list/detail 命令若已打开过连接，这里直接复用连接池里的连接。
     let part = reqwest::multipart::Part::bytes(bytes)
         .file_name(format!("{pack_id}.zip"))
         .mime_str("application/zip")
@@ -2643,7 +2658,7 @@ pub async fn marketplace_upload(
     if let Some(ref oid) = origin_pack_id {
         form = form.text("origin_pack_id", oid.clone());
     }
-    let resp = client
+    let resp = net::http()
         .post(format!("{base}/packs"))
         .header("X-Dev-User", dev_user)
         .timeout(std::time::Duration::from_secs(30))
@@ -2694,14 +2709,15 @@ pub async fn marketplace_like(
     if dev_user.is_empty() {
         return Err("未登录：先在 Settings 填发布者名字".into());
     }
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(format!("{base}/packs/{pack_id}/like"))
-        .header("X-Dev-User", dev_user)
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
-        .await
-        .map_err(|e| format!("like request failed: {e}"))?;
+    let like_url = format!("{base}/packs/{pack_id}/like");
+    let resp = net::send_with_retry(|| {
+        net::http()
+            .post(&like_url)
+            .header("X-Dev-User", dev_user.as_str())
+            .timeout(std::time::Duration::from_secs(10))
+    })
+    .await
+    .map_err(|e| format!("like request failed: {e}"))?;
     if !resp.status().is_success() {
         return Err(format!("like HTTP {}", resp.status()));
     }
@@ -2726,14 +2742,15 @@ pub async fn marketplace_delete(
     if dev_user.is_empty() {
         return Err("未登录：先在 Settings 填发布者名字".into());
     }
-    let client = reqwest::Client::new();
-    let resp = client
-        .delete(format!("{base}/packs/{pack_id}"))
-        .header("X-Dev-User", dev_user)
-        .timeout(std::time::Duration::from_secs(15))
-        .send()
-        .await
-        .map_err(|e| format!("delete request failed: {e}"))?;
+    let delete_url = format!("{base}/packs/{pack_id}");
+    let resp = net::send_with_retry(|| {
+        net::http()
+            .delete(&delete_url)
+            .header("X-Dev-User", dev_user.as_str())
+            .timeout(std::time::Duration::from_secs(15))
+    })
+    .await
+    .map_err(|e| format!("delete request failed: {e}"))?;
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
@@ -2751,14 +2768,15 @@ pub async fn marketplace_my_likes(coord: CoordinatorState<'_>) -> Result<Vec<Str
     if dev_user.is_empty() {
         return Ok(Vec::new()); // 未登录就空集合，UI 渲染无红心
     }
-    let client = reqwest::Client::new();
-    let resp = client
-        .get(format!("{base}/me/likes"))
-        .header("X-Dev-User", dev_user)
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
-        .await
-        .map_err(|e| format!("my-likes request failed: {e}"))?;
+    let likes_url = format!("{base}/me/likes");
+    let resp = net::send_with_retry(|| {
+        net::http()
+            .get(&likes_url)
+            .header("X-Dev-User", dev_user.as_str())
+            .timeout(std::time::Duration::from_secs(10))
+    })
+    .await
+    .map_err(|e| format!("my-likes request failed: {e}"))?;
     if !resp.status().is_success() {
         return Err(format!("my-likes HTTP {}", resp.status()));
     }
@@ -2778,14 +2796,15 @@ pub async fn marketplace_my_packs(
     if dev_user.is_empty() {
         return Ok(Vec::new());
     }
-    let client = reqwest::Client::new();
-    let resp = client
-        .get(format!("{base}/me/packs"))
-        .header("X-Dev-User", dev_user)
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
-        .await
-        .map_err(|e| format!("my-packs request failed: {e}"))?;
+    let packs_url = format!("{base}/me/packs");
+    let resp = net::send_with_retry(|| {
+        net::http()
+            .get(&packs_url)
+            .header("X-Dev-User", dev_user.as_str())
+            .timeout(std::time::Duration::from_secs(10))
+    })
+    .await
+    .map_err(|e| format!("my-packs request failed: {e}"))?;
     if !resp.status().is_success() {
         return Err(format!("my-packs HTTP {}", resp.status()));
     }
@@ -2844,18 +2863,16 @@ pub struct GithubDeviceStartResponse {
 #[tauri::command]
 pub async fn github_device_flow_start() -> Result<GithubDeviceStartResponse, String> {
     let client_id = get_github_oauth_client_id()?;
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|e| format!("build http client: {e}"))?;
-    let resp = client
-        .post("https://github.com/login/device/code")
-        .header("Accept", "application/json")
-        .header("User-Agent", "OpenLess")
-        .form(&[("client_id", client_id.as_str()), ("scope", "read:user")])
-        .send()
-        .await
-        .map_err(|e| format!("调用 GitHub /login/device/code 失败：{e}"))?;
+    let resp = net::send_with_retry(|| {
+        net::http()
+            .post("https://github.com/login/device/code")
+            .header("Accept", "application/json")
+            .header("User-Agent", "OpenLess")
+            .timeout(std::time::Duration::from_secs(15))
+            .form(&[("client_id", client_id.as_str()), ("scope", "read:user")])
+    })
+    .await
+    .map_err(|e| format!("调用 GitHub /login/device/code 失败：{e}"))?;
     let status = resp.status();
     let body: serde_json::Value = resp
         .json()
@@ -2892,36 +2909,36 @@ pub async fn github_device_flow_poll(
     device_code: String,
 ) -> Result<GithubDevicePollResult, String> {
     let client_id = get_github_oauth_client_id()?;
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|e| format!("build http client: {e}"))?;
-    let token_resp = client
-        .post("https://github.com/login/oauth/access_token")
-        .header("Accept", "application/json")
-        .header("User-Agent", "OpenLess")
-        .form(&[
-            ("client_id", client_id.as_str()),
-            ("device_code", device_code.as_str()),
-            ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
-        ])
-        .send()
-        .await
-        .map_err(|e| format!("调用 GitHub /login/oauth/access_token 失败：{e}"))?;
+    let token_resp = net::send_with_retry(|| {
+        net::http()
+            .post("https://github.com/login/oauth/access_token")
+            .header("Accept", "application/json")
+            .header("User-Agent", "OpenLess")
+            .timeout(std::time::Duration::from_secs(15))
+            .form(&[
+                ("client_id", client_id.as_str()),
+                ("device_code", device_code.as_str()),
+                ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+            ])
+    })
+    .await
+    .map_err(|e| format!("调用 GitHub /login/oauth/access_token 失败：{e}"))?;
     let body: serde_json::Value = token_resp
         .json()
         .await
         .map_err(|e| format!("解析 access_token 响应失败：{e}"))?;
 
     if let Some(token) = body["access_token"].as_str() {
-        let user_resp = client
-            .get("https://api.github.com/user")
-            .header("User-Agent", "OpenLess")
-            .header("Accept", "application/vnd.github+json")
-            .bearer_auth(token)
-            .send()
-            .await
-            .map_err(|e| format!("调用 GitHub /user 失败：{e}"))?;
+        let user_resp = net::send_with_retry(|| {
+            net::http()
+                .get("https://api.github.com/user")
+                .header("User-Agent", "OpenLess")
+                .header("Accept", "application/vnd.github+json")
+                .timeout(std::time::Duration::from_secs(15))
+                .bearer_auth(token)
+        })
+        .await
+        .map_err(|e| format!("调用 GitHub /user 失败：{e}"))?;
         let user_body: serde_json::Value = user_resp
             .json()
             .await

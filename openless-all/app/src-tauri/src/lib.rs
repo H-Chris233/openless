@@ -24,6 +24,7 @@ mod insertion;
 #[cfg(target_os = "linux")]
 mod linux_fcitx;
 mod llm_gemini;
+mod net;
 mod permissions;
 mod persistence;
 mod polish;

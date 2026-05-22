@@ -1,5 +1,5 @@
-// 高级设置：流式输入开关 / 同步剪贴板 / 本地 ASR 模型启用与禁用。
-// 拆出自 Settings.tsx，逻辑零改动；i18n key 全部保持 `settings.advanced.*`。
+// 高级 → 本地模型：本地 ASR 推理引擎的启用 / 禁用 + 模型下载管理。
+// 自 Settings.tsx 的 AdvancedSection 拆出（流式输入已挪到「录音与输入」），逻辑零改动。
 
 import { useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -10,13 +10,12 @@ import { useHotkeySettings } from '../../state/HotkeySettingsContext';
 import { Btn, Card } from '../_atoms';
 import { SettingRow, Toggle, type AsrPresetId } from './shared';
 
-export function AdvancedSection() {
+export function LocalModelSection() {
   const { t } = useTranslation();
   const { prefs, updatePrefs } = useHotkeySettings();
   const os = detectOS();
   const isMac = os === 'mac';
   const isWin = os === 'win';
-  const isLinux = os === 'linux';
   const platformSupported = isMac || isWin;
   const switchSeqRef = useRef(0);
   const [busy, setBusy] = useState(false);
@@ -109,64 +108,15 @@ export function AdvancedSection() {
         </div>
       )}
 
-      {/* ─── 流式输入（全平台 opt-in） ───────────────────────────────────
-          润色 SSE 一边到达一边逐字模拟键盘事件落到光标。开启后用户感知到的处理
-          时延显著降低，但有几个限制（不满足时自动回落原一次性插入路径）：
-          - macOS：CGEvent Unicode + 临时切到 ABC 输入源（CJK / 日文 IME 拦截兜底）
-          - Windows：SendInput Unicode，绕过 TSF / IME，不需要切输入法
-          - Linux：通过 fcitx5 插件提交文字；流式输入使用 enigo + XTest 合成按键
-          - 仅 OpenAI-compatible provider 实装；Gemini / Codex 透明降级
-          - 密码框 / 1Password / SSH prompt 等 Secure Input 框拒绝合成按键 → 失败回落
-          每个平台用各自的 hint key，互相不显示对方平台的细节。 */}
       <Card>
-        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>
-          {t(isLinux
-            ? 'settings.advanced.streamingInsertTitleLinux'
-            : 'settings.advanced.streamingInsertTitle')}
-        </div>
-        <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', marginBottom: 10 }}>
-          {t('settings.advanced.streamingInsertDesc')}
-        </div>
-        <SettingRow
-          label={t('settings.advanced.streamingInsertLabel')}
-          desc={t(
-            isMac
-              ? 'settings.advanced.streamingInsertHintMac'
-              : isWin
-                ? 'settings.advanced.streamingInsertHintWindows'
-                : 'settings.advanced.streamingInsertHintLinux'
-          )}>
-          <Toggle
-            on={!!prefs?.streamingInsert}
-            onToggle={(next) => {
-              if (prefs) void updatePrefs({ ...prefs, streamingInsert: next });
-            }}
-          />
-        </SettingRow>
-        <SettingRow
-          label={t('settings.advanced.streamingInsertSaveClipboardLabel')}
-          desc={t('settings.advanced.streamingInsertSaveClipboardHint')}>
-          <Toggle
-            on={!!prefs?.streamingInsertSaveClipboard}
-            onToggle={(next) => {
-              if (prefs) void updatePrefs({ ...prefs, streamingInsertSaveClipboard: next });
-            }}
-          />
-        </SettingRow>
-      </Card>
-
-      <Card>
-        {/* 标题 + 右上角 inline 警告小字（替换原琥珀大警告条）。
-            Windows：标题区整体灰显 —— "本地 ASR 模型（实验性）" 在 Win 上几乎只有
-            Qwen3 占位、本平台暂不支持；Foundry 走的是另一条独立路径，不属于"实验性"
-            框架。灰显视觉让用户知道这条"实验性"主线在 Win 不可用，关注点转到下方
+        {/* 标题 + 右上角 inline 警告小字。
+            Windows：标题区整体灰显 —— 「本地 ASR 模型（实验性）」在 Win 上几乎只有
+            Qwen3 占位、本平台暂不支持；Foundry 走的是另一条独立路径，不属于「实验性」
+            框架。灰显视觉让用户知道这条「实验性」主线在 Win 不可用，关注点转到下方
             Foundry 行。 */}
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, marginBottom: 14 }}>
           <div style={{ minWidth: 0, opacity: isWin ? 0.45 : 1 }}>
-            <div style={{ fontSize: 13, fontWeight: 600 }}>{t('settings.advanced.localAsrTitle')}</div>
-            <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', marginTop: 2 }}>
-              {t('settings.advanced.localAsrDesc')}
-            </div>
+            <div style={{ fontSize: 14, fontWeight: 600, letterSpacing: '-0.01em' }}>{t('settings.advanced.localAsrTitle')}</div>
           </div>
           <div style={{
             fontSize: 11,
@@ -190,16 +140,9 @@ export function AdvancedSection() {
         ) : (
           <>
             {/* Qwen3 行 —— macOS Toggle 可点切换；Windows 后端是 stub，Toggle 始终 off
-                + 不可点 + desc=notSupportedHere，跟"本平台不可用"视觉一致。跨平台
-                异常（Windows profile 同步到 local-qwen3）时 active 状态靠下方独立
-                "禁用本地 ASR" 行兜底，避免 Toggle ON + desc 说不支持的自相矛盾感
-                （pr_agent #403 'Stale Windows state' 修法）。
-                Windows 整行灰显，跟"本地 ASR 实验性"标题区视觉对齐 —— 用户一眼看出
-                这条线在 Win 上不能用，关注点落到下方 Foundry 行。 */}
+                + 不可点 + desc=notSupportedHere。整行灰显，跟「实验性」标题区对齐。 */}
             <div style={{ opacity: isWin ? 0.45 : 1 }}>
-              <SettingRow
-                label={t('settings.providers.presets.asrLocalQwen3')}
-                desc={isMac ? t('settings.advanced.qwen3Desc') : t('settings.advanced.notSupportedHere')}>
+              <SettingRow label={t('settings.providers.presets.asrLocalQwen3')}>
                 <div style={{ display: 'flex', justifyContent: 'flex-end', width: '100%' }}>
                   <Toggle
                     on={isMac && isOnLocalQwen3}
@@ -214,9 +157,7 @@ export function AdvancedSection() {
 
             {/* Foundry 行 —— 仅 Windows 露出（macOS 不展示 Windows 端模型内容）。 */}
             {isWin && (
-              <SettingRow
-                label={t('settings.providers.presets.asrFoundryLocalWhisper')}
-                desc={t('settings.advanced.foundryDesc')}>
+              <SettingRow label={t('settings.providers.presets.asrFoundryLocalWhisper')}>
                 <div style={{ display: 'flex', justifyContent: 'flex-end', width: '100%' }}>
                   <Toggle
                     on={isOnFoundry}
@@ -231,15 +172,10 @@ export function AdvancedSection() {
           </>
         )}
 
-        {/* 「禁用本地 ASR」逃生入口——只在行内 Toggle 关不掉的场景露出：
-            - Linux / 不支持平台：根本没有任何引擎行
-            - 跨平台异常（macOS profile 同步到 foundry / Windows profile 同步到 qwen3）：
-              本机引擎 Toggle 是 off，关不动异常 active 的对方引擎
-            否则平台本机 Toggle 自身就能 off → 关停，重复 disable 行徒增视觉。 */}
+        {/* 「禁用本地 ASR」逃生入口——只在行内 Toggle 关不掉的场景露出（Linux / 跨平台
+            异常 profile 同步）。否则平台本机 Toggle 自身就能 off。 */}
         {isOnAnyLocal && !((isMac && isOnLocalQwen3) || (isWin && isOnFoundry)) && (
-          <SettingRow
-            label={t('settings.advanced.disableLocalLabel')}
-            desc={t('settings.advanced.disableLocalDesc')}>
+          <SettingRow label={t('settings.advanced.disableLocalLabel')}>
             <div style={{ display: 'flex', justifyContent: 'flex-end', width: '100%' }}>
               <Btn
                 variant="primary"
@@ -251,11 +187,16 @@ export function AdvancedSection() {
             </div>
           </SettingRow>
         )}
-      </Card>
 
-      {/* 模型管理 UI（镜像源 / 模型列表 / 下载 / 删除 / 设为默认 / Foundry Local）
-          inline 渲染——「模型设置」独立页已删，这里是唯一入口。 */}
-      {platformSupported && <LocalAsr embedded />}
+        {/* 模型下载 / 加载（镜像源 · 模型列表 · 下载 · 删除 · 设为默认 · Foundry Local）
+            —— 跟上面的启动开关收进同一个框：「实验性千问 ASR」是一个整体。
+            一条分隔线把「启动开关」区与「模型管理」区分开。 */}
+        {platformSupported && (
+          <div style={{ marginTop: 16, borderTop: '0.5px solid var(--ol-line)', paddingTop: 16 }}>
+            <LocalAsr embedded />
+          </div>
+        )}
+      </Card>
     </>
   );
 }

@@ -26,17 +26,13 @@ export function ShortcutsSection() {
     );
   }
 
-  const desc = capability.requiresAccessibilityPermission
-    ? t('settings.shortcuts.descAcc')
-    : t('settings.shortcuts.descNoAcc');
   const readonlyRows: Array<[string, string]> = [
     [t('settings.shortcuts.cancel'), 'Esc'],
     [t('settings.shortcuts.confirm'), t('settings.shortcuts.confirmHint')],
   ];
   return (
     <Card>
-      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>{t('settings.shortcuts.title')}</div>
-      <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', marginBottom: 6 }}>{desc}</div>
+      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>{t('settings.shortcuts.title')}</div>
       <SettingRow label={t('settings.shortcuts.startStop')}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6, width: '100%' }}>
           <ShortcutRecorder

@@ -655,7 +655,7 @@ const contentStyle: CSSProperties = {
   flex: 1,
   minHeight: 0,
   overflow: 'auto',
-  padding: '14px 16px',
+  padding: 16,
   display: 'flex',
   flexDirection: 'column',
   gap: 12,
@@ -754,7 +754,7 @@ const statusBarStyle: CSSProperties = {
   display: 'flex',
   alignItems: 'center',
   gap: 8,
-  padding: '0 14px',
+  padding: '0 16px',
   borderTop: '0.5px solid rgba(0, 0, 0, 0.06)',
   background: 'rgba(255,255,255,0.4)',
 };

@@ -1,66 +1,35 @@
-// SettingsModal.tsx — centered sheet with sub-nav on the left.
+// SettingsModal.tsx — 居中弹窗，左侧单层侧栏。
 //
-// 设计原则：每个可见控件都必须可用。没有后端支撑的占位（账号 / 主题切换 / 启动项 /
-// 开机自启）已从此弹窗移除，避免 "看似可点实际无效" 的负面体感。
-// 待 backend 就位后再补回（参见 issue #69）。
+// 重构（2026-05）：原本是「外层弹窗侧栏 + 设置页内层侧栏」双层嵌套，用户点
+// 「设置」还要再面对第二个侧栏。现在拍平成单层 —— 通用 / 服务 / 隐私 / 高级 /
+// 个性化 / 关于 六个 tab + 帮助外链组。每个 tab 的内容见 pages/settings/。
+//
+// 设计原则：每个可见控件都必须可用。没有后端支撑的占位（账号 / 主题切换 等）
+// 不在此弹窗出现。
 
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
+import { useLayoutEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Icon } from './Icon';
-import { AboutUpdateControl, Settings as SettingsContent, Toggle, type SettingsSectionId } from '../pages/Settings';
-import { Row } from './ui/Row';
 import { SavedToast } from './SavedToast';
 import { useSavedToastListener } from '../lib/savedEvent';
-import { readFontScale, setFontScale, type FontScaleId } from '../lib/fontScale';
-import {
-  exportErrorLog,
-  fetchLatestBetaRelease,
-  getUpdateChannel,
-  openExternal,
-  setUpdateChannel,
-  type LatestBetaRelease,
-  type UpdateChannel,
-} from '../lib/ipc';
-import { APP_VERSION } from '../lib/appVersion';
-import { isDialogStatus, UpdateDialog, useAutoUpdate } from './AutoUpdate';
+import { openExternal } from '../lib/ipc';
 import type { OS } from './WindowChrome';
+import { GeneralTab, ServicesTab, PrivacyTab, AdvancedTab } from '../pages/settings/tabs';
+import { AboutSection } from '../pages/settings/AboutSection';
 
-// 把 Beta tag 名（如 "v1.3.4-1-beta-tauri" / "v1.3.2-3-beta-tauri"）解析回 semver 版本号
-// "1.3.4-1" / "1.3.2-3"。失败返回 null（让 UI fallback 到字符串相等比对）。
-function parseVersionFromBetaTag(tag: string): string | null {
-  const trimmed = tag.replace(/^v/, '').replace(/-beta-tauri$/, '');
-  return /^\d+\.\d+\.\d+(-\d+)?$/.test(trimmed) ? trimmed : null;
-}
-
-// 简化版 semver 比较 —— 只覆盖本仓库实际用到的两种形态：X.Y.Z 和 X.Y.Z-N。
-// 返回 true 表示 a > b。按 SemVer 规则：major→minor→patch→prerelease（none > some）。
-function semverGreater(a: string, b: string): boolean {
-  const parse = (v: string) => {
-    const [main, pre] = v.split('-');
-    const [major, minor, patch] = main.split('.').map(n => Number.parseInt(n, 10));
-    const preNum = pre === undefined ? null : Number.parseInt(pre, 10);
-    return { major, minor, patch, preNum };
-  };
-  const A = parse(a);
-  const B = parse(b);
-  if (A.major !== B.major) return A.major > B.major;
-  if (A.minor !== B.minor) return A.minor > B.minor;
-  if (A.patch !== B.patch) return A.patch > B.patch;
-  // pre: null（无 prerelease）> 任何 prerelease
-  if (A.preNum === B.preNum) return false;
-  if (A.preNum === null) return true;
-  if (B.preNum === null) return false;
-  return A.preNum > B.preNum;
-}
+// 稳定 tab ID（与 i18n key `modal.sections.*` 一致）。
+export type SettingsSectionId =
+  | 'general'
+  | 'services'
+  | 'privacy'
+  | 'advanced'
+  | 'about';
 
 interface SettingsModalProps {
   os: OS;
   onClose: () => void;
   initialSettingsSection?: SettingsSectionId;
 }
-
-// 稳定 ID（与 i18n key 一致，方便 modal.sections.* 渲染）。
-type ModalSectionId = 'settings' | 'personalize' | 'about';
 
 interface ModalNavItem {
   id: string;
@@ -69,39 +38,33 @@ interface ModalNavItem {
   href?: string;
 }
 
-interface ModalGroup {
-  items: ModalNavItem[];
-}
-
 const HELP_URL = 'https://github.com/appergb/openless#readme';
 const RELEASE_NOTES_URL = 'https://github.com/appergb/openless/releases';
 
+// 第一组：可选中的 tab；第二组：外部链接（永远不 active）。
+const TAB_ITEMS: ModalNavItem[] = [
+  { id: 'general', icon: 'settings' },
+  { id: 'services', icon: 'cloud' },
+  { id: 'privacy', icon: 'shield' },
+  { id: 'advanced', icon: 'bolt' },
+  { id: 'about', icon: 'info' },
+];
+const LINK_ITEMS: ModalNavItem[] = [
+  { id: 'helpCenter', icon: 'help', external: true, href: HELP_URL },
+  { id: 'releaseNotes', icon: 'doc', external: true, href: RELEASE_NOTES_URL },
+];
+
 export function SettingsModal({ os: _os, onClose, initialSettingsSection }: SettingsModalProps) {
   const { t } = useTranslation();
-  const [section, setSection] = useState<ModalSectionId>('settings');
+  const [section, setSection] = useState<SettingsSectionId>(initialSettingsSection ?? 'general');
   const savedToast = useSavedToastListener();
-  const groups: ModalGroup[] = [
-    {
-      items: [
-        { id: 'settings', icon: 'settings' },
-        { id: 'personalize', icon: 'sparkle' },
-        { id: 'about', icon: 'info' },
-      ],
-    },
-    {
-      items: [
-        { id: 'helpCenter', icon: 'help', external: true, href: HELP_URL },
-        { id: 'releaseNotes', icon: 'doc', external: true, href: RELEASE_NOTES_URL },
-      ],
-    },
-  ];
 
-  // 与 sidebar nav 一致的滑动指示器：仅第一组（可选中）有 pill；外链组永远不 active 不画 pill。
-  const firstGroupRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  // 与 sidebar nav 一致的滑动指示器：仅 tab 组有 pill；外链组永远不画 pill。
+  const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const [pillRect, setPillRect] = useState<{ top: number; height: number } | null>(null);
   useLayoutEffect(() => {
-    const idx = groups[0].items.findIndex(it => it.id === section);
-    const el = firstGroupRefs.current[idx];
+    const idx = TAB_ITEMS.findIndex(it => it.id === section);
+    const el = tabRefs.current[idx];
     if (!el) return;
     setPillRect({ top: el.offsetTop, height: el.offsetHeight });
   }, [section]);
@@ -117,7 +80,7 @@ export function SettingsModal({ os: _os, onClose, initialSettingsSection }: Sett
         display: 'flex', alignItems: 'center', justifyContent: 'center',
         padding: 28,
         zIndex: 50,
-        animation: 'ol-modal-fade .2s var(--ol-motion-soft)',
+        animation: 'ol-modal-backdrop-in 0.18s var(--ol-motion-soft)',
       }}>
 
       <div
@@ -129,11 +92,11 @@ export function SettingsModal({ os: _os, onClose, initialSettingsSection }: Sett
           border: '0.5px solid rgba(0,0,0,.08)',
           boxShadow: '0 30px 80px -20px rgba(15,17,22,.35), 0 0 0 0.5px rgba(0,0,0,.06)',
           display: 'flex', overflow: 'hidden',
-          animation: 'ol-modal-pop .28s var(--ol-motion-spring)',
+          animation: 'ol-modal-card-in 0.24s var(--ol-motion-spring)',
           position: 'relative',
         }}>
 
-        {/* sub-sidebar */}
+        {/* ─── 单层侧栏 ────────────────────────────────────────────── */}
         <aside
           style={{
             width: 200, flexShrink: 0,
@@ -143,70 +106,63 @@ export function SettingsModal({ os: _os, onClose, initialSettingsSection }: Sett
             display: 'flex', flexDirection: 'column', gap: 14,
           }}>
 
-          {groups.map((g, gi) => (
-            <div key={gi} style={{ position: 'relative', display: 'flex', flexDirection: 'column', gap: 1, paddingTop: gi === 1 ? 8 : 0, borderTop: gi === 1 ? '0.5px solid var(--ol-line-soft)' : 'none' }}>
-              {gi === 0 && pillRect && (
-                <div
-                  aria-hidden
-                  style={{
-                    position: 'absolute',
-                    left: 0,
-                    right: 0,
-                    top: pillRect.top,
-                    height: pillRect.height,
-                    background: '#fff',
-                    borderRadius: 8,
-                    boxShadow: '0 1px 2px rgba(0,0,0,.05), 0 0 0 0.5px rgba(0,0,0,.06)',
-                    transition: 'top 0.36s var(--ol-motion-spring), height 0.36s var(--ol-motion-spring)',
-                    pointerEvents: 'none',
-                    zIndex: 0,
-                  }}
-                />
-              )}
-              {g.items.map((it, idx) => {
-                const active = section === it.id && !it.external;
-                return (
-                  <button
-                    key={it.id}
-                    ref={gi === 0 ? (el => { firstGroupRefs.current[idx] = el; }) : undefined}
-                    onClick={() => {
-                      if (it.external && it.href) {
-                        void openExternal(it.href);
-                      } else {
-                        setSection(it.id as ModalSectionId);
-                      }
-                    }}
-                    className={active ? 'ol-nav-btn ol-nav-btn-active' : 'ol-nav-btn'}
-                    style={{
-                      display: 'flex', alignItems: 'center', gap: 10,
-                      padding: '7px 10px',
-                      borderRadius: 8, border: 0,
-                      background: 'transparent',
-                      fontFamily: 'inherit', fontSize: 13,
-                      cursor: 'default', textAlign: 'left',
-                      position: 'relative',
-                      zIndex: 1,
-                      transition: 'color 0.16s var(--ol-motion-quick), background 0.16s var(--ol-motion-quick)',
-                    }}>
+          {/* tab 组 */}
+          <div style={{ position: 'relative', display: 'flex', flexDirection: 'column', gap: 1 }}>
+            {pillRect && (
+              <div
+                aria-hidden
+                style={{
+                  position: 'absolute',
+                  left: 0,
+                  right: 0,
+                  top: pillRect.top,
+                  height: pillRect.height,
+                  background: '#fff',
+                  borderRadius: 8,
+                  boxShadow: '0 1px 2px rgba(0,0,0,.05), 0 0 0 0.5px rgba(0,0,0,.06)',
+                  transition: 'top 0.36s var(--ol-motion-spring), height 0.36s var(--ol-motion-spring)',
+                  pointerEvents: 'none',
+                  zIndex: 0,
+                }}
+              />
+            )}
+            {TAB_ITEMS.map((it, idx) => {
+              const active = section === it.id;
+              return (
+                <button
+                  key={it.id}
+                  ref={el => { tabRefs.current[idx] = el; }}
+                  onClick={() => setSection(it.id as SettingsSectionId)}
+                  className={active ? 'ol-nav-btn ol-nav-btn-active' : 'ol-nav-btn'}
+                  style={navBtnStyle}>
+                  <Icon name={it.icon} size={14} />
+                  <span style={{ flex: 1 }}>{t(`modal.sections.${it.id}`)}</span>
+                </button>
+              );
+            })}
+          </div>
 
-                    <Icon name={it.icon} size={14} />
-                    <span style={{ flex: 1 }}>{t(`modal.sections.${it.id}`)}</span>
-                    {it.external && <Icon name="external" size={11} />}
-                  </button>
-                );
-              })}
-            </div>
-          ))}
+          {/* 外链组 */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 1, paddingTop: 8, borderTop: '0.5px solid var(--ol-line-soft)' }}>
+            {LINK_ITEMS.map(it => (
+              <button
+                key={it.id}
+                onClick={() => { if (it.href) void openExternal(it.href); }}
+                className="ol-nav-btn"
+                style={navBtnStyle}>
+                <Icon name={it.icon} size={14} />
+                <span style={{ flex: 1 }}>{t(`modal.sections.${it.id}`)}</span>
+                <Icon name="external" size={11} />
+              </button>
+            ))}
+          </div>
         </aside>
 
-        {/* content — 父容器 overflow:hidden + 列向 flex；X 和 h2 固定在头部，
-            只有最里层的 scroll wrapper 真正滚动。这样模态左 sidebar、关闭按钮、
-            section 标题都不会跟着内容一起飘。 */}
+        {/* ─── 内容区 ──────────────────────────────────────────────
+            父容器 overflow:hidden + 列向 flex；关闭按钮、section 标题固定在头部，
+            只有最里层的 scroll wrapper 真正滚动。 */}
         <div style={{ flex: 1, minWidth: 0, overflow: 'hidden', position: 'relative', display: 'flex', flexDirection: 'column' }}>
-          {/* "已保存"toast 在内容区右上角；right:54 避开 28×28 关闭按钮 + 12px gap。
-              弹窗内用 absolute 锚内容区、从上方滑入 / 滑回 —— 外层 overflow:hidden
-              会把它裁在面板顶边，读感即"从屏幕外上方来、回上方去"。
-              CredentialField 等通过 emitSaved 发事件，useSavedToastListener 接收。 */}
+          {/* "已保存" toast：right:54 避开 28×28 关闭按钮 + 12px gap。 */}
           <SavedToast
             saveState={savedToast.state}
             message={savedToast.message}
@@ -226,373 +182,41 @@ export function SettingsModal({ os: _os, onClose, initialSettingsSection }: Sett
             onMouseEnter={e => (e.currentTarget.style.background = 'rgba(0,0,0,0.05)')}
             onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
             title={t('common.close')}>
-
             <Icon name="close" size={14} />
           </button>
 
-          <h2 style={{ margin: 0, padding: '22px 28px 8px', fontSize: 22, fontWeight: 600, letterSpacing: '-0.02em', flexShrink: 0 }}>{t(`modal.sections.${section}`)}</h2>
+          <h2 style={{ margin: 0, padding: '22px 28px 8px', fontSize: 22, fontWeight: 600, letterSpacing: '-0.02em', flexShrink: 0 }}>
+            {t(`modal.sections.${section}`)}
+          </h2>
 
-          {section === 'settings' ? (
-            // SettingsContent 自己接管 flex:1 + 内部右栏 scroll，外层不能再加 overflow:auto。
-            <div style={{ flex: 1, minHeight: 0, padding: '10px 28px 28px', display: 'flex', flexDirection: 'column' }}>
-              <SettingsContent embedded initialSection={initialSettingsSection} />
+          <div
+            className="ol-thinscroll"
+            style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '10px 28px 28px' }}>
+            {/* key=section 让切 tab 时整块重挂载，ol-tab-fade 轻微淡入。 */}
+            <div
+              key={section}
+              style={{ display: 'flex', flexDirection: 'column', gap: 12, animation: 'ol-tab-fade 0.2s var(--ol-motion-soft)' }}>
+              {section === 'general' && <GeneralTab />}
+              {section === 'services' && <ServicesTab />}
+              {section === 'privacy' && <PrivacyTab />}
+              {section === 'advanced' && <AdvancedTab />}
+              {section === 'about' && <AboutSection />}
             </div>
-          ) : (
-            // personalize / about 短内容：单一 scroll wrapper，超出时本块滚动。
-            <div className="ol-thinscroll" style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '10px 28px 28px' }}>
-              {section === 'personalize' && <PersonalizeSection />}
-              {section === 'about' && <AboutMini />}
-            </div>
-          )}
+          </div>
         </div>
       </div>
-
-      <style>{`
-        @keyframes ol-modal-fade {
-          from { opacity: 0; backdrop-filter: blur(0); -webkit-backdrop-filter: blur(0); }
-          to   { opacity: 1; backdrop-filter: blur(8px) saturate(140%); -webkit-backdrop-filter: blur(8px) saturate(140%); }
-        }
-        @keyframes ol-modal-pop {
-          from { opacity: 0; transform: translateY(8px) scale(.98); filter: blur(8px); }
-          to   { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
-        }
-      `}</style>
     </div>
   );
 }
 
-function PersonalizeSection() {
-  const { t } = useTranslation();
-  // 玻璃强度持久化到 localStorage，并实时写入 CSS var --ol-glass-blur。
-  // 这是 CSS-only 的层（影响 backdrop-filter 的内层强度）；macOS NSVisualEffectView
-  // 是另一层，由 Tauri 在窗口创建时一次性配置，运行时改动需要重启 App。
-  const [blur, setBlur] = useState<number>(() => {
-    const saved = window.localStorage.getItem('ol.glassBlur');
-    return saved ? Number(saved) : 22;
-  });
-
-  useEffect(() => {
-    document.documentElement.style.setProperty('--ol-glass-blur', `${blur}px`);
-    window.localStorage.setItem('ol.glassBlur', String(blur));
-  }, [blur]);
-
-  const [fontScale, setFontScaleState] = useState<FontScaleId>(() => readFontScale());
-  const applyFontScaleChoice = (next: FontScaleId) => {
-    setFontScaleState(next);
-    setFontScale(next);
-  };
-  const fontOptions: Array<[FontScaleId, string]> = [
-    ['small', t('modal.personalize.fontSmall')],
-    ['medium', t('modal.personalize.fontMedium')],
-    ['large', t('modal.personalize.fontLarge')],
-  ];
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <Row label={t('modal.personalize.font')} desc={t('modal.personalize.fontDesc')}>
-        <div style={{ display: 'flex', gap: 4, padding: 2, background: 'rgba(0,0,0,0.04)', borderRadius: 8 }}>
-          {fontOptions.map(([id, label]) => {
-            const selected = fontScale === id;
-            return (
-              <button
-                key={id}
-                onClick={() => applyFontScaleChoice(id)}
-                style={{
-                  minWidth: 64,
-                  height: 28,
-                  border: 0,
-                  borderRadius: 6,
-                  background: selected ? '#fff' : 'transparent',
-                  color: selected ? 'var(--ol-ink)' : 'var(--ol-ink-3)',
-                  fontFamily: 'inherit',
-                  fontSize: 12,
-                  fontWeight: selected ? 600 : 500,
-                  cursor: 'default',
-                  boxShadow: selected ? '0 1px 2px rgba(0,0,0,.06), 0 0 0 0.5px rgba(0,0,0,.06)' : 'none',
-                  transition: 'background 0.16s var(--ol-motion-quick), color 0.16s var(--ol-motion-quick), box-shadow 0.18s var(--ol-motion-soft)',
-                  padding: '0 12px',
-                }}
-              >
-                {label}
-              </button>
-            );
-          })}
-        </div>
-      </Row>
-      <Row label={t('modal.personalize.blur')} desc={t('modal.personalize.blurDesc')}>
-        <div style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
-          <input
-            type="range"
-            min="0"
-            max="48"
-            value={blur}
-            onChange={e => setBlur(Number(e.target.value))}
-            style={{ width: 200, accentColor: 'var(--ol-blue)' }}
-          />
-          <span style={{ fontSize: 12, fontFamily: 'var(--ol-font-mono)', color: 'var(--ol-ink-3)', minWidth: 36 }}>
-            {blur}px
-          </span>
-        </div>
-      </Row>
-    </div>
-  );
-}
-
-function AboutMini() {
-  const { t } = useTranslation();
-  const [qqCopied, setQqCopied] = useState(false);
-  const qqCopiedRef = useRef<number | null>(null);
-  const [exportStatus, setExportStatus] = useState<'idle' | 'busy' | 'ok' | 'err'>('idle');
-  const [exportMessage, setExportMessage] = useState<string>('');
-
-  useEffect(() => () => {
-    if (qqCopiedRef.current) clearTimeout(qqCopiedRef.current);
-  }, []);
-
-  const copyQq = () => {
-    navigator.clipboard?.writeText('1078960553');
-    setQqCopied(true);
-    if (qqCopiedRef.current) clearTimeout(qqCopiedRef.current);
-    qqCopiedRef.current = window.setTimeout(() => setQqCopied(false), 1500);
-  };
-
-  const onExportLog = async () => {
-    setExportStatus('busy');
-    setExportMessage('');
-    try {
-      const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-      const target = await exportErrorLog(`openless-${ts}.log`);
-      if (target == null) {
-        setExportStatus('idle');
-        return;
-      }
-      setExportStatus('ok');
-      setExportMessage(target);
-      window.setTimeout(() => setExportStatus('idle'), 4000);
-    } catch (err) {
-      setExportStatus('err');
-      setExportMessage(err instanceof Error ? err.message : String(err));
-    }
-  };
-
-  return (
-    <div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 16 }}>
-        <img src="AppIcon.png" alt="" style={{ width: 56, height: 56, borderRadius: 13, boxShadow: '0 4px 10px rgba(0,0,0,.10), 0 0 0 0.5px rgba(0,0,0,.06)' }} />
-        <div>
-          <div style={{ fontSize: 17, fontWeight: 600 }}>OpenLess</div>
-          <AboutUpdateControl tagline={t('modal.about.tagline')} />
-        </div>
-      </div>
-      <Row label={t('modal.about.source')}>
-        <button
-          style={btnGhost}
-          onClick={() => openExternal('https://github.com/appergb/openless')}
-        >
-          GitHub
-        </button>
-      </Row>
-      <Row label={t('modal.about.docs')}>
-        <button
-          style={btnGhost}
-          onClick={() => openExternal('https://github.com/appergb/openless#readme')}
-        >
-          {t('modal.about.docsBtn')}
-        </button>
-      </Row>
-      <Row label={t('modal.about.feedback')}>
-        <button
-          style={btnGhost}
-          onClick={() => openExternal('https://github.com/appergb/openless/issues')}
-        >
-          {t('modal.about.feedbackBtn')}
-        </button>
-      </Row>
-      <Row label={t('modal.about.qq')} desc={t('modal.about.qqDesc')}>
-        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-          <kbd style={{
-            padding: '4px 10px', fontSize: 12, fontFamily: 'var(--ol-font-mono)',
-            borderRadius: 6, background: 'var(--ol-surface-2)',
-            border: '0.5px solid var(--ol-line-strong)',
-            boxShadow: '0 1px 0 rgba(0,0,0,0.04)',
-            color: 'var(--ol-ink-2)',
-          }}>1078960553</kbd>
-          <button onClick={copyQq} title={t('modal.about.copyQq')} style={btnGhost}>
-            <Icon name="copy" size={14} />
-          </button>
-          {qqCopied && <span style={{ fontSize: 11, color: 'var(--ol-ok)', whiteSpace: 'nowrap' }}>{t('common.copied')}</span>}
-        </div>
-      </Row>
-      <Row label={t('modal.about.exportErrorLog')} desc={t('modal.about.exportErrorLogDesc')}>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          <button style={btnGhost} onClick={onExportLog} disabled={exportStatus === 'busy'}>
-            {exportStatus === 'busy' ? t('modal.about.exporting') : t('modal.about.exportErrorLogBtn')}
-          </button>
-          {exportStatus === 'ok' && (
-            <span style={{ fontSize: 11, color: 'var(--ol-ok)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 220 }}
-                  title={exportMessage}>
-              {t('modal.about.exportSuccess')}
-            </span>
-          )}
-          {exportStatus === 'err' && (
-            <span style={{ fontSize: 11, color: 'var(--ol-err)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 220 }}
-                  title={exportMessage}>
-              {t('modal.about.exportFailed')}
-            </span>
-          )}
-        </div>
-      </Row>
-      <Row label={t('modal.about.privacy')} desc={t('modal.about.privacyDesc')}>
-        <span style={{ fontSize: 11, padding: '3px 8px', borderRadius: 999, background: 'var(--ol-blue-soft)', color: 'var(--ol-blue)', fontWeight: 500 }}>{t('modal.about.localFirst')}</span>
-      </Row>
-      <BetaChannelControl />
-    </div>
-  );
-}
-
-// Beta 渠道开关：物理隔离的 opt-in，**已接 auto-update**（PR feat/beta-auto-update）。
-// - 关闭 = Stable 渠道，「检查更新」走 tauri.conf 默认 endpoints
-// - 打开 = 写 prefs.update_channel = 'beta'；Rust 端 app_check_update_with_channel
-//   命令会自动拉最新 prerelease tag 拼成 -beta manifest URL，再走 plugin-updater
-//   的 check/download/install 标准流程
-// - 这里拉一次 fetch_latest_beta_release 仅用于「告诉用户最新 Beta 是哪个版本」做
-//   信息透明；不再渲染手动下载按钮（auto-update 接管了那条路）。
-// 不在 Beta 渠道时不发起 GitHub API 请求，避免空切换浪费配额。
-function BetaChannelControl() {
-  const { t } = useTranslation();
-  const [channel, setChannel] = useState<UpdateChannel>('stable');
-  const [latest, setLatest] = useState<LatestBetaRelease | null>(null);
-  const [status, setStatus] = useState<'idle' | 'fetching' | 'empty' | 'error'>('idle');
-  const [errorMessage, setErrorMessage] = useState<string>('');
-  const updater = useAutoUpdate();
-
-  // 本机 vs 最新 Beta tag 比对：
-  // - 'unknown'  → 还没拿到 latest 或解析失败，按"未知"渲染
-  // - 'up-to-date' → 本机版本 >= 远端最新 Beta，按"已是最新"渲染、隐藏更新按钮
-  // - 'newer'    → 远端有更新版本，渲染「立即更新」按钮触发 auto-update 流程
-  const remoteVersion = latest ? parseVersionFromBetaTag(latest.tagName) : null;
-  const comparison: 'unknown' | 'up-to-date' | 'newer' = !remoteVersion
-    ? 'unknown'
-    : semverGreater(remoteVersion, APP_VERSION)
-      ? 'newer'
-      : 'up-to-date';
-
-  useEffect(() => {
-    let cancelled = false;
-    void getUpdateChannel()
-      .then(c => { if (!cancelled) setChannel(c); })
-      .catch(() => { /* fall back to stable already in initial state */ });
-    return () => { cancelled = true; };
-  }, []);
-
-  const fetchBeta = async () => {
-    setStatus('fetching');
-    setErrorMessage('');
-    try {
-      const info = await fetchLatestBetaRelease();
-      if (info == null) {
-        setLatest(null);
-        setStatus('empty');
-      } else {
-        setLatest(info);
-        setStatus('idle');
-      }
-    } catch (err) {
-      setStatus('error');
-      setErrorMessage(err instanceof Error ? err.message : String(err));
-    }
-  };
-
-  const onToggle = async (next: boolean) => {
-    const target: UpdateChannel = next ? 'beta' : 'stable';
-    setChannel(target);
-    try {
-      await setUpdateChannel(target);
-    } catch (err) {
-      setStatus('error');
-      setErrorMessage(err instanceof Error ? err.message : String(err));
-      // 写入失败时回滚 UI，免得用户以为切成功了。
-      setChannel(target === 'beta' ? 'stable' : 'beta');
-      return;
-    }
-    if (target === 'beta') {
-      void fetchBeta();
-    } else {
-      setLatest(null);
-      setStatus('idle');
-      setErrorMessage('');
-    }
-  };
-
-  return (
-    <>
-      <Row label={t('settings.about.betaChannelLabel')} desc={t('settings.about.betaChannelDesc')}>
-        <Toggle on={channel === 'beta'} onToggle={onToggle} />
-      </Row>
-      {channel === 'beta' && (
-        <div style={{ fontSize: 11, color: 'var(--ol-ink-3)', marginTop: -4, marginBottom: 12, lineHeight: 1.6 }}>
-          {status === 'fetching' && <span>{t('settings.about.betaChannelFetching')}</span>}
-          {status === 'empty' && <span>{t('settings.about.betaChannelNoBeta')}</span>}
-          {status === 'error' && (
-            <span style={{ color: 'var(--ol-err)' }} title={errorMessage}>
-              {t('settings.about.betaChannelFetchError')}
-            </span>
-          )}
-          {status === 'idle' && latest && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-              <span>
-                {t('settings.about.betaChannelLatestPrefix')} <code style={{ fontFamily: 'var(--ol-font-mono)' }}>{latest.tagName}</code>
-              </span>
-              {comparison === 'up-to-date' && (
-                <span style={{
-                  fontSize: 11, padding: '2px 8px', borderRadius: 999,
-                  background: 'var(--ol-blue-soft)', color: 'var(--ol-blue)', fontWeight: 500,
-                }}>{t('settings.about.betaChannelUpToDate')}</span>
-              )}
-              {comparison === 'newer' && (
-                <button
-                  style={{ ...btnGhost, borderColor: 'var(--ol-blue)', color: 'var(--ol-blue)' }}
-                  onClick={() => void updater.checkForUpdates()}
-                  disabled={updater.checking || updater.busy}
-                  title={t('settings.about.betaChannelUpdateNowTitle')}
-                >
-                  {updater.checking
-                    ? t('settings.about.betaChannelChecking')
-                    : t('settings.about.betaChannelUpdateNow')}
-                </button>
-              )}
-              <button style={btnGhost} onClick={fetchBeta} title={t('settings.about.betaChannelRefresh')}>
-                <Icon name="refresh" size={12} />
-              </button>
-            </div>
-          )}
-          {status === 'idle' && !latest && (
-            <button style={btnGhost} onClick={fetchBeta}>
-              {t('settings.about.betaChannelFetchBtn')}
-            </button>
-          )}
-        </div>
-      )}
-      {isDialogStatus(updater.status) && (
-        <UpdateDialog
-          status={updater.status}
-          version={updater.version}
-          progress={updater.progress}
-          downloaded={updater.downloaded}
-          contentLength={updater.contentLength}
-          onInstall={() => void updater.installUpdate()}
-          onClose={() => void updater.dismissDialog()}
-        />
-      )}
-    </>
-  );
-}
-
-const btnGhost: CSSProperties = {
-  padding: '5px 10px', fontSize: 12, borderRadius: 6,
-  border: '0.5px solid var(--ol-line-strong)',
-  background: '#fff', color: 'var(--ol-ink-2)',
-  cursor: 'default', fontFamily: 'inherit',
-  transition: 'background 0.16s var(--ol-motion-quick), border-color 0.16s var(--ol-motion-quick)',
+const navBtnStyle = {
+  display: 'flex', alignItems: 'center', gap: 10,
+  padding: '7px 10px',
+  borderRadius: 8, border: 0,
+  background: 'transparent',
+  fontFamily: 'inherit', fontSize: 13,
+  cursor: 'default', textAlign: 'left' as const,
+  position: 'relative' as const,
+  zIndex: 1,
+  transition: 'color 0.16s var(--ol-motion-quick), background 0.16s var(--ol-motion-quick)',
 };
-
