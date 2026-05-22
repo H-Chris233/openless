@@ -197,8 +197,11 @@ export function ProvidersSection() {
     setLlmProvider(id);
     const seq = ++llmSwitchSeqRef.current;
     emitSaved('saving', t('common.saving'));
+    // 后端 active.llm 是否已切到 id —— 决定失败时下拉框该回滚到哪。
+    let backendSwitched = false;
     try {
       await setActiveLlmProvider(id);
+      backendSwitched = true;
       if (seq !== llmSwitchSeqRef.current) return;
       if (prefs) {
         const next = { ...prefs, activeLlmProvider: id };
@@ -228,9 +231,12 @@ export function ProvidersSection() {
       // newer call 的 emitSaved('saving') 覆盖，不要插手。
       if (seq === llmSwitchSeqRef.current) {
         emitSaved('failed', t('common.operationFailed'));
-        // 后端切换失败 → 下拉框退回真实生效的 committed provider，免得 UI 停在
-        // 新选项、实际 provider 仍是旧的，造成显示与后端不一致。
-        setLlmProvider(committedLlmProvider);
+        // 仅当后端切换本身没成（active.llm 仍是旧的）才回滚下拉框 —— 回到 committed
+        // 与后端一致。若后端已切到 id、只是后续 prefs / 凭据写入失败，回滚反而让下拉
+        // 显示旧、后端是新；此时保持下拉在 id 与后端一致更不误导。
+        if (!backendSwitched) {
+          setLlmProvider(committedLlmProvider);
+        }
       }
       // 不再 rethrow：本 handler 作为 SelectLite onChange 是即发即忘调用，
       // rethrow 会变成未处理的 promise rejection。错误已 emitSaved + 记日志。
@@ -250,8 +256,10 @@ export function ProvidersSection() {
     setAsrProvider(id);
     const seq = ++asrSwitchSeqRef.current;
     emitSaved('saving', t('common.saving'));
+    let backendSwitched = false;
     try {
       await setActiveAsrProvider(id);
+      backendSwitched = true;
       if (seq !== asrSwitchSeqRef.current) return;
       if (prefs) {
         const next = { ...prefs, activeAsrProvider: id };
@@ -284,7 +292,10 @@ export function ProvidersSection() {
       // seq 守卫 + 回滚 + 不 rethrow，同 onLlmProviderChange。
       if (seq === asrSwitchSeqRef.current) {
         emitSaved('failed', t('common.operationFailed'));
-        setAsrProvider(committedAsrProvider);
+        // 同 onLlmProviderChange：仅后端没切成时才回滚下拉框，与后端保持一致。
+        if (!backendSwitched) {
+          setAsrProvider(committedAsrProvider);
+        }
       }
       console.error('[settings] switch ASR provider failed', err);
     }
