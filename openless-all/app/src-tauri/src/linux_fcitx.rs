@@ -475,14 +475,27 @@ pub fn ensure_plugin_installed(app: &tauri::AppHandle) {
 
 #[cfg(target_os = "linux")]
 fn is_plugin_installed_on_disk() -> bool {
-    let system_so_paths = [
-        "/usr/lib/x86_64-linux-gnu/fcitx5/libopenless.so",
-        "/usr/lib64/fcitx5/libopenless.so",
-        "/usr/local/lib/fcitx5/libopenless.so",
-        "/usr/lib/fcitx5/libopenless.so",
+    // 同时检查 .so 和 .conf：孤立的 .so 没有 addon 配置 fcitx5 也不会加载。
+    let pairs: &[(&str, &str)] = &[
+        (
+            "/usr/lib/x86_64-linux-gnu/fcitx5/libopenless.so",
+            "/usr/share/fcitx5/addon/openless.conf",
+        ),
+        (
+            "/usr/lib64/fcitx5/libopenless.so",
+            "/usr/share/fcitx5/addon/openless.conf",
+        ),
+        (
+            "/usr/local/lib/fcitx5/libopenless.so",
+            "/usr/local/share/fcitx5/addon/openless.conf",
+        ),
+        (
+            "/usr/lib/fcitx5/libopenless.so",
+            "/usr/share/fcitx5/addon/openless.conf",
+        ),
     ];
-    for path in &system_so_paths {
-        if std::path::Path::new(path).exists() {
+    for (so, conf) in pairs {
+        if std::path::Path::new(so).exists() && std::path::Path::new(conf).exists() {
             return true;
         }
     }
@@ -490,7 +503,9 @@ fn is_plugin_installed_on_disk() -> bool {
     if let Ok(home) = std::env::var("HOME") {
         let user_so = std::path::PathBuf::from(&home)
             .join(".local").join("lib").join("fcitx5").join("libopenless.so");
-        if user_so.exists() {
+        let user_conf = std::path::PathBuf::from(&home)
+            .join(".local").join("share").join("fcitx5").join("addon").join("openless.conf");
+        if user_so.exists() && user_conf.exists() {
             return true;
         }
     }

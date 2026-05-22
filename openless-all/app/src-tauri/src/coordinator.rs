@@ -4585,9 +4585,14 @@ fn emit_capsule(
             match aux {
                 Some(t) => {
                     log::info!("[capsule] set_aux_down: {t}");
-                    if let Err(e) = crate::linux_fcitx::set_aux_down(t) {
-                        log::warn!("[capsule] set_aux_down failed: {e}");
-                    }
+                    // 把 DBus I/O 移到独立线程：emit_capsule 会被音频回调线程
+                    // (cpal) 调用，同步阻塞可能导致录音卡顿或可闻杂音。
+                    let text = t.to_string();
+                    std::thread::spawn(move || {
+                        if let Err(e) = crate::linux_fcitx::set_aux_down(&text) {
+                            log::warn!("[capsule] set_aux_down failed: {e}");
+                        }
+                    });
                     // 首次设置（从 None 转为有值）时，fcitx5 可能还在处理触发
                     // 快捷键的按键事件（press/release），这些事件可能覆盖 auxDown。
                     // 延迟 300ms 重设一次确保状态不被竞态覆盖。
@@ -4610,9 +4615,12 @@ fn emit_capsule(
                 }
                 None => {
                     log::info!("[capsule] clear_aux_down");
-                    if let Err(e) = crate::linux_fcitx::clear_aux_down() {
-                        log::warn!("[capsule] clear_aux_down failed: {e}");
-                    }
+                    // 同样从音频线程挪走，避免阻塞。
+                    std::thread::spawn(|| {
+                        if let Err(e) = crate::linux_fcitx::clear_aux_down() {
+                            log::warn!("[capsule] clear_aux_down failed: {e}");
+                        }
+                    });
                 }
             }
         }
