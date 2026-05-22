@@ -17,10 +17,10 @@ import { AnimatePresence, motion } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
 import { Icon } from '../components/Icon';
 import { SavedToast } from '../components/SavedToast';
+import { GithubLoginModal } from '../components/GithubLoginModal';
+import { Modal } from '../components/ui/Modal';
 import {
   fetchMarketplaceDetail,
-  githubDeviceFlowPoll,
-  githubDeviceFlowStart,
   installMarketplacePack,
   likeMarketplacePack,
   listMarketplace,
@@ -28,7 +28,6 @@ import {
   marketplaceDelete,
   marketplaceMyLikes,
   marketplaceMyPacks,
-  openExternal,
   readMarketplaceDetailCache,
   readMarketplaceListCache,
   uploadMarketplacePack,
@@ -75,15 +74,8 @@ export function Marketplace() {
   // 失败后只弹 toast，没有 inline 重试入口。
   const [myPacksLoading, setMyPacksLoading] = useState(false);
   const [myPacksError, setMyPacksError] = useState<string | null>(null);
-  // GitHub OAuth Device Flow 状态。点登录 chip → 'starting' → 'pending'（展示 user_code 等待
-  // 用户在浏览器授权）→ 'success'（自动保存 marketplaceDevLogin）/ 'error'。
-  type OAuthPhase =
-    | { phase: 'idle' }
-    | { phase: 'starting' }
-    | { phase: 'pending'; userCode: string; verificationUri: string; deviceCode: string }
-    | { phase: 'success'; login: string }
-    | { phase: 'error'; message: string };
-  const [oauth, setOauth] = useState<OAuthPhase>({ phase: 'idle' });
+  // GitHub 登录弹窗开关 —— 登录流程交给共用的 <GithubLoginModal />。
+  const [showLogin, setShowLogin] = useState(false);
   // 当前用户赞过的 pack id 集合 —— 用于红心渲染 + 「我赞过的」过滤。
   // 进入 marketplace 时拉一次；点星后本地 mutate。
   const [likedIds, setLikedIds] = useState<Set<string>>(new Set());
@@ -402,67 +394,14 @@ export function Marketplace() {
     }
   };
 
-  // GitHub OAuth Device Flow 入口：点登录 chip 触发。
-  const beginGithubLogin = useCallback(async () => {
-    setOauth({ phase: 'starting' });
-    try {
-      const start = await githubDeviceFlowStart();
-      setOauth({
-        phase: 'pending',
-        userCode: start.userCode,
-        verificationUri: start.verificationUri,
-        deviceCode: start.deviceCode,
-      });
-      // 自动拉起浏览器到 verification_uri；失败不致命，用户可以手动复制点击
-      try { await openExternal(start.verificationUri); } catch { /* user can copy manually */ }
-    } catch (error) {
-      setOauth({ phase: 'error', message: errorMessage(error) });
-    }
-  }, []);
-
-  // OAuth 轮询：phase==='pending' 时每 interval 秒打 backend → GitHub 一次。
-  useEffect(() => {
-    if (oauth.phase !== 'pending') return;
-    let cancelled = false;
-    let timer: number | null = null;
-    let interval = 5_000;
-    const pendingDeviceCode = oauth.deviceCode;
-    const tick = async () => {
-      if (cancelled) return;
-      try {
-        const res = await githubDeviceFlowPoll(pendingDeviceCode);
-        if (cancelled) return;
-        if (res.kind === 'authorized') {
-          setOauth({ phase: 'success', login: res.login });
-          // 写入 prefs.marketplaceDevLogin，让后续 X-Dev-User 走真实 GitHub login。
-          try {
-            await updatePrefs(current => ({ ...current, marketplaceDevLogin: res.login }));
-          } catch (e) {
-            console.warn('[oauth] save login to prefs failed', e);
-          }
-          setActionMsg({ kind: 'ok', text: t('marketplace.oauth.successAs', { login: res.login }) });
-          window.setTimeout(() => {
-            if (!cancelled) setOauth({ phase: 'idle' });
-          }, 1500);
-        } else if (res.kind === 'slowDown') {
-          interval = Math.min(interval + 5_000, 30_000);
-          timer = window.setTimeout(tick, interval);
-        } else if (res.kind === 'pending') {
-          timer = window.setTimeout(tick, interval);
-        } else {
-          setOauth({ phase: 'error', message: res.message });
-        }
-      } catch (error) {
-        if (cancelled) return;
-        setOauth({ phase: 'error', message: errorMessage(error) });
-      }
-    };
-    timer = window.setTimeout(tick, interval);
-    return () => {
-      cancelled = true;
-      if (timer != null) window.clearTimeout(timer);
-    };
-  }, [oauth, updatePrefs]);
+  // GitHub 登录成功 → 写回 prefs.marketplaceDevLogin，让后续 X-Dev-User 走真实身份。
+  const onLoginSuccess = useCallback((nextLogin: string) => {
+    // prefs 写入失败只 console 记一笔（与重构前的 OAuth 轮询一致）—— 不能裸 void，
+    // 否则 reject 会冒成未处理的 promise rejection。
+    void updatePrefs(current => ({ ...current, marketplaceDevLogin: nextLogin }))
+      .catch(e => console.warn('[marketplace] save login to prefs failed', e));
+    setActionMsg({ kind: 'ok', text: t('marketplace.oauth.successAs', { login: nextLogin }) });
+  }, [updatePrefs, t]);
 
   const sortPills = useMemo<Array<{ id: SortMode; label: string }>>(
     () => [
@@ -901,8 +840,7 @@ export function Marketplace() {
             <button
               type="button"
               title={currentLogin ? t('marketplace.oauth.reloginTooltip', { login: currentLogin }) : t('marketplace.oauth.loginTooltip')}
-              onClick={() => void beginGithubLogin()}
-              disabled={oauth.phase === 'starting' || oauth.phase === 'pending'}
+              onClick={() => setShowLogin(true)}
               style={{
                 display: 'inline-flex', alignItems: 'center', gap: 6,
                 padding: '5px 10px', borderRadius: 9,
@@ -910,9 +848,8 @@ export function Marketplace() {
                 background: currentLogin ? 'var(--ol-blue-soft)' : 'var(--ol-surface)',
                 color: currentLogin ? 'var(--ol-blue)' : 'var(--ol-ink-3)',
                 fontSize: 12, fontWeight: 650,
-                cursor: (oauth.phase === 'starting' || oauth.phase === 'pending') ? 'wait' : 'pointer',
+                cursor: 'pointer',
                 whiteSpace: 'nowrap',
-                opacity: (oauth.phase === 'starting' || oauth.phase === 'pending') ? 0.6 : 1,
               }}
             >
               <span style={{
@@ -1070,191 +1007,13 @@ export function Marketplace() {
         </Modal>
       )}
 
-      {/* GitHub OAuth Device Flow 弹框（叠在「我的发布」之上）*/}
-      {oauth.phase !== 'idle' && (
-        <Modal onClose={() => {
-          // 关闭即放弃；正在 pending 也允许取消
-          setOauth({ phase: 'idle' });
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14, gap: 12 }}>
-            <h2 style={{ margin: 0, fontSize: 16, fontWeight: 650 }}>{t('marketplace.oauth.title')}</h2>
-            <button
-              type="button"
-              aria-label={t('common.close')}
-              title={t('common.close')}
-              onClick={() => setOauth({ phase: 'idle' })}
-              style={{
-                width: 28, height: 28, borderRadius: 8,
-                display: 'inline-grid', placeItems: 'center',
-                border: '0.5px solid var(--ol-line-strong)',
-                background: 'var(--ol-surface)',
-                color: 'var(--ol-ink-2)',
-                cursor: 'pointer',
-                fontSize: 16, lineHeight: 1,
-              }}
-            >×</button>
-          </div>
-
-          {oauth.phase === 'starting' && (
-            <div style={{ padding: '24px 8px', textAlign: 'center', color: 'var(--ol-ink-3)', fontSize: 13 }}>
-              {t('marketplace.oauth.generating')}
-            </div>
-          )}
-
-          {oauth.phase === 'pending' && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-              <div style={{ fontSize: 13, color: 'var(--ol-ink-2)', lineHeight: 1.6 }}>
-                {(() => {
-                  const parts = t('marketplace.oauth.browserHint', { uri: ' URI ' }).split(' URI ');
-                  return (
-                    <>
-                      {parts[0]}
-                      <span style={{ fontFamily: 'var(--ol-font-mono)', fontSize: 12, padding: '1px 5px', background: 'var(--ol-surface-2)', borderRadius: 4 }}>{oauth.verificationUri}</span>
-                      {parts[1] ?? ''}
-                    </>
-                  );
-                })()}
-              </div>
-              <div style={{
-                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12,
-                padding: 18, borderRadius: 12,
-                border: '0.5px solid var(--ol-line-strong)',
-                background: 'var(--ol-surface-2)',
-              }}>
-                <span style={{
-                  fontFamily: 'var(--ol-font-mono)',
-                  fontSize: 22, fontWeight: 700,
-                  letterSpacing: 2,
-                  color: 'var(--ol-blue)',
-                }}>{oauth.userCode}</span>
-                <Btn
-                  variant="ghost"
-                  size="sm"
-                  onClick={async () => {
-                    try {
-                      await navigator.clipboard.writeText(oauth.userCode);
-                      setActionMsg({ kind: 'ok', text: t('marketplace.oauth.copied') });
-                    } catch (e) {
-                      setActionMsg({ kind: 'err', text: t('marketplace.oauth.copyFailed', { err: errorMessage(e) }) });
-                    }
-                  }}
-                >
-                  {t('marketplace.oauth.copyBtn')}
-                </Btn>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-                <Btn variant="ghost" size="sm" onClick={() => void openExternal(oauth.verificationUri)}>
-                  {t('marketplace.oauth.openBrowserBtn')}
-                </Btn>
-                <Btn variant="ghost" size="sm" onClick={() => setOauth({ phase: 'idle' })}>
-                  {t('marketplace.oauth.cancelBtn')}
-                </Btn>
-              </div>
-              <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', textAlign: 'center', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
-                <span style={{
-                  display: 'inline-block', width: 8, height: 8, borderRadius: 999,
-                  background: 'var(--ol-blue)', animation: 'ol-pulse 1.4s ease-in-out infinite',
-                }} />
-                {t('marketplace.oauth.waiting')}
-              </div>
-              <style>{`
-                @keyframes ol-pulse {
-                  0%, 100% { opacity: 0.3; }
-                  50% { opacity: 1; }
-                }
-              `}</style>
-            </div>
-          )}
-
-          {oauth.phase === 'success' && (
-            <div style={{ padding: '24px 8px', textAlign: 'center' }}>
-              <div style={{ fontSize: 24, color: 'var(--ol-blue)', marginBottom: 8 }}>✓</div>
-              <div style={{ fontSize: 14, fontWeight: 650, color: 'var(--ol-ink)' }}>{t('marketplace.oauth.successAs', { login: oauth.login })}</div>
-            </div>
-          )}
-
-          {oauth.phase === 'error' && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-              <div style={{
-                padding: 12, borderRadius: 10,
-                border: '0.5px solid rgba(239,68,68,0.3)',
-                background: 'rgba(239,68,68,0.06)',
-                color: '#b91c1c',
-                fontSize: 12, lineHeight: 1.6,
-                whiteSpace: 'pre-wrap',
-              }}>
-                {oauth.message}
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-                <Btn variant="ghost" size="sm" onClick={() => setOauth({ phase: 'idle' })}>{t('marketplace.oauth.closeBtn')}</Btn>
-                <Btn variant="blue" size="sm" onClick={() => void beginGithubLogin()}>{t('marketplace.oauth.retryBtn')}</Btn>
-              </div>
-            </div>
-          )}
-        </Modal>
+      {/* GitHub 登录弹窗 */}
+      {showLogin && (
+        <GithubLoginModal
+          onClose={() => setShowLogin(false)}
+          onSuccess={onLoginSuccess}
+        />
       )}
-    </div>
-  );
-}
-
-function Modal({
-  children,
-  onClose,
-  zIndex = 50,
-}: {
-  children: React.ReactNode;
-  onClose: () => void;
-  /** 默认 50；多层叠加时（如上传 picker 在「我的发布」之上）传更大的值。*/
-  zIndex?: number;
-}) {
-  return (
-    <div
-      className="ol-modal-backdrop"
-      onClick={onClose}
-      style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'rgba(0,0,0,0.22)',
-        display: 'grid',
-        placeItems: 'center',
-        zIndex,
-        padding: 20,
-      }}
-    >
-      <div
-        className="ol-modal-card"
-        onClick={e => e.stopPropagation()}
-        style={{
-          width: 'min(560px, 100%)',
-          maxHeight: '85vh',
-          overflow: 'auto',
-          borderRadius: 16,
-          background: 'var(--ol-surface)',
-          border: '0.5px solid var(--ol-line-strong)',
-          boxShadow: '0 18px 42px rgba(0,0,0,0.18)',
-          padding: 22,
-        }}
-      >
-        {children}
-      </div>
-      <style>{`
-        @keyframes ol-modal-backdrop-in {
-          from { opacity: 0; }
-          to   { opacity: 1; }
-        }
-        @keyframes ol-modal-card-in {
-          from { opacity: 0; transform: scale(.96) translateY(4px); }
-          to   { opacity: 1; transform: scale(1) translateY(0); }
-        }
-        .ol-modal-backdrop {
-          animation: ol-modal-backdrop-in .14s ease-out;
-          will-change: opacity;
-        }
-        .ol-modal-card {
-          animation: ol-modal-card-in .18s cubic-bezier(.34,1.56,.64,1);
-          will-change: transform, opacity;
-        }
-      `}</style>
     </div>
   );
 }

@@ -46,9 +46,8 @@ export function LanguageSection() {
 
   return (
     <Card>
-      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>{t('settings.language.title')}</div>
-      <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', marginBottom: 6 }}>{t('settings.language.desc')}</div>
-      <SettingRow label={t('settings.language.label')} desc={t('settings.language.labelDesc')}>
+      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>{t('settings.language.title')}</div>
+      <SettingRow label={t('settings.language.label')}>
         <SelectLite
           value={pref}
           onChange={next => apply(next as SupportedLocale | typeof FOLLOW_SYSTEM)}
@@ -57,9 +56,6 @@ export function LanguageSection() {
           style={{ maxWidth: 220, minWidth: 200 }}
         />
       </SettingRow>
-      <div style={{ fontSize: 11, color: 'var(--ol-ink-4)', marginTop: 8, lineHeight: 1.6 }}>
-        {t('settings.language.restartHint')}
-      </div>
     </Card>
   );
 }

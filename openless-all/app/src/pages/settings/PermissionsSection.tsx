@@ -16,13 +16,11 @@ import {
 } from '../../lib/ipc';
 import type { NetworkCheckResult } from '../../lib/ipc';
 import type {
-  HotkeyCapability,
   HotkeyStatus,
   PermissionStatus,
   WindowsImeStatus,
 } from '../../lib/types';
 import { useHotkeySettings } from '../../state/HotkeySettingsContext';
-import i18n from '../../i18n';
 import { Btn, Card, Pill } from '../_atoms';
 import { SettingRow } from './shared';
 
@@ -103,17 +101,10 @@ export function PermissionsSection() {
     refreshPermissions();
   };
 
-  const desc = capability?.requiresAccessibilityPermission
-    ? t('settings.permissions.descAcc')
-    : t('settings.permissions.descNoAcc');
-
   return (
     <Card>
-      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>{t('settings.permissions.title')}</div>
-      <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', marginBottom: 6 }}>
-        {desc}
-      </div>
-      <SettingRow label={t('settings.permissions.micLabel')} desc={t('settings.permissions.micDesc')}>
+      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>{t('settings.permissions.title')}</div>
+      <SettingRow label={t('settings.permissions.micLabel')}>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'flex-end', width: '100%' }}>
           <PermissionPill status={microphone} />
           {microphone !== 'granted' && microphone !== 'notApplicable' && microphone !== 'loading' && (
@@ -124,8 +115,8 @@ export function PermissionsSection() {
         </div>
       </SettingRow>
       {capability?.requiresAccessibilityPermission && (
-        <SettingRow label={t('settings.permissions.accLabel')} desc={t('settings.permissions.accDesc')}>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+        <SettingRow label={t('settings.permissions.accLabel')}>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'flex-end', width: '100%' }}>
             <PermissionPill status={accessibility} />
             {accessibility !== 'granted' && accessibility !== 'notApplicable' && (
               <Btn variant="ghost" size="sm" onClick={reRequestAccessibility}>
@@ -135,10 +126,7 @@ export function PermissionsSection() {
           </div>
         </SettingRow>
       )}
-      <SettingRow
-        label={t('settings.permissions.hotkeyLabel')}
-        desc={capability ? t('settings.permissions.hotkeyDescWithAdapter', { adapter: adapterDisplayName(capability.adapter) }) : t('settings.permissions.hotkeyDescPlain')}
-      >
+      <SettingRow label={t('settings.permissions.hotkeyLabel')}>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', minWidth: 0, justifyContent: 'flex-end', width: '100%' }}>
           {hotkey?.message && (
             <span style={{
@@ -153,10 +141,7 @@ export function PermissionsSection() {
         </div>
       </SettingRow>
       {windowsIme?.state !== 'notWindows' && (
-        <SettingRow
-          label={t('settings.permissions.windowsImeLabel')}
-          desc={t('settings.permissions.windowsImeDesc')}
-        >
+        <SettingRow label={t('settings.permissions.windowsImeLabel')}>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', minWidth: 0, justifyContent: 'flex-end', width: '100%' }}>
             {windowsIme && (
               <span style={{
@@ -171,7 +156,7 @@ export function PermissionsSection() {
           </div>
         </SettingRow>
       )}
-      <SettingRow label={t('settings.permissions.networkLabel')} desc={t('settings.permissions.networkDesc')}>
+      <SettingRow label={t('settings.permissions.networkLabel')}>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'flex-end', width: '100%' }}>
           {network && network.latencyMs != null && (
             <span style={{ fontSize: 11, color: 'var(--ol-ink-4)' }}>
@@ -241,10 +226,4 @@ function NetworkStatusPill({ status }: { status: NetworkCheckResult | null }) {
     return <Pill tone="ok"><Icon name="check" size={11} />{t('settings.permissions.networkOk')}</Pill>;
   }
   return <Pill tone="outline">{t('settings.permissions.networkOffline') ?? '不可用'}</Pill>;
-}
-
-function adapterDisplayName(adapter: HotkeyCapability['adapter'] | HotkeyStatus['adapter']) {
-  if (adapter === 'macEventTap') return i18n.t('hotkey.adapter.macEventTap');
-  if (adapter === 'windowsLowLevel') return i18n.t('hotkey.adapter.windowsLowLevel');
-  return i18n.t('hotkey.adapter.fcitx5');
 }

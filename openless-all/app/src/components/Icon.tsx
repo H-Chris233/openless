@@ -48,6 +48,7 @@ export const ICONS: Record<string, string> = {
   user: 'M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z', // User
   mail: 'M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2zM22 6l-10 7L2 6', // Mail
   info: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 16v-4M12 8h.01', // Info
+  shield: 'M12 22s8-3 8-9V5l-8-3-8 3v8c0 6 8 9 8 9z', // Shield (privacy)
   external: 'M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6M15 3h6v6M10 14L21 3', // External link
   close: 'M18 6L6 18M6 6l12 12', // Close / X
   play: 'M5 3l14 9-14 9V3z', // Play

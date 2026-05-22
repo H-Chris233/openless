@@ -5,17 +5,20 @@ import i18n from "./i18n"; // 副作用：触发 i18next init
 import "./styles/tokens.css";
 import "./styles/global.css";
 
+import type { OS } from "./components/WindowChrome";
+
 const params = new URLSearchParams(window.location.search);
 const windowKind = params.get("window");
 const isCapsule = windowKind === "capsule";
 const isQa = windowKind === "qa";
+const osQuery = params.get("os") as OS | null;
 
 const root = ReactDOM.createRoot(document.getElementById("root")!);
 
 const renderApp = () => {
   root.render(
     <React.StrictMode>
-      <App isCapsule={isCapsule} isQa={isQa} />
+      <App isCapsule={isCapsule} isQa={isQa} forcedOs={osQuery} />
     </React.StrictMode>,
   );
 };

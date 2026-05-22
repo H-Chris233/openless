@@ -30,7 +30,7 @@ import {
   PROVIDER_SETUP_PROMPT_DEFERRED_KEY,
   shouldShowProviderSetupPrompt,
 } from '../lib/providerSetup';
-import { type SettingsSectionId } from '../pages/Settings';
+import { type SettingsSectionId } from './SettingsModal';
 import { useAppState, type AppTab } from '../state/useAppState';
 
 interface NavItem {
@@ -170,13 +170,13 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
 
   const openProviderSettings = () => {
     rememberProviderPrompt();
-    openSettings('providers');
+    openSettings('services');
   };
 
   const openHotkeyRecordingSettings = () => {
     window.localStorage.setItem(HOTKEY_MODE_MIGRATION_ACK_KEY, '1');
     setHotkeyModePromptOpen(false);
-    openSettings('recording');
+    openSettings('general');
   };
 
   return (

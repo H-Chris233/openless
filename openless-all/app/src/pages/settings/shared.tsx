@@ -1,5 +1,5 @@
-// 共享在 Settings 各 section 间的原子（SettingRow / Toggle / inputStyle）。
-// AsrPresetId 也放在这里，让 AdvancedSection 与 Settings.tsx 都从一处来源拿。
+// 共享在设置各 section 间的原子（SettingRow / Toggle / inputStyle）。
+// AsrPresetId 也放在这里，让 settings/ 下各 section 都从同一处来源拿。
 
 import type { CSSProperties, ReactNode } from "react"
 
@@ -170,8 +170,8 @@ export const inputStyle: CSSProperties = {
         "background 0.16s var(--ol-motion-quick), border-color 0.16s var(--ol-motion-quick)",
 }
 
-// ASR provider id 集合，跟 Settings.tsx::ASR_PRESETS 一一对应。
-// 拆成独立类型让 AdvancedSection / ProvidersSection 都能用同一份不互相依赖。
+// ASR provider id 集合，跟 ProvidersSection.tsx::ASR_PRESETS 一一对应。
+// 拆成独立类型让 LocalModelSection / ProvidersSection 都能用同一份不互相依赖。
 export type AsrPresetId =
     | "volcengine"
     | "bailian"

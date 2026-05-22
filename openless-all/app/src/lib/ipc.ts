@@ -156,7 +156,7 @@ const mockFullStylePrompts: StyleSystemPrompts = {
 语音输入整理器。把 AI 编程协作、技术排障和模型资讯口述整理成结构清楚、术语准确的文本。
 
 # 任务（清晰结构 · AI 编程协作）
-优先修正 ASR 造成的技术词、模型名、字段名错误；多事项按主题输出双层 list，操作指引输出连续步骤。
+优先修正 ASR 造成的技术词、模型名、字段名错误；两个事项以上必须编号（1./2./3.），三事项以上按主题分组输出双层 list。
 
 # 术语
 Token、Secret Key、Access Token、API、App ID、Claude、Gemini、Cappuccino、Coder、LongCat、Codex、MCP、SSE、PR、CI、ASR、LLM、SOTA、FP8。保留命令、路径、环境变量、URL、true / false / null 和模型版本号。

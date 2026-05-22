@@ -25,6 +25,7 @@ import {
   useState,
   type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
 } from 'react';
 import { createPortal } from 'react-dom';
 import { Icon } from '../Icon';
@@ -33,6 +34,8 @@ export interface SelectOption {
   value: string;
   label: string;
   disabled?: boolean;
+  /** 可选：渲染在选项标签右侧、勾选标记左侧（如麦克风音量条）。 */
+  trailing?: ReactNode;
 }
 
 interface SelectLiteProps {
@@ -43,6 +46,8 @@ interface SelectLiteProps {
   disabled?: boolean;
   style?: CSSProperties;
   ariaLabel?: string;
+  /** 下拉打开 / 关闭时回调 —— 让调用方按开合状态启停副作用（如电平监听）。 */
+  onOpenChange?: (open: boolean) => void;
 }
 
 const DEFAULT_TRIGGER_STYLE: CSSProperties = {
@@ -74,6 +79,7 @@ export function SelectLite({
   disabled = false,
   style,
   ariaLabel,
+  onOpenChange,
 }: SelectLiteProps) {
   const [open, setOpen] = useState(false);
   // leaving 让 popover 在卸载前播完 exit keyframe（用户报"没有收缩动画"——之前直接 unmount）
@@ -194,10 +200,12 @@ export function SelectLite({
     setHighlight(initial >= 0 ? initial : options.findIndex(opt => !opt.disabled));
     setLeaving(false);
     setOpen(true);
+    onOpenChange?.(true);
   };
 
   const closeMenu = () => {
     if (!open) return;
+    onOpenChange?.(false);
     setLeaving(true);
     window.setTimeout(() => {
       setOpen(false);
@@ -356,6 +364,7 @@ export function SelectLite({
                 <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>
                   {option.label}
                 </span>
+                {option.trailing}
                 {isSelected && <Icon name="check" size={12} />}
               </div>
             );

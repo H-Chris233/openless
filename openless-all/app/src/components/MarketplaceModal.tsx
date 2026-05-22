@@ -41,7 +41,7 @@ export function MarketplaceModal({ onClose }: MarketplaceModalProps) {
         display: 'flex', alignItems: 'center', justifyContent: 'center',
         padding: 28,
         zIndex: 50,
-        animation: 'ol-modal-fade .2s var(--ol-motion-soft)',
+        animation: 'ol-modal-backdrop-in 0.18s var(--ol-motion-soft)',
       }}
     >
       <div
@@ -55,7 +55,7 @@ export function MarketplaceModal({ onClose }: MarketplaceModalProps) {
           overflow: 'hidden',
           position: 'relative',
           display: 'flex', flexDirection: 'column',
-          animation: 'ol-modal-pop .28s var(--ol-motion-spring)',
+          animation: 'ol-modal-card-in 0.24s var(--ol-motion-spring)',
         }}
       >
         <div
