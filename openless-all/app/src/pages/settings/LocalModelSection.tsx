@@ -43,6 +43,10 @@ export function LocalModelSection() {
       if (prefs) {
         await updatePrefs({ ...prefs, activeAsrProvider: target });
       }
+    } catch (err) {
+      // 调用方是 void performSwitch(...) 即发即忘 —— 这里吞掉并记日志，否则 IPC
+      // 失败会冒成未处理的 promise rejection。
+      console.error('[settings] switch local ASR provider failed', err);
     } finally {
       if (seq === switchSeqRef.current) {
         setBusy(false);
