@@ -396,7 +396,10 @@ export function Marketplace() {
 
   // GitHub 登录成功 → 写回 prefs.marketplaceDevLogin，让后续 X-Dev-User 走真实身份。
   const onLoginSuccess = useCallback((nextLogin: string) => {
-    void updatePrefs(current => ({ ...current, marketplaceDevLogin: nextLogin }));
+    // prefs 写入失败只 console 记一笔（与重构前的 OAuth 轮询一致）—— 不能裸 void，
+    // 否则 reject 会冒成未处理的 promise rejection。
+    void updatePrefs(current => ({ ...current, marketplaceDevLogin: nextLogin }))
+      .catch(e => console.warn('[marketplace] save login to prefs failed', e));
     setActionMsg({ kind: 'ok', text: t('marketplace.oauth.successAs', { login: nextLogin }) });
   }, [updatePrefs, t]);
 

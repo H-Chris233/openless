@@ -98,7 +98,8 @@ export function MarketplaceSection() {
         <GithubLoginModal
           onClose={() => setShowLogin(false)}
           onSuccess={nextLogin => {
-            void savePrefs(current => ({ ...current, marketplaceDevLogin: nextLogin }));
+            void savePrefs(current => ({ ...current, marketplaceDevLogin: nextLogin }))
+              .catch(e => console.warn('[marketplace] save login to prefs failed', e));
           }}
         />
       )}
