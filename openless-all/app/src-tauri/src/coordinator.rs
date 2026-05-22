@@ -1700,7 +1700,6 @@ fn is_builtin_translation_shift(binding: &crate::types::ShortcutBinding) -> bool
 
 /// Linux: 从 prefs 读取自定义组合键，同步到 fcitx5 插件。
 #[cfg(target_os = "linux")]
-#[cfg(target_os = "linux")]
 fn custom_dictation_key_string(inner: &Arc<Inner>) -> Option<String> {
     let prefs = inner.prefs.get();
     let key_string = crate::linux_fcitx::binding_to_fcitx_key_string(&prefs.dictation_hotkey);
@@ -1711,6 +1710,7 @@ fn custom_dictation_key_string(inner: &Arc<Inner>) -> Option<String> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn sync_custom_dictation_to_plugin(inner: &Arc<Inner>) {
     let prefs = inner.prefs.get();
     let dictation = &prefs.dictation_hotkey;
