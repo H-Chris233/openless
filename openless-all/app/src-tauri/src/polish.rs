@@ -2782,7 +2782,8 @@ mod tests {
         assert!(prompt.contains("# 三、双层格式"));
         assert!(prompt.contains("第一层（主题）"));
         assert!(prompt.contains("第二层（子项）"));
-        assert!(prompt.contains("事项 ≤ 2 条"));
+        assert!(prompt.contains("事项仅 1 条"));
+        assert!(prompt.contains("事项 = 2 条"));
         assert!(prompt.contains("事项 ≥ 3 条"));
 
         // 防回归：模型名、字段名、布尔值和版本号必须被显式保护。
@@ -2808,14 +2809,14 @@ mod tests {
     fn structured_prompt_keeps_regrouping_and_no_loss_guards() {
         let prompt = prompts::system_prompt(PolishMode::Structured);
 
-        // v1.3.0 回归的关键规则：已编号 ≠ 不用改、≥3 必须重组、≤2 不硬塞层级。
+        // v1.3.0 回归的关键规则：已编号 ≠ 不用改、≥3 必须重组、仅 1 条事项输出连贯段落。
         assert!(
             prompt.contains("照抄原结构 = 失败"),
             "Structured prompt 必须把照抄原结构判为失败"
         );
         assert!(
-            prompt.contains("不硬塞层级"),
-            "Structured prompt 必须避免短输入过度结构化"
+            prompt.contains("输出连贯段落"),
+            "Structured prompt 必须避免短输入过度结构化（仅 1 条事项 → 连贯段落）"
         );
         assert!(
             prompt.contains("不丢失任何一件事"),
