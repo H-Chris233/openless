@@ -3866,13 +3866,13 @@ mod tests {
         // 平台列表必须与 capsule_show_strategy_for_platform 的 cfg 完全一致：
         // 改实现里的 #[cfg] 时，一并改这两个 #[cfg]，否则 Linux CI 直接红
         // （fcitx5 PR #451 把 Linux 加进 NoActivate 但漏改本测试，CI 失败）。
-        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         assert_eq!(
             capsule_show_strategy_for_platform(),
             CapsuleShowStrategy::NoActivate
         );
 
-        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         assert_eq!(
             capsule_show_strategy_for_platform(),
             CapsuleShowStrategy::FallbackShow
