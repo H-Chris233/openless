@@ -207,6 +207,29 @@ pub fn sync_translation_binding(trigger: Option<crate::types::HotkeyTrigger>) {
     }
 }
 
+/// 通过 fcitx5 插件在候选词列表下方显示状态文本（不干扰输入法预编辑）。
+pub fn set_aux_down(text: &str) -> Result<(), String> {
+    let conn = dbus::blocking::Connection::new_session()
+        .map_err(|e| format!("dbus session: {e}"))?;
+    let msg = dbus::Message::new_method_call(DEST, PATH, IFACE, "SetAuxDown")
+        .map_err(|e| format!("build msg: {e}"))?
+        .append1(text);
+    conn.send_with_reply_and_block(msg, TIMEOUT)
+        .map_err(|e| format!("SetAuxDown: {e}"))?;
+    Ok(())
+}
+
+/// 清除 fcitx5 插件候选词列表下方状态文本。
+pub fn clear_aux_down() -> Result<(), String> {
+    let conn = dbus::blocking::Connection::new_session()
+        .map_err(|e| format!("dbus session: {e}"))?;
+    let msg = dbus::Message::new_method_call(DEST, PATH, IFACE, "ClearAuxDown")
+        .map_err(|e| format!("build msg: {e}"))?;
+    conn.send_with_reply_and_block(msg, TIMEOUT)
+        .map_err(|e| format!("ClearAuxDown: {e}"))?;
+    Ok(())
+}
+
 /// 快速检查 fcitx5 OpenLess 插件是否可用（DBus 对象存在）。
 pub fn available() -> bool {
     let conn = match dbus::blocking::Connection::new_session() {
@@ -228,9 +251,15 @@ pub fn available() -> bool {
 /// 本函数将此信号转发为 `HotkeyEvent::Pressed` / `Released` 到协调器事件通道。
 ///
 /// 后台线程在 `tx` 全部 drop（协调器关闭）或 DBus 连接断开时自动退出。
+///
+/// 如果 fcitx5 尚未启动，线程会每 3 秒重试同步热键绑定，直到 fcitx5 可用。
+/// 同时监听 `NameOwnerChanged` 信号以在 fcitx5 重启后重新同步。
 #[cfg(target_os = "linux")]
 pub fn start_dictation_signal_listener(
     tx: std::sync::mpsc::Sender<crate::hotkey::HotkeyEvent>,
+    binding: crate::types::HotkeyBinding,
+    qa_trigger: Option<crate::types::HotkeyTrigger>,
+    translation_trigger: Option<crate::types::HotkeyTrigger>,
 ) {
     use std::time::Duration;
 
@@ -245,7 +274,7 @@ pub fn start_dictation_signal_listener(
                 }
             };
 
-            // 同时监听所有三个信号
+            // 同时监听所有三个 OpenLess 信号
             let rule = match dbus::message::MatchRule::parse(
                 "type='signal',\
                  interface='org.fcitx.Fcitx.OpenLess1'",
@@ -293,6 +322,58 @@ pub fn start_dictation_signal_listener(
                 }
             };
 
+            // 监听 fcitx5 的 NameOwnerChanged 信号，用于在 fcitx5 重启后重新同步。
+            let fcitx_rule = match dbus::message::MatchRule::parse(
+                "type='signal',\
+                 sender='org.freedesktop.DBus',\
+                 interface='org.freedesktop.DBus',\
+                 member='NameOwnerChanged',\
+                 arg0='org.fcitx.Fcitx5'",
+            ) {
+                Ok(r) => r,
+                Err(e) => {
+                    log::warn!("[fcitx-hotkey] Invalid fcitx5 name watch rule: {e}");
+                    return;
+                }
+            };
+
+            let binding_for_name = binding.clone();
+            let qa_for_name = qa_trigger;
+            let trans_for_name = translation_trigger;
+            let _name_match = match conn.add_match(fcitx_rule, move |args: (String, String, String), _conn, _msg| {
+                let (_name, _old_owner, new_owner) = args;
+                if !new_owner.is_empty() {
+                    // fcitx5 已启动（或重启），重新同步所有快捷键绑定。
+                    log::info!("[fcitx-hotkey] fcitx5 appeared on DBus, re-syncing bindings");
+                    std::thread::sleep(Duration::from_secs(1)); // 等插件完全加载
+                    sync_binding_to_plugin(&binding_for_name);
+                    sync_qa_binding(qa_for_name);
+                    sync_translation_binding(trans_for_name);
+                }
+                true
+            }) {
+                Ok(m) => m,
+                Err(e) => {
+                    log::warn!("[fcitx-hotkey] Failed to add fcitx5 name watch: {e}");
+                    return;
+                }
+            };
+
+            // 初始同步：等待 fcitx5 可用（最多重试 10 次，每次 3 秒）。
+            for attempt in 0..10 {
+                if fcitx5_name_has_owner(&conn) {
+                    log::info!("[fcitx-hotkey] fcitx5 available, syncing initial bindings (attempt {attempt})");
+                    sync_binding_to_plugin(&binding);
+                    sync_qa_binding(qa_trigger);
+                    sync_translation_binding(translation_trigger);
+                    break;
+                }
+                if attempt == 0 {
+                    log::info!("[fcitx-hotkey] fcitx5 not yet available, will retry...");
+                }
+                std::thread::sleep(Duration::from_secs(3));
+            }
+
             log::info!("[fcitx-hotkey] Listening for OpenLess1 signals");
             loop {
                 if let Err(e) = conn.process(Duration::from_millis(500)) {
@@ -302,4 +383,136 @@ pub fn start_dictation_signal_listener(
             }
         })
         .ok();
+}
+
+/// AppImage / 便携版：检查 fcitx5 插件是否已安装，未安装则从 bundled resources
+/// 自动安装到 `~/.local/lib/fcitx5/` 和 `~/.local/share/fcitx5/addon/`。
+///
+/// 仅当插件文件在任何已知系统路径和用户路径都不存在时才执行安装。
+/// 安装后需要用户重启 fcitx5（`fcitx5 -r`）才能加载新插件。
+#[cfg(target_os = "linux")]
+pub fn ensure_plugin_installed(app: &tauri::AppHandle) {
+    use tauri::Manager;
+
+    if is_plugin_installed_on_disk() {
+        log::info!("[fcitx-install] Plugin already installed on disk");
+        return;
+    }
+
+    let resource_dir = match app.path().resource_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            log::warn!("[fcitx-install] Cannot resolve resource dir: {e}");
+            return;
+        }
+    };
+
+    let so_src = resource_dir.join("linux-fcitx5-plugin").join("libopenless.so");
+    if !so_src.exists() {
+        log::info!(
+            "[fcitx-install] Bundled plugin not found at {:?} — not an AppImage or plugin not bundled",
+            so_src
+        );
+        return;
+    }
+
+    let Ok(home) = std::env::var("HOME") else {
+        log::warn!("[fcitx-install] Cannot determine HOME dir");
+        return;
+    };
+    let home = std::path::PathBuf::from(home);
+
+    let lib_dir = home.join(".local").join("lib").join("fcitx5");
+    let addon_dir = home.join(".local").join("share").join("fcitx5").join("addon");
+
+    if let Err(e) = std::fs::create_dir_all(&lib_dir) {
+        log::warn!("[fcitx-install] Failed to create {:?}: {e}", lib_dir);
+        return;
+    }
+    if let Err(e) = std::fs::create_dir_all(&addon_dir) {
+        log::warn!("[fcitx-install] Failed to create {:?}: {e}", addon_dir);
+        return;
+    }
+
+    let so_dest = lib_dir.join("libopenless.so");
+    if let Err(e) = std::fs::copy(&so_src, &so_dest) {
+        log::warn!("[fcitx-install] Failed to copy plugin .so: {e}");
+        return;
+    }
+    log::info!("[fcitx-install] Installed plugin .so to {:?}", so_dest);
+
+    let config_content = format!(
+        concat!(
+            "[Addon]\n",
+            "Name=OpenLess\n",
+            "Name[zh_CN]=OpenLess 听写辅助\n",
+            "Comment=OpenLess dictation commit helper\n",
+            "Comment[zh_CN]=供 OpenLess 听写提交文字的 DBus 接口及快捷键监听\n",
+            "Category=Module\n",
+            "Type=SharedLibrary\n",
+            "Library={}\n",
+            "Version=1.0.0\n",
+            "OnDemand=False\n",
+            "Configurable=False\n",
+            "\n",
+            "[Addon/Dependencies]\n",
+            "0=core\n",
+            "1=dbus\n",
+        ),
+        so_dest.display()
+    );
+
+    let conf_dest = addon_dir.join("openless.conf");
+    if let Err(e) = std::fs::write(&conf_dest, &config_content) {
+        log::warn!("[fcitx-install] Failed to write addon config: {e}");
+        return;
+    }
+    log::info!("[fcitx-install] Installed addon config to {:?}", conf_dest);
+    log::info!(
+        "[fcitx-install] Done. Run `fcitx5 -r` to load the plugin, then restart OpenLess."
+    );
+}
+
+#[cfg(target_os = "linux")]
+fn is_plugin_installed_on_disk() -> bool {
+    let system_so_paths = [
+        "/usr/lib/x86_64-linux-gnu/fcitx5/libopenless.so",
+        "/usr/lib64/fcitx5/libopenless.so",
+        "/usr/local/lib/fcitx5/libopenless.so",
+        "/usr/lib/fcitx5/libopenless.so",
+    ];
+    for path in &system_so_paths {
+        if std::path::Path::new(path).exists() {
+            return true;
+        }
+    }
+
+    if let Ok(home) = std::env::var("HOME") {
+        let user_so = std::path::PathBuf::from(&home)
+            .join(".local").join("lib").join("fcitx5").join("libopenless.so");
+        if user_so.exists() {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// 检查 fcitx5 是否在 DBus 上注册了名称（即 fcitx5 进程是否在运行且 DBus 模块已加载）。
+fn fcitx5_name_has_owner(conn: &dbus::blocking::SyncConnection) -> bool {
+    use dbus::blocking::BlockingSender;
+    let msg = match dbus::Message::new_method_call(
+        "org.freedesktop.DBus",
+        "/org/freedesktop/DBus",
+        "org.freedesktop.DBus",
+        "NameHasOwner",
+    ) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    let msg = msg.append1("org.fcitx.Fcitx5");
+    match conn.send_with_reply_and_block(msg, Duration::from_secs(1)) {
+        Ok(reply) => reply.read1::<bool>().unwrap_or(false),
+        Err(_) => false,
+    }
 }

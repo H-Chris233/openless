@@ -85,11 +85,11 @@ fn capsule_show_strategy_for_platform() -> CapsuleShowStrategy {
     // ⚠️ 如果改下面的 cfg 列表，**必须**同步更新单元测试
     // `capsule_show_strategy_matches_platform_activation_contract` 的两组 cfg —
     // 否则 Linux CI 直接红（PR #451 即是这种漏改）。
-    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         CapsuleShowStrategy::NoActivate
     }
-    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         CapsuleShowStrategy::FallbackShow
     }
@@ -823,7 +823,13 @@ impl Coordinator {
                 // Linux: 启动 fcitx5 插件信号监听作为热键源。
                 #[cfg(target_os = "linux")]
                 {
-                    crate::linux_fcitx::start_dictation_signal_listener(fcitx_tx);
+                    let (qa_trigger, translation_trigger) = modifier_shortcut_triggers(&self.inner);
+                    crate::linux_fcitx::start_dictation_signal_listener(
+                        fcitx_tx,
+                        fcitx_binding.clone(),
+                        qa_trigger,
+                        translation_trigger,
+                    );
                     if fcitx_binding.trigger == crate::types::HotkeyTrigger::Custom {
                         sync_custom_dictation_to_plugin(&self.inner);
                     } else {
@@ -1102,7 +1108,13 @@ fn hotkey_supervisor_loop(inner: Arc<Inner>) {
                 // Linux: 启动 fcitx5 插件信号监听作为热键源。
                 #[cfg(target_os = "linux")]
                 {
-                    crate::linux_fcitx::start_dictation_signal_listener(fcitx_tx);
+                    let (qa_trigger, translation_trigger) = modifier_shortcut_triggers(&inner);
+                    crate::linux_fcitx::start_dictation_signal_listener(
+                        fcitx_tx,
+                        fcitx_binding.clone(),
+                        qa_trigger,
+                        translation_trigger,
+                    );
                     if fcitx_binding.trigger == crate::types::HotkeyTrigger::Custom {
                         sync_custom_dictation_to_plugin(&inner);
                     } else {
@@ -4477,8 +4489,6 @@ fn show_capsule_window_no_activate<R: tauri::Runtime>(
     _app: &AppHandle<R>,
     _window: &tauri::WebviewWindow<R>,
 ) -> bool {
-    // Linux/fcitx5: Wayland 上弹胶囊窗口会触发 workspace 跳转且无法可靠
-    // no-activate。返回 true 抑制胶囊窗口，不让 wrapper fallback 到 window.show()。
     true
 }
 
@@ -4550,6 +4560,57 @@ fn emit_capsule(
     // 必须在 call-site（即音频线程触发 emit_capsule 时）就算定，否则 main thread
     // 闭包里读到的将是「下一帧」的 state，跟实际下发给 JS 的 payload 不一致。
     let visible = !matches!(state, CapsuleState::Idle);
+
+    // Linux: 通过 fcitx5 插件在候选词列表下方显示听写状态，不干扰输入法预编辑。
+    // 只在文本变化时调用 DBus，避免录音中 ~30Hz 的音频电平回调重复调用。
+    #[cfg(target_os = "linux")]
+    {
+        use std::sync::Mutex;
+        static LAST_AUX: Mutex<Option<String>> = Mutex::new(None);
+
+        let aux = match state {
+            CapsuleState::Idle => None,
+            CapsuleState::Recording => Some("🎤 收音中..."),
+            CapsuleState::Transcribing => Some("🔄 识别中..."),
+            CapsuleState::Polishing => Some("✨ 润色中..."),
+            CapsuleState::Done => Some("✅ 已插入"),
+            CapsuleState::Cancelled => Some("— 已取消"),
+            CapsuleState::Error => Some("❌ 出错"),
+        };
+
+        let mut last = LAST_AUX.lock().unwrap();
+        if aux != last.as_deref() {
+            let was_none = last.is_none();
+            *last = aux.map(String::from);
+            match aux {
+                Some(t) => {
+                    log::info!("[capsule] set_aux_down: {t}");
+                    if let Err(e) = crate::linux_fcitx::set_aux_down(t) {
+                        log::warn!("[capsule] set_aux_down failed: {e}");
+                    }
+                    // 首次设置（从 None 转为有值）时，fcitx5 可能还在处理触发
+                    // 快捷键的按键事件（press/release），这些事件可能覆盖 auxDown。
+                    // 延迟 300ms 重设一次确保状态不被竞态覆盖。
+                    if was_none {
+                        let text = t.to_string();
+                        std::thread::spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_millis(300));
+                            log::info!("[capsule] set_aux_down retry: {text}");
+                            if let Err(e) = crate::linux_fcitx::set_aux_down(&text) {
+                                log::warn!("[capsule] set_aux_down retry failed: {e}");
+                            }
+                        });
+                    }
+                }
+                None => {
+                    log::info!("[capsule] clear_aux_down");
+                    if let Err(e) = crate::linux_fcitx::clear_aux_down() {
+                        log::warn!("[capsule] clear_aux_down failed: {e}");
+                    }
+                }
+            }
+        }
+    }
 
     // emit_capsule 会被 cpal process_callback（音频回调线程）调用 ~30 Hz —— 在该
     // 线程上调用 NSWindow / HWND API 会撞 macOS dispatch_assert_queue_fail SIGTRAP

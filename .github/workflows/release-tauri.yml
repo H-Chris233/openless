@@ -418,14 +418,15 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          # 构建带 fcitx5 插件的 deb/rpm。AppImage 不含插件（无法安装系统路径），
-          # 用户需手动安装脚本 scripts/linux-fcitx5-plugin/build.sh 输出的 .so 和 .conf。
+          # deb/rpm：通过 files 映射把插件安装到系统 fcitx5 路径。
+          # AppImage：通过 bundle.resources 把 .so 打进包内，运行时由
+          #   ensure_plugin_installed() 自动安装到 ~/.local/ 下。
           # 插件 .so + .conf 由上一步 Build fcitx5 plugin 生成并复制到
           # src-tauri/linux-fcitx5-plugin/ 下。
           cat > /tmp/tauri-linux-config.json << CONFIG_EOF
           {
             "bundle": {
-              "resources": {},
+              "resources": ["linux-fcitx5-plugin/libopenless.so"],
               "linux": {
                 "deb": {
                   "depends": ["fcitx5", "fcitx5-module-dbus", "libdbus-1-3"],
