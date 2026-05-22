@@ -282,6 +282,9 @@ public:
     }
 
     void clearAuxDown() {
+        // 无论是否有可用 IC，都要清掉缓存的状态文字，否则下一次 FocusIn
+        // 会把旧状态（如"已插入"）重放到新聚焦的窗口。
+        lastAuxText_.clear();
         InputContext *ic = nullptr;
         auto &mgr = instance_->inputContextManager();
         mgr.foreachFocused([&](InputContext *focusedIc) {
@@ -293,7 +296,6 @@ public:
         }
         if (!ic) return;
         FCITX_LOGC(openless, Info) << "ClearStatusCandidates";
-        lastAuxText_.clear();
         ic->inputPanel().setAuxDown(Text());
         ic->updatePreedit();
         ic->updateUserInterface(UserInterfaceComponent::InputPanel, true);

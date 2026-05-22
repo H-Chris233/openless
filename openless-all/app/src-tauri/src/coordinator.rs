@@ -4591,10 +4591,16 @@ fn emit_capsule(
                     // 首次设置（从 None 转为有值）时，fcitx5 可能还在处理触发
                     // 快捷键的按键事件（press/release），这些事件可能覆盖 auxDown。
                     // 延迟 300ms 重设一次确保状态不被竞态覆盖。
+                    // 重设前检查 LAST_AUX：如果状态已经变了则跳过，避免旧文字覆盖新状态。
                     if was_none {
                         let text = t.to_string();
                         std::thread::spawn(move || {
                             std::thread::sleep(std::time::Duration::from_millis(300));
+                            let current = LAST_AUX.lock().unwrap().clone();
+                            if current.as_deref() != Some(&text) {
+                                log::info!("[capsule] set_aux_down retry skipped: state changed to {current:?}");
+                                return;
+                            }
                             log::info!("[capsule] set_aux_down retry: {text}");
                             if let Err(e) = crate::linux_fcitx::set_aux_down(&text) {
                                 log::warn!("[capsule] set_aux_down retry failed: {e}");
