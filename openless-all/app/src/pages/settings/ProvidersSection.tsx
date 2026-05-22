@@ -270,25 +270,19 @@ export function ProvidersSection() {
         await updatePrefs(next);
         if (seq !== asrSwitchSeqRef.current) return;
       }
-      // OpenAI 兼容厂商首次切换时预填 baseUrl / model 默认值，省得用户必踩
-      // 「跨厂商 model 名根本不一样」的坑；但用户已自定义后就不再覆盖。
-      // volcengine 走另一套凭据，跳过。
+      // asr.endpoint / asr.model 是所有 ASR 厂商共用的一对凭据槽（persistence.rs
+      // 未做 per-provider 隔离）。若只在槽空时填默认值，老用户从 A 厂商切到 B 厂商
+      // 时槽里仍是 A 的 endpoint/model —— dropdown 切了、实际还打 A 的地址。改成切到
+      // 有默认值的预设就强制覆盖，让切换真切到位。volcengine 走另一套凭据、本地引擎
+      // 无 baseUrl，都被 if 守卫天然跳过。与 onLlmProviderChange 同款修法。
       const preset = ASR_PRESETS.find(p => p.id === id);
       if (preset && preset.baseUrl) {
-        const existing = await readCredential('asr.endpoint');
+        await setCredential('asr.endpoint', preset.baseUrl);
         if (seq !== asrSwitchSeqRef.current) return;
-        if (!existing) {
-          await setCredential('asr.endpoint', preset.baseUrl);
-          if (seq !== asrSwitchSeqRef.current) return;
-        }
       }
       if (preset && preset.model) {
-        const existing = await readCredential('asr.model');
+        await setCredential('asr.model', preset.model);
         if (seq !== asrSwitchSeqRef.current) return;
-        if (!existing) {
-          await setCredential('asr.model', preset.model);
-          if (seq !== asrSwitchSeqRef.current) return;
-        }
       }
       setCommittedAsrProvider(id);
       emitSaved('saved', t('common.saved'));

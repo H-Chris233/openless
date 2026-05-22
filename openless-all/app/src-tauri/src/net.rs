@@ -7,11 +7,12 @@
 //! 这里提供两件东西：
 //! - `http()`：进程级共享客户端。一次握手成功后的连接进连接池，后续命令直接复用，
 //!   不再付握手成本。
-//! - `send_with_retry`：对「连接失败 / 请求未送出」这两类传输层失败做指数退避
-//!   重试 —— 它们都发生在请求送达服务端之前，重试幂等安全。**不重试超时**：
-//!   reqwest 的 `is_timeout()` 也涵盖「请求已发出、等响应时超时」，此时服务端可能
-//!   已收到并在处理，重试 POST / DELETE 会重复执行。HTTP 4xx/5xx 同样不重试 ——
-//!   服务端已应答，状态码交给调用方判断。
+//! - `send_with_retry`：只对**连接层失败**（`is_connect()` —— 握手重置 / 连接被拒
+//!   等）做指数退避重试。这类失败发生在请求送达服务端之前、且通常是瞬时的（代理
+//!   分流抖动等），重试既幂等安全又有意义。**不重试超时与其他请求层错误**：超时
+//!   可能发生在服务端已收到之后（重试 POST / DELETE 会重复执行）；`is_request()`
+//!   类错误多为确定性失败（如 endpoint 配置错误），重试只是徒增数秒延迟。HTTP
+//!   4xx/5xx 同样不重试 —— 服务端已应答，状态码交给调用方判断。
 
 use std::time::Duration;
 
@@ -38,12 +39,13 @@ pub fn http() -> &'static reqwest::Client {
 /// 单次请求最多尝试的次数。失败本身很快（握手重置 ~0.5s），10 次总耗时仍可控。
 const MAX_ATTEMPTS: u32 = 10;
 
-/// 发送请求，对连接层失败（连接重置 / 请求未送出）做指数退避重试。
+/// 发送请求，只对连接层失败（`is_connect()`：握手重置 / 连接被拒等）做指数退避重试。
 ///
 /// `make` 每次尝试都重新构造 `RequestBuilder`（`send()` 会消耗它）。只重试
-/// `is_connect()` / `is_request()` —— 这两类失败时请求尚未送达服务端，重试幂等
-/// 安全。**超时不重试**：服务端可能已收到并在处理，重试非幂等请求（POST / DELETE）
-/// 会重复执行。拿到任意 HTTP 响应（含 4xx/5xx）即返回，状态码由调用方自行判断。
+/// `is_connect()` —— 连接尚未建立、请求未送达服务端，且这类失败通常是瞬时的，
+/// 重试幂等安全且有价值。超时（可能服务端已在处理）与其他 `is_request()` 类错误
+/// （多为 endpoint 配置错误等确定性失败）都不重试。拿到任意 HTTP 响应（含
+/// 4xx/5xx）即返回，状态码由调用方自行判断。
 pub async fn send_with_retry<F>(make: F) -> reqwest::Result<reqwest::Response>
 where
     F: Fn() -> reqwest::RequestBuilder,
@@ -54,7 +56,7 @@ where
         match make().send().await {
             Ok(resp) => return Ok(resp),
             Err(err) => {
-                let retryable = err.is_connect() || err.is_request();
+                let retryable = err.is_connect();
                 if !retryable || attempt >= MAX_ATTEMPTS {
                     return Err(err);
                 }
