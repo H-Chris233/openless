@@ -484,17 +484,19 @@ pub struct NetworkCheckResult {
 
 #[tauri::command]
 pub async fn check_network() -> NetworkCheckResult {
-    // 探一个真实存在的接口。旧逻辑探 `/health` —— 这个接口实测返回 404，于是哪怕
-    // 链路完全正常也永远判定离线；且用 HEAD（后端只挂 GET）。改成 GET `/packs`，
-    // 走共享客户端 + 重试。只要拿到任意 HTTP 响应就说明链路通；连不上才算离线。
+    // 探一个真实存在的接口。旧逻辑探 `/health` —— 实测返回 404，链路正常也永远判
+    // 离线；且用 HEAD（后端只挂 GET）。改成 GET `/packs`，拿到任意 HTTP 响应即算通。
+    //
+    // 单发、不走 send_with_retry：这是每 30s 跑一次的状态探针，要的是「快」。10 次
+    // 退避重试会让被过滤 / 黑洞的网络下探测拖到近一分钟、状态灯像卡死。偶发的瞬时
+    // 误判由下一个 30s 周期自动纠正。仍用 net::http() 共享连接池。
     let url = format!("{MARKETPLACE_BASE_URL}/packs?limit=1");
     let start = std::time::Instant::now();
-    match net::send_with_retry(|| {
-        net::http()
-            .get(&url)
-            .timeout(std::time::Duration::from_secs(8))
-    })
-    .await
+    match net::http()
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(8))
+        .send()
+        .await
     {
         Ok(_) => NetworkCheckResult {
             online: true,
