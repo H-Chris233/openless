@@ -338,6 +338,10 @@ pub fn start_dictation_signal_listener(
                 }
             };
 
+            // NOTE: NameOwnerChanged 捕获的是线程启动时的绑定快照。用户在
+            // OpenLess 运行时改了快捷键且 fcitx5 恰好重启，重连会写入旧绑定。
+            // 这是一个低概率场景（需要两个操作同时发生），暂时保留快照语义。
+            // 要彻底解决需要把 Arc<PreferencesStore> 传给监听线程做实时读取。
             let binding_for_name = binding.clone();
             let custom_for_name = custom_trigger_key.clone();
             let qa_for_name = qa_trigger;
