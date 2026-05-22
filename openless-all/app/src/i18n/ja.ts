@@ -662,6 +662,7 @@ export const ja: typeof zhCN = {
       selectModel: 'モデルを選んで上記欄に入力',
       modelSaved: 'モデル {{model}} を保存しました。',
       validateSuccess: '接続チェックに合格しました。',
+      validateFailed: '接続チェックに失敗しました。',
       providerHttpStatus: 'サプライヤーが {{status}} を返しました。API Key 権限またはエンドポイントを確認してください。',
       endpointMustUseHttps: 'Endpoint は HTTPS を使用する必要があります（localhost/127.0.0.1 を除く）。',
       endpointInvalid: 'Endpoint の形式が無効です。',

@@ -22,7 +22,10 @@ export function CheckUpdateButton({ channel }: { channel: UpdateChannel }) {
       return () => window.clearTimeout(id);
     }
     return undefined;
-  }, [status, updater]);
+    // 只按 status 触发：useAutoUpdate 每次渲染都返回新 updater 对象，把它放进
+    // 依赖会让父组件每次重渲染都把 2.5s 自动收起计时器清掉重置。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status]);
 
   const upToDate = status === 'none';
   const failed = status === 'error';

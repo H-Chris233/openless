@@ -662,6 +662,7 @@ export const ko: typeof zhCN = {
       selectModel: '모델을 선택해 위 필드에 입력',
       modelSaved: '모델 {{model}} 을(를) 저장했습니다.',
       validateSuccess: '연결 확인을 통과했습니다.',
+      validateFailed: '연결 확인에 실패했습니다.',
       providerHttpStatus: '공급자가 {{status}} 를 반환했습니다. API Key 권한 또는 Endpoint 를 확인해 주세요.',
       endpointMustUseHttps: 'Endpoint 는 HTTPS 를 사용해야 합니다(localhost/127.0.0.1 제외).',
       endpointInvalid: 'Endpoint 형식이 올바르지 않습니다.',

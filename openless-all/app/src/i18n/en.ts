@@ -660,6 +660,7 @@ export const en: typeof zhCN = {
       selectModel: 'Select a model to fill the field above',
       modelSaved: 'Saved model {{model}}.',
       validateSuccess: 'Connection check passed.',
+      validateFailed: 'Connection check failed.',
       providerHttpStatus: 'Provider returned HTTP {{status}}. Check the API key permissions or endpoint.',
       endpointMustUseHttps: 'Endpoint must use HTTPS (localhost/127.0.0.1 are allowed for local testing).',
       endpointInvalid: 'Endpoint format is invalid.',

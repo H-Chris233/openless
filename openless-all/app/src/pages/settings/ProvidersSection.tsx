@@ -224,13 +224,17 @@ export function ProvidersSection() {
       setCommittedLlmProvider(id);
       emitSaved('saved', t('common.saved'));
     } catch (err) {
-      // seq 守卫：只有当前 call 还是最新时才把 saving 翻成 failed；
-      // 旧 call 早被 newer call 的 emitSaved('saving') 覆盖，再叠 failed 会
-      // 把 newer 正在跑的 saving 假伪成失败。
+      // seq 守卫：只有当前 call 还是最新时才翻 failed + 回滚下拉框；旧 call 早被
+      // newer call 的 emitSaved('saving') 覆盖，不要插手。
       if (seq === llmSwitchSeqRef.current) {
         emitSaved('failed', t('common.operationFailed'));
+        // 后端切换失败 → 下拉框退回真实生效的 committed provider，免得 UI 停在
+        // 新选项、实际 provider 仍是旧的，造成显示与后端不一致。
+        setLlmProvider(committedLlmProvider);
       }
-      throw err;
+      // 不再 rethrow：本 handler 作为 SelectLite onChange 是即发即忘调用，
+      // rethrow 会变成未处理的 promise rejection。错误已 emitSaved + 记日志。
+      console.error('[settings] switch LLM provider failed', err);
     }
   };
 
@@ -277,12 +281,12 @@ export function ProvidersSection() {
       setCommittedAsrProvider(id);
       emitSaved('saved', t('common.saved'));
     } catch (err) {
-      // seq 守卫同上 onLlmProviderChange：旧 call 不要把 newer call 的 saving
-      // 伪造成 failed。
+      // seq 守卫 + 回滚 + 不 rethrow，同 onLlmProviderChange。
       if (seq === asrSwitchSeqRef.current) {
         emitSaved('failed', t('common.operationFailed'));
+        setAsrProvider(committedAsrProvider);
       }
-      throw err;
+      console.error('[settings] switch ASR provider failed', err);
     }
   };
 
@@ -473,7 +477,10 @@ function ProviderTools({ kind, modelAccount, onModelSelected }: { kind: 'llm' | 
     setResult('loading', t('settings.providers.validating'));
     try {
       const result = await validateProviderCredentials(kind);
-      setResult(result.ok ? 'success' : 'error', t('settings.providers.validateSuccess'));
+      setResult(
+        result.ok ? 'success' : 'error',
+        t(result.ok ? 'settings.providers.validateSuccess' : 'settings.providers.validateFailed'),
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if ((kind === 'llm' && message === 'llmModelMissing') || (kind === 'asr' && message === 'asrModelMissing')) {

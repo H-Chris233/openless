@@ -658,6 +658,7 @@ export const zhCN = {
       selectModel: '选择一个模型写入上方字段',
       modelSaved: '已保存模型 {{model}}。',
       validateSuccess: '连接检查通过。',
+      validateFailed: '连接检查未通过。',
       providerHttpStatus: '供应商接口返回 {{status}}，请检查 API Key 权限或 Endpoint。',
       endpointMustUseHttps: 'Endpoint 必须使用 HTTPS（本地 localhost/127.0.0.1 测试除外）。',
       endpointInvalid: 'Endpoint 格式不合法。',

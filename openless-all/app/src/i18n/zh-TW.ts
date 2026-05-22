@@ -660,6 +660,7 @@ export const zhTW: typeof zhCN = {
       selectModel: '選擇一個模型寫入上方字段',
       modelSaved: '已保存模型 {{model}}。',
       validateSuccess: '連接檢查通過。',
+      validateFailed: '連接檢查未通過。',
       providerHttpStatus: '供應商接口返回 {{status}}，請檢查 API Key 權限或 Endpoint。',
       endpointMustUseHttps: 'Endpoint 必須使用 HTTPS（本地 localhost/127.0.0.1 測試除外）。',
       endpointInvalid: 'Endpoint 格式不合法。',
