@@ -1,6 +1,6 @@
 // Overview.tsx — 真实指标，从 listHistory + getCredentials 派生。
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Icon } from '../components/Icon';
 import { formatComboLabel } from '../lib/hotkey';
@@ -64,6 +64,7 @@ export function Overview({ onOpenHistory }: OverviewProps) {
     arkConfigured: false,
   });
   const { prefs } = useHotkeySettings();
+  const credentialsRequestSeq = useRef(0);
 
   const refreshHistory = useCallback(() => {
     setHistoryError(false);
@@ -76,13 +77,17 @@ export function Overview({ onOpenHistory }: OverviewProps) {
   }, []);
 
   const refreshCredentials = useCallback(() => {
+    const requestSeq = credentialsRequestSeq.current + 1;
+    credentialsRequestSeq.current = requestSeq;
     setCredsError(false);
     getCredentials()
       .then(status => {
+        if (requestSeq !== credentialsRequestSeq.current) return;
         setCreds(status);
         setCredsError(false);
       })
       .catch(error => {
+        if (requestSeq !== credentialsRequestSeq.current) return;
         console.error('[overview] failed to load credentials status', error);
         setCredsError(true);
       });
