@@ -179,9 +179,20 @@ fn persist_settings<T: SettingsWriter>(
     let open_app_changed = previous.open_app_hotkey != prefs.open_app_hotkey;
     let active_asr_provider_changed = previous.active_asr_provider != prefs.active_asr_provider;
     let active_asr_provider = prefs.active_asr_provider.clone();
-    coord.write_settings(prefs)?;
     if active_asr_provider_changed {
         coord.sync_active_asr_provider(&active_asr_provider)?;
+    }
+    if let Err(error) = coord.write_settings(prefs) {
+        if active_asr_provider_changed {
+            if let Err(rollback_error) =
+                coord.sync_active_asr_provider(&previous.active_asr_provider)
+            {
+                return Err(format!(
+                    "{error}; additionally failed to restore active ASR provider: {rollback_error}"
+                ));
+            }
+        }
+        return Err(error);
     }
     if dictation_shortcut_changed || dictation_mode_changed {
         coord.refresh_dictation_hotkey();
@@ -3324,6 +3335,8 @@ mod tests {
     struct FakeSettingsWriter {
         saved: Mutex<Option<UserPreferences>>,
         active_asr_provider_syncs: Mutex<Vec<String>>,
+        write_settings_error: Mutex<Option<String>>,
+        active_asr_provider_sync_error: Mutex<Option<String>>,
         dictation_refreshes: Mutex<u32>,
         qa_refreshes: Mutex<u32>,
         combo_refreshes: Mutex<u32>,
@@ -3591,6 +3604,9 @@ mod tests {
         }
 
         fn write_settings(&self, prefs: UserPreferences) -> Result<(), String> {
+            if let Some(error) = self.write_settings_error.lock().unwrap().clone() {
+                return Err(error);
+            }
             *self.saved.lock().unwrap() = Some(prefs);
             Ok(())
         }
@@ -3600,6 +3616,14 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(provider.to_string());
+            if let Some(error) = self
+                .active_asr_provider_sync_error
+                .lock()
+                .unwrap()
+                .clone()
+            {
+                return Err(error);
+            }
             Ok(())
         }
 
@@ -3820,6 +3844,91 @@ mod tests {
         assert_eq!(
             writer.active_asr_provider_syncs.lock().unwrap().clone(),
             vec![prefs.active_asr_provider.clone()]
+        );
+        assert_eq!(*writer.dictation_refreshes.lock().unwrap(), 0);
+        assert_eq!(*writer.combo_refreshes.lock().unwrap(), 0);
+        assert_eq!(*writer.qa_refreshes.lock().unwrap(), 0);
+        assert_eq!(*writer.translation_refreshes.lock().unwrap(), 0);
+        assert_eq!(*writer.switch_style_refreshes.lock().unwrap(), 0);
+        assert_eq!(*writer.open_app_refreshes.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn persist_settings_does_not_save_when_active_asr_sync_fails() {
+        let writer = FakeSettingsWriter::default();
+        let previous = UserPreferences::default();
+        *writer.saved.lock().unwrap() = Some(previous.clone());
+        *writer.active_asr_provider_sync_error.lock().unwrap() = Some("sync failed".to_string());
+        let prefs = UserPreferences {
+            active_asr_provider: "whisper".to_string(),
+            microphone_device_name: "External Mic".to_string(),
+            hotkey: previous.hotkey,
+            dictation_hotkey: previous.dictation_hotkey,
+            qa_hotkey: previous.qa_hotkey,
+            translation_hotkey: previous.translation_hotkey,
+            switch_style_hotkey: previous.switch_style_hotkey,
+            open_app_hotkey: previous.open_app_hotkey,
+            ..Default::default()
+        };
+
+        let error = persist_settings(&writer, prefs).unwrap_err();
+
+        assert_eq!(error, "sync failed");
+        let saved = writer
+            .saved
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("previous settings remain saved");
+        assert_eq!(saved.active_asr_provider, previous.active_asr_provider);
+        assert_eq!(saved.microphone_device_name, previous.microphone_device_name);
+        assert_eq!(
+            writer.active_asr_provider_syncs.lock().unwrap().clone(),
+            vec!["whisper".to_string()]
+        );
+        assert_eq!(*writer.dictation_refreshes.lock().unwrap(), 0);
+        assert_eq!(*writer.combo_refreshes.lock().unwrap(), 0);
+        assert_eq!(*writer.qa_refreshes.lock().unwrap(), 0);
+        assert_eq!(*writer.translation_refreshes.lock().unwrap(), 0);
+        assert_eq!(*writer.switch_style_refreshes.lock().unwrap(), 0);
+        assert_eq!(*writer.open_app_refreshes.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn persist_settings_restores_active_asr_provider_when_save_fails_after_sync() {
+        let writer = FakeSettingsWriter::default();
+        let previous = UserPreferences::default();
+        *writer.saved.lock().unwrap() = Some(previous.clone());
+        *writer.write_settings_error.lock().unwrap() = Some("save failed".to_string());
+        let prefs = UserPreferences {
+            active_asr_provider: "whisper".to_string(),
+            microphone_device_name: "External Mic".to_string(),
+            hotkey: previous.hotkey,
+            dictation_hotkey: previous.dictation_hotkey,
+            qa_hotkey: previous.qa_hotkey,
+            translation_hotkey: previous.translation_hotkey,
+            switch_style_hotkey: previous.switch_style_hotkey,
+            open_app_hotkey: previous.open_app_hotkey,
+            ..Default::default()
+        };
+
+        let error = persist_settings(&writer, prefs).unwrap_err();
+
+        assert_eq!(error, "save failed");
+        let saved = writer
+            .saved
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("previous settings remain saved");
+        assert_eq!(saved.active_asr_provider, previous.active_asr_provider);
+        assert_eq!(saved.microphone_device_name, previous.microphone_device_name);
+        assert_eq!(
+            writer.active_asr_provider_syncs.lock().unwrap().clone(),
+            vec![
+                "whisper".to_string(),
+                previous.active_asr_provider.clone()
+            ]
         );
         assert_eq!(*writer.dictation_refreshes.lock().unwrap(), 0);
         assert_eq!(*writer.combo_refreshes.lock().unwrap(), 0);
