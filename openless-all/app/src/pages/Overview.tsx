@@ -1,6 +1,6 @@
 // Overview.tsx — 真实指标，从 listHistory + getCredentials 派生。
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Icon } from '../components/Icon';
 import { formatComboLabel } from '../lib/hotkey';
@@ -31,6 +31,7 @@ const ASR_NAME_KEY_BY_ID: Record<string, string> = {
   groq: 'asrGroq',
   whisper: 'asrWhisper',
   'foundry-local-whisper': 'asrFoundryLocalWhisper',
+  'sherpa-onnx-local': 'asrSherpaOnnxLocal',
   'local-qwen3': 'asrLocalQwen3',
 };
 
@@ -63,6 +64,7 @@ export function Overview({ onOpenHistory }: OverviewProps) {
     arkConfigured: false,
   });
   const { prefs } = useHotkeySettings();
+  const credentialsRequestSeq = useRef(0);
 
   const refreshHistory = useCallback(() => {
     setHistoryError(false);
@@ -74,18 +76,30 @@ export function Overview({ onOpenHistory }: OverviewProps) {
       });
   }, []);
 
-  useEffect(() => {
-    refreshHistory();
+  const refreshCredentials = useCallback(() => {
+    const requestSeq = credentialsRequestSeq.current + 1;
+    credentialsRequestSeq.current = requestSeq;
+    setCredsError(false);
     getCredentials()
       .then(status => {
+        if (requestSeq !== credentialsRequestSeq.current) return;
         setCreds(status);
         setCredsError(false);
       })
       .catch(error => {
+        if (requestSeq !== credentialsRequestSeq.current) return;
         console.error('[overview] failed to load credentials status', error);
         setCredsError(true);
       });
+  }, []);
+
+  useEffect(() => {
+    refreshHistory();
   }, [refreshHistory]);
+
+  useEffect(() => {
+    refreshCredentials();
+  }, [refreshCredentials, prefs?.activeAsrProvider, prefs?.activeLlmProvider]);
 
   const metrics = useMemo(() => {
     const today = new Date();

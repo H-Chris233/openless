@@ -5,7 +5,7 @@
 //!
 //! 推理接入见 `sherpa_runtime.rs`（M2）。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use serde::Serialize;
@@ -128,6 +128,25 @@ pub fn required_files_for_alias(alias: &str) -> Result<&'static [&'static str]> 
     }
 }
 
+pub fn required_path_is_valid(alias: &str, required: &str, path: &Path) -> bool {
+    if required_path_is_dir(alias, required) {
+        required_dir_is_valid(alias, required, path)
+    } else {
+        path.is_file()
+    }
+}
+
+fn required_path_is_dir(alias: &str, required: &str) -> bool {
+    matches!((alias, required), ("qwen3-asr-0.6b-int8", "tokenizer"))
+}
+
+fn required_dir_is_valid(alias: &str, required: &str, path: &Path) -> bool {
+    match (alias, required) {
+        ("qwen3-asr-0.6b-int8", "tokenizer") => path.join("tokenizer.json").is_file(),
+        _ => false,
+    }
+}
+
 pub fn download_files_for_alias(alias: &str) -> Result<&'static [(&'static str, &'static str)]> {
     match alias {
         "sense-voice-small-zh" => Ok(&[
@@ -184,6 +203,7 @@ pub struct SherpaCatalogModel {
     pub mode: SherpaMode,
     pub languages: Vec<String>,
     pub cached: bool,
+    pub downloaded_bytes: u64,
     pub file_size_mb: Option<u64>,
 }
 
@@ -197,6 +217,7 @@ impl SherpaCatalogModel {
             mode: model.mode,
             languages: model.languages.iter().map(|s| s.to_string()).collect(),
             cached: false,
+            downloaded_bytes: 0,
             file_size_mb: None,
         }
     }
@@ -294,6 +315,7 @@ impl SherpaRuntimeStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn provider_id_is_stable() {
@@ -320,6 +342,30 @@ mod tests {
             ]
         );
         assert!(catalog.iter().all(|m| !m.cached));
+    }
+
+    #[test]
+    fn qwen3_tokenizer_requires_tokenizer_json() {
+        let dir = std::env::temp_dir().join(format!(
+            "openless-sherpa-tokenizer-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).expect("create tokenizer dir");
+
+        assert!(!required_path_is_valid(
+            "qwen3-asr-0.6b-int8",
+            "tokenizer",
+            &dir
+        ));
+
+        fs::write(dir.join("tokenizer.json"), b"{}").expect("write tokenizer json");
+        assert!(required_path_is_valid(
+            "qwen3-asr-0.6b-int8",
+            "tokenizer",
+            &dir
+        ));
+
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

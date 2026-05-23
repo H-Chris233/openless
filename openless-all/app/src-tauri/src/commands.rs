@@ -78,6 +78,7 @@ pub fn get_default_style_system_prompts() -> StyleSystemPrompts {
 trait SettingsWriter {
     fn read_settings(&self) -> UserPreferences;
     fn write_settings(&self, prefs: UserPreferences) -> Result<(), String>;
+    fn sync_active_asr_provider(&self, provider: &str) -> Result<(), String>;
     fn refresh_dictation_hotkey(&self);
     fn refresh_qa_hotkey(&self);
     fn refresh_combo_hotkey(&self);
@@ -93,6 +94,10 @@ impl SettingsWriter for Coordinator {
 
     fn write_settings(&self, prefs: UserPreferences) -> Result<(), String> {
         self.prefs().set(prefs).map_err(|e| e.to_string())
+    }
+
+    fn sync_active_asr_provider(&self, provider: &str) -> Result<(), String> {
+        self.sync_active_asr_provider_to_vault(provider)
     }
 
     fn refresh_dictation_hotkey(&self) {
@@ -127,6 +132,10 @@ impl<T: SettingsWriter + ?Sized> SettingsWriter for Arc<T> {
 
     fn write_settings(&self, prefs: UserPreferences) -> Result<(), String> {
         (**self).write_settings(prefs)
+    }
+
+    fn sync_active_asr_provider(&self, provider: &str) -> Result<(), String> {
+        (**self).sync_active_asr_provider(provider)
     }
 
     fn refresh_dictation_hotkey(&self) {
@@ -168,7 +177,28 @@ fn persist_settings<T: SettingsWriter>(
     let translation_changed = previous.translation_hotkey != prefs.translation_hotkey;
     let switch_style_changed = previous.switch_style_hotkey != prefs.switch_style_hotkey;
     let open_app_changed = previous.open_app_hotkey != prefs.open_app_hotkey;
-    coord.write_settings(prefs)?;
+    let active_asr_provider_changed = previous.active_asr_provider != prefs.active_asr_provider;
+    let active_asr_provider = prefs.active_asr_provider.clone();
+    if active_asr_provider_changed {
+        coord.sync_active_asr_provider(&active_asr_provider)?;
+    }
+    if let Err(error) = coord.write_settings(prefs.clone()) {
+        if active_asr_provider_changed {
+            if let Err(rollback_error) =
+                coord.sync_active_asr_provider(&previous.active_asr_provider)
+            {
+                coord.write_settings(prefs).map_err(|roll_forward_error| {
+                    format!(
+                        "{error}; additionally failed to restore active ASR provider: {rollback_error}; additionally failed to preserve active ASR provider consistency: {roll_forward_error}"
+                    )
+                })?;
+            } else {
+                return Err(error);
+            }
+        } else {
+            return Err(error);
+        }
+    }
     if dictation_shortcut_changed || dictation_mode_changed {
         coord.refresh_dictation_hotkey();
     }
@@ -3309,6 +3339,11 @@ mod tests {
     #[derive(Default)]
     struct FakeSettingsWriter {
         saved: Mutex<Option<UserPreferences>>,
+        active_asr_provider_syncs: Mutex<Vec<String>>,
+        write_settings_error: Mutex<Option<String>>,
+        write_settings_errors: Mutex<Vec<Option<String>>>,
+        active_asr_provider_sync_error: Mutex<Option<String>>,
+        active_asr_provider_sync_errors: Mutex<Vec<Option<String>>>,
         dictation_refreshes: Mutex<u32>,
         qa_refreshes: Mutex<u32>,
         combo_refreshes: Mutex<u32>,
@@ -3576,7 +3611,46 @@ mod tests {
         }
 
         fn write_settings(&self, prefs: UserPreferences) -> Result<(), String> {
+            if let Some(error) = {
+                let mut errors = self.write_settings_errors.lock().unwrap();
+                if errors.is_empty() {
+                    None
+                } else {
+                    errors.remove(0)
+                }
+            } {
+                return Err(error);
+            }
+            if let Some(error) = self.write_settings_error.lock().unwrap().clone() {
+                return Err(error);
+            }
             *self.saved.lock().unwrap() = Some(prefs);
+            Ok(())
+        }
+
+        fn sync_active_asr_provider(&self, provider: &str) -> Result<(), String> {
+            self.active_asr_provider_syncs
+                .lock()
+                .unwrap()
+                .push(provider.to_string());
+            if let Some(error) = {
+                let mut errors = self.active_asr_provider_sync_errors.lock().unwrap();
+                if errors.is_empty() {
+                    None
+                } else {
+                    errors.remove(0)
+                }
+            } {
+                return Err(error);
+            }
+            if let Some(error) = self
+                .active_asr_provider_sync_error
+                .lock()
+                .unwrap()
+                .clone()
+            {
+                return Err(error);
+            }
             Ok(())
         }
 
@@ -3768,7 +3842,7 @@ mod tests {
     }
 
     #[test]
-    fn persist_settings_skips_hotkey_refresh_when_shortcuts_unchanged() {
+    fn persist_settings_syncs_active_asr_provider_without_hotkey_refresh() {
         let writer = FakeSettingsWriter::default();
         let previous = UserPreferences::default();
         *writer.saved.lock().unwrap() = Some(previous.clone());
@@ -3794,6 +3868,138 @@ mod tests {
             .expect("settings saved");
         assert_eq!(saved.active_asr_provider, prefs.active_asr_provider);
         assert_eq!(saved.microphone_device_name, prefs.microphone_device_name);
+        assert_eq!(
+            writer.active_asr_provider_syncs.lock().unwrap().clone(),
+            vec![prefs.active_asr_provider.clone()]
+        );
+        assert_eq!(*writer.dictation_refreshes.lock().unwrap(), 0);
+        assert_eq!(*writer.combo_refreshes.lock().unwrap(), 0);
+        assert_eq!(*writer.qa_refreshes.lock().unwrap(), 0);
+        assert_eq!(*writer.translation_refreshes.lock().unwrap(), 0);
+        assert_eq!(*writer.switch_style_refreshes.lock().unwrap(), 0);
+        assert_eq!(*writer.open_app_refreshes.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn persist_settings_does_not_save_when_active_asr_sync_fails() {
+        let writer = FakeSettingsWriter::default();
+        let previous = UserPreferences::default();
+        *writer.saved.lock().unwrap() = Some(previous.clone());
+        *writer.active_asr_provider_sync_error.lock().unwrap() = Some("sync failed".to_string());
+        let prefs = UserPreferences {
+            active_asr_provider: "whisper".to_string(),
+            microphone_device_name: "External Mic".to_string(),
+            hotkey: previous.hotkey,
+            dictation_hotkey: previous.dictation_hotkey,
+            qa_hotkey: previous.qa_hotkey,
+            translation_hotkey: previous.translation_hotkey,
+            switch_style_hotkey: previous.switch_style_hotkey,
+            open_app_hotkey: previous.open_app_hotkey,
+            ..Default::default()
+        };
+
+        let error = persist_settings(&writer, prefs).unwrap_err();
+
+        assert_eq!(error, "sync failed");
+        let saved = writer
+            .saved
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("previous settings remain saved");
+        assert_eq!(saved.active_asr_provider, previous.active_asr_provider);
+        assert_eq!(saved.microphone_device_name, previous.microphone_device_name);
+        assert_eq!(
+            writer.active_asr_provider_syncs.lock().unwrap().clone(),
+            vec!["whisper".to_string()]
+        );
+        assert_eq!(*writer.dictation_refreshes.lock().unwrap(), 0);
+        assert_eq!(*writer.combo_refreshes.lock().unwrap(), 0);
+        assert_eq!(*writer.qa_refreshes.lock().unwrap(), 0);
+        assert_eq!(*writer.translation_refreshes.lock().unwrap(), 0);
+        assert_eq!(*writer.switch_style_refreshes.lock().unwrap(), 0);
+        assert_eq!(*writer.open_app_refreshes.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn persist_settings_restores_active_asr_provider_when_save_fails_after_sync() {
+        let writer = FakeSettingsWriter::default();
+        let previous = UserPreferences::default();
+        *writer.saved.lock().unwrap() = Some(previous.clone());
+        *writer.write_settings_error.lock().unwrap() = Some("save failed".to_string());
+        let prefs = UserPreferences {
+            active_asr_provider: "whisper".to_string(),
+            microphone_device_name: "External Mic".to_string(),
+            hotkey: previous.hotkey,
+            dictation_hotkey: previous.dictation_hotkey,
+            qa_hotkey: previous.qa_hotkey,
+            translation_hotkey: previous.translation_hotkey,
+            switch_style_hotkey: previous.switch_style_hotkey,
+            open_app_hotkey: previous.open_app_hotkey,
+            ..Default::default()
+        };
+
+        let error = persist_settings(&writer, prefs).unwrap_err();
+
+        assert_eq!(error, "save failed");
+        let saved = writer
+            .saved
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("previous settings remain saved");
+        assert_eq!(saved.active_asr_provider, previous.active_asr_provider);
+        assert_eq!(saved.microphone_device_name, previous.microphone_device_name);
+        assert_eq!(
+            writer.active_asr_provider_syncs.lock().unwrap().clone(),
+            vec![
+                "whisper".to_string(),
+                previous.active_asr_provider.clone()
+            ]
+        );
+        assert_eq!(*writer.dictation_refreshes.lock().unwrap(), 0);
+        assert_eq!(*writer.combo_refreshes.lock().unwrap(), 0);
+        assert_eq!(*writer.qa_refreshes.lock().unwrap(), 0);
+        assert_eq!(*writer.translation_refreshes.lock().unwrap(), 0);
+        assert_eq!(*writer.switch_style_refreshes.lock().unwrap(), 0);
+        assert_eq!(*writer.open_app_refreshes.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn persist_settings_keeps_new_active_asr_provider_when_rollback_fails() {
+        let writer = FakeSettingsWriter::default();
+        let previous = UserPreferences::default();
+        *writer.saved.lock().unwrap() = Some(previous.clone());
+        *writer.write_settings_errors.lock().unwrap() =
+            vec![Some("save failed".to_string()), None];
+        *writer.active_asr_provider_sync_errors.lock().unwrap() =
+            vec![None, Some("rollback failed".to_string())];
+        let prefs = UserPreferences {
+            active_asr_provider: "whisper".to_string(),
+            microphone_device_name: "External Mic".to_string(),
+            hotkey: previous.hotkey,
+            dictation_hotkey: previous.dictation_hotkey,
+            qa_hotkey: previous.qa_hotkey,
+            translation_hotkey: previous.translation_hotkey,
+            switch_style_hotkey: previous.switch_style_hotkey,
+            open_app_hotkey: previous.open_app_hotkey,
+            ..Default::default()
+        };
+
+        persist_settings(&writer, prefs.clone()).expect("settings remain consistent");
+
+        let saved = writer
+            .saved
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("new settings saved");
+        assert_eq!(saved.active_asr_provider, prefs.active_asr_provider);
+        assert_eq!(saved.microphone_device_name, prefs.microphone_device_name);
+        assert_eq!(
+            writer.active_asr_provider_syncs.lock().unwrap().clone(),
+            vec!["whisper".to_string(), previous.active_asr_provider.clone()]
+        );
         assert_eq!(*writer.dictation_refreshes.lock().unwrap(), 0);
         assert_eq!(*writer.combo_refreshes.lock().unwrap(), 0);
         assert_eq!(*writer.qa_refreshes.lock().unwrap(), 0);
