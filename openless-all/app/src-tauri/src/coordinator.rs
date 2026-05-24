@@ -4638,7 +4638,14 @@ fn emit_capsule(
                 None => {
                     log::info!("[capsule] clear_aux_down");
                     // 同样从音频线程挪走，避免阻塞。
+                    // 状态守卫：发送前确认 LAST_AUX 仍是 None，避免快速状态切换时
+                    // 旧 clear_aux_down 跑到新 set_aux_down 后面，把新文字清掉。
                     std::thread::spawn(|| {
+                        let current = LAST_AUX.lock().unwrap().clone();
+                        if current.is_some() {
+                            log::info!("[capsule] clear_aux_down skipped: state changed to {current:?}");
+                            return;
+                        }
                         if let Err(e) = crate::linux_fcitx::clear_aux_down() {
                             log::warn!("[capsule] clear_aux_down failed: {e}");
                         }
