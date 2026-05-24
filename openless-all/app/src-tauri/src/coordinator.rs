@@ -4604,6 +4604,13 @@ fn emit_capsule(
                     // (cpal) 调用，同步阻塞可能导致录音卡顿或可闻杂音。
                     let text = t.to_string();
                     std::thread::spawn(move || {
+                        // 状态检查：发送前确认 LAST_AUX 未变，避免在快速状态切换时
+                        // 旧 set_aux_down 跑到 clear_aux_down 后面，旧文字覆盖新状态。
+                        let current = LAST_AUX.lock().unwrap().clone();
+                        if current.as_deref() != Some(&text) {
+                            log::info!("[capsule] set_aux_down skipped: state changed to {current:?}");
+                            return;
+                        }
                         if let Err(e) = crate::linux_fcitx::set_aux_down(&text) {
                             log::warn!("[capsule] set_aux_down failed: {e}");
                         }

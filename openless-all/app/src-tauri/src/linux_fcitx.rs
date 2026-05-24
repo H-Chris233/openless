@@ -324,12 +324,12 @@ pub fn start_dictation_signal_listener(
             };
 
             // 监听 fcitx5 的 NameOwnerChanged 信号，用于在 fcitx5 重启后重新同步。
+            // dbus crate 的 MatchRule::parse 不支持 arg0 过滤，在回调里做匹配。
             let fcitx_rule = match dbus::message::MatchRule::parse(
                 "type='signal',\
                  sender='org.freedesktop.DBus',\
                  interface='org.freedesktop.DBus',\
-                 member='NameOwnerChanged',\
-                 arg0='org.fcitx.Fcitx5'",
+                 member='NameOwnerChanged'",
             ) {
                 Ok(r) => r,
                 Err(e) => {
@@ -347,14 +347,23 @@ pub fn start_dictation_signal_listener(
             let qa_for_name = qa_trigger;
             let trans_for_name = translation_trigger;
             let _name_match = match conn.add_match(fcitx_rule, move |args: (String, String, String), _conn, _msg| {
-                let (_name, _old_owner, new_owner) = args;
+                let (name, _old_owner, new_owner) = args;
+                if name != "org.fcitx.Fcitx5" { return true; }
                 if !new_owner.is_empty() {
                     // fcitx5 已启动（或重启），重新同步所有快捷键绑定。
+                    // 把延迟+同步挪到独立线程：add_match 回调跑在 DBus 事件循环
+                    // 线程里，sleep 会阻塞所有信号处理。
                     log::info!("[fcitx-hotkey] fcitx5 appeared on DBus, re-syncing bindings");
-                    std::thread::sleep(Duration::from_secs(1)); // 等插件完全加载
-                    resync_main_binding(&binding_for_name, custom_for_name.as_deref());
-                    sync_qa_binding(qa_for_name);
-                    sync_translation_binding(trans_for_name);
+                    let b = binding_for_name.clone();
+                    let c = custom_for_name.clone();
+                    let q = qa_for_name;
+                    let t = trans_for_name;
+                    std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_secs(1)); // 等插件完全加载
+                        resync_main_binding(&b, c.as_deref());
+                        sync_qa_binding(q);
+                        sync_translation_binding(t);
+                    });
                 }
                 true
             }) {
@@ -391,10 +400,11 @@ pub fn start_dictation_signal_listener(
         .ok();
 }
 
-/// AppImage / 便携版：检查 fcitx5 插件是否已安装，未安装则从 bundled resources
-/// 自动安装到 `~/.local/lib/fcitx5/` 和 `~/.local/share/fcitx5/addon/`。
+/// AppImage / 便携版：每次启动时从 bundled resources 复制插件到
+/// `~/.local/lib/fcitx5/` 和 `~/.local/share/fcitx5/addon/`，始终覆盖已有文件。
 ///
-/// 仅当插件文件在任何已知系统路径和用户路径都不存在时才执行安装。
+/// 这确保 AppImage 版本与插件版本一致——插件新增 DBus 方法时旧 .so 不会缺少符号。
+/// 系统路径（deb/rpm 安装）不会被覆盖。
 /// 安装后需要用户重启 fcitx5（`fcitx5 -r`）才能加载新插件。
 #[cfg(target_os = "linux")]
 pub fn ensure_plugin_installed(app: &tauri::AppHandle) {
