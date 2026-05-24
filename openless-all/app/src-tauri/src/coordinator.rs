@@ -4597,9 +4597,13 @@ fn emit_capsule(
         if aux != last.as_deref() {
             let was_none = last.is_none();
             *last = aux.map(String::from);
+            // 代数计数器：每次状态变化 +1，retry 线程只在自己代数仍为最新时生效。
+            // 避免 Recording→Idle→Recording 快速切换时多个 retry 重复触发。
+            static RETRY_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let gen = RETRY_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             match aux {
                 Some(t) => {
-                    log::info!("[capsule] set_aux_down: {t}");
+                    log::info!("[capsule] set_aux_down: {t} gen={gen}");
                     // 把 DBus I/O 移到独立线程：emit_capsule 会被音频回调线程
                     // (cpal) 调用，同步阻塞可能导致录音卡顿或可闻杂音。
                     let text = t.to_string();
@@ -4618,11 +4622,17 @@ fn emit_capsule(
                     // 首次设置（从 None 转为有值）时，fcitx5 可能还在处理触发
                     // 快捷键的按键事件（press/release），这些事件可能覆盖 auxDown。
                     // 延迟 300ms 重设一次确保状态不被竞态覆盖。
-                    // 重设前检查 LAST_AUX：如果状态已经变了则跳过，避免旧文字覆盖新状态。
+                    // retry 使用 gen 去重：状态已变则不再发送旧文字。
                     if was_none {
                         let text = t.to_string();
                         std::thread::spawn(move || {
                             std::thread::sleep(std::time::Duration::from_millis(300));
+                            // 检查代数：新的状态变化已发生则跳过。
+                            let latest_gen = RETRY_GEN.load(std::sync::atomic::Ordering::SeqCst);
+                            if gen != latest_gen {
+                                log::info!("[capsule] set_aux_down retry skipped: gen {gen} < {latest_gen}");
+                                return;
+                            }
                             let current = LAST_AUX.lock().unwrap().clone();
                             if current.as_deref() != Some(&text) {
                                 log::info!("[capsule] set_aux_down retry skipped: state changed to {current:?}");
@@ -4636,11 +4646,17 @@ fn emit_capsule(
                     }
                 }
                 None => {
-                    log::info!("[capsule] clear_aux_down");
+                    log::info!("[capsule] clear_aux_down gen={gen}");
                     // 同样从音频线程挪走，避免阻塞。
                     // 状态守卫：发送前确认 LAST_AUX 仍是 None，避免快速状态切换时
                     // 旧 clear_aux_down 跑到新 set_aux_down 后面，把新文字清掉。
-                    std::thread::spawn(|| {
+                    std::thread::spawn(move || {
+                        // 检查代数：新的状态变化已发生则跳过。
+                        let latest_gen = RETRY_GEN.load(std::sync::atomic::Ordering::SeqCst);
+                        if gen != latest_gen {
+                            log::info!("[capsule] clear_aux_down skipped: gen {gen} < {latest_gen}");
+                            return;
+                        }
                         let current = LAST_AUX.lock().unwrap().clone();
                         if current.is_some() {
                             log::info!("[capsule] clear_aux_down skipped: state changed to {current:?}");

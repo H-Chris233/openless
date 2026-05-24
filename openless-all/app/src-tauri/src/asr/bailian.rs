@@ -386,6 +386,8 @@ impl BailianRealtimeASR {
             // 同一 sentence_id 后到覆盖前到：API 对同一句话的累积更新
             // （"你"→"你好"→"你好吗"）只保留最终版本。
             st.final_segments.insert(sentence_id, trimmed.to_string());
+        } else if is_sentence_final && sentence_id == 0 {
+            log::warn!("[bailian-asr] final sentence missing sentence_id, dropping: {trimmed:?}");
         }
     }
 
