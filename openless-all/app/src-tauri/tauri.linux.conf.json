@@ -10,8 +10,8 @@
         "minWidth": 980,
         "minHeight": 640,
         "resizable": true,
-        "decorations": true,
-        "transparent": false,
+        "decorations": false,
+        "transparent": true,
         "shadow": true,
         "visible": false,
         "acceptFirstMouse": true
