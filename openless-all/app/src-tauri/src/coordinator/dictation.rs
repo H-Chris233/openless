@@ -1550,6 +1550,9 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         "[coord] polish dispatch: translation={translation_active} mode={mode:?} streaming_eligible={streaming_eligible}"
     );
 
+    // Linux: emit_capsule(Polishing) 已通过 fcitx5 auxDown 显示 "✨ 润色中..."，
+    // 无需在此重复调用。
+
     let (polished, polish_error, already_streamed) = if translation_active {
         log::info!(
             "[coord] translation mode → target=\u{300C}{}\u{300D} working={:?} front_app={:?}",

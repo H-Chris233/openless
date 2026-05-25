@@ -5,6 +5,7 @@
 //! matches OpenLess' recorder output directly. The Qwen OpenAI Realtime line is
 //! a different protocol and is intentionally left for a follow-up provider.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -94,7 +95,9 @@ struct SyncState {
     start: Option<Instant>,
     final_tx: Option<oneshot::Sender<Result<RawTranscript, BailianASRError>>>,
     send_tx: Option<mpsc::UnboundedSender<SendItem>>,
-    final_segments: Vec<String>,
+    /// sentence_id → text，按 sentence_id 排序拼接得到最终文本。
+    /// 同一 sentence_id 的后到结果覆盖前一个，消除累积文本导致的重复。
+    final_segments: BTreeMap<i64, String>,
     last_result_text: String,
 }
 
@@ -367,11 +370,24 @@ impl BailianRealtimeASR {
         if trimmed.is_empty() {
             return;
         }
-        let is_sentence_final = sentence.get("end_time").is_some();
+        // end_time 为 0 或缺失时是 interim 结果；仅正数才是真正完成的句子。
+        let end_time = sentence
+            .get("end_time")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let is_sentence_final = end_time > 0;
+        let sentence_id = sentence
+            .get("sentence_id")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
         let mut st = self.state.lock();
         st.last_result_text = trimmed.to_string();
-        if is_sentence_final && st.final_segments.last().map(|s| s.as_str()) != Some(trimmed) {
-            st.final_segments.push(trimmed.to_string());
+        if is_sentence_final && sentence_id > 0 {
+            // 同一 sentence_id 后到覆盖前到：API 对同一句话的累积更新
+            // （"你"→"你好"→"你好吗"）只保留最终版本。
+            st.final_segments.insert(sentence_id, trimmed.to_string());
+        } else if is_sentence_final && sentence_id == 0 {
+            log::warn!("[bailian-asr] final sentence missing sentence_id, dropping: {trimmed:?}");
         }
     }
 
@@ -386,7 +402,7 @@ impl BailianRealtimeASR {
             let text = if st.final_segments.is_empty() {
                 st.last_result_text.clone()
             } else {
-                st.final_segments.join("")
+                st.final_segments.values().cloned().collect::<Vec<_>>().join("")
             };
             let duration_ms = if st.bytes_received > 0 {
                 st.bytes_received / BYTES_PER_MS

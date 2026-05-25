@@ -217,6 +217,11 @@ pub fn run() {
                 log::info!("[startup] Accessibility status = {:?}", status);
             }
 
+            // AppImage / 便携版：fcitx5 插件缺了就从 bundled resources 自动安装
+            // 到 ~/.local/ 下面。不会覆盖系统已有的插件。
+            #[cfg(target_os = "linux")]
+            crate::linux_fcitx::ensure_plugin_installed(app.handle());
+
             // 菜单栏图标 — 与 Swift `MenuBarController` 同语义：
             // 左键点 → 显示/聚焦主窗口；菜单含「显示主窗口」「退出」。
             let tray_menu = build_tray_menu(app, &coordinator)?;
