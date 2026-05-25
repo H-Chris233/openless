@@ -207,14 +207,10 @@ pub fn run() {
                 } else {
                     #[cfg(target_os = "linux")]
                     {
-                        // Workaround for Linux Wayland WebKitGTK compositing bugs:
+                        // Workaround for Linux Wayland WebKitGTK compositing:
                         // `visible:false` → `show()` can leave the webview surface
-                        // without a valid input region, making the entire window
-                        // (including CSD titlebar buttons) unresponsive to clicks.
-                        //
-                        // The fix: after show(), async-delay for webview realize,
-                        // then set_focus() + ±1px pseudo-resize to force GTK's
-                        // size-allocate → input surface reattach.
+                        // without a valid input region. The ±1px nudge forces
+                        // GTK size-allocate → input surface reattach.
                         // Ref: tauri#9394, cc-switch linux_fix.rs
                         let main_clone = main.clone();
                         let _ = main_clone.set_focus();
@@ -234,11 +230,12 @@ pub fn run() {
                                 // set_size calls, leaving the window at width+1.
                                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                                 if let Ok(after) = main_clone.inner_size() {
-                                    if after.width != orig.width || after.height != orig.height {
-                                        log::info!(
-                                            "[main] Linux nudge drift detected: {}x{} → {}x{}, correcting",
-                                            orig.width, orig.height, after.width, after.height
-                                        );
+                                    // Only correct the ±1px nudge artifact — if the
+                                    // compositor or user resized the window significantly
+                                    // during this window, don't clobber that change.
+                                    let dw = if after.width > orig.width { after.width - orig.width } else { orig.width - after.width };
+                                    let dh = if after.height > orig.height { after.height - orig.height } else { orig.height - after.height };
+                                    if dw <= 1 && dh <= 1 && (dw > 0 || dh > 0) {
                                         let _ = main_clone.set_size(orig);
                                     }
                                 }

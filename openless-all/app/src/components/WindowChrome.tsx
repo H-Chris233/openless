@@ -31,10 +31,15 @@ export function WindowChrome({
   children,
   height = 800,
 }: WindowChromeProps) {
+  // Windows: decorations:true 时外层不画圆角/边框/阴影/标题栏，避免与原生窗口重叠。
+  // Linux: decorations:false 时外层画 14px 圆角 + 自定义标题栏。
   const shellRadius = os === 'mac' ? 0 : os === 'win' ? 0 : 14;
   const consoleRadius = os === 'mac' ? 20 : os === 'win' ? WIN_CONSOLE_RADIUS : 14;
   const titlebarHeight = os === 'mac' ? MAC_TITLEBAR_HEIGHT : os === 'linux' ? LINUX_TITLEBAR_HEIGHT : 0;
 
+  // 三个平台共用半透明玻璃 background + backdropFilter。
+  // macOS: NSVisualEffectView 提供材质；Windows: Tauri apply_mica 提供 Mica；
+  // Linux: decorations:false 后 CSS 磨砂玻璃自成背景。
   const background = `
     radial-gradient(120% 80% at 0% 0%, rgba(255,255,255,0.55) 0%, rgba(255,255,255,0) 60%),
     radial-gradient(100% 70% at 100% 100%, rgba(37,99,235,0.07) 0%, rgba(37,99,235,0) 55%),
@@ -78,6 +83,9 @@ export function WindowChrome({
         />
       )}
       {os === 'linux' && <LinuxTitlebar />}
+      {os === 'linux' && (
+        <style>{`.ol-linux-close-btn:hover{background:rgba(220,38,38,0.12)!important;color:rgb(220,38,38)!important}`}</style>
+      )}
       <div style={{ flex: 1, minHeight: 0, display: 'flex', position: 'relative' }}>
         {children}
       </div>
@@ -87,21 +95,36 @@ export function WindowChrome({
 
 // ── Linux custom titlebar — mirrors cc-switch's approach ──
 
+type TauriWindow = import('@tauri-apps/api/window').Window;
+
 function LinuxTitlebar() {
   const [maximized, setMaximized] = useState(false);
-  const winRef = useRef<any>(null);
+  const winRef = useRef<TauriWindow | null>(null);
 
   useEffect(() => {
     let cancelled = false;
+    let unlisten: (() => void) | undefined;
     import('@tauri-apps/api/window').then(({ getCurrentWindow }) => {
       if (cancelled) return;
       const w = getCurrentWindow();
       winRef.current = w;
-      w.isMaximized().then((m: boolean) => {
+      w.isMaximized().then((m) => {
         if (!cancelled) setMaximized(m);
       }).catch(() => {});
+      // Keep icon in sync when user maximizes via double-click / keyboard shortcut
+      w.listen('tauri://resize', () => {
+        if (cancelled) return;
+        w.isMaximized().then((m) => {
+          if (!cancelled) setMaximized(m);
+        }).catch(() => {});
+      }).then((fn) => {
+        if (!cancelled) unlisten = fn;
+      }).catch(() => {});
     }).catch(() => {});
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
   }, []);
 
   const onMinimize = useCallback(() => {
@@ -109,8 +132,13 @@ function LinuxTitlebar() {
   }, []);
 
   const onToggleMaximize = useCallback(() => {
-    winRef.current?.toggleMaximize().catch(() => {});
-    setMaximized((m) => !m);
+    const w = winRef.current;
+    if (!w) return;
+    w.toggleMaximize().catch(() => {});
+    // Re-query after window manager processes the toggle, in case WM rejects it
+    setTimeout(() => {
+      w.isMaximized().then(setMaximized).catch(() => {});
+    }, 300);
   }, []);
 
   const onClose = useCallback(() => {
@@ -154,17 +182,11 @@ function LinuxTitlebar() {
           onClick={onClose}
           aria-label="Close"
           className="ol-linux-close-btn"
-          style={closeBtn}
+          style={ctrlBtn}
         >
           <CloseSvg />
         </button>
       </div>
-      <style>{`
-        .ol-linux-close-btn:hover {
-          background: rgba(220,38,38,0.12) !important;
-          color: rgb(220,38,38) !important;
-        }
-      `}</style>
     </div>
   );
 }
@@ -179,9 +201,6 @@ const ctrlBtn: CSSProperties = {
   background: 'transparent', color: 'var(--ol-ink-3)',
   fontFamily: 'inherit', cursor: 'default',
   transition: 'background 0.12s, color 0.12s',
-};
-const closeBtn: CSSProperties = {
-  ...ctrlBtn,
 };
 
 function MinimizeSvg() {
