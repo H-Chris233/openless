@@ -613,8 +613,7 @@ pub struct UserPreferences {
     /// Windows Foundry Local Whisper 模型在 runtime 中保持加载多久。
     #[serde(default = "default_local_asr_keep_loaded_secs")]
     pub foundry_local_asr_keep_loaded_secs: u32,
-    /// Windows sherpa-onnx 本地 ASR（M1 实验 provider，详见
-    /// `docs/windows-sherpa-onnx-asr-plan.md`）当前激活的模型 alias。
+    /// Windows sherpa-onnx 本地 ASR 当前激活的模型 alias。
     #[serde(default = "default_sherpa_onnx_model")]
     pub sherpa_onnx_model: String,
     /// Windows sherpa-onnx 语言 hint（BCP-47 / ISO 639-1 小写）。空 = 自动。

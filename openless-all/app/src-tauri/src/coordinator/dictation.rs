@@ -622,9 +622,10 @@ pub(super) async fn begin_session(inner: &Arc<Inner>) -> Result<(), String> {
         return Ok(());
     }
 
-    // Windows sherpa-onnx-local（M1 骨架）：与 Foundry 同形分支，复用 Recorder /
-    // ActiveAsr / start_recorder_and_enter_listening。runtime/transcribe 都是
-    // 桩——M1 这里只验证主链路能跑到 sherpa 这条路径；真实推理见 M2。
+    // Windows sherpa-onnx-local：与 Foundry 同形分支，复用 Recorder /
+    // ActiveAsr / start_recorder_and_enter_listening。offline 模型走 batch；
+    // online 模型在 provider 内部 worker 中边录边解码，并通过 local-asr-token
+    // 推 partial 给前端胶囊。
     #[cfg(target_os = "windows")]
     if sherpa::is_sherpa_onnx_local(&active_asr) {
         let prefs = inner.prefs.get();
@@ -639,11 +640,38 @@ pub(super) async fn begin_session(inner: &Arc<Inner>) -> Result<(), String> {
         } else {
             Some(language_hint)
         };
-        let local = Arc::new(SherpaOnnxAsr::new(
+        let token_handler = inner.app.lock().clone().map(|app| {
+            Arc::new(move |piece: String| {
+                if let Err(error) = app.emit("local-asr-token", piece) {
+                    log::warn!("[sherpa-asr] emit token failed: {error}");
+                }
+            }) as crate::asr::local::sherpa_provider::SherpaTokenHandler
+        });
+        let local = match SherpaOnnxAsr::new_for_model(
             Arc::clone(&inner.sherpa_onnx_runtime),
             model_alias,
             language_hint,
-        ));
+            token_handler,
+        )
+        .await
+        {
+            Ok(local) => Arc::new(local),
+            Err(e) => {
+                log::error!("[coord] sherpa-onnx init failed: {e:#}");
+                emit_capsule(
+                    inner,
+                    CapsuleState::Error,
+                    0.0,
+                    0,
+                    Some(format!("本地模型初始化失败: {e}")),
+                    None,
+                );
+                restore_prepared_windows_ime_session(inner, current_session_id);
+                inner.state.lock().phase = SessionPhase::Idle;
+                schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
+                return Err(format!("sherpa-onnx init failed: {e}"));
+            }
+        };
         store_asr_for_session(
             inner,
             current_session_id,
@@ -1282,9 +1310,8 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                 }
             }
         }
-        // Windows sherpa-onnx（M1 骨架）：transcribe 当前返回空 RawTranscript，
-        // 上层 empty-transcript guard 会写 emptyTranscript 历史并显示错误胶囊。
-        // M2 接入推理后这里的行为就跟 Foundry 完全一致。
+        // Windows sherpa-onnx offline batch：停止录音后整段转写，再复用现有
+        // polish / insert / history 收尾路径。
         #[cfg(target_os = "windows")]
         ActiveAsr::SherpaOnnxLocal(local) => {
             debug_assert!(!uses_global_timeout);

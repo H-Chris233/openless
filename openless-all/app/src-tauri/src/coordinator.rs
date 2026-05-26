@@ -142,8 +142,7 @@ enum ActiveAsr {
     Bailian(Arc<BailianRealtimeASR>),
     #[cfg(target_os = "windows")]
     FoundryLocalWhisper(Arc<FoundryLocalWhisperAsr>),
-    /// Windows sherpa-onnx 本地 ASR（M1 骨架，详见
-    /// `docs/windows-sherpa-onnx-asr-plan.md`）。
+    /// Windows sherpa-onnx 本地 ASR（offline batch + 实验 online streaming）。
     #[cfg(target_os = "windows")]
     SherpaOnnxLocal(Arc<SherpaOnnxAsr>),
     /// 本地 Qwen3-ASR；只在 macOS + 模型已下载时可达。
@@ -186,7 +185,7 @@ struct Inner {
     local_asr_cache: Arc<crate::asr::local::LocalAsrCache>,
     #[cfg(target_os = "windows")]
     foundry_local_runtime: Arc<FoundryLocalRuntime>,
-    /// Windows sherpa-onnx 本地 ASR runtime（M1 骨架）。与 Foundry 同处一个
+    /// Windows sherpa-onnx 本地 ASR runtime。与 Foundry 同处一个
     /// 位置、同一 lifecycle 语义；上层通过 `ActiveAsr::SherpaOnnxLocal` 后只调
     /// runtime，不会跨模块调。
     #[cfg(target_os = "windows")]
@@ -312,8 +311,8 @@ impl Coordinator {
         }
     }
 
-    /// 保留旧构造函数：现有调用点（含单元测试）只传 Foundry runtime，
-    /// sherpa-onnx runtime 采用默认骨架实例。入产后（lib.rs）请走
+    /// 保留旧构造函数：现有调用点（含单元测试）只传 Foundry runtime。
+    /// sherpa-onnx runtime 这里创建默认 offline batch 实例；入产后（lib.rs）请走
     /// `new_with_local_runtimes`，确保 Tauri State 共享同一个 Arc。
     #[cfg(target_os = "windows")]
     pub fn new_with_foundry_runtime(foundry_local_runtime: Arc<FoundryLocalRuntime>) -> Self {
@@ -2392,8 +2391,7 @@ fn sherpa_onnx_release_keep_secs(inner: &Arc<Inner>) -> u32 {
 }
 
 /// 与 `schedule_foundry_local_asr_release` 同形：session_id 老旧则不释放，
-/// 避免下一轮 session 重加载同一个模型。M1 阶段 runtime 是骨架，`release_now`
-/// 只清 alias state，不会报错。
+/// 避免下一轮 session 立即重加载同一个 offline batch 模型。
 #[cfg(target_os = "windows")]
 fn schedule_sherpa_onnx_release(inner: &Arc<Inner>, session_id: SessionId) {
     let keep_secs = sherpa_onnx_release_keep_secs(inner);
@@ -4176,8 +4174,8 @@ fn local_qwen_transcribe_timeout(audio_secs: f64) -> std::time::Duration {
     std::time::Duration::from_secs(secs)
 }
 
-/// sherpa-onnx M1 阶段超时与 Foundry 同档。M2 接入真实推理后视 CPU 模型
-/// 实际耗时再调（中文 SenseVoice small int8 在 4 核 CPU 上一般 < 3s/30s 音频）。
+/// sherpa-onnx offline batch 暂与 Foundry 同档；后续按 Windows 真机 CPU/模型
+/// 实测结果再调整。
 #[cfg(target_os = "windows")]
 fn sherpa_audio_transcribe_timeout_duration() -> std::time::Duration {
     std::time::Duration::from_secs(COORDINATOR_GLOBAL_TIMEOUT_SECS)
