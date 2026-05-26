@@ -1,4 +1,4 @@
-import { type CSSProperties, type ReactNode } from 'react';
+import { type CSSProperties, type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
 
 export type OS = 'mac' | 'win' | 'linux';
 
@@ -16,6 +16,7 @@ export function detectOS(): OS {
 
 const MAC_TITLEBAR_HEIGHT = 28;
 const MAC_SYSTEM_CONTROLS_RESERVED_WIDTH = 76;
+const LINUX_TITLEBAR_HEIGHT = 36;
 const WIN_CONSOLE_RADIUS = 10;
 
 interface WindowChromeProps {
@@ -30,17 +31,15 @@ export function WindowChrome({
   children,
   height = 800,
 }: WindowChromeProps) {
-  // Windows 下交还原生外壳（decorations:true）：外层不画圆角 / 边框 / 阴影 / 标题栏，
-  // 避免与原生窗口的角和关闭按钮重叠。内层卡片保留 10px 圆角，跟整体设计对齐。
+  // Windows: decorations:true 时外层不画圆角/边框/阴影/标题栏，避免与原生窗口重叠。
+  // Linux: decorations:false 时外层画 14px 圆角 + 自定义标题栏。
   const shellRadius = os === 'mac' ? 0 : os === 'win' ? 0 : 14;
   const consoleRadius = os === 'mac' ? 20 : os === 'win' ? WIN_CONSOLE_RADIUS : 14;
-  const titlebarHeight = os === 'mac' ? MAC_TITLEBAR_HEIGHT : 0;
+  const titlebarHeight = os === 'mac' ? MAC_TITLEBAR_HEIGHT : os === 'linux' ? LINUX_TITLEBAR_HEIGHT : 0;
 
-  // 两个平台用同一份半透明玻璃 background + backdropFilter，让 sidebar 透明地坐在
-  // 磨砂底板上时有可见的玻璃感。
-  // Windows: Tauri transparent:true + lib.rs apply_mica 提供 Win11 Mica 透出来；
-  // macOS: NSVisualEffectView 提供材质。
-  // alpha 0.92：和原生 Win11 caption（lib.rs 设为 rgb(245,245,247)）色差最小，玻璃感仍可见。
+  // 三个平台共用半透明玻璃 background + backdropFilter。
+  // macOS: NSVisualEffectView 提供材质；Windows: Tauri apply_mica 提供 Mica；
+  // Linux: decorations:false 后 CSS 磨砂玻璃自成背景。
   const background = `
     radial-gradient(120% 80% at 0% 0%, rgba(255,255,255,0.55) 0%, rgba(255,255,255,0) 60%),
     radial-gradient(100% 70% at 100% 100%, rgba(37,99,235,0.07) 0%, rgba(37,99,235,0) 55%),
@@ -83,9 +82,156 @@ export function WindowChrome({
           }}
         />
       )}
+      {os === 'linux' && <LinuxTitlebar />}
+      {os === 'linux' && (
+        <style>{`.ol-linux-close-btn:hover{background:rgba(220,38,38,0.12)!important;color:rgb(220,38,38)!important}`}</style>
+      )}
       <div style={{ flex: 1, minHeight: 0, display: 'flex', position: 'relative' }}>
         {children}
       </div>
     </div>
+  );
+}
+
+// ── Linux custom titlebar — mirrors cc-switch's approach ──
+
+type TauriWindow = import('@tauri-apps/api/window').Window;
+
+function LinuxTitlebar() {
+  const [maximized, setMaximized] = useState(false);
+  const winRef = useRef<TauriWindow | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    import('@tauri-apps/api/window').then(({ getCurrentWindow }) => {
+      if (cancelled) return;
+      const w = getCurrentWindow();
+      winRef.current = w;
+      w.isMaximized().then((m) => {
+        if (!cancelled) setMaximized(m);
+      }).catch(() => {});
+      // Keep icon in sync when user maximizes via double-click / keyboard shortcut
+      w.listen('tauri://resize', () => {
+        if (cancelled) return;
+        w.isMaximized().then((m) => {
+          if (!cancelled) setMaximized(m);
+        }).catch(() => {});
+      }).then((fn) => {
+        if (!cancelled) unlisten = fn;
+      }).catch(() => {});
+    }).catch(() => {});
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  const onMinimize = useCallback(() => {
+    winRef.current?.minimize().catch(() => {});
+  }, []);
+
+  const onToggleMaximize = useCallback(() => {
+    const w = winRef.current;
+    if (!w) return;
+    w.toggleMaximize().catch(() => {});
+    // Re-query after window manager processes the toggle, in case WM rejects it
+    setTimeout(() => {
+      w.isMaximized().then(setMaximized).catch(() => {});
+    }, 300);
+  }, []);
+
+  const onClose = useCallback(() => {
+    winRef.current?.close().catch(() => {});
+  }, []);
+
+  return (
+    <div
+      data-tauri-drag-region
+      style={{
+        height: LINUX_TITLEBAR_HEIGHT,
+        flexShrink: 0,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        padding: '0 6px 0 14px',
+        background: 'rgba(245,245,247,0.85)',
+        backdropFilter: 'blur(12px) saturate(180%)',
+        WebkitBackdropFilter: 'blur(12px) saturate(180%)',
+        borderBottom: '0.5px solid rgba(0,0,0,0.08)',
+        color: 'var(--ol-ink-3)',
+        fontSize: 13,
+        fontWeight: 500,
+        cursor: 'default',
+        userSelect: 'none',
+        zIndex: 50,
+      }}
+    >
+      <span style={{ color: 'var(--ol-ink-2)' }}>OpenLess</span>
+      <div
+        style={{ display: 'flex', gap: 4, pointerEvents: 'auto' }}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <button onClick={onMinimize} aria-label="Minimize" style={ctrlBtn}>
+          <MinimizeSvg />
+        </button>
+        <button onClick={onToggleMaximize} aria-label={maximized ? 'Restore' : 'Maximize'} style={ctrlBtn}>
+          {maximized ? <RestoreSvg /> : <MaximizeSvg />}
+        </button>
+        <button
+          onClick={onClose}
+          aria-label="Close"
+          className="ol-linux-close-btn"
+          style={ctrlBtn}
+        >
+          <CloseSvg />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── inline SVG icons (no lucide-react dep) ──
+
+const svgWrap: CSSProperties = { width: 12, height: 12, display: 'block' };
+const ctrlBtn: CSSProperties = {
+  width: 30, height: 24,
+  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+  borderRadius: 5, border: 0, padding: 0,
+  background: 'transparent', color: 'var(--ol-ink-3)',
+  fontFamily: 'inherit', cursor: 'default',
+  transition: 'background 0.12s, color 0.12s',
+};
+
+function MinimizeSvg() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 12 12" fill="none" style={svgWrap}>
+      <rect x="2" y="5.5" width="8" height="1" rx="0.5" fill="currentColor" />
+    </svg>
+  );
+}
+
+function MaximizeSvg() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 12 12" fill="none" style={svgWrap}>
+      <rect x="2" y="2" width="8" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.1" />
+    </svg>
+  );
+}
+
+function RestoreSvg() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 12 12" fill="none" style={svgWrap}>
+      <rect x="3.6" y="0.6" width="7.2" height="7.2" rx="1.3" stroke="currentColor" strokeWidth="1.1" />
+      <rect x="0.6" y="3.6" width="7.2" height="7.2" rx="1.3" fill="var(--ol-surface, #fff)" stroke="currentColor" strokeWidth="1.1" />
+    </svg>
+  );
+}
+
+function CloseSvg() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 12 12" fill="none" style={svgWrap}>
+      <path d="M2.8 2.8l6.4 6.4M9.2 2.8l-6.4 6.4" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" />
+    </svg>
   );
 }
