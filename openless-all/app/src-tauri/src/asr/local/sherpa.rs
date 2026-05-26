@@ -1,9 +1,7 @@
 //! Windows sherpa-onnx 本地 ASR 的常量、catalog 与事件载荷。
 //!
-//! M1 阶段：纯描述层；不依赖 `sherpa-onnx` crate，不做实际推理。
-//! 与 `foundry.rs` 形状对齐，便于前端命令链路与 Foundry 同形复用。
-//!
-//! 推理接入见 `sherpa_runtime.rs`（M2）。
+//! 当前 catalog 覆盖 Windows offline batch 模型和实验 online streaming 模型；
+//! `sherpa_runtime.rs` 分别持有 `OfflineRecognizer` / `OnlineRecognizer`。
 
 use std::path::{Path, PathBuf};
 
@@ -12,6 +10,7 @@ use serde::Serialize;
 
 pub const PROVIDER_ID: &str = "sherpa-onnx-local";
 pub const DEFAULT_MODEL_ALIAS: &str = "sense-voice-small-zh";
+pub const DEFAULT_ONLINE_MODEL_ALIAS: &str = "zipformer-bilingual-zh-en-streaming";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -30,7 +29,7 @@ pub enum SherpaFamily {
 pub enum SherpaMode {
     /// 录音停止后整段 PCM 一次性识别。
     Offline,
-    /// 边录边识别 partial / final segment。M5 才接。
+    /// 边录边识别 partial / final segment。
     Online,
 }
 
@@ -47,8 +46,8 @@ pub struct SherpaModel {
     pub quality_tier: &'static str,
 }
 
-/// M1 catalog 三档：默认 SenseVoice，中文专用 Paraformer，多语 Whisper 兜底。
-/// 文件清单 + 校验和会在 M3 模型管理阶段补全；M1 只暴露元数据驱动 UI。
+/// Catalog：默认 SenseVoice，中文专用 Paraformer，多语 Whisper 兜底，
+/// Qwen3-ASR 实验档，以及 Zipformer online streaming 实验档。
 #[allow(dead_code)]
 pub const MODELS: &[SherpaModel] = &[
     SherpaModel {
@@ -83,6 +82,14 @@ pub const MODELS: &[SherpaModel] = &[
         languages: &["multi"],
         quality_tier: "qwen3-balanced",
     },
+    SherpaModel {
+        alias: DEFAULT_ONLINE_MODEL_ALIAS,
+        display_name: "Zipformer Streaming bilingual (zh/en)",
+        family: SherpaFamily::Zipformer,
+        mode: SherpaMode::Online,
+        languages: &["zh", "en"],
+        quality_tier: "streaming-experimental",
+    },
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +109,18 @@ pub fn model_alias_is_known(alias: &str) -> bool {
     MODELS.iter().any(|model| model.alias == alias)
 }
 
+pub fn mode_for_alias(alias: &str) -> Result<SherpaMode> {
+    MODELS
+        .iter()
+        .find(|model| model.alias == alias)
+        .map(|model| model.mode)
+        .ok_or_else(|| anyhow::anyhow!("unknown sherpa-onnx model alias: {alias}"))
+}
+
+pub fn alias_is_online(alias: &str) -> bool {
+    matches!(mode_for_alias(alias), Ok(SherpaMode::Online))
+}
+
 pub fn hf_repo_for_alias(alias: &str) -> Result<&'static str> {
     match alias {
         "sense-voice-small-zh" => {
@@ -109,6 +128,9 @@ pub fn hf_repo_for_alias(alias: &str) -> Result<&'static str> {
         }
         "paraformer-zh" => Ok("csukuangfj/sherpa-onnx-paraformer-zh-2024-03-09"),
         "whisper-small-multi" => Ok("csukuangfj/sherpa-onnx-whisper-small"),
+        DEFAULT_ONLINE_MODEL_ALIAS => {
+            Ok("csukuangfj/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20")
+        }
         _ => anyhow::bail!("unknown sherpa-onnx model alias: {alias}"),
     }
 }
@@ -123,6 +145,12 @@ pub fn required_files_for_alias(alias: &str) -> Result<&'static [&'static str]> 
             "encoder.int8.onnx",
             "decoder.int8.onnx",
             "tokenizer",
+        ]),
+        DEFAULT_ONLINE_MODEL_ALIAS => Ok(&[
+            "encoder-epoch-99-avg-1.int8.onnx",
+            "decoder-epoch-99-avg-1.onnx",
+            "joiner-epoch-99-avg-1.int8.onnx",
+            "tokens.txt",
         ]),
         _ => anyhow::bail!("unknown sherpa-onnx model alias: {alias}"),
     }
@@ -164,6 +192,18 @@ pub fn download_files_for_alias(alias: &str) -> Result<&'static [(&'static str, 
             ("small-encoder.int8.onnx", "encoder.int8.onnx"),
             ("small-decoder.int8.onnx", "decoder.int8.onnx"),
             ("small-tokens.txt", "tokens.txt"),
+        ]),
+        DEFAULT_ONLINE_MODEL_ALIAS => Ok(&[
+            (
+                "encoder-epoch-99-avg-1.int8.onnx",
+                "encoder-epoch-99-avg-1.int8.onnx",
+            ),
+            ("decoder-epoch-99-avg-1.onnx", "decoder-epoch-99-avg-1.onnx"),
+            (
+                "joiner-epoch-99-avg-1.int8.onnx",
+                "joiner-epoch-99-avg-1.int8.onnx",
+            ),
+            ("tokens.txt", "tokens.txt"),
         ]),
         _ => anyhow::bail!("unknown sherpa-onnx model alias: {alias}"),
     }
@@ -292,25 +332,39 @@ impl SherpaPrepareProgressPayload {
 #[allow(dead_code)]
 pub struct SherpaRuntimeStatus {
     pub provider_id: String,
-    /// M1 阶段恒为 false：sherpa-onnx crate 尚未接入。
+    /// 当前平台是否具备 sherpa-onnx 推理能力。Windows 为 true；其他平台保留
+    /// provider 元数据但不提供本地 sherpa 推理。
     pub available: bool,
     /// 当前模型是否已加载到内存。
     pub runtime_ready: bool,
     pub active_model: String,
     pub loaded_model_id: Option<String>,
     pub error: Option<String>,
+    /// 最近一次 prepare/load 耗时。缓存命中也会记录一次很小的耗时。
+    pub last_prepare_ms: Option<u64>,
+    /// 最近一次 batch decode 耗时，不含录音时间。
+    pub last_transcribe_ms: Option<u64>,
+    /// 最近一次送入 recognizer 的音频时长。
+    pub last_audio_ms: Option<u64>,
+    /// 最近一次 prepare/transcribe 错误，方便 UI 和日志定位可恢复失败。
+    pub last_error: Option<String>,
 }
 
 impl SherpaRuntimeStatus {
     #[allow(dead_code)]
     pub fn unavailable(active_model: String, error: impl Into<String>) -> Self {
+        let error = error.into();
         Self {
             provider_id: PROVIDER_ID.into(),
             available: false,
             runtime_ready: false,
             active_model,
             loaded_model_id: None,
-            error: Some(error.into()),
+            error: Some(error.clone()),
+            last_prepare_ms: None,
+            last_transcribe_ms: None,
+            last_audio_ms: None,
+            last_error: Some(error),
         }
     }
 }
@@ -342,9 +396,33 @@ mod tests {
                 "paraformer-zh",
                 "whisper-small-multi",
                 "qwen3-asr-0.6b-int8",
+                "zipformer-bilingual-zh-en-streaming",
             ]
         );
         assert!(catalog.iter().all(|m| !m.cached));
+        assert_eq!(catalog.last().unwrap().mode, SherpaMode::Online);
+    }
+
+    #[test]
+    fn online_zipformer_has_download_and_required_files() {
+        assert_eq!(
+            mode_for_alias(DEFAULT_ONLINE_MODEL_ALIAS).unwrap(),
+            SherpaMode::Online
+        );
+        assert!(alias_is_online(DEFAULT_ONLINE_MODEL_ALIAS));
+        assert_eq!(
+            hf_repo_for_alias(DEFAULT_ONLINE_MODEL_ALIAS).unwrap(),
+            "csukuangfj/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20"
+        );
+        assert_eq!(
+            required_files_for_alias(DEFAULT_ONLINE_MODEL_ALIAS).unwrap(),
+            &[
+                "encoder-epoch-99-avg-1.int8.onnx",
+                "decoder-epoch-99-avg-1.onnx",
+                "joiner-epoch-99-avg-1.int8.onnx",
+                "tokens.txt",
+            ]
+        );
     }
 
     #[test]
@@ -394,6 +472,7 @@ mod tests {
         assert!(!status.runtime_ready);
         assert_eq!(status.active_model, "paraformer-zh");
         assert_eq!(status.error.as_deref(), Some("not ready"));
+        assert_eq!(status.last_error.as_deref(), Some("not ready"));
     }
 
     #[test]
