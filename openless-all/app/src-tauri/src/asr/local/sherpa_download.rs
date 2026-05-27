@@ -863,7 +863,193 @@ mod tests {
     impl Drop for TempModelDir {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
+            if let Ok(extract_dir) = archive_extract_dir(&self.0) {
+                let _ = fs::remove_dir_all(extract_dir);
+            }
         }
+    }
+
+    fn write_release_archive_fixture(
+        archive_path: &Path,
+        archive: sherpa::SherpaReleaseArchive,
+        files: &[(&str, &[u8])],
+    ) {
+        let src_root = std::env::temp_dir().join(format!(
+            "openless-sherpa-archive-src-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&src_root).expect("create archive source root");
+        for (relative, bytes) in files {
+            let path = src_root.join(relative);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("create archive source parent");
+            }
+            fs::write(path, bytes).expect("write archive source file");
+        }
+
+        let file = fs::File::create(archive_path).expect("create archive file");
+        let encoder = bzip2::write::BzEncoder::new(file, bzip2::Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        builder
+            .append_dir_all(archive.root_dir, &src_root)
+            .expect("append archive root");
+        let encoder = builder.into_inner().expect("finish tar");
+        encoder.finish().expect("finish bzip2");
+        let _ = fs::remove_dir_all(src_root);
+    }
+
+    #[test]
+    fn verify_file_rejects_size_mismatch() {
+        let dir = TempModelDir::new("verify-size");
+        let path = dir.path().join("model.bin");
+        fs::write(&path, b"abc").expect("write test file");
+        let file = SherpaRemoteFile {
+            path: "model.bin".into(),
+            local_path: "model.bin".into(),
+            size: 4,
+            sha256: None,
+        };
+
+        let message = format!("{:#}", verify_file(&path, &file).unwrap_err());
+
+        assert!(message.contains("文件大小不匹配"));
+        assert!(message.contains("actual=3"));
+        assert!(message.contains("expected=4"));
+    }
+
+    #[test]
+    fn verify_file_rejects_sha256_mismatch() {
+        let dir = TempModelDir::new("verify-sha");
+        let path = dir.path().join("model.bin");
+        fs::write(&path, b"abc").expect("write test file");
+        let file = SherpaRemoteFile {
+            path: "model.bin".into(),
+            local_path: "model.bin".into(),
+            size: 3,
+            sha256: Some("0000000000000000000000000000000000000000000000000000000000000000".into()),
+        };
+
+        let message = format!("{:#}", verify_file(&path, &file).unwrap_err());
+
+        assert!(message.contains("SHA-256 不匹配"));
+        assert!(message
+            .contains("expected=0000000000000000000000000000000000000000000000000000000000000000"));
+    }
+
+    #[test]
+    fn verify_file_accepts_case_insensitive_sha256() {
+        let dir = TempModelDir::new("verify-sha-ok");
+        let path = dir.path().join("model.bin");
+        fs::write(&path, b"abc").expect("write test file");
+        let file = SherpaRemoteFile {
+            path: "model.bin".into(),
+            local_path: "model.bin".into(),
+            size: 3,
+            sha256: Some(sha256_file(&path).unwrap().to_ascii_uppercase()),
+        };
+
+        verify_file(&path, &file).expect("sha should verify");
+    }
+
+    #[test]
+    fn archive_extract_dir_uses_sibling_path() {
+        let dir = TempModelDir::new("extract-dir");
+        let name = dir.path().file_name().unwrap().to_string_lossy();
+
+        let extract_dir = archive_extract_dir(dir.path()).unwrap();
+
+        assert_eq!(
+            extract_dir,
+            dir.path().with_file_name(format!("{name}.extracting"))
+        );
+    }
+
+    #[test]
+    fn release_archive_bytes_uses_partial_archive_when_not_extracted() {
+        let alias = "qwen3-asr-0.6b-int8";
+        let archive = sherpa::release_archive_for_alias(alias).expect("release archive");
+        let dir = TempModelDir::new("release-archive-partial");
+        let partial_path = dir.path().join(archive.file_name).with_extension("partial");
+        fs::write(partial_path, b"partial").expect("write partial archive");
+
+        assert_eq!(
+            downloaded_release_archive_bytes(dir.path(), alias, archive),
+            7
+        );
+    }
+
+    #[test]
+    fn extract_release_archive_rejects_missing_required_file() {
+        let alias = "qwen3-asr-0.6b-int8";
+        let archive = sherpa::release_archive_for_alias(alias).expect("release archive");
+        let dir = TempModelDir::new("release-archive-missing");
+        let archive_path = dir.path().join(archive.file_name);
+        write_release_archive_fixture(
+            &archive_path,
+            archive,
+            &[("conv_frontend.onnx", b"conv" as &[u8])],
+        );
+
+        let message = format!(
+            "{:#}",
+            extract_release_archive(&archive_path, dir.path(), archive, alias).unwrap_err()
+        );
+
+        assert!(message.contains("archive required path missing"));
+        assert!(message.contains("encoder.int8.onnx"));
+    }
+
+    #[test]
+    fn extract_release_archive_moves_required_files_and_removes_work_paths() {
+        let alias = "qwen3-asr-0.6b-int8";
+        let archive = sherpa::release_archive_for_alias(alias).expect("release archive");
+        let dir = TempModelDir::new("release-archive-success");
+        let archive_path = dir.path().join(archive.file_name);
+        write_release_archive_fixture(
+            &archive_path,
+            archive,
+            &[
+                ("conv_frontend.onnx", b"conv" as &[u8]),
+                ("encoder.int8.onnx", b"encoder" as &[u8]),
+                ("decoder.int8.onnx", b"decoder" as &[u8]),
+                ("tokenizer/tokenizer.json", b"tok" as &[u8]),
+            ],
+        );
+
+        extract_release_archive(&archive_path, dir.path(), archive, alias).unwrap();
+
+        assert_eq!(
+            fs::read(dir.path().join("conv_frontend.onnx")).unwrap(),
+            b"conv"
+        );
+        assert_eq!(
+            fs::read(dir.path().join("encoder.int8.onnx")).unwrap(),
+            b"encoder"
+        );
+        assert_eq!(
+            fs::read(dir.path().join("decoder.int8.onnx")).unwrap(),
+            b"decoder"
+        );
+        assert_eq!(
+            fs::read(dir.path().join("tokenizer").join("tokenizer.json")).unwrap(),
+            b"tok"
+        );
+        assert!(!archive_path.exists());
+        assert!(!archive_extract_dir(dir.path()).unwrap().exists());
+    }
+
+    #[test]
+    fn download_manager_cancel_sets_active_flag() {
+        let manager = SherpaDownloadManager::new();
+        let flag = Arc::new(AtomicBool::new(false));
+        manager
+            .cancel_flags
+            .lock()
+            .insert("sense-voice-small-zh".into(), Arc::clone(&flag));
+
+        manager.cancel("sense-voice-small-zh");
+
+        assert!(flag.load(Ordering::SeqCst));
     }
 
     #[test]

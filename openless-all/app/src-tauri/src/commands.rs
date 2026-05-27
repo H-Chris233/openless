@@ -2513,11 +2513,11 @@ fn emit_foundry_prepare_progress(app: &AppHandle, payload: FoundryPrepareProgres
     }
 }
 
-// ───────────────────── Windows local ASR (sherpa-onnx-local, M1 骨架) ─────────────────────
+// ───────────── Windows local ASR (sherpa-onnx-local, offline batch + online) ─────────────
 //
-// 命令形态与 Foundry 同形，让前端命令封装可以复用同一种 hook 模式；M1 阶段
-// 不做下载 / 不接 sherpa-onnx crate / 不做实际推理，详见
-// `docs/windows-sherpa-onnx-asr-plan.md`。
+// 命令形态与 Foundry 同形，让前端命令封装可以复用同一种 hook 模式；当前支持
+// catalog / 下载 / prepare / release / 删除 / 状态查询，推理由 coordinator 的
+// 听写链路触发。offline 模型停止录音后 batch decode；online 模型录音时输出 partial。
 
 fn active_sherpa_model_from_prefs(prefs: &UserPreferences) -> String {
     if sherpa_model_alias_is_known(&prefs.sherpa_onnx_model) {
@@ -3319,13 +3319,13 @@ pub async fn github_device_flow_poll(
 mod tests {
     use super::{
         active_asr_is_keyless_for_validation, active_foundry_model_from_prefs,
-        asr_configured_for_provider, asr_transcriptions_url, fetch_provider_models,
-        is_gemini_base_url, is_valid_local_pack_id, is_valid_session_id,
+        active_sherpa_model_from_prefs, asr_configured_for_provider, asr_transcriptions_url,
+        fetch_provider_models, is_gemini_base_url, is_valid_local_pack_id, is_valid_session_id,
         llm_configured_for_provider, local_asr_release_plan_for_provider, models_url,
-        normalize_foundry_language_hint, parse_gemini_model_ids, parse_latest_beta_from_atom,
-        parse_model_ids, persist_settings, release_foundry_runtime_if_inactive,
-        release_sherpa_runtime_if_inactive,
-        validate_foundry_model_alias, ProviderConfig, SettingsWriter,
+        normalize_foundry_language_hint, normalize_sherpa_language_hint, parse_gemini_model_ids,
+        parse_latest_beta_from_atom, parse_model_ids, persist_settings,
+        release_foundry_runtime_if_inactive, release_sherpa_runtime_if_inactive,
+        validate_foundry_model_alias, validate_sherpa_model_alias, ProviderConfig, SettingsWriter,
     };
     use crate::persistence::CredentialsSnapshot;
     use crate::types::{
@@ -3551,6 +3551,49 @@ mod tests {
 
             assert_eq!(active_foundry_model_from_prefs(&prefs), alias);
         }
+    }
+
+    #[test]
+    fn sherpa_language_hint_accepts_empty_and_supported_lowercase_tags() {
+        assert_eq!(normalize_sherpa_language_hint("").unwrap(), "");
+        assert_eq!(normalize_sherpa_language_hint("   ").unwrap(), "");
+        assert_eq!(normalize_sherpa_language_hint("zh").unwrap(), "zh");
+        assert_eq!(normalize_sherpa_language_hint(" en ").unwrap(), "en");
+        assert_eq!(normalize_sherpa_language_hint("zh-cn").unwrap(), "zh-cn");
+        assert_eq!(normalize_sherpa_language_hint("yue").unwrap(), "yue");
+    }
+
+    #[test]
+    fn sherpa_language_hint_normalizes_uppercase_and_rejects_digits() {
+        assert_eq!(normalize_sherpa_language_hint("ZH").unwrap(), "zh");
+        assert!(normalize_sherpa_language_hint("zh-1").is_err());
+        assert!(normalize_sherpa_language_hint("zh_CN").is_err());
+    }
+
+    #[test]
+    fn sherpa_model_alias_validation_matches_catalog() {
+        assert!(
+            validate_sherpa_model_alias(crate::asr::local::sherpa::DEFAULT_MODEL_ALIAS).is_ok()
+        );
+        assert!(validate_sherpa_model_alias("qwen3-asr-0.6b-int8").is_ok());
+        assert!(
+            validate_sherpa_model_alias(crate::asr::local::sherpa::DEFAULT_ONLINE_MODEL_ALIAS)
+                .is_ok()
+        );
+        assert!(validate_sherpa_model_alias("zipformer-zh-streaming").is_err());
+    }
+
+    #[test]
+    fn sherpa_active_model_pref_falls_back_to_default_for_unknown_alias() {
+        let prefs = UserPreferences {
+            sherpa_onnx_model: "zipformer-zh-streaming".to_string(),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            active_sherpa_model_from_prefs(&prefs),
+            crate::asr::local::sherpa::DEFAULT_MODEL_ALIAS
+        );
     }
 
     #[test]

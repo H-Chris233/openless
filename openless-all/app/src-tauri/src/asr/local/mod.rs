@@ -3,7 +3,7 @@
 //! 当前本地引擎：
 //! - **macOS**：`antirez/qwen-asr` 纯 C + Accelerate（`local_provider` / `qwen_engine`）
 //! - **Windows**：Foundry Local Whisper（`foundry_*`），以及 sherpa-onnx-local
-//!   实验 provider（`sherpa*`，M1 仅骨架，详见 `docs/windows-sherpa-onnx-asr-plan.md`）
+//!   实验 provider（`sherpa*`，offline batch + online streaming）
 
 pub mod cache;
 pub mod download;
