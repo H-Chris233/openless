@@ -384,17 +384,20 @@ impl BailianRealtimeASR {
             return;
         }
 
-        // 使用 API 文档标注的 sentence_end 作为 finality 判断，
-        // end_time > 0 作为兼容 fallback（部分早期接口可能不含 sentence_end）。
-        let sentence_end = sentence
-            .get("sentence_end")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+        // 使用 API 文档标注的 sentence_end 作为 finality 判断。
+        // end_time > 0 仅在 sentence_end 字段完全不存在时作为兼容 fallback，
+        // 因为 DashScope 的 interim 结果也包含正数的 end_time（随音频推进增长），
+        // 直接 fallback 会导致 interim 结果被误判为 final，重现累积文本重复。
+        let sentence_end_val = sentence.get("sentence_end");
+        let sentence_end = sentence_end_val.and_then(Value::as_bool).unwrap_or(false);
         let end_time = sentence
             .get("end_time")
             .and_then(Value::as_i64)
             .unwrap_or(0);
-        let is_sentence_final = sentence_end || end_time > 0;
+        let is_sentence_final = match sentence_end_val {
+            Some(_) => sentence_end,
+            None => end_time > 0,
+        };
 
         let sentence_id = sentence
             .get("sentence_id")
@@ -631,7 +634,9 @@ mod tests {
                         "sentence_id": sentence_id,
                         "text": text,
                         "sentence_end": is_final,
-                        "end_time": if is_final { 1000 + sentence_id * 100 } else { 0 }
+                        // end_time 始终为正数，匹配 DashScope 真实 API 行为：
+                        // interim 和 final 都携带正数的 end_time。
+                        "end_time": 1000 + sentence_id * 100
                     }
                 }
             }
@@ -737,6 +742,21 @@ mod tests {
         assert_eq!(st.final_segments.len(), 1);
         assert_eq!(st.final_segments.get(&1).unwrap(), "你好吗");
         assert!(st.partial_segments.is_empty(), "partial not cleaned up");
+    }
+
+    #[test]
+    fn interim_with_positive_end_time_not_mistaken_for_final() {
+        // DashScope 真实 API 中 interim 结果同时带有 sentence_end: false
+        // 和正数的 end_time，验证这不会被误判为 final。
+        let asr = create_test_asr();
+        asr.record_result(&make_result_event(1, "中间结果", false));
+        let st = asr.state.lock();
+        assert!(
+            st.final_segments.is_empty(),
+            "interim with end_time > 0 but sentence_end=false should not be final"
+        );
+        assert_eq!(st.partial_segments.len(), 1);
+        assert_eq!(st.partial_segments.get(&1).unwrap(), "中间结果");
     }
 
     // ---- record_result: duplicate final ----
