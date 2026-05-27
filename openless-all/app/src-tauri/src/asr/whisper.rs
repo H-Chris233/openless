@@ -616,8 +616,9 @@ mod tests {
                     .unwrap();
                 let request = read_http_request(&mut stream);
                 let request_text = String::from_utf8_lossy(&request);
+                let request_text_lower = request_text.to_ascii_lowercase();
                 assert!(request_text.starts_with("POST /audio/transcriptions HTTP/1.1"));
-                assert!(request_text.contains("authorization: Bearer key"));
+                assert!(request_text_lower.contains("authorization: bearer key"));
                 assert!(request_text.contains("model"));
                 write_json_response(&mut stream, &format!(r#"{{"text":"{}"}}"#, text));
             }
