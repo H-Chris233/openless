@@ -53,12 +53,12 @@ case "$PKG" in
         cp "$CONF_SRC" ".$TARGET_CONF"
         if command -v rpmrebuild &>/dev/null; then
             rpmrebuild -np -d "$TMPDIR" "$PKG" 2>/dev/null || {
-                echo "[inject-fcitx5] rpmrebuild failed — rpm injection not available, skipping"
-                exit 0
+                echo "[inject-fcitx5] ERROR: rpmrebuild failed" >&2
+                exit 1
             }
         else
-            echo "[inject-fcitx5] rpmrebuild not found — install it for rpm injection support. Skipping."
-            exit 0
+            echo "[inject-fcitx5] ERROR: rpmrebuild not found — required for RPM injection. Install it with: sudo dnf install rpmrebuild" >&2
+            exit 1
         fi
         echo "[inject-fcitx5] Done — rpm updated"
         ;;
