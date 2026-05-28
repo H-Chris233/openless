@@ -2,7 +2,9 @@
 # Inject fcitx5 plugin files into Linux packages at system paths.
 # Usage: ./inject-fcitx5-plugin.sh <package-path>
 #
-# Supports: .deb, .rpm, AppImage (AppDir)
+# Supports: .deb, .rpm
+# AppImage is NOT supported — fcitx5 runs on the host and cannot load
+# addons from inside the AppImage mount.
 set -euo pipefail
 
 PKG="$1"
@@ -20,8 +22,14 @@ TARGET_CONF="/usr/share/fcitx5/addon/openless.conf"
 
 case "$PKG" in
     *.deb)
-        TARGET_LIB="/usr/lib/x86_64-linux-gnu/fcitx5/libopenless.so"
-        echo "[inject-fcitx5] Injecting into deb: $PKG"
+        # Detect multiarch triplet for the target architecture
+        MULTIARCH=$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || echo "")
+        if [ -n "$MULTIARCH" ]; then
+            TARGET_LIB="/usr/lib/$MULTIARCH/fcitx5/libopenless.so"
+        else
+            TARGET_LIB="/usr/lib/fcitx5/libopenless.so"
+        fi
+        echo "[inject-fcitx5] Injecting into deb ($MULTIARCH): $PKG"
         TMPDIR=$(mktemp -d)
         trap 'rm -rf "$TMPDIR"' EXIT
         dpkg-deb -R "$PKG" "$TMPDIR"
@@ -54,23 +62,8 @@ case "$PKG" in
         fi
         echo "[inject-fcitx5] Done — rpm updated"
         ;;
-    */AppDir|*/appdir|*.AppDir)
-        TARGET_LIB="/usr/lib/x86_64-linux-gnu/fcitx5/libopenless.so"
-        # Inject into AppDir before it's packaged into AppImage.
-        # Must be a directory, not an existing .AppImage file.
-        if [ ! -d "$PKG" ]; then
-            echo "[inject-fcitx5] AppImage injection only supports AppDir (directory), not a packaged .AppImage file. Skipping."
-            exit 0
-        fi
-        echo "[inject-fcitx5] Injecting into AppDir: $PKG"
-        mkdir -p "$PKG/$(dirname "$TARGET_LIB")"
-        mkdir -p "$PKG/$(dirname "$TARGET_CONF")"
-        cp "$SO_SRC" "$PKG/$TARGET_LIB"
-        cp "$CONF_SRC" "$PKG/$TARGET_CONF"
-        echo "[inject-fcitx5] Done — AppDir updated"
-        ;;
     *)
-        echo "[inject-fcitx5] Unknown package format: $PKG — skipping"
+        echo "[inject-fcitx5] Unknown package format: $PKG (supported: .deb, .rpm)"
         exit 1
         ;;
 esac
