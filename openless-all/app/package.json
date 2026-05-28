@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "prebuild": "mkdir -p src-tauri/linux-fcitx5-plugin && for f in libopenless.so openless.conf; do [ -f ../scripts/linux-fcitx5-plugin/build_release/$f ] && cp ../scripts/linux-fcitx5-plugin/build_release/$f src-tauri/linux-fcitx5-plugin/; done; true",
+    "prebuild": "node scripts/copy-plugin.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
     "check:hotkey-injection": "node scripts/check-hotkey-injection.mjs"
