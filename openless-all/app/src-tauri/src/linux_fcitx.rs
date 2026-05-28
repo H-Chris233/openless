@@ -404,57 +404,22 @@ pub fn start_dictation_signal_listener(
         .ok();
 }
 
-/// 检查 fcitx5 插件是否已安装到系统路径，与 bundled 版本比对。
+/// 检查 fcitx5 插件是否已安装到系统路径。
 ///
 /// 所有 Linux 格式（deb/rpm/AppImage）的插件安装都在打包时完成
-///（`scripts/inject-fcitx5-plugin.sh`），此处仅做版本检查。
-/// 不做任何文件 I/O 写入——版本不匹配或未安装时仅输出警告。
+///（`scripts/inject-fcitx5-plugin.sh`），此处仅确认文件存在。
+/// 未安装时输出警告，不做任何文件 I/O。
 #[cfg(target_os = "linux")]
-pub fn ensure_plugin_installed(app: &tauri::AppHandle) {
-    use tauri::Manager;
-
-    let resource_dir = match app.path().resource_dir() {
-        Ok(d) => d,
-        Err(e) => {
-            log::warn!("[fcitx] Cannot resolve resource dir: {e}");
-            return;
-        }
-    };
-
-    let bundled_so = resource_dir.join("linux-fcitx5-plugin").join("libopenless.so");
-    if !bundled_so.exists() {
-        // 非打包环境（dev build），跳过检查
-        return;
-    }
-
-    let bundled_size = match bundled_so.metadata() {
-        Ok(m) => m.len(),
-        Err(_) => return,
-    };
-
-    // fcitx5 标准系统路径（打包时由 inject-fcitx5-plugin.sh 注入）
+pub fn ensure_plugin_installed(_app: &tauri::AppHandle) {
     let system_so = std::path::Path::new("/usr/lib/x86_64-linux-gnu/fcitx5/libopenless.so");
     let system_conf = std::path::Path::new("/usr/share/fcitx5/addon/openless.conf");
 
-    match (system_so.exists(), system_conf.exists()) {
-        (true, true) => {
-            if let Ok(m) = system_so.metadata() {
-                if m.len() != bundled_size {
-                    log::warn!(
-                        "[fcitx] Plugin version mismatch: system={}, bundled={}. Reinstall OpenLess to update.",
-                        m.len(),
-                        bundled_size
-                    );
-                }
-            }
-        }
-        (false, _) | (_, false) => {
-            log::warn!(
-                "[fcitx] fcitx5 plugin not installed at system paths ({:?}, {:?}). \
-                 The OpenLess package may be incomplete.",
-                system_so, system_conf
-            );
-        }
+    if !system_so.exists() || !system_conf.exists() {
+        log::warn!(
+            "[fcitx] fcitx5 plugin not installed at system paths ({:?}, {:?}). \
+             The OpenLess package may be incomplete.",
+            system_so, system_conf
+        );
     }
 }
 

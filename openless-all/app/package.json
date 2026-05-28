@@ -6,7 +6,6 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "prebuild": "node scripts/copy-plugin.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
     "check:hotkey-injection": "node scripts/check-hotkey-injection.mjs"

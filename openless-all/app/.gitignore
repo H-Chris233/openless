@@ -9,5 +9,3 @@ dist/
 # Tauri
 src-tauri/target/
 src-tauri/gen/
-src-tauri/linux-fcitx5-plugin/libopenless.so
-src-tauri/linux-fcitx5-plugin/openless.conf

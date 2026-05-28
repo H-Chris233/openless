@@ -53,10 +53,6 @@
     ]
   },
   "bundle": {
-    "resources": [
-      "linux-fcitx5-plugin/libopenless.so",
-      "linux-fcitx5-plugin/openless.conf"
-    ],
     "linux": {
       "deb": {
         "depends": [
