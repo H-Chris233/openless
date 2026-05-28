@@ -1,11 +1,9 @@
 //! 全局热键监听：发送按下 / 抬起 / 取消三类边沿事件。
 //!
 //! - macOS：原生 CGEventTap（core-foundation + core-graphics FFI），与 Swift
-//!   `OpenLessHotkey/HotkeyMonitor.swift` 同源。**不能用 `rdev`**：rdev 在每个
-//!   事件回调里同步调 `TSMGetInputSourceProperty`，macOS 14+ 强制断言主线程，
-//!   非主线程触发 `dispatch_assert_queue_fail` → SIGTRAP abort（已踩坑）。
+//!   `OpenLessHotkey/HotkeyMonitor.swift` 同源。
 //! - Windows：原生 `WH_KEYBOARD_LL` low-level keyboard hook，保留 modifier-only
-//!   trigger（如右 Control / 右 Alt）的真实语义，不再把平台能力藏在 `rdev` 抽象里。
+//!   trigger（如右 Control / 右 Alt）的真实语义。
 //! - Linux：fcitx5 插件提供热键事件（DBus 信号 `DictationKeyEvent`）。
 //!
 //! 仅产出"边沿"事件，toggle vs hold 由 Coordinator 解释。
@@ -1189,19 +1187,18 @@ mod platform {
     use super::{HotkeyAdapter, HotkeyEvent};
     use crate::types::{HotkeyAdapterKind, HotkeyBinding, HotkeyInstallError, HotkeyTrigger};
 
-    /// Linux 统一使用 fcitx5 插件作为热键源（Wayland / X11 均可），
-    /// 不再启用 rdev 监听器。此处返回占位 adapter 让上层走 `Installed` 分支。
+    /// Linux 统一使用 fcitx5 插件作为热键源（Wayland / X11 均可）。
     ///
     /// 实际的热键事件由 `linux_fcitx::start_dictation_signal_listener` 接收
     /// fcitx5 插件的 DBus 信号并转发到 `Sender<HotkeyEvent>`。
     pub fn start_adapter(
         _binding: HotkeyBinding,
-        tx: Sender<HotkeyEvent>,
+        _tx: Sender<HotkeyEvent>,
     ) -> Result<Box<dyn HotkeyAdapter>, HotkeyInstallError> {
         log::info!(
-            "[hotkey] Linux — fcitx5 plugin handles hotkeys; rdev listener skipped"
+            "[hotkey] Linux — fcitx5 plugin handles hotkeys"
         );
-        Ok(Box::new(PlaceholderAdapter { _tx: tx }))
+        Ok(Box::new(PlaceholderAdapter { _tx }))
     }
 
     /// Linux 占位 adapter：实现接口但不监听键盘。

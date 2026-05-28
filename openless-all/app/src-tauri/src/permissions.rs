@@ -6,7 +6,7 @@
 //! - macOS Accessibility：`AXIsProcessTrusted` 检查；
 //!   `AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: true})` 弹系统授权框。
 //! - macOS Microphone：`AVAudioApplication.shared.recordPermission` + requestRecordPermission。
-//! - Windows：rdev / cpal 不需要 Accessibility 等价权限；麦克风首次使用时 Win10+ 弹一次系统提示。
+//! - Windows：cpal 不需要 Accessibility 等价权限；麦克风首次使用时 Win10+ 弹一次系统提示。
 
 use serde::Serialize;
 
@@ -256,7 +256,7 @@ mod platform {
     #[cfg(target_os = "windows")]
     use winreg::RegKey;
 
-    /// Windows / Linux 不存在 macOS 那种 Accessibility 概念；rdev 直接监听键盘。
+    /// Windows / Linux 不存在 macOS 那种 Accessibility 概念。
     pub fn check_accessibility() -> PermissionStatus {
         PermissionStatus::NotApplicable
     }
