@@ -411,14 +411,32 @@ pub fn start_dictation_signal_listener(
 /// 未安装时输出警告，不做任何文件 I/O。
 #[cfg(target_os = "linux")]
 pub fn ensure_plugin_installed(_app: &tauri::AppHandle) {
-    let system_so = std::path::Path::new("/usr/lib/x86_64-linux-gnu/fcitx5/libopenless.so");
+    // fcitx5 在不同发行版的 lib 路径不同
+    let lib_dirs = [
+        "/usr/lib/x86_64-linux-gnu/fcitx5", // Debian multiarch
+        "/usr/lib64/fcitx5",                 // RPM 64-bit
+        "/usr/lib/fcitx5",                   // 通用回退
+    ];
     let system_conf = std::path::Path::new("/usr/share/fcitx5/addon/openless.conf");
 
-    if !system_so.exists() || !system_conf.exists() {
+    if !system_conf.exists() {
         log::warn!(
-            "[fcitx] fcitx5 plugin not installed at system paths ({:?}, {:?}). \
+            "[fcitx] fcitx5 addon config not installed at {:?}. \
              The OpenLess package may be incomplete.",
-            system_so, system_conf
+            system_conf
+        );
+        return;
+    }
+
+    let found = lib_dirs.iter().any(|dir| {
+        std::path::Path::new(dir).join("libopenless.so").exists()
+    });
+
+    if !found {
+        log::warn!(
+            "[fcitx] fcitx5 plugin .so not found in any of {:?}. \
+             The OpenLess package may be incomplete.",
+            lib_dirs
         );
     }
 }
