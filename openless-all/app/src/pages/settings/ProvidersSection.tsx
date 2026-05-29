@@ -714,55 +714,64 @@ function CredentialField({ label, account, placeholder, mono, mask, defaultValue
 
   const inputType = mask && !revealed ? 'password' : 'text';
   const disabled = !loaded;
+  const showInsecureAsrEndpointWarning = account === 'asr.endpoint'
+    && value.trim().toLowerCase().startsWith('http://');
 
   return (
     <SettingRow label={label}>
-      <div style={{ display: 'flex', gap: 6, alignItems: 'center', width: '100%', maxWidth: 420 }}>
-        <input
-          type={inputType}
-          value={value}
-          placeholder={loaded ? placeholder : t('common.loading')}
-          onChange={handleChange}
-          onBlur={onBlur}
-          disabled={disabled}
-          style={{ ...inputStyle, fontFamily: mono ? 'var(--ol-font-mono)' : 'inherit' }}
-        />
-        {defaultValue && !value && loaded && (
-          <button onClick={fillDefault} title={t('settings.providers.fillDefault')} style={iconBtnStyle} disabled={!loaded}>
-            <Icon name="check" size={13} />
-          </button>
-        )}
-        {trailing}
-        {mask && (
-          <button
-            onClick={() => setRevealed(r => !r)}
-            title={revealed ? t('common.hide') : t('common.show')}
-            style={iconBtnStyle}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 5, width: '100%', maxWidth: 420 }}>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center', width: '100%' }}>
+          <input
+            type={inputType}
+            value={value}
+            placeholder={loaded ? placeholder : t('common.loading')}
+            onChange={handleChange}
+            onBlur={onBlur}
             disabled={disabled}
+            style={{ ...inputStyle, fontFamily: mono ? 'var(--ol-font-mono)' : 'inherit' }}
+          />
+          {defaultValue && !value && loaded && (
+            <button onClick={fillDefault} title={t('settings.providers.fillDefault')} style={iconBtnStyle} disabled={!loaded}>
+              <Icon name="check" size={13} />
+            </button>
+          )}
+          {trailing}
+          {mask && (
+            <button
+              onClick={() => setRevealed(r => !r)}
+              title={revealed ? t('common.hide') : t('common.show')}
+              style={iconBtnStyle}
+              disabled={disabled}
+            >
+              <Icon name="eye" size={14} />
+            </button>
+          )}
+          <button
+            onClick={onCopy}
+            title={t('common.copy')}
+            style={iconBtnStyle}
+            disabled={!value || disabled}
           >
-            <Icon name="eye" size={14} />
+            <Icon name="copy" size={14} />
           </button>
-        )}
-        <button
-          onClick={onCopy}
-          title={t('common.copy')}
-          style={iconBtnStyle}
-          disabled={!value || disabled}
-        >
-          <Icon name="copy" size={14} />
-        </button>
-        {/* readError 是字段无法读取的持续错误，留在原位提示用户该字段不可用；
-            其它瞬态状态（saving / saved / saveError / copied / copyError）都通过
-            emitSaved 发到右上角统一 toast，不再内联占位。 */}
-        {status === 'readError' && (
-          <span
-            style={{
-              fontSize: 11,
-              color: 'var(--ol-warn)',
-              whiteSpace: 'nowrap',
-            }}
-          >
-            {t('settings.providers.readFailed')}
+          {/* readError 是字段无法读取的持续错误，留在原位提示用户该字段不可用；
+              其它瞬态状态（saving / saved / saveError / copied / copyError）都通过
+              emitSaved 发到右上角统一 toast，不再内联占位。 */}
+          {status === 'readError' && (
+            <span
+              style={{
+                fontSize: 11,
+                color: 'var(--ol-warn)',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {t('settings.providers.readFailed')}
+            </span>
+          )}
+        </div>
+        {showInsecureAsrEndpointWarning && (
+          <span style={{ fontSize: 11, color: 'var(--ol-warn)', lineHeight: 1.45 }}>
+            {t('settings.providers.endpointMustUseHttps')}
           </span>
         )}
       </div>

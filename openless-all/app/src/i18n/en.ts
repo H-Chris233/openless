@@ -663,7 +663,7 @@ export const en: typeof zhCN = {
       validateSuccess: 'Connection check passed.',
       validateFailed: 'Connection check failed.',
       providerHttpStatus: 'Provider returned HTTP {{status}}. Check the API key permissions or endpoint.',
-      endpointMustUseHttps: 'Endpoint must use HTTPS (localhost/127.0.0.1 are allowed for local testing).',
+      endpointMustUseHttps: 'HTTP endpoints are allowed, but API keys and audio content may leak in transit.',
       endpointInvalid: 'Endpoint format is invalid.',
       responseTooLarge: 'Provider response is too large to validate safely.',
       asrInvalidJson: 'ASR response is not valid JSON.',

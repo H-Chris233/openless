@@ -1150,11 +1150,6 @@ async fn validate_asr_transcription(config: &ProviderConfig, model: &str) -> Res
 
 fn asr_transcriptions_url(base_url: &str) -> Result<String, String> {
     let parsed = reqwest::Url::parse(base_url.trim()).map_err(|_| "endpointInvalid".to_string())?;
-    let host = parsed.host_str().unwrap_or_default();
-    let localhost = host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1";
-    if parsed.scheme() != "https" && !localhost {
-        return Err("endpointMustUseHttps".to_string());
-    }
 
     // Work on the URL path only so we don't corrupt query parameters.
     let mut url = parsed.clone();
@@ -3755,6 +3750,10 @@ mod tests {
         assert_eq!(
             asr_transcriptions_url("https://api.openai.com/v1?api-version=2024-12-01").unwrap(),
             "https://api.openai.com/v1/audio/transcriptions?api-version=2024-12-01"
+        );
+        assert_eq!(
+            asr_transcriptions_url("http://192.168.1.10:8000/v1").unwrap(),
+            "http://192.168.1.10:8000/v1/audio/transcriptions"
         );
     }
 

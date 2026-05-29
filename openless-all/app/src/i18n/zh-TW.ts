@@ -663,7 +663,7 @@ export const zhTW: typeof zhCN = {
       validateSuccess: '連接檢查通過。',
       validateFailed: '連接檢查未通過。',
       providerHttpStatus: '供應商接口返回 {{status}}，請檢查 API Key 權限或 Endpoint。',
-      endpointMustUseHttps: 'Endpoint 必須使用 HTTPS（本地 localhost/127.0.0.1 測試除外）。',
+      endpointMustUseHttps: '允許使用 HTTP Endpoint，但請注意：API Key 和音訊內容可能在傳輸中外洩。',
       endpointInvalid: 'Endpoint 格式不合法。',
       responseTooLarge: '供應商響應過大，已停止驗證以保證安全。',
       asrInvalidJson: 'ASR 響應不是有效 JSON。',
