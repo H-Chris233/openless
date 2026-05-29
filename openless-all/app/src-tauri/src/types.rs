@@ -532,7 +532,7 @@ pub struct UserPreferences {
     pub active_llm_provider: String, // "ark" | "openai" | ...
     /// LLM 思考模式开关。默认 false 以保持既有「尽量关闭思考」行为；
     /// Gemini 走原生 thinkingConfig，OpenAI-compatible 路径仅按 provider/channel
-    /// 下发官方渠道级字段，不用 prompt 注入，也不做模型白名单适配。详见 issue #402。
+    /// 下发官方渠道级字段；OpenAI 官方渠道会跳过普通 chat 模型不支持的字段。详见 issue #402。
     #[serde(default)]
     pub llm_thinking_enabled: bool,
     /// Windows/Linux 粘贴成功后是否恢复用户原剪贴板。默认 true 跟历史行为一致；
