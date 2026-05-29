@@ -661,7 +661,7 @@ export const zhCN = {
       validateSuccess: '连接检查通过。',
       validateFailed: '连接检查未通过。',
       providerHttpStatus: '供应商接口返回 {{status}}，请检查 API Key 权限或 Endpoint。',
-      endpointMustUseHttps: 'Endpoint 必须使用 HTTPS（本地 localhost/127.0.0.1 测试除外）。',
+      endpointMustUseHttps: '允许使用 HTTP Endpoint，但请注意：API Key 和音频内容可能在传输中泄漏。',
       endpointInvalid: 'Endpoint 格式不合法。',
       responseTooLarge: '供应商响应过大，已停止验证以保证安全。',
       asrInvalidJson: 'ASR 响应不是有效 JSON。',

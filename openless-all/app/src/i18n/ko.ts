@@ -665,7 +665,7 @@ export const ko: typeof zhCN = {
       validateSuccess: '연결 확인을 통과했습니다.',
       validateFailed: '연결 확인에 실패했습니다.',
       providerHttpStatus: '공급자가 {{status}} 를 반환했습니다. API Key 권한 또는 Endpoint 를 확인해 주세요.',
-      endpointMustUseHttps: 'Endpoint 는 HTTPS 를 사용해야 합니다(localhost/127.0.0.1 제외).',
+      endpointMustUseHttps: 'HTTP Endpoint 를 사용할 수 있지만, API Key 와 음성 내용이 전송 중 유출될 수 있습니다.',
       endpointInvalid: 'Endpoint 형식이 올바르지 않습니다.',
       responseTooLarge: '공급자 응답이 너무 커서 안전을 위해 검증을 중단했습니다.',
       asrInvalidJson: 'ASR 응답이 유효한 JSON 이 아닙니다.',
