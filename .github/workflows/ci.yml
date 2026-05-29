@@ -85,6 +85,9 @@ jobs:
             }
           }
 
+      - name: Check macOS capsule Spaces contract
+        run: npm run check:macos-capsule-spaces
+
       - name: Build frontend (tsc + vite)
         run: npm run build
 

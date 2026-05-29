@@ -4500,7 +4500,12 @@ fn show_capsule_window_no_activate<R: tauri::Runtime>(
 
     // emit_capsule 已经把窗口操作 marshal 到 Tauri 主线程；这里不能再调用
     // window.show()/set_focus()/NSApp.activate，否则 AeroSpace 会把 workspace 切回
-    // OpenLess 主窗口所在空间。orderFrontRegardless 只让胶囊可见，不成为 key window。
+    // OpenLess 主窗口所在空间。先让胶囊加入所有 Spaces，再用
+    // orderFrontRegardless 做无激活展示。
+    if let Err(e) = window.set_visible_on_all_workspaces(true) {
+        log::warn!("[capsule] set visible on all macOS Spaces failed: {e}");
+    }
+
     unsafe {
         let _: () = msg_send![ns_window, orderFrontRegardless];
     }
