@@ -215,6 +215,14 @@ export function RecordingInputSection() {
         <SettingRow label={t('settings.recording.muteDuringRecordingLabel')}>
           <Toggle on={prefs.muteDuringRecording} onToggle={onMuteDuringRecordingChange} />
         </SettingRow>
+        {os === 'linux' && (
+        <SettingRow label={t('settings.advanced.streamingInsertLabel')}>
+          <Toggle
+            on={!!prefs.streamingInsert}
+            onToggle={(next) => void savePrefs({ ...prefs, streamingInsert: next })}
+          />
+        </SettingRow>
+        )}
       </Card>
 
       {/* ─── 插入与剪贴板（折叠，仅 macOS / Windows） ──────────────── */}
@@ -262,18 +270,6 @@ export function RecordingInputSection() {
         </SettingRow>
       </Collapsible>
       )}
-      {/* ─── 流式输入（Linux） ────────────────────────────────────────── */}
-      {os === 'linux' && (
-      <Card>
-        <SettingRow label={t('settings.advanced.streamingInsertLabel')}>
-          <Toggle
-            on={!!prefs.streamingInsert}
-            onToggle={(next) => void savePrefs({ ...prefs, streamingInsert: next })}
-          />
-        </SettingRow>
-      </Card>
-      )}
-
       {/* ─── 启动（折叠） ──────────────────────────────────────────── */}
       <Collapsible title={t('settings.recording.startupGroupTitle')}>
         <AutostartRow />
