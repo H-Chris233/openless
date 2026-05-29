@@ -404,88 +404,41 @@ pub fn start_dictation_signal_listener(
         .ok();
 }
 
-/// AppImage / 便携版：每次启动时从 bundled resources 复制插件到
-/// `~/.local/lib/fcitx5/` 和 `~/.local/share/fcitx5/addon/`，始终覆盖已有文件。
+/// 检查 fcitx5 插件是否已安装到系统路径。
 ///
-/// 这确保 AppImage 版本与插件版本一致——插件新增 DBus 方法时旧 .so 不会缺少符号。
-/// 系统路径（deb/rpm 安装）不会被覆盖。
-/// 安装后需要用户重启 fcitx5（`fcitx5 -r`）才能加载新插件。
+/// 所有 Linux 格式（deb/rpm/AppImage）的插件安装都在打包时完成
+///（`scripts/inject-fcitx5-plugin.sh`），此处仅确认文件存在。
+/// 未安装时输出警告，不做任何文件 I/O。
 #[cfg(target_os = "linux")]
-pub fn ensure_plugin_installed(app: &tauri::AppHandle) {
-    use tauri::Manager;
+pub fn ensure_plugin_installed(_app: &tauri::AppHandle) {
+    // fcitx5 在不同发行版的 lib 路径不同
+    let lib_dirs = [
+        "/usr/lib/x86_64-linux-gnu/fcitx5", // Debian multiarch
+        "/usr/lib64/fcitx5",                 // RPM 64-bit
+        "/usr/lib/fcitx5",                   // 通用回退
+    ];
+    let system_conf = std::path::Path::new("/usr/share/fcitx5/addon/openless.conf");
 
-    let resource_dir = match app.path().resource_dir() {
-        Ok(d) => d,
-        Err(e) => {
-            log::warn!("[fcitx-install] Cannot resolve resource dir: {e}");
-            return;
-        }
-    };
-
-    let so_src = resource_dir.join("linux-fcitx5-plugin").join("libopenless.so");
-    if !so_src.exists() {
-        log::info!(
-            "[fcitx-install] Bundled plugin not found at {:?} — not an AppImage or plugin not bundled",
-            so_src
+    if !system_conf.exists() {
+        log::warn!(
+            "[fcitx] fcitx5 addon config not installed at {:?}. \
+             The OpenLess package may be incomplete.",
+            system_conf
         );
         return;
     }
 
-    let Ok(home) = std::env::var("HOME") else {
-        log::warn!("[fcitx-install] Cannot determine HOME dir");
-        return;
-    };
-    let home = std::path::PathBuf::from(home);
+    let found = lib_dirs.iter().any(|dir| {
+        std::path::Path::new(dir).join("libopenless.so").exists()
+    });
 
-    let lib_dir = home.join(".local").join("lib").join("fcitx5");
-    let addon_dir = home.join(".local").join("share").join("fcitx5").join("addon");
-
-    if let Err(e) = std::fs::create_dir_all(&lib_dir) {
-        log::warn!("[fcitx-install] Failed to create {:?}: {e}", lib_dir);
-        return;
+    if !found {
+        log::warn!(
+            "[fcitx] fcitx5 plugin .so not found in any of {:?}. \
+             The OpenLess package may be incomplete.",
+            lib_dirs
+        );
     }
-    if let Err(e) = std::fs::create_dir_all(&addon_dir) {
-        log::warn!("[fcitx-install] Failed to create {:?}: {e}", addon_dir);
-        return;
-    }
-
-    let so_dest = lib_dir.join("libopenless.so");
-    if let Err(e) = std::fs::copy(&so_src, &so_dest) {
-        log::warn!("[fcitx-install] Failed to copy plugin .so: {e}");
-        return;
-    }
-    log::info!("[fcitx-install] Installed plugin .so to {:?}", so_dest);
-
-    let config_content = format!(
-        concat!(
-            "[Addon]\n",
-            "Name=OpenLess\n",
-            "Name[zh_CN]=OpenLess 听写辅助\n",
-            "Comment=OpenLess dictation commit helper\n",
-            "Comment[zh_CN]=供 OpenLess 听写提交文字的 DBus 接口及快捷键监听\n",
-            "Category=Module\n",
-            "Type=SharedLibrary\n",
-            "Library={}\n",
-            "Version=1.0.0\n",
-            "OnDemand=False\n",
-            "Configurable=False\n",
-            "\n",
-            "[Addon/Dependencies]\n",
-            "0=core\n",
-            "1=dbus\n",
-        ),
-        so_dest.display()
-    );
-
-    let conf_dest = addon_dir.join("openless.conf");
-    if let Err(e) = std::fs::write(&conf_dest, &config_content) {
-        log::warn!("[fcitx-install] Failed to write addon config: {e}");
-        return;
-    }
-    log::info!("[fcitx-install] Installed addon config to {:?}", conf_dest);
-    log::info!(
-        "[fcitx-install] Done. Run `fcitx5 -r` to load the plugin, then restart OpenLess."
-    );
 }
 
 /// 同步主听写热键：自定义组合键走 SetCustomDictationTrigger，预设修饰键走 SetHotkeyRaw。

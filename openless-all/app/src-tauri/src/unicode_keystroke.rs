@@ -31,8 +31,7 @@
 //! - `type_unicode_chunk`（CGEventPost）任意线程可调，对齐 `insertion.rs::macos::
 //!   simulate_paste` 现状。
 //! - TIS（`switch_to_ascii` / `restore_input_source`）调度到主线程，规避 macOS 14+
-//!   对 TSM/TIS 主线程的 `dispatch_assert_queue_fail` SIGTRAP（与
-//!   `feedback_rdev_macos_trap.md` 同款风险类别）。
+//!   对 TSM/TIS 主线程的 `dispatch_assert_queue_fail` SIGTRAP。
 
 #[allow(unused_imports)]
 use tauri::{AppHandle, Runtime};
