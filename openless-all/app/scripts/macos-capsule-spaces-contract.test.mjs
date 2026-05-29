@@ -6,7 +6,9 @@ function assertMatch(source, pattern, name) {
   }
 }
 
-const coordinatorRs = await readFile(new URL('../src-tauri/src/coordinator.rs', import.meta.url), 'utf-8');
+const coordinatorRs = (
+  await readFile(new URL('../src-tauri/src/coordinator.rs', import.meta.url), 'utf-8')
+).replace(/\r\n/g, '\n');
 const functionMatch = coordinatorRs.match(
   /#\[cfg\(target_os = "macos"\)\]\s*fn show_capsule_window_no_activate[\s\S]*?\n}\n\n#\[cfg\(target_os = "linux"\)\]/,
 );
