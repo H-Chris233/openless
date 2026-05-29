@@ -624,7 +624,7 @@ export const ja: typeof zhCN = {
       volcengineAppKeyLabel: 'APP ID',
       volcengineAccessKeyLabel: 'Access Token',
       volcengineResourceIdLabel: 'Resource ID',
-      volcengineMappingNote: 'Secret Key は現在不要。Resource ID のデフォルトは volc.bigasr.sauc.duration。',
+      volcengineMappingNote: 'Secret Key は現在不要。Resource ID のデフォルトは volc.seedasr.sauc.duration。',
       localAsrActiveNotice: '現在「{{name}}」を使用中。「詳細設定」タブから切り替えまたは無効化できます。',
       localAsrTakeoverHint: '「{{name}}」を有効化すると ASR プロバイダーが引き継がれます。',
       asrProviderTakenOver: 'ASR プロバイダーは引き継ぎ済み',

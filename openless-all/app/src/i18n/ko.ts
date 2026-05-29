@@ -624,7 +624,7 @@ export const ko: typeof zhCN = {
       volcengineAppKeyLabel: 'APP ID',
       volcengineAccessKeyLabel: 'Access Token',
       volcengineResourceIdLabel: 'Resource ID',
-      volcengineMappingNote: 'Secret Key 는 현재 입력 불필요. Resource ID 기본값은 volc.bigasr.sauc.duration.',
+      volcengineMappingNote: 'Secret Key 는 현재 입력 불필요. Resource ID 기본값은 volc.seedasr.sauc.duration.',
       localAsrActiveNotice: '현재 "{{name}}" 사용 중. "고급" 탭에서 전환 또는 비활성화할 수 있습니다.',
       localAsrTakeoverHint: '"{{name}}" 활성화 시 ASR 프로바이더가 인수됩니다.',
       asrProviderTakenOver: 'ASR 프로바이더 인수 완료',

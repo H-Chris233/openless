@@ -620,7 +620,7 @@ export const zhCN = {
       volcengineAppKeyLabel: 'APP ID',
       volcengineAccessKeyLabel: 'Access Token',
       volcengineResourceIdLabel: 'Resource ID',
-      volcengineMappingNote: 'Secret Key 当前无需填写。Resource ID 默认使用 volc.bigasr.sauc.duration。',
+      volcengineMappingNote: 'Secret Key 当前无需填写。Resource ID 默认使用 volc.seedasr.sauc.duration。',
       localAsrActiveNotice: '当前已启用「{{name}}」，可在「高级」中切换或禁用。',
       localAsrTakeoverHint: '启动「{{name}}」后，ASR 提供商将被接管。',
       asrProviderTakenOver: 'ASR 提供商已被接管',

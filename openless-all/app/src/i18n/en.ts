@@ -622,7 +622,7 @@ export const en: typeof zhCN = {
       volcengineAppKeyLabel: 'APP ID',
       volcengineAccessKeyLabel: 'Access Token',
       volcengineResourceIdLabel: 'Resource ID',
-      volcengineMappingNote: 'Secret Key is not required right now. Resource ID defaults to volc.bigasr.sauc.duration.',
+      volcengineMappingNote: 'Secret Key is not required right now. Resource ID defaults to volc.seedasr.sauc.duration.',
       localAsrActiveNotice: 'Local ASR ({{name}}) is currently active. Switch or disable it from the Advanced tab.',
       localAsrTakeoverHint: 'Once "{{name}}" is enabled, the ASR provider will be taken over.',
       asrProviderTakenOver: 'ASR provider taken over',
