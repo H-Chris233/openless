@@ -17,6 +17,7 @@ import { SelectLite } from '../../components/ui/SelectLite';
 import { Card, Collapsible } from '../_atoms';
 import { SettingRow, Toggle, inputStyle } from './shared';
 import { MicrophoneSelect } from './MicrophoneSelect';
+import { detectOS } from '../../components/WindowChrome';
 
 async function autostartIsEnabled(): Promise<boolean> {
   const { invoke } = await import('@tauri-apps/api/core');
@@ -35,6 +36,7 @@ async function autostartDisable(): Promise<void> {
 
 export function RecordingInputSection() {
   const { t } = useTranslation();
+  const os = detectOS();
   const { prefs, capability, updatePrefs: savePrefs } = useHotkeySettings();
   const [microphoneDevices, setMicrophoneDevices] = useState<MicrophoneDevice[]>([]);
   const [microphoneDevicesLoaded, setMicrophoneDevicesLoaded] = useState(false);
@@ -205,15 +207,26 @@ export function RecordingInputSection() {
             )}
           </div>
         </SettingRow>
+        {os !== 'linux' && (
         <SettingRow label={t('settings.recording.capsuleLabel')}>
           <Toggle on={prefs.showCapsule} onToggle={onShowCapsuleChange} />
         </SettingRow>
+        )}
         <SettingRow label={t('settings.recording.muteDuringRecordingLabel')}>
           <Toggle on={prefs.muteDuringRecording} onToggle={onMuteDuringRecordingChange} />
         </SettingRow>
+        {os === 'linux' && (
+        <SettingRow label={t('settings.advanced.streamingInsertLabel')}>
+          <Toggle
+            on={!!prefs.streamingInsert}
+            onToggle={(next) => void savePrefs({ ...prefs, streamingInsert: next })}
+          />
+        </SettingRow>
+        )}
       </Card>
 
-      {/* ─── 插入与剪贴板（折叠） ──────────────────────────────────── */}
+      {/* ─── 插入与剪贴板（折叠，仅 macOS / Windows） ──────────────── */}
+      {os !== 'linux' && (
       <Collapsible title={t('settings.recording.insertGroupTitle')}>
         <SettingRow label={t('settings.recording.restoreClipboardLabel')}>
           <Toggle on={prefs.restoreClipboardAfterPaste} onToggle={onRestoreClipboardChange} />
@@ -256,7 +269,7 @@ export function RecordingInputSection() {
           />
         </SettingRow>
       </Collapsible>
-
+      )}
       {/* ─── 启动（折叠） ──────────────────────────────────────────── */}
       <Collapsible title={t('settings.recording.startupGroupTitle')}>
         <AutostartRow />

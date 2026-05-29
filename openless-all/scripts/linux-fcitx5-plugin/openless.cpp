@@ -222,6 +222,21 @@ public:
                     instance_->flushUI();
                 }));
 
+        // 6. PostInputMethod 阶段恢复 lastAuxText_：fcitx5 在处理按键后可能
+        //    清掉 auxDown（如 enter/backspace 触发内联模式），此钩子自动补回。
+        eventHandlers_.push_back(
+            instance_->watchEvent(
+                EventType::InputContextKeyEvent,
+                EventWatcherPhase::PostInputMethod,
+                [this](Event &event) {
+                    if (lastAuxText_.empty()) return;
+                    auto &keyEvent = static_cast<KeyEvent &>(event);
+                    auto *ic = keyEvent.inputContext();
+                    if (!ic) return;
+                    ic->inputPanel().setAuxDown(Text(lastAuxText_));
+                    ic->updateUserInterface(UserInterfaceComponent::InputPanel, true);
+                }));
+
         FCITX_LOGC(openless, Info) << "OpenLess plugin loaded";
     }
 

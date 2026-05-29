@@ -88,15 +88,11 @@ export function HotkeySettingsProvider({ children }: { children: ReactNode }) {
     }, [])
 
     const queueSetSettings = useCallback(
-        (resolveNext: (current: UserPreferences) => UserPreferences) => {
+        (resolved: UserPreferences) => {
             const task = persistQueueRef.current
                 .catch(() => undefined)
                 .then(async () => {
-                    const current = latestPrefsRef.current
-                    if (!current) return
-                    const next = resolveNext(current)
-                    if (next === current) return
-                    await setSettings(next)
+                    await setSettings(resolved)
                 })
             persistQueueRef.current = task
             return task
@@ -176,10 +172,7 @@ export function HotkeySettingsProvider({ children }: { children: ReactNode }) {
         const merged = { ...currentPrefs, ...nextLocalePrefs }
         latestPrefsRef.current = merged
         setPrefs(merged)
-        void queueSetSettings((current) => ({
-            ...current,
-            ...nextLocalePrefs,
-        })).catch((error) => {
+        void queueSetSettings(merged).catch((error) => {
             console.warn(
                 "[settings] sync locale output preferences failed",
                 error,
@@ -199,7 +192,7 @@ export function HotkeySettingsProvider({ children }: { children: ReactNode }) {
             if (resolved === current) return
             setPrefs(resolved)
             latestPrefsRef.current = resolved
-            await queueSetSettings(() => resolved)
+            await queueSetSettings(resolved)
         },
         [queueSetSettings],
     )
