@@ -13,9 +13,11 @@ import {
 import { useHotkeySettings } from '../../state/HotkeySettingsContext';
 import { Card } from '../_atoms';
 import { SettingRow } from './shared';
+import { detectOS } from '../../components/WindowChrome';
 
 export function ShortcutsSection() {
   const { t } = useTranslation();
+  const os = detectOS();
   const { prefs, hotkey, capability, updatePrefs: savePrefs } = useHotkeySettings();
 
   if (!prefs || !hotkey || !capability) {
@@ -28,7 +30,7 @@ export function ShortcutsSection() {
 
   const readonlyRows: Array<[string, string]> = [
     [t('settings.shortcuts.cancel'), 'Esc'],
-    [t('settings.shortcuts.confirm'), t('settings.shortcuts.confirmHint')],
+    ...(os !== 'linux' ? [[t('settings.shortcuts.confirm'), t('settings.shortcuts.confirmHint')]] as Array<[string, string]> : []),
   ];
   return (
     <Card>
