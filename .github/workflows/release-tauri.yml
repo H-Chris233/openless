@@ -572,6 +572,38 @@ jobs:
           if-no-files-found: error
 
       # ── tag 推送时,同步上传到 GitHub Release ──
+      # 只有 leader job (darwin/aarch64) 把 release body 写到文件,其余 matrix job
+      # 的 body_path 留空,softprops/action-gh-release@v2 在 body 为空时会保留
+      # existing release body 不动,避免每个 matrix job 都 append 一遍同样的 prelude
+      # 导致 release notes 重复 N 次 (v1.3.4-tauri 出现 4 次的 root cause:
+      # 4 个 matrix job × append_body=true × 共享同一份 body)。
+      - name: Prepare release body prelude
+        if: matrix.updater-target == 'darwin' && matrix.updater-arch == 'aarch64' && startsWith(github.ref, 'refs/tags/v') && endsWith(github.ref, '-tauri')
+        shell: bash
+        run: |
+          cat > "$RUNNER_TEMP/release-body.md" << 'EOF'
+          ### macOS 用户首次安装提示
+
+          下载 DMG 拖入 `/Applications` 后，**必须**在终端运行：
+
+          ```bash
+          xattr -cr /Applications/OpenLess.app
+          ```
+
+          否则 Gatekeeper 会提示「OpenLess 已损坏」——这是因为当前 build 用 ad-hoc 签名、没做 Apple 公证。
+
+          ### 渠道说明
+
+          - 以 `-tauri` 结尾的 tag 是**正式版**（自动推送给所有 in-app 检查更新的用户）。
+          - 以 `-beta-tauri` 结尾的 tag 是 **Beta 版**（GitHub 标 pre-release，**不**通过 in-app updater 推送给正式版用户；只对在「设置 → 关于 → 加入 Beta 渠道」开关切到 Beta 的用户可见，且需要手动从此页面下载安装）。
+
+          ### 行为变更提示
+
+          - 流式输入默认开启；不兼容场景会自动回落到一次性插入。可在「设置 → 高级」关闭。
+          - 流式输入成功后默认把最终文本同步到剪贴板，方便再次粘贴；可在「设置 → 高级」关闭。
+          EOF
+          echo "OPENLESS_RELEASE_BODY_PATH=$RUNNER_TEMP/release-body.md" >> "$GITHUB_ENV"
+
       - name: Create / update release
         if: startsWith(github.ref, 'refs/tags/v') && endsWith(github.ref, '-tauri')
         uses: softprops/action-gh-release@v2
@@ -583,33 +615,14 @@ jobs:
           # 普通用户看不到；同时只上传 latest-*-beta.json，正式版用户的
           # endpoint（latest-*.json）永远不会被覆盖，保证 Beta 不溢出正式版。
           prerelease: ${{ env.OPENLESS_RELEASE_CHANNEL == 'beta' }}
-          # body 在 generated notes 之前 prepend——所有 matrix job 设同一份字符串，
-          # 多次调用 action 时内容一致、idempotent。提示 macOS Gatekeeper 绕过指令 +
-          # 渠道说明，每个 release 自动带上，用户不用回项目 README 翻就能看到。
-          body: |
-            ### macOS 用户首次安装提示
-
-            下载 DMG 拖入 `/Applications` 后，**必须**在终端运行：
-
-            ```bash
-            xattr -cr /Applications/OpenLess.app
-            ```
-
-            否则 Gatekeeper 会提示「OpenLess 已损坏」——这是因为当前 build 用 ad-hoc 签名、没做 Apple 公证。
-
-            ### 渠道说明
-
-            - 以 `-tauri` 结尾的 tag 是**正式版**（自动推送给所有 in-app 检查更新的用户）。
-            - 以 `-beta-tauri` 结尾的 tag 是 **Beta 版**（GitHub 标 pre-release，**不**通过 in-app updater 推送给正式版用户；只对在「设置 → 关于 → 加入 Beta 渠道」开关切到 Beta 的用户可见，且需要手动从此页面下载安装）。
-
-            ### 行为变更提示
-
-            - 流式输入默认开启；不兼容场景会自动回落到一次性插入。可在「设置 → 高级」关闭。
-            - 流式输入成功后默认把最终文本同步到剪贴板，方便再次粘贴；可在「设置 → 高级」关闭。
-
-          append_body: true
-          # Matrix jobs all upload assets to the same release. Generate notes once
-          # so macOS, Windows, and Linux jobs do not duplicate the release body.
+          # 非 leader job 的 OPENLESS_RELEASE_BODY_PATH 是空字符串,softprops 在
+          # body 为空时走 `body || existing.body` 分支保留既有内容,不会覆盖。
+          # leader job 用默认 append_body=false,每次完整覆盖 release body 为
+          # "prelude + generated notes",re-run 同一 tag 时也保持 idempotent
+          # (append_body=true 会让 re-run 把上轮 body 拼到前面、再次复制)。
+          body_path: ${{ env.OPENLESS_RELEASE_BODY_PATH }}
+          # generate_release_notes 也只在 leader 跑:避免 4 个 matrix jobs
+          # 产生 4 份相同的 What's Changed 段。
           generate_release_notes: ${{ matrix.updater-target == 'darwin' && matrix.updater-arch == 'aarch64' }}
           files: |
             openless-all/app/src-tauri/target/release/bundle/dmg/*.dmg
