@@ -26,6 +26,12 @@ assertMatch(
   'macOS capsule should join all Spaces before showing without activation',
 );
 
+assertMatch(
+  macosNoActivateFunction,
+  /FullScreenAuxiliary[\s\S]*?setCollectionBehavior[\s\S]*?orderFrontRegardless/,
+  'macOS capsule should join fullscreen Spaces as an auxiliary window before showing without activation',
+);
+
 for (const forbidden of ['window.show()', 'set_focus', 'NSApp.activate', 'makeKeyAndOrderFront']) {
   if (executableMacosNoActivateFunction.includes(forbidden)) {
     throw new Error(`macOS capsule no-activate path must not call ${forbidden}`);

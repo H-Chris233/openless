@@ -4489,6 +4489,7 @@ fn show_capsule_window_no_activate<R: tauri::Runtime>(
 ) -> bool {
     use objc2::msg_send;
     use objc2::runtime::AnyObject;
+    use objc2_app_kit::NSWindowCollectionBehavior;
 
     let Ok(handle) = window.ns_window() else {
         return false;
@@ -4507,6 +4508,11 @@ fn show_capsule_window_no_activate<R: tauri::Runtime>(
     }
 
     unsafe {
+        let behavior: NSWindowCollectionBehavior = msg_send![ns_window, collectionBehavior];
+        let behavior = behavior
+            | NSWindowCollectionBehavior::CanJoinAllSpaces
+            | NSWindowCollectionBehavior::FullScreenAuxiliary;
+        let _: () = msg_send![ns_window, setCollectionBehavior: behavior];
         let _: () = msg_send![ns_window, orderFrontRegardless];
     }
     true
