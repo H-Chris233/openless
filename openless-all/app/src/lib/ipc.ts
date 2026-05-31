@@ -79,6 +79,7 @@ let mockSettings: UserPreferences = {
     launchAtLogin: false,
     showCapsule: true,
     muteDuringRecording: false,
+    audioCueOnRecord: true,
     microphoneDeviceName: "",
     activeAsrProvider: "foundry-local-whisper",
     activeLlmProvider: "ark",

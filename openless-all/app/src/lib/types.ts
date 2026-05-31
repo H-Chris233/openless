@@ -218,6 +218,9 @@ export interface UserPreferences {
   showCapsule: boolean;
   /** 录音期间临时静音系统输出，停止/取消/出错后恢复原静音状态。 */
   muteDuringRecording: boolean;
+  /** 按下录音热键进入 recording 状态时，播放一段合成提示音提醒「已开始录音」。
+   *  默认开启；在 capsule 窗口用 Web Audio API 合成，不依赖 showCapsule。 */
+  audioCueOnRecord: boolean;
   /** 录音输入设备名称。空字符串 = 使用系统默认麦克风。 */
   microphoneDeviceName: string;
   activeAsrProvider: string;

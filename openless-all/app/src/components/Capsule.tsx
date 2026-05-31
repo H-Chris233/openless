@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { detectOS, type OS } from './WindowChrome';
 import {
@@ -6,8 +6,9 @@ import {
   getCapsuleMessageLayout,
   getCapsulePillMetrics,
 } from '../lib/capsuleLayout';
-import { invokeOrMock, isTauri } from '../lib/ipc';
-import type { CapsulePayload, CapsuleState } from '../lib/types';
+import { getSettings, invokeOrMock, isTauri } from '../lib/ipc';
+import { playRecordStartCue, stopAudioCue } from '../lib/audioCue';
+import type { CapsulePayload, CapsuleState, UserPreferences } from '../lib/types';
 
 interface AudioBarsProps {
   level: number;
@@ -307,6 +308,10 @@ export function Capsule() {
   const [lastVisibleState, setLastVisibleState] = useState<CapsuleState>(INITIAL_VISIBLE_STATE);
   // Windows 端 host 在翻译模式从 84 长到 118；macOS / Linux 上 capsuleLayout 已固定 42 忽略此参数。
   const hostMetrics = getCapsuleHostMetrics(os, translation);
+  // 录音提示音：是否开启（默认 true，老配置缺字段也按开启）+ 上一帧 capsule 状态，
+  // 用于检测「进入 recording」这条边沿。用 ref 而非 state：提示音是副作用，不该触发重渲染。
+  const audioCueEnabledRef = useRef<boolean>(true);
+  const prevStateRef = useRef<CapsuleState>(INITIAL_VISIBLE_STATE);
 
   useEffect(() => {
     if (!isTauri) return;
@@ -330,6 +335,49 @@ export function Capsule() {
       if (unlisten) unlisten();
     };
   }, []);
+
+  // 读取「录音提示音」开关并跟随设置实时更新：capsule 窗口不在 HotkeySettingsProvider 下，
+  // 所以这里自己拉一次 getSettings()，再订阅 prefs:changed 保持同步。缺字段按默认开启。
+  useEffect(() => {
+    if (!isTauri) return;
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    (async () => {
+      try {
+        const prefs = await getSettings();
+        if (!cancelled) audioCueEnabledRef.current = prefs.audioCueOnRecord !== false;
+      } catch (err) {
+        console.warn('[capsule] read audioCueOnRecord failed; default on', err);
+      }
+      const { listen } = await import('@tauri-apps/api/event');
+      const handle = await listen<UserPreferences>('prefs:changed', event => {
+        const next = event.payload;
+        if (next) audioCueEnabledRef.current = next.audioCueOnRecord !== false;
+      });
+      if (cancelled) handle();
+      else unlisten = handle;
+    })().catch(err => {
+      // import / listen 早期失败（Tauri IPC 尚未就绪）不能变成 unhandled rejection。
+      console.warn('[capsule] audio-cue prefs listener init failed', err);
+    });
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  }, []);
+
+  // 提示音触发：检测 capsule 状态进入 recording 的边沿就播放（提醒「已开始录音」）；
+  // 离开 recording 则停掉，避免连按热键时残留尾音。独立于 showCapsule —— 胶囊隐藏也会响。
+  useEffect(() => {
+    const prev = prevStateRef.current;
+    prevStateRef.current = state;
+    if (!isTauri) return;
+    if (state === 'recording' && prev !== 'recording') {
+      if (audioCueEnabledRef.current) playRecordStartCue();
+    } else if (state !== 'recording' && prev === 'recording') {
+      stopAudioCue();
+    }
+  }, [state]);
 
   // 退出动画调度：在 state 真正进入 idle 时，先用 capsule-out 播放 EXIT_ANIM_MS，再卸载。
   // 设计要点：

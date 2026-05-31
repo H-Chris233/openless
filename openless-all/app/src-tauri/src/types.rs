@@ -525,6 +525,11 @@ pub struct UserPreferences {
     /// 录音期间临时静音系统输出，停止/取消/出错后恢复原静音状态。
     #[serde(default)]
     pub mute_during_recording: bool,
+    /// 按下录音热键进入 recording 状态时，播放一段即时合成的提示音，提醒「已开始录音」。
+    /// 默认开启；可在「录音与输入」设置里关闭。提示音由 capsule 窗口用 Web Audio API 合成，
+    /// 不依赖 show_capsule —— 胶囊隐藏时仍会响。
+    #[serde(default = "default_true")]
+    pub audio_cue_on_record: bool,
     /// 录音输入设备名称。空字符串 = 使用系统默认麦克风。
     #[serde(default)]
     pub microphone_device_name: String,
@@ -759,6 +764,8 @@ struct UserPreferencesWire {
     show_capsule: bool,
     #[serde(default)]
     mute_during_recording: bool,
+    #[serde(default = "default_true")]
+    audio_cue_on_record: bool,
     #[serde(default)]
     microphone_device_name: String,
     active_asr_provider: String,
@@ -842,6 +849,7 @@ impl Default for UserPreferencesWire {
             launch_at_login: prefs.launch_at_login,
             show_capsule: prefs.show_capsule,
             mute_during_recording: prefs.mute_during_recording,
+            audio_cue_on_record: prefs.audio_cue_on_record,
             microphone_device_name: prefs.microphone_device_name,
             active_asr_provider: prefs.active_asr_provider,
             active_llm_provider: prefs.active_llm_provider,
@@ -920,6 +928,7 @@ impl<'de> Deserialize<'de> for UserPreferences {
             launch_at_login: wire.launch_at_login,
             show_capsule: wire.show_capsule,
             mute_during_recording: wire.mute_during_recording,
+            audio_cue_on_record: wire.audio_cue_on_record,
             microphone_device_name: wire.microphone_device_name,
             active_asr_provider: wire.active_asr_provider,
             active_llm_provider: wire.active_llm_provider,
@@ -1613,6 +1622,7 @@ impl Default for UserPreferences {
             launch_at_login: false,
             show_capsule: true,
             mute_during_recording: false,
+            audio_cue_on_record: true,
             microphone_device_name: String::new(),
             active_asr_provider: default_active_asr_provider(),
             active_llm_provider: "ark".into(),
@@ -2252,6 +2262,32 @@ mod tests {
         let prefs: UserPreferences = serde_json::from_str("{}").unwrap();
 
         assert!(prefs.allow_non_tsf_insertion_fallback);
+    }
+
+    #[test]
+    fn missing_audio_cue_on_record_pref_defaults_to_enabled() {
+        // 老用户的 preferences.json 没有这个字段 → 应默认开启（按下录音即提示）。
+        let prefs: UserPreferences = serde_json::from_str("{}").unwrap();
+
+        assert!(prefs.audio_cue_on_record);
+    }
+
+    #[test]
+    fn audio_cue_on_record_pref_round_trips_explicit_false() {
+        // 用户在设置里关掉后，set_settings → 存盘 → get_settings 必须保住 false，
+        // 否则开关一刷新又跳回 true（字段在 Wire 往返时被丢掉的经典症状）。
+        let disabled = UserPreferences {
+            audio_cue_on_record: false,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&disabled).unwrap();
+        assert!(
+            json.contains("\"audioCueOnRecord\":false"),
+            "序列化应输出 camelCase 字段，实际: {json}"
+        );
+
+        let restored: UserPreferences = serde_json::from_str(&json).unwrap();
+        assert!(!restored.audio_cue_on_record);
     }
 
     #[test]
