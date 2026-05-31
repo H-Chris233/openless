@@ -1847,6 +1847,7 @@ pub enum HotkeyTrigger {
     RightCommand,
     Fn,
     RightAlt, // Windows synonym for RightOption
+    MediaPlayPause,
     Custom,
 }
 
@@ -1860,6 +1861,7 @@ impl HotkeyTrigger {
             HotkeyTrigger::RightCommand => "右 Command",
             HotkeyTrigger::Fn => "Fn (地球键)",
             HotkeyTrigger::RightAlt => "右 Alt",
+            HotkeyTrigger::MediaPlayPause => "⏯ Media 播放/暂停",
             HotkeyTrigger::Custom => "自定义组合键",
         }
     }
@@ -1951,6 +1953,7 @@ fn legacy_trigger_code(trigger: HotkeyTrigger) -> &'static str {
         HotkeyTrigger::Fn => "ControlRight",
         #[cfg(not(target_os = "windows"))]
         HotkeyTrigger::Fn => "Fn",
+        HotkeyTrigger::MediaPlayPause => "MediaPlayPause",
         HotkeyTrigger::Custom => "",
     }
 }
@@ -2071,6 +2074,7 @@ impl HotkeyCapability {
                     HotkeyTrigger::RightAlt,
                     HotkeyTrigger::LeftControl,
                     HotkeyTrigger::RightCommand,
+                    HotkeyTrigger::MediaPlayPause,
                     HotkeyTrigger::Custom,
                 ],
                 requires_accessibility_permission: false,
