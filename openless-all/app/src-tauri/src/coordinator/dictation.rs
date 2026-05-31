@@ -892,13 +892,6 @@ pub(super) async fn begin_session(inner: &Arc<Inner>) -> Result<(), String> {
     Ok(())
 }
 
-fn batch_asr_chunk_limit_ms(provider_id: &str) -> Option<u64> {
-    match provider_id {
-        "zhipu" => Some(30_000),
-        _ => None,
-    }
-}
-
 pub(super) async fn start_recorder_for_starting(
     inner: &Arc<Inner>,
     session_id: SessionId,
@@ -1280,7 +1273,10 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                 .await
             {
                 Ok(r) => {
-                    schedule_foundry_local_asr_release(inner, current_session_id);
+                    schedule_foundry_local_asr_release(
+                        inner,
+                        AsrReleaseSession::Dictation(current_session_id),
+                    );
                     r
                 }
                 Err(e) => {
@@ -1288,13 +1284,19 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                         log::info!(
                             "[coord] Foundry Local Whisper transcribe cancelled — discarding transcript"
                         );
-                        schedule_foundry_local_asr_release(inner, current_session_id);
+                        schedule_foundry_local_asr_release(
+                            inner,
+                            AsrReleaseSession::Dictation(current_session_id),
+                        );
                         restore_prepared_windows_ime_session(inner, current_session_id);
                         set_phase_idle_if_session_matches(inner, current_session_id);
                         return Ok(());
                     }
                     log::error!("[coord] Foundry Local Whisper transcribe failed: {e:#}");
-                    schedule_foundry_local_asr_release(inner, current_session_id);
+                    schedule_foundry_local_asr_release(
+                        inner,
+                        AsrReleaseSession::Dictation(current_session_id),
+                    );
                     emit_capsule(
                         inner,
                         CapsuleState::Error,
@@ -1320,7 +1322,10 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                 .await
             {
                 Ok(r) => {
-                    schedule_sherpa_onnx_release(inner, current_session_id);
+                    schedule_sherpa_onnx_release(
+                        inner,
+                        AsrReleaseSession::Dictation(current_session_id),
+                    );
                     r
                 }
                 Err(e) => {
@@ -1328,13 +1333,19 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                         log::info!(
                             "[coord] sherpa-onnx transcribe cancelled — discarding transcript"
                         );
-                        schedule_sherpa_onnx_release(inner, current_session_id);
+                        schedule_sherpa_onnx_release(
+                            inner,
+                            AsrReleaseSession::Dictation(current_session_id),
+                        );
                         restore_prepared_windows_ime_session(inner, current_session_id);
                         set_phase_idle_if_session_matches(inner, current_session_id);
                         return Ok(());
                     }
                     log::error!("[coord] sherpa-onnx transcribe failed: {e:#}");
-                    schedule_sherpa_onnx_release(inner, current_session_id);
+                    schedule_sherpa_onnx_release(
+                        inner,
+                        AsrReleaseSession::Dictation(current_session_id),
+                    );
                     emit_capsule(
                         inner,
                         CapsuleState::Error,
