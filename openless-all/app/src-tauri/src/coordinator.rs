@@ -71,8 +71,9 @@ use qa::{close_qa_panel, handle_qa_hotkey_pressed, QaPhase, QaSessionState};
 #[cfg(test)]
 use resources::discard_startup_resources_for_session;
 use resources::{
-    acquire_recording_mute, release_recording_mute, selected_microphone_device_name,
-    stop_microphone_preview_monitor, stop_qa_recorder, SessionResource, SharedRecordingMuteState,
+    acquire_recording_mute, cancel_active_asr, release_recording_mute,
+    selected_microphone_device_name, stop_microphone_preview_monitor, stop_qa_recorder,
+    SessionResource, SharedRecordingMuteState,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -136,6 +137,7 @@ fn show_capsule_window_for_recording<R: tauri::Runtime>(
     }
 }
 
+#[derive(Clone)]
 enum ActiveAsr {
     Volcengine(Arc<VolcengineStreamingASR>),
     Whisper(Arc<WhisperBatchASR>),
@@ -159,6 +161,30 @@ fn asr_transcribe_uses_global_timeout(asr: &ActiveAsr) -> bool {
         #[cfg(target_os = "windows")]
         ActiveAsr::SherpaOnnxLocal(_) => false,
         _ => true,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActiveAsrProviderKind {
+    Bailian,
+    WhisperCompatible,
+    Volcengine,
+}
+
+fn active_asr_provider_kind(id: &str) -> ActiveAsrProviderKind {
+    if is_bailian_provider(id) {
+        ActiveAsrProviderKind::Bailian
+    } else if is_whisper_compatible_provider(id) {
+        ActiveAsrProviderKind::WhisperCompatible
+    } else {
+        ActiveAsrProviderKind::Volcengine
+    }
+}
+
+fn batch_asr_chunk_limit_ms(provider_id: &str) -> Option<u64> {
+    match provider_id {
+        "zhipu" => Some(30_000),
+        _ => None,
     }
 }
 
@@ -225,8 +251,8 @@ struct Inner {
     /// 最近一次应用到 capsule 窗口的几何状态。避免录音 level tick 反复触发
     /// resize / reposition。
     capsule_layout: Mutex<Option<CapsuleLayoutState>>,
-    /// QA 用的 ASR 句柄（始终是 Volcengine 流式）。
-    qa_asr: Mutex<Option<Arc<VolcengineStreamingASR>>>,
+    /// QA 用的 ASR 句柄。必须跟 active_asr_provider 保持一致，避免浮窗走不同入口。
+    qa_asr: Mutex<Option<ActiveAsr>>,
     /// QA 用的 Recorder 句柄。
     qa_recorder: Mutex<Option<Recorder>>,
     /// QA SSE 流取消标志。begin_qa_session 重置为 false；cancel_qa_session 设 true；
@@ -2363,12 +2389,22 @@ fn foundry_local_asr_release_keep_secs(inner: &Arc<Inner>) -> u32 {
 }
 
 #[cfg(target_os = "windows")]
-fn foundry_release_session_is_current(inner: &Arc<Inner>, session_id: SessionId) -> bool {
-    inner.state.lock().session_id == session_id
+#[derive(Clone, Copy)]
+enum AsrReleaseSession {
+    Dictation(SessionId),
+    Qa(SessionId),
 }
 
 #[cfg(target_os = "windows")]
-fn schedule_foundry_local_asr_release(inner: &Arc<Inner>, session_id: SessionId) {
+fn asr_release_session_is_current(inner: &Arc<Inner>, session: AsrReleaseSession) -> bool {
+    match session {
+        AsrReleaseSession::Dictation(session_id) => inner.state.lock().session_id == session_id,
+        AsrReleaseSession::Qa(session_id) => inner.qa_state.lock().session_id == session_id,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn schedule_foundry_local_asr_release(inner: &Arc<Inner>, session: AsrReleaseSession) {
     let keep_secs = foundry_local_asr_release_keep_secs(inner);
     let runtime = Arc::clone(&inner.foundry_local_runtime);
     let inner = Arc::clone(inner);
@@ -2376,7 +2412,7 @@ fn schedule_foundry_local_asr_release(inner: &Arc<Inner>, session_id: SessionId)
         if keep_secs > 0 {
             tokio::time::sleep(std::time::Duration::from_secs(keep_secs as u64)).await;
         }
-        if !foundry_release_session_is_current(&inner, session_id) {
+        if !asr_release_session_is_current(&inner, session) {
             return;
         }
         if let Err(error) = runtime.release_now().await {
@@ -2393,7 +2429,7 @@ fn sherpa_onnx_release_keep_secs(inner: &Arc<Inner>) -> u32 {
 /// 与 `schedule_foundry_local_asr_release` 同形：session_id 老旧则不释放，
 /// 避免下一轮 session 立即重加载同一个 offline batch 模型。
 #[cfg(target_os = "windows")]
-fn schedule_sherpa_onnx_release(inner: &Arc<Inner>, session_id: SessionId) {
+fn schedule_sherpa_onnx_release(inner: &Arc<Inner>, session: AsrReleaseSession) {
     let keep_secs = sherpa_onnx_release_keep_secs(inner);
     let runtime = Arc::clone(&inner.sherpa_onnx_runtime);
     let inner = Arc::clone(inner);
@@ -2401,7 +2437,7 @@ fn schedule_sherpa_onnx_release(inner: &Arc<Inner>, session_id: SessionId) {
         if keep_secs > 0 {
             tokio::time::sleep(std::time::Duration::from_secs(keep_secs as u64)).await;
         }
-        if !foundry_release_session_is_current(&inner, session_id) {
+        if !asr_release_session_is_current(&inner, session) {
             return;
         }
         if let Err(error) = runtime.release_now().await {
@@ -2469,15 +2505,159 @@ fn apply_chinese_script_preference(text: &str, pref: ChineseScriptPreference) ->
     }
 }
 
-/// QA 路径专用：begin_qa_session 永远走 Volcengine 流式（低延迟要求），所以
-/// 凭据校验也只看 Volcengine 字段，不依赖 active_asr。dictation 路径请用
-/// `ensure_asr_credentials`。
-fn ensure_qa_volcengine_credentials() -> Result<(), String> {
-    let creds = read_volc_credentials();
-    if creds.app_id.trim().is_empty() || creds.access_token.trim().is_empty() {
-        Err("请先在设置中填写火山引擎 ASR App Key 和 Access Key".to_string())
-    } else {
-        Ok(())
+enum QaAsrStart {
+    Volcengine {
+        asr: Arc<VolcengineStreamingASR>,
+        bridge: Arc<DeferredAsrBridge>,
+    },
+    Bailian {
+        asr: Arc<BailianRealtimeASR>,
+        bridge: Arc<DeferredAsrBridge>,
+    },
+    Ready {
+        active: ActiveAsr,
+        consumer: Arc<dyn crate::recorder::AudioConsumer>,
+    },
+}
+
+impl QaAsrStart {
+    fn active_asr(&self) -> ActiveAsr {
+        match self {
+            QaAsrStart::Volcengine { asr, .. } => ActiveAsr::Volcengine(Arc::clone(asr)),
+            QaAsrStart::Bailian { asr, .. } => ActiveAsr::Bailian(Arc::clone(asr)),
+            QaAsrStart::Ready { active, .. } => active.clone(),
+        }
+    }
+
+    fn recorder_consumer(&self) -> Arc<dyn crate::recorder::AudioConsumer> {
+        match self {
+            QaAsrStart::Volcengine { bridge, .. } => Arc::clone(bridge) as _,
+            QaAsrStart::Bailian { bridge, .. } => Arc::clone(bridge) as _,
+            QaAsrStart::Ready { consumer, .. } => Arc::clone(consumer),
+        }
+    }
+
+    async fn open_streaming_session(&self) -> Result<(), String> {
+        match self {
+            QaAsrStart::Volcengine { asr, bridge } => {
+                asr.open_session().await.map_err(|e| e.to_string())?;
+                let target: Arc<dyn crate::asr::AudioConsumer> = Arc::clone(asr) as _;
+                let flushed = bridge.attach(target);
+                log::info!("[coord] QA ASR connected; flushed {flushed} deferred audio bytes");
+                Ok(())
+            }
+            QaAsrStart::Bailian { asr, bridge } => {
+                asr.open_session().await.map_err(|e| e.to_string())?;
+                let target: Arc<dyn crate::asr::AudioConsumer> = Arc::clone(asr) as _;
+                let flushed = bridge.attach(target);
+                log::info!(
+                    "[coord] QA Bailian ASR connected; flushed {flushed} deferred audio bytes"
+                );
+                Ok(())
+            }
+            QaAsrStart::Ready { .. } => Ok(()),
+        }
+    }
+}
+
+async fn build_qa_asr_start(inner: &Arc<Inner>, active_asr: &str) -> Result<QaAsrStart, String> {
+    #[cfg(target_os = "windows")]
+    if foundry::is_foundry_local_whisper(active_asr) {
+        let prefs = inner.prefs.get();
+        let model_alias = if foundry::model_alias_is_known(&prefs.foundry_local_asr_model) {
+            prefs.foundry_local_asr_model.clone()
+        } else {
+            foundry::DEFAULT_MODEL_ALIAS.to_string()
+        };
+        let language_hint = prefs.foundry_local_asr_language_hint.trim().to_string();
+        let language_hint = if language_hint.is_empty() {
+            None
+        } else {
+            Some(language_hint)
+        };
+        let local = Arc::new(FoundryLocalWhisperAsr::new(
+            Arc::clone(&inner.foundry_local_runtime),
+            model_alias,
+            prefs.foundry_local_runtime_source.clone(),
+            language_hint,
+        ));
+        let active = ActiveAsr::FoundryLocalWhisper(Arc::clone(&local));
+        let consumer: Arc<dyn crate::recorder::AudioConsumer> = local;
+        return Ok(QaAsrStart::Ready { active, consumer });
+    }
+
+    #[cfg(target_os = "windows")]
+    if sherpa::is_sherpa_onnx_local(active_asr) {
+        let prefs = inner.prefs.get();
+        let model_alias = if sherpa::model_alias_is_known(&prefs.sherpa_onnx_model) {
+            prefs.sherpa_onnx_model.clone()
+        } else {
+            sherpa::DEFAULT_MODEL_ALIAS.to_string()
+        };
+        let language_hint = prefs.sherpa_onnx_language_hint.trim().to_string();
+        let language_hint = if language_hint.is_empty() {
+            None
+        } else {
+            Some(language_hint)
+        };
+        let token_handler = inner.app.lock().clone().map(|app| {
+            Arc::new(move |piece: String| {
+                if let Err(error) = app.emit("local-asr-token", piece) {
+                    log::warn!("[sherpa-asr] emit token failed: {error}");
+                }
+            }) as crate::asr::local::sherpa_provider::SherpaTokenHandler
+        });
+        let local = SherpaOnnxAsr::new_for_model(
+            Arc::clone(&inner.sherpa_onnx_runtime),
+            model_alias,
+            language_hint,
+            token_handler,
+        )
+        .await
+        .map_err(|e| format!("sherpa-onnx init failed: {e}"))?;
+        let local = Arc::new(local);
+        let active = ActiveAsr::SherpaOnnxLocal(Arc::clone(&local));
+        let consumer: Arc<dyn crate::recorder::AudioConsumer> = local;
+        return Ok(QaAsrStart::Ready { active, consumer });
+    }
+
+    #[cfg(target_os = "macos")]
+    if crate::asr::local::is_local_qwen3(active_asr) {
+        let local = build_local_qwen3(inner)
+            .await
+            .map_err(|e| format!("local ASR init failed: {e}"))?;
+        let active = ActiveAsr::Local(Arc::clone(&local));
+        let consumer: Arc<dyn crate::recorder::AudioConsumer> = local;
+        return Ok(QaAsrStart::Ready { active, consumer });
+    }
+
+    match active_asr_provider_kind(active_asr) {
+        ActiveAsrProviderKind::Bailian => Ok(QaAsrStart::Bailian {
+            asr: Arc::new(BailianRealtimeASR::new(read_bailian_credentials())),
+            bridge: Arc::new(DeferredAsrBridge::new()),
+        }),
+        ActiveAsrProviderKind::WhisperCompatible => {
+            let (api_key, base_url, model) = read_whisper_credentials();
+            let whisper_prompt =
+                crate::asr::whisper::build_prompt_from_phrases(&enabled_phrases(inner));
+            let whisper = Arc::new(WhisperBatchASR::new(
+                api_key,
+                base_url,
+                model,
+                whisper_prompt,
+                batch_asr_chunk_limit_ms(active_asr),
+            ));
+            let active = ActiveAsr::Whisper(Arc::clone(&whisper));
+            let consumer: Arc<dyn crate::recorder::AudioConsumer> = whisper;
+            Ok(QaAsrStart::Ready { active, consumer })
+        }
+        ActiveAsrProviderKind::Volcengine => Ok(QaAsrStart::Volcengine {
+            asr: Arc::new(VolcengineStreamingASR::new(
+                read_volc_credentials(),
+                enabled_hotwords(inner),
+            )),
+            bridge: Arc::new(DeferredAsrBridge::new()),
+        }),
     }
 }
 
@@ -2900,15 +3080,11 @@ async fn begin_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
         );
     }
 
-    // 2. 凭据缺失走静默 fallback：与 dictation 一致的"用户的话不丢"约定。
-    //    缺火山凭据 → 后续 Recorder 仍会跑，只是 ASR 拿不到结果，end_qa_session
-    //    会发 idle 事件关浮窗。
-    //    注意：QA 强制走 Volcengine 流式（见下方注释），所以这里必须直接校验
-    //    Volcengine 字段，不能复用 `ensure_asr_credentials`——后者会按用户在设置
-    //    里选的 active_asr 走 OpenAI 兼容分支，让 QA 把 `asr.api_key` 当成必要项，
-    //    或在 Volcengine 凭据其实为空时误判通过。Codex P1，PR #213。
-    if let Err(message) = ensure_qa_volcengine_credentials() {
-        log::warn!("[coord] QA: ASR credentials missing: {message}");
+    // 2. QA 与 dictation 使用同一个 active ASR 入口。不要回退火山，否则用户配置
+    // 百炼 / Whisper / 本地 ASR 后，浮窗仍会偷偷走另一套凭据。
+    let active_asr = CredentialsVault::get_active_asr();
+    if let Err(message) = ensure_asr_credentials() {
+        log::warn!("[coord] QA: active ASR credentials missing: {message}");
         finish_qa_with_error(inner, format!("缺少 ASR 凭据：{message}"));
         return Err(message);
     }
@@ -2919,13 +3095,16 @@ async fn begin_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
         return Err(message);
     }
 
-    // 3. 启动 Recorder + ASR（强制走 Volcengine 流式：QA 必须低延迟）。
-    let hotwords = enabled_hotwords(inner);
-    let creds = read_volc_credentials();
-    let asr = Arc::new(VolcengineStreamingASR::new(creds, hotwords));
-    let bridge = Arc::new(DeferredAsrBridge::new());
-    let consumer: Arc<dyn crate::recorder::AudioConsumer> = bridge.clone();
-    *inner.qa_asr.lock() = Some(Arc::clone(&asr));
+    let qa_asr = match build_qa_asr_start(inner, &active_asr).await {
+        Ok(qa_asr) => qa_asr,
+        Err(message) => {
+            log::error!("[coord] QA active ASR init failed: {message}");
+            finish_qa_with_error(inner, format!("ASR 初始化失败: {message}"));
+            return Err(message);
+        }
+    };
+    let consumer = qa_asr.recorder_consumer();
+    *inner.qa_asr.lock() = Some(qa_asr.active_asr());
 
     // QA recorder 不需要 RMS 节流到胶囊；前端 QA 浮窗有自己的电平视图，
     // 这里发一份事件给 "qa" label 用就够了。
@@ -2980,35 +3159,35 @@ async fn begin_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
         }
         Err(e) => {
             log::error!("[coord] QA recorder start failed: {e}");
-            inner.qa_asr.lock().take();
+            if let Some(asr) = inner.qa_asr.lock().take() {
+                cancel_active_asr(asr);
+            }
             release_recording_mute(inner, "qa");
             finish_qa_with_error(inner, format!("录音启动失败: {e}"));
             return Err(e.to_string());
         }
     }
 
-    if let Err(e) = asr.open_session().await {
+    if let Err(e) = qa_asr.open_streaming_session().await {
         log::error!("[coord] QA: open ASR session failed: {e}");
         stop_qa_recorder(inner);
         if let Some(asr) = inner.qa_asr.lock().take() {
-            asr.cancel();
+            cancel_active_asr(asr);
         }
         finish_qa_with_error(inner, format!("ASR 连接失败: {e}"));
-        return Err(e.to_string());
+        return Err(e);
     }
 
     // cancel race：在 await 期间用户可能 dismiss 了浮窗。
     if inner.qa_state.lock().cancelled {
         log::info!("[coord] QA cancel raced during open_session — aborting begin");
-        asr.cancel();
+        if let Some(asr) = inner.qa_asr.lock().take() {
+            cancel_active_asr(asr);
+        }
         stop_qa_recorder(inner);
         inner.qa_state.lock().phase = QaPhase::Idle;
         return Ok(());
     }
-
-    let target: Arc<dyn crate::asr::AudioConsumer> = asr;
-    let flushed = bridge.attach(target);
-    log::info!("[coord] QA ASR connected; flushed {flushed} deferred audio bytes");
 
     // 显式弹胶囊到 Recording。level_handler 后续会持续推电平，胶囊里"录音中…"
     // 的视觉反馈跟主听写完全一致。
@@ -3043,28 +3222,159 @@ async fn end_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
         }
     };
 
-    if let Err(e) = asr.send_last_frame().await {
-        log::error!("[coord] QA: send last frame failed: {e}");
-    }
-    // 添加全局超时保护：防止 await_final_result() 永远挂起
-    let timeout_duration = std::time::Duration::from_secs(COORDINATOR_GLOBAL_TIMEOUT_SECS);
-    let raw = match tokio::time::timeout(timeout_duration, asr.await_final_result()).await {
-        Ok(Ok(r)) => r,
-        Ok(Err(e)) => {
-            log::error!("[coord] QA: await final failed: {e}");
-            finish_qa_with_error(inner, format!("识别失败: {e}"));
-            return Err(e.to_string());
+    #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
+    let qa_session_id = inner.qa_state.lock().session_id;
+    let uses_global_timeout = asr_transcribe_uses_global_timeout(&asr);
+    let raw = match asr {
+        ActiveAsr::Volcengine(asr) => {
+            debug_assert!(uses_global_timeout);
+            if let Err(e) = asr.send_last_frame().await {
+                log::error!("[coord] QA: send last frame failed: {e}");
+            }
+            let timeout_duration = std::time::Duration::from_secs(COORDINATOR_GLOBAL_TIMEOUT_SECS);
+            match tokio::time::timeout(timeout_duration, asr.await_final_result()).await {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => {
+                    log::error!("[coord] QA: await final failed: {e}");
+                    finish_qa_with_error(inner, format!("识别失败: {e}"));
+                    return Err(e.to_string());
+                }
+                Err(_) => {
+                    log::error!(
+                        "[coord] QA: 全局超时 {} 秒 - 强制恢复",
+                        COORDINATOR_GLOBAL_TIMEOUT_SECS
+                    );
+                    asr.cancel();
+                    finish_qa_with_error(inner, "识别超时".to_string());
+                    return Err("global timeout".to_string());
+                }
+            }
         }
-        Err(_) => {
-            // 全局超时：最后的防线
-            log::error!(
-                "[coord] QA: 全局超时 {} 秒 - 强制恢复",
-                COORDINATOR_GLOBAL_TIMEOUT_SECS
+        ActiveAsr::Bailian(asr) => {
+            debug_assert!(uses_global_timeout);
+            if let Err(e) = asr.send_last_frame().await {
+                log::error!("[coord] QA: Bailian send last frame failed: {e}");
+            }
+            let timeout_duration = std::time::Duration::from_secs(COORDINATOR_GLOBAL_TIMEOUT_SECS);
+            match tokio::time::timeout(timeout_duration, asr.await_final_result()).await {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => {
+                    log::error!("[coord] QA: Bailian await final failed: {e}");
+                    finish_qa_with_error(inner, format!("识别失败: {e}"));
+                    return Err(e.to_string());
+                }
+                Err(_) => {
+                    log::error!(
+                        "[coord] QA: Bailian 全局超时 {} 秒",
+                        COORDINATOR_GLOBAL_TIMEOUT_SECS
+                    );
+                    asr.cancel();
+                    finish_qa_with_error(inner, "识别超时".to_string());
+                    return Err("bailian global timeout".to_string());
+                }
+            }
+        }
+        ActiveAsr::Whisper(w) => {
+            debug_assert!(uses_global_timeout);
+            let timeout_duration = std::time::Duration::from_secs(COORDINATOR_GLOBAL_TIMEOUT_SECS);
+            match tokio::time::timeout(timeout_duration, w.transcribe()).await {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => {
+                    log::error!("[coord] QA: whisper transcribe failed: {e}");
+                    finish_qa_with_error(inner, format!("识别失败: {e}"));
+                    return Err(e.to_string());
+                }
+                Err(_) => {
+                    log::error!(
+                        "[coord] QA: whisper 全局超时 {} 秒",
+                        COORDINATOR_GLOBAL_TIMEOUT_SECS
+                    );
+                    finish_qa_with_error(inner, "识别超时".to_string());
+                    return Err("whisper global timeout".to_string());
+                }
+            }
+        }
+        #[cfg(target_os = "windows")]
+        ActiveAsr::FoundryLocalWhisper(local) => {
+            debug_assert!(!uses_global_timeout);
+            match local
+                .transcribe(foundry_audio_transcribe_timeout_duration())
+                .await
+            {
+                Ok(r) => {
+                    schedule_foundry_local_asr_release(inner, AsrReleaseSession::Qa(qa_session_id));
+                    r
+                }
+                Err(e) => {
+                    schedule_foundry_local_asr_release(inner, AsrReleaseSession::Qa(qa_session_id));
+                    if inner.qa_state.lock().cancelled {
+                        log::info!(
+                            "[coord] QA Foundry Local Whisper transcribe cancelled — discarding transcript"
+                        );
+                        finish_qa_idle_silently(inner);
+                        return Ok(());
+                    }
+                    log::error!("[coord] QA Foundry Local Whisper transcribe failed: {e:#}");
+                    finish_qa_with_error(inner, format!("本地识别失败: {e}"));
+                    return Err(e.to_string());
+                }
+            }
+        }
+        #[cfg(target_os = "windows")]
+        ActiveAsr::SherpaOnnxLocal(local) => {
+            debug_assert!(!uses_global_timeout);
+            match local
+                .transcribe(sherpa_audio_transcribe_timeout_duration())
+                .await
+            {
+                Ok(r) => {
+                    schedule_sherpa_onnx_release(inner, AsrReleaseSession::Qa(qa_session_id));
+                    r
+                }
+                Err(e) => {
+                    schedule_sherpa_onnx_release(inner, AsrReleaseSession::Qa(qa_session_id));
+                    if inner.qa_state.lock().cancelled {
+                        log::info!(
+                            "[coord] QA sherpa-onnx transcribe cancelled — discarding transcript"
+                        );
+                        finish_qa_idle_silently(inner);
+                        return Ok(());
+                    }
+                    log::error!("[coord] QA sherpa-onnx transcribe failed: {e:#}");
+                    finish_qa_with_error(inner, format!("本地识别失败: {e}"));
+                    return Err(e.to_string());
+                }
+            }
+        }
+        #[cfg(target_os = "macos")]
+        ActiveAsr::Local(local) => {
+            debug_assert!(uses_global_timeout);
+            let audio_secs = (local.buffer_duration_ms() as f64) / 1000.0;
+            let timeout_duration = local_qwen_transcribe_timeout(audio_secs);
+            log::info!(
+                "[coord] QA local Qwen3-ASR transcribe: audio={:.2}s timeout={}s",
+                audio_secs,
+                timeout_duration.as_secs()
             );
-            // 清理 ASR session，避免资源泄漏
-            asr.cancel();
-            finish_qa_with_error(inner, "识别超时".to_string());
-            return Err("global timeout".to_string());
+            let result = tokio::time::timeout(timeout_duration, local.transcribe()).await;
+            inner.local_asr_cache.touch();
+            schedule_local_asr_release(inner);
+            match result {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => {
+                    log::error!("[coord] QA local Qwen3-ASR transcribe failed: {e:#}");
+                    finish_qa_with_error(inner, format!("本地识别失败: {e}"));
+                    return Err(e.to_string());
+                }
+                Err(_) => {
+                    log::error!(
+                        "[coord] QA local Qwen3-ASR transcribe timeout after {}s",
+                        timeout_duration.as_secs()
+                    );
+                    finish_qa_with_error(inner, "本地识别超时".to_string());
+                    return Err("local qwen transcribe timeout".to_string());
+                }
+            }
         }
     };
 
@@ -3313,7 +3623,7 @@ fn cancel_qa_session(inner: &Arc<Inner>) {
     inner.qa_stream_cancelled.store(true, Ordering::SeqCst);
     stop_qa_recorder(inner);
     if let Some(asr) = inner.qa_asr.lock().take() {
-        asr.cancel();
+        cancel_active_asr(asr);
     }
     // Processing 阶段保持 phase 让 end_qa_session 自然走完 cancel 检查；
     // 否则直接复位。
@@ -3570,6 +3880,22 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn qa_asr_provider_kind_tracks_active_provider() {
+        assert_eq!(
+            active_asr_provider_kind(crate::asr::bailian::PROVIDER_ID),
+            ActiveAsrProviderKind::Bailian
+        );
+        assert_eq!(
+            active_asr_provider_kind("whisper"),
+            ActiveAsrProviderKind::WhisperCompatible
+        );
+        assert_eq!(
+            active_asr_provider_kind("volcengine"),
+            ActiveAsrProviderKind::Volcengine
+        );
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn coordinator_shares_app_foundry_runtime() {
@@ -3658,21 +3984,41 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn foundry_release_guard_rejects_stale_session() {
+    fn foundry_release_guard_rejects_stale_dictation_session() {
         let runtime = Arc::new(crate::asr::local::FoundryLocalRuntime::new());
         let coordinator = Coordinator::new_with_foundry_runtime(runtime);
         let old_session_id = coordinator.inner.state.lock().session_id;
 
-        assert!(foundry_release_session_is_current(
+        assert!(asr_release_session_is_current(
             &coordinator.inner,
-            old_session_id
+            AsrReleaseSession::Dictation(old_session_id)
         ));
 
         coordinator.inner.state.lock().session_id = new_session_id();
 
-        assert!(!foundry_release_session_is_current(
+        assert!(!asr_release_session_is_current(
             &coordinator.inner,
-            old_session_id
+            AsrReleaseSession::Dictation(old_session_id)
+        ));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn local_asr_release_guard_rejects_stale_qa_session() {
+        let runtime = Arc::new(crate::asr::local::FoundryLocalRuntime::new());
+        let coordinator = Coordinator::new_with_foundry_runtime(runtime);
+        let old_session_id = coordinator.inner.qa_state.lock().session_id;
+
+        assert!(asr_release_session_is_current(
+            &coordinator.inner,
+            AsrReleaseSession::Qa(old_session_id)
+        ));
+
+        coordinator.inner.qa_state.lock().session_id = new_session_id();
+
+        assert!(!asr_release_session_is_current(
+            &coordinator.inner,
+            AsrReleaseSession::Qa(old_session_id)
         ));
     }
 
