@@ -28,7 +28,7 @@ assertMatch(
 
 assertMatch(
   macosNoActivateFunction,
-  /FullScreenAuxiliary[\s\S]*?setCollectionBehavior[\s\S]*?orderFrontRegardless/,
+  /FULL_SCREEN_AUXILIARY[\s\S]*?1 << 8[\s\S]*?setCollectionBehavior[\s\S]*?orderFrontRegardless/,
   'macOS capsule should join fullscreen Spaces as an auxiliary window before showing without activation',
 );
 
