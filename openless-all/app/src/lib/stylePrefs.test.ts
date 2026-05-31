@@ -31,6 +31,7 @@ const previousPrefs: UserPreferences = {
   launchAtLogin: false,
   showCapsule: true,
   muteDuringRecording: false,
+  audioCueOnRecord: true,
   microphoneDeviceName: '',
   activeAsrProvider: 'volcengine',
   activeLlmProvider: 'ark',
