@@ -47,6 +47,10 @@ interface ActiveVoice {
   gain: GainNode;
 }
 let activeVoices: ActiveVoice[] = [];
+// 每次「关闭」或「新一轮播放」自增。suspended 时 play 会等 resume() 再排期，
+// 这个代号让挂起的 resume 回调能判断「等待期间是否已被叫停/被新一轮取代」，
+// 避免录音已经结束、提示音却姗姗来迟地响起来（冷启动 WebView 上快按热键可复现）。
+let playGeneration = 0;
 
 function resolveAudioContextCtor(): AudioContextCtor | null {
   if (typeof window === 'undefined') return null;
@@ -69,8 +73,8 @@ function getContext(): AudioContext | null {
   return sharedCtx;
 }
 
-/** 关闭/停止当前正在播放的提示音；无声音在播时为 no-op。 */
-export function stopAudioCue(): void {
+// 停掉当前正在发声的节点（不影响 playGeneration —— 仅做去叠音 / 收尾）。
+function stopVoices(): void {
   const ctx = sharedCtx;
   const now = ctx?.currentTime ?? 0;
   for (const { osc, gain } of activeVoices) {
@@ -86,11 +90,18 @@ export function stopAudioCue(): void {
   activeVoices = [];
 }
 
+/** 关闭/停止提示音：停掉在播节点，并作废任何还挂在 resume() 上、尚未排期的播放。 */
+export function stopAudioCue(): void {
+  playGeneration++;
+  stopVoices();
+}
+
 // 实际排期合成节点。必须在 AudioContext 处于 running（非 suspended）时调用：
 // suspended 时 currentTime 冻结在暂停时刻，节点会排到过期时间点 → 不发声还堆积。
 function scheduleCueVoices(ctx: AudioContext): void {
-  // 连按热键时先停掉上一轮，避免叠音越来越响。
-  stopAudioCue();
+  // 连按热键时先停掉上一轮，避免叠音越来越响。用 stopVoices 而非 stopAudioCue：
+  // 这里不该作废自己这一轮的 generation。
+  stopVoices();
 
   const base = ctx.currentTime + 0.01;
   for (const tone of recordStartCueTones()) {
@@ -134,9 +145,15 @@ export function playRecordStartCue(): void {
   // WKWebView / WebView2 的 AudioContext 常处于 suspended：必须先 resume 再排期，
   // 不能在 resume 未完成时就用冻结的 currentTime 排节点。resume() 失败也不抛（无声降级）。
   if (ctx.state === 'suspended') {
+    const gen = ++playGeneration;
     ctx
       .resume()
-      .then(() => scheduleCueVoices(ctx))
+      .then(() => {
+        // 等待 resume 期间若已 stopAudioCue（录音结束）或有新一轮播放，本次作废，
+        // 否则会出现「录音已停，提示音却晚到」。
+        if (gen !== playGeneration) return;
+        scheduleCueVoices(ctx);
+      })
       .catch(() => undefined);
     return;
   }
