@@ -4507,6 +4507,13 @@ fn show_capsule_window_no_activate<R: tauri::Runtime>(
     }
 
     unsafe {
+        const NS_WINDOW_COLLECTION_BEHAVIOR_CAN_JOIN_ALL_SPACES: usize = 1 << 0;
+        const NS_WINDOW_COLLECTION_BEHAVIOR_FULL_SCREEN_AUXILIARY: usize = 1 << 8;
+        let behavior: usize = msg_send![ns_window, collectionBehavior];
+        let behavior = behavior
+            | NS_WINDOW_COLLECTION_BEHAVIOR_CAN_JOIN_ALL_SPACES
+            | NS_WINDOW_COLLECTION_BEHAVIOR_FULL_SCREEN_AUXILIARY;
+        let _: () = msg_send![ns_window, setCollectionBehavior: behavior];
         let _: () = msg_send![ns_window, orderFrontRegardless];
     }
     true
