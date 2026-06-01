@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>Open-source voice input for macOS &amp; Windows.</strong><br/>
-  Press a hotkey, speak, get AI-polished text at your cursor.
+  Hold a hotkey, talk, and watch AI-polished text stream straight to your cursor — in the writing style <em>you</em> choose.
 </p>
 
 <p align="center">
@@ -81,6 +81,13 @@ Put your cursor in any text field — ChatGPT, Claude, Cursor, Notion, an email 
 
 Unlike voice typing tools that just dump a word-for-word transcript, OpenLess's headline mode is **AI-prompt mode**: you ramble, it adds structure, lists constraints, and produces a context-rich prompt you can paste straight into ChatGPT / Claude / Cursor.
 
+## ✨ What's new
+
+Two features that change how OpenLess feels day to day:
+
+- 🎨 **Style Pack Marketplace.** OpenLess no longer ships a single fixed "polish" voice. Build your own **style packs** with custom system prompts, switch between them with a hotkey, and **install community packs in one click** — or publish your own to share. When the style is tuned to your exact job (cold emails, commit messages, 小红书 posts, formal reports, your team's tone), the output isn't just cleaner — it comes out *noticeably better*, because the model is finally writing the way you actually want.
+- ⚡ **Streaming insertion.** Text now flows to your cursor **character by character** as it's polished, instead of making you wait for the whole result to land. Perceived latency drops sharply, so dictation feels about as fast as thinking — and it automatically falls back to a one-shot paste when an app can't accept streamed keystrokes.
+
 ## A concrete example
 
 Hold the hotkey, say to OpenLess:
@@ -118,6 +125,16 @@ OpenLess goes for the same end-user experience but:
 - Code comments, commit messages, PR descriptions: dump what's in your head straight to the cursor.
 - Any "I don't want to type but I have to produce written text" situation.
 
+## Style packs & the Marketplace
+
+A **style pack** is a named output style with its own system prompt. Instead of being stuck with one built-in "polish" voice, you can shape exactly how your speech comes out — and the closer the style matches your real task, the better the result.
+
+- **Create & customize.** On the **Style** page, add a pack and write a custom system prompt (e.g. "terse engineering commit messages", "warm customer-support replies", "小红书 copy with emoji"). Switch the active pack with a hotkey.
+- **Install from the community.** Open the **Marketplace** to browse, search, and one-click install packs other people have shared, and like the ones that work for you.
+- **Publish your own.** Sign in with a GitHub identity (Settings → Marketplace), then hit **Publish to Marketplace** from the Style page. Uploads are moderated before they appear publicly.
+
+The marketplace is served by OpenLess's own moderated backend, so the catalog stays curated rather than a free-for-all.
+
 ## Project direction
 
 OpenLess does one thing: **turn speech into usable written text (especially AI prompts), at the current cursor.**
@@ -136,16 +153,19 @@ OpenLess does one thing: **turn speech into usable written text (especially AI p
 | [Lazy](https://heylazy.com) | Closed-source notes / capture tool | Not a notes container — inserts straight into any input field |
 | [Superwhisper](https://superwhisper.com) | Closed-source macOS, subscription | Open source; cloud ASR today, local ASR on the roadmap |
 
-## Status (v1.2)
+## Status (v1.3.6)
 
 - Tauri 2 + Rust backend + React/TS frontend. macOS 12+, Windows 10+.
-- **Toggle and push-to-talk** recording modes. `Esc` cancels at any phase, including polish/insert.
+- 🎨 **Style Pack Marketplace** — browse, install, and like community **style packs** from the in-app Marketplace, and publish your own (custom system prompt per pack, switchable by hotkey). Backed by a moderated marketplace backend; uploads are reviewed before they go public.
+- ⚡ **Streaming insertion** — polished text is written to the cursor character by character to cut perceived latency, with an automatic one-shot-paste fallback. Toggle in Settings → Recording.
+- **Toggle and push-to-talk** recording modes, plus a **MediaPlayPause trigger** so wired-earbud inline controls can start/stop recording. `Esc` cancels at any phase, including polish/insert.
 - **Cloud ASR**: Volcengine streaming ASR, OpenAI Whisper-compatible batch ASR, Apple Speech (macOS).
 - **Local ASR**: bundled Qwen3-ASR (0.6B / 1.7B) via vendored `Open-Less/qwen-asr`; Windows Foundry Local Whisper variants.
 - **Polish providers**: Ark / DeepSeek / OpenAI / Doubao / Anthropic-compatible chat-completions, plus any OpenAI-compatible endpoint you bring.
 - 4 output modes: raw, light polish, structured (**AI prompt mode**), formal. Plus a **translation hotkey** that converts speech directly into the configured target language ([#43](../../issues/43)).
 - **Selection-ask QA panel** — separate hotkey opens a floating panel that runs voice Q&A against the highlighted text in any app ([#118](../../issues/118)).
-- Main window: Overview / History / Vocab / Style / Settings. Persistent tray icon. Mini status capsule floating on screen.
+- Main window: Overview / History / Vocab / Style / Marketplace / Settings. Persistent tray icon. Mini status capsule that floats on screen and follows the display you're typing on (multi-monitor).
+- **Local model management** — manage on-disk local-ASR model storage from Settings.
 - **Multilingual UI** — Settings → Language switches between 简体中文 / 繁體中文 / English / 日本語 / 한국어 (auto-detects on first launch).
 - **In-app auto-update** — Settings → About → Check button; signed updater artifacts via Tauri updater plugin.
 - **Beta channel (opt-in)** — Settings → About → Join Beta channel exposes the latest pre-release build for manual download; Beta releases never reach Stable users automatically (see [Contributing workflow](#contributing-workflow)).
@@ -327,7 +347,6 @@ Planned but not yet shipped:
 - Snippets (no UI / trigger logic yet).
 - History enhancements: copy button, search, re-polish, re-insert.
 - "Paste last result" hotkey.
-- Multi-monitor capsule placement on the focused screen.
 
 ## Maintainer release checklist
 
