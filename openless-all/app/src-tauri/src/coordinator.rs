@@ -2488,6 +2488,19 @@ fn is_whisper_compatible_provider(id: &str) -> bool {
     matches!(id, "whisper" | "siliconflow" | "zhipu" | "groq")
 }
 
+/// 该 provider 的 `/audio/transcriptions` 是否支持 `response_format=verbose_json`
+/// 并返回带 `no_speech_prob` / `avg_logprob` / `compression_ratio` 的 segments，
+/// 用于幻听过滤。
+///
+/// - `whisper`（OpenAI）/ `groq`：原生 Whisper，完整支持，过滤有效。
+/// - `siliconflow`：模型是 SenseVoice / TeleSpeech，文档无 `response_format`，
+///   发送 verbose_json 可能被拒，**保持关闭**走旧的 `json`。
+/// - `zhipu`（GLM-ASR）：虽接受 verbose_json，但不产出上述指标，过滤是空转；
+///   为最小化行为变更，这里也**保持关闭**，仅对确证有收益的 whisper/groq 开启。
+fn whisper_supports_verbose_json(provider_id: &str) -> bool {
+    matches!(provider_id, "whisper" | "groq")
+}
+
 fn is_bailian_provider(id: &str) -> bool {
     id == crate::asr::bailian::PROVIDER_ID
 }
@@ -2654,6 +2667,7 @@ async fn build_qa_asr_start(inner: &Arc<Inner>, active_asr: &str) -> Result<QaAs
                 model,
                 whisper_prompt,
                 batch_asr_chunk_limit_ms(active_asr),
+                whisper_supports_verbose_json(active_asr),
             ));
             let active = ActiveAsr::Whisper(Arc::clone(&whisper));
             let consumer: Arc<dyn crate::recorder::AudioConsumer> = whisper;
@@ -3889,6 +3903,16 @@ mod tests {
     }
 
     #[test]
+    fn verbose_json_enabled_only_for_whisper_family() {
+        // verbose_json + 幻听过滤只对返回完整 Whisper 指标的 provider 开启。
+        assert!(whisper_supports_verbose_json("whisper"));
+        assert!(whisper_supports_verbose_json("groq"));
+        // SiliconFlow(SenseVoice/TeleSpeech) / Zhipu(GLM-ASR) 保持旧的 json 行为。
+        assert!(!whisper_supports_verbose_json("siliconflow"));
+        assert!(!whisper_supports_verbose_json("zhipu"));
+    }
+
+    #[test]
     fn qa_asr_provider_kind_tracks_active_provider() {
         assert_eq!(
             active_asr_provider_kind(crate::asr::bailian::PROVIDER_ID),
@@ -4468,6 +4492,7 @@ mod tests {
             "model".to_string(),
             None,
             None,
+            false,
         ));
         *coordinator.inner.asr.lock() = Some(SessionResource::new(
             session_id(2),
