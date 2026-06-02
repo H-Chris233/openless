@@ -566,7 +566,7 @@ pub(crate) async fn download_one(
 
     // 1. 计算 chunk 计划
     let chunks: Vec<(usize, u64, u64)> = chunk_plan(total_size);
-    let total_chunks = chunks.len();
+    let _total_chunks = chunks.len();
 
     // 2. 读已完成的 chunk 索引
     let done_set = read_idx(&idx_path);

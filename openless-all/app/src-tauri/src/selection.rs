@@ -1,3 +1,4 @@
+#![cfg_attr(target_os = "linux", allow(dead_code, unused_variables))]
 //! 跨平台「划词捕获」工具：在用户触发 QA 快捷键时尝试拿到当前前台 app 的选区文本。
 //!
 //! 三级 fallback：
@@ -13,7 +14,6 @@
 //! 模块依赖：仅 `arboard`（跨平台剪贴板）+ libc + 平台 native 框架；不依赖其它
 //! Rust 模块（与 CLAUDE.md 对齐）。
 
-use std::time::Duration;
 
 const SELECTION_MAX_CHARS: usize = 4000;
 const SELECTION_TRUNCATE_HEAD: usize = 2000;

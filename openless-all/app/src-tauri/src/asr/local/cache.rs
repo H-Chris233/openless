@@ -1,3 +1,4 @@
+#![cfg_attr(target_os = "linux", allow(dead_code, unused_variables))]
 //! 本地 Qwen3-ASR 引擎缓存。
 //!
 //! 用途：避免每次 dictation 都重加载 1.2GB+ 模型。引擎一次 load 后驻留在内存，
@@ -7,12 +8,8 @@
 //! 调度规则：每次会话结束后 spawn 一个 sleep+check 任务；任务在到点时检查
 //! `last_used`——如果中间又被使用过则不释放，否则 drop 引擎让 OS 回收 RAM。
 
-use std::path::Path;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use anyhow::Result;
-use parking_lot::Mutex;
 
 #[cfg(target_os = "macos")]
 use super::QwenAsrEngine;

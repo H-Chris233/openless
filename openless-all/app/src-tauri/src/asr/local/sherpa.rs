@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_imports, unused_variables)]
 //! Windows sherpa-onnx 本地 ASR 的常量、catalog 与事件载荷。
 //!
 //! 当前 catalog 覆盖 Windows offline batch 模型和实验 online streaming 模型；

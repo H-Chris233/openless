@@ -1,3 +1,4 @@
+#![cfg_attr(target_os = "linux", allow(dead_code, unused_variables))]
 //! Linux fcitx5 插件 DBus 客户端。
 //!
 //! 封装对 `org.fcitx.Fcitx.OpenLess1` 接口的调用，

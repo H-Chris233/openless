@@ -93,9 +93,9 @@ impl FoundryLocalWhisperAsr {
     async fn transcribe_inner(
         &self,
         pcm: &[u8],
-        audio_timeout: std::time::Duration,
+        _audio_timeout: std::time::Duration,
     ) -> Result<RawTranscript> {
-        let duration_ms = pcm_duration_ms(pcm);
+        let _duration_ms = pcm_duration_ms(pcm);
 
         #[cfg(not(target_os = "windows"))]
         {

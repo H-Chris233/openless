@@ -1,3 +1,4 @@
+#![cfg_attr(target_os = "linux", allow(dead_code))]
 //! 跨平台光标位置文本插入。
 //!
 //! 通用步骤：先写剪贴板（模拟失败时用户能手动粘贴）→ 模拟粘贴快捷键。
@@ -36,8 +37,8 @@ impl TextInserter {
     pub fn insert(
         &self,
         text: &str,
-        restore_clipboard_after_paste: bool,
-        paste_shortcut: PasteShortcut,
+        _restore_clipboard_after_paste: bool,
+        _paste_shortcut: PasteShortcut,
     ) -> InsertStatus {
         if text.is_empty() {
             return InsertStatus::CopiedFallback;
@@ -57,6 +58,7 @@ impl TextInserter {
                 }
             }
         }
+        #[cfg(not(target_os = "linux"))]
         insert_with_clipboard_restore(text, restore_clipboard_after_paste, paste_shortcut)
     }
 
