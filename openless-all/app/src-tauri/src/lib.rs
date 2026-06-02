@@ -1,4 +1,4 @@
-#![cfg_attr(target_os = "linux", allow(dead_code, unused_variables))]
+#![cfg_attr(target_os = "linux", allow(dead_code, unused_imports, unused_variables))]
 //! OpenLess Tauri backend.
 //!
 //! Modules mirror the original Swift libraries (one purpose per file):
@@ -57,7 +57,7 @@ use tauri::menu::{
 };
 use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
 use tauri::{
-    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager,
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, PhysicalPosition, PhysicalSize,
     RunEvent, Runtime,
 };
 
