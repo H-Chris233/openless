@@ -1,4 +1,4 @@
-#![cfg_attr(target_os = "linux", allow(dead_code))]
+#![cfg_attr(target_os = "linux", allow(dead_code, unused_imports, unused_variables))]
 //! Dictation coordinator.
 //!
 //! Mirrors the Swift `DictationCoordinator` state machine. Single owner of
@@ -65,8 +65,8 @@ mod resources;
 #[cfg(test)]
 use dictation::dictation_error_code;
 use dictation::{
-    begin_session, cancel_session, end_session, handle_pressed_edge,
-    handle_released_edge, request_stop_during_starting,
+    begin_session, cancel_session, end_session, handle_pressed, handle_pressed_edge,
+    handle_released, handle_released_edge, request_stop_during_starting,
 };
 use qa::{close_qa_panel, handle_qa_hotkey_pressed, QaPhase, QaSessionState};
 #[cfg(test)]
@@ -4979,7 +4979,7 @@ fn emit_capsule(
     // visible / translation 是「这一帧 capsule:state event 的 payload」内容 ——
     // 必须在 call-site（即音频线程触发 emit_capsule 时）就算定，否则 main thread
     // 闭包里读到的将是「下一帧」的 state，跟实际下发给 JS 的 payload 不一致。
-    let _visible = !matches!(state, CapsuleState::Idle);
+    let visible = !matches!(state, CapsuleState::Idle);
 
     // Linux: 通过 fcitx5 插件在候选词列表下方显示听写状态，不干扰输入法预编辑。
     // 只在文本变化时调用 DBus，避免录音中 ~30Hz 的音频电平回调重复调用。
@@ -5072,10 +5072,10 @@ fn emit_capsule(
     let inner_for_main = Arc::clone(inner);
     let app_for_main = app.clone();
     let _ = app.run_on_main_thread(move || {
-        let Some(_window) = app_for_main.get_webview_window("capsule") else {
+        let Some(window) = app_for_main.get_webview_window("capsule") else {
             return;
         };
-        let _show_capsule = inner_for_main.prefs.get().show_capsule;
+        let show_capsule = inner_for_main.prefs.get().show_capsule;
         // Linux: 不操作胶囊窗口（不 show/hide，不 reposition）。
         // 文字通过 fcitx5 插件直接 commit，用户始终在目标 app 中。
         #[cfg(target_os = "linux")]

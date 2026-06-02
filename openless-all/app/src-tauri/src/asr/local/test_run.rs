@@ -19,6 +19,8 @@ use anyhow::Result;
 use serde::Serialize;
 
 use super::models::ModelId;
+#[cfg(target_os = "macos")]
+use super::models::model_dir;
 
 /// 内嵌测试音频。原始文件 `vendor/qwen-asr/samples/test_speech.wav`
 /// 内容："Hello. This is a test of the Voxtrail speech-to-text system."

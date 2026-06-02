@@ -1,4 +1,4 @@
-#![allow(dead_code)] // Task 6 接入 coordinator 后这些路径会变成运行时路径。
+#![allow(dead_code, unused_variables)] // Task 6 接入 coordinator 后这些路径会变成运行时路径。
 
 #[cfg(target_os = "windows")]
 use std::fs::{self, OpenOptions};
@@ -93,9 +93,9 @@ impl FoundryLocalWhisperAsr {
     async fn transcribe_inner(
         &self,
         pcm: &[u8],
-        _audio_timeout: std::time::Duration,
+        audio_timeout: std::time::Duration,
     ) -> Result<RawTranscript> {
-        let _duration_ms = pcm_duration_ms(pcm);
+        let duration_ms = pcm_duration_ms(pcm);
 
         #[cfg(not(target_os = "windows"))]
         {
