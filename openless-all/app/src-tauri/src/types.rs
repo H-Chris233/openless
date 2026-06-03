@@ -1,3 +1,4 @@
+#![cfg_attr(target_os = "linux", allow(dead_code, unused_variables))]
 //! Shared value types crossing the IPC boundary.
 
 use serde::{Deserialize, Serialize};

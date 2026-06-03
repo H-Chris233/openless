@@ -1,3 +1,4 @@
+#![cfg_attr(target_os = "linux", allow(dead_code, unused_imports, unused_variables))]
 //! OpenLess Tauri backend.
 //!
 //! Modules mirror the original Swift libraries (one purpose per file):

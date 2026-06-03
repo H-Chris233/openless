@@ -1,3 +1,4 @@
+#![cfg_attr(target_os = "linux", allow(dead_code, unused_variables))]
 //! 本地 Qwen3-ASR 一键"加载 + 测试"实现。
 //!
 //! 流程：
@@ -17,7 +18,9 @@ use std::time::Instant;
 use anyhow::Result;
 use serde::Serialize;
 
-use super::models::{model_dir, ModelId};
+use super::models::ModelId;
+#[cfg(target_os = "macos")]
+use super::models::model_dir;
 
 /// 内嵌测试音频。原始文件 `vendor/qwen-asr/samples/test_speech.wav`
 /// 内容："Hello. This is a test of the Voxtrail speech-to-text system."

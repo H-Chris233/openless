@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_imports, unused_variables)]
 use std::time::Duration;
 
 use crate::windows_ime_protocol::ImeSubmitStatus;

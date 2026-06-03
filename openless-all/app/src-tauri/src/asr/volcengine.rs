@@ -1,3 +1,4 @@
+#![cfg_attr(target_os = "linux", allow(dead_code, unused_variables))]
 //! Volcengine SAUC bigmodel streaming ASR client.
 //!
 //! Direct port of the Swift `VolcengineStreamingASR`. Battle-tested protocol

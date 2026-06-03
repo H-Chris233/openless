@@ -1,3 +1,4 @@
+#![cfg_attr(target_os = "linux", allow(dead_code, unused_variables))]
 //! 跨平台 Unicode keystroke 合成（流式输入用）。
 //!
 //! 公开 API 三件套：

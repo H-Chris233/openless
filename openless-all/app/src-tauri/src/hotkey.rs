@@ -1,3 +1,4 @@
+#![cfg_attr(target_os = "linux", allow(dead_code))]
 //! 全局热键监听：发送按下 / 抬起 / 取消三类边沿事件。
 //!
 //! - macOS：原生 CGEventTap（core-foundation + core-graphics FFI），与 Swift

@@ -1,3 +1,4 @@
+#![cfg_attr(target_os = "linux", allow(dead_code, unused_variables))]
 //! OpenAI-compatible chat completions client + polish prompts.
 //!
 //! 提示词在 `prompts` 模块中维护：使用 `# 角色 / # 任务 / # 通用规则 / # 输出 / # 示例`

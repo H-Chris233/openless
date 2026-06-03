@@ -1,3 +1,4 @@
+#![cfg_attr(target_os = "linux", allow(dead_code, unused_variables))]
 //! Tauri command surface — every IPC entry the React UI invokes lives here.
 
 use std::sync::Arc;

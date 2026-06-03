@@ -1,3 +1,4 @@
+#![cfg_attr(target_os = "linux", allow(dead_code, unused_imports, unused_variables))]
 //! Dictation coordinator.
 //!
 //! Mirrors the Swift `DictationCoordinator` state machine. Single owner of
@@ -5081,6 +5082,8 @@ fn emit_capsule(
         {
             return;
         }
+        #[cfg(not(target_os = "linux"))]
+        {
 
         // 三平台统一：Done / Cancelled / Error 状态保留 ~1.5s toast
         // （schedule_capsule_idle 之后会回 Idle 隐藏）。
@@ -5118,6 +5121,7 @@ fn emit_capsule(
             }
             hide_capsule_window_if_present();
             let _ = window.hide();
+        }
         }
     });
 

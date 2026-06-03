@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_imports, unused_variables)]
 //! sherpa-onnx 本地 ASR provider（Windows offline batch + online streaming）。
 //!
 //! 形状与 `foundry_provider.rs` 对齐：

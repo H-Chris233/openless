@@ -1,3 +1,4 @@
+#![cfg_attr(target_os = "linux", allow(dead_code, unused_variables))]
 //! Local persistence: history JSON, user preferences JSON, vocab JSON, and
 //! platform-backed credentials vault.
 //!

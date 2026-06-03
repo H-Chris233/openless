@@ -1,4 +1,4 @@
-#![allow(dead_code)] // Task 6 接入 coordinator 后这些路径会变成运行时路径。
+#![allow(dead_code, unused_variables)] // Task 6 接入 coordinator 后这些路径会变成运行时路径。
 
 #[cfg(target_os = "windows")]
 use std::fs::{self, OpenOptions};

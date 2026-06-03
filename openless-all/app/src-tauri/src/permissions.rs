@@ -1,3 +1,4 @@
+#![cfg_attr(target_os = "linux", allow(dead_code, unused_variables))]
 //! 系统权限请求 / 检查（macOS / Windows）。
 //!
 //! 与 Swift `Sources/OpenLessHotkey/AccessibilityPermission.swift` +
