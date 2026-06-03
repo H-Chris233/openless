@@ -682,7 +682,7 @@ export const zhTW: typeof zhCN = {
       startStop: '開始 / 停止錄音',
       cancel: '取消本次錄音',
       confirm: '膠囊確認插入',
-      switchStyle: '切換上一次風格',
+      switchStyle: '切換到上一個風格',
       openApp: '打開 OpenLess',
       confirmHint: '點擊右側 ✓',
       notSupported: '暫未支持',

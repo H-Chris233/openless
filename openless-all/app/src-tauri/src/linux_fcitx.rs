@@ -422,7 +422,7 @@ pub fn start_dictation_signal_listener(
 /// 未安装时输出警告，不做任何文件 I/O。
 #[cfg(target_os = "linux")]
 pub fn ensure_plugin_installed(_app: &tauri::AppHandle) {
-    // fcitx5 在不同发行版的 lib 路径不同
+    // fcitx5 在不同发行版的 lib 路径不同，同时支持用户 XDG 安装
     let lib_dirs = [
         "/usr/lib/x86_64-linux-gnu/fcitx5", // Debian multiarch
         "/usr/lib64/fcitx5",                 // RPM 64-bit
@@ -430,24 +430,48 @@ pub fn ensure_plugin_installed(_app: &tauri::AppHandle) {
     ];
     let system_conf = std::path::Path::new("/usr/share/fcitx5/addon/openless.conf");
 
-    if !system_conf.exists() {
+    // 用户 XDG 安装：~/.local/ 下自编译安装的版本
+    let (user_so, user_conf) = if let Ok(home) = std::env::var("HOME") {
+        let home = std::path::PathBuf::from(home);
+        (
+            home.join(".local/lib/fcitx5/libopenless.so"),
+            home.join(".local/share/fcitx5/addon/openless.conf"),
+        )
+    } else {
+        (std::path::PathBuf::new(), std::path::PathBuf::new())
+    };
+
+    let conf_ok = user_conf.exists() || system_conf.exists();
+    let system_so_found = lib_dirs.iter().find(|dir| {
+        std::path::Path::new(dir).join("libopenless.so").exists()
+    });
+    let so_ok = user_so.exists() || system_so_found.is_some();
+
+    // 用户手动安装过 ~/.local/ 版本，同时系统路径也有（deb 注入的）→
+    // fcitx5 优先加载用户路径的旧版，系统新版被忽略。
+    // 提醒用户删除 ~/.local/ 的旧插件。
+    if user_so.exists() && system_so_found.is_some() {
         log::warn!(
-            "[fcitx] fcitx5 addon config not installed at {:?}. \
-             The OpenLess package may be incomplete.",
-            system_conf
+            "[fcitx] fcitx5 plugin found in both ~/.local/ and system paths. \
+             fcitx5 will load the ~/.local/ version first, which may be outdated. \
+             Remove it if you want to use the system-installed version: rm -f {}",
+            user_so.display()
+        );
+    }
+
+    if !conf_ok {
+        log::warn!(
+            "[fcitx] fcitx5 addon config not found. \
+             The OpenLess package may be incomplete."
         );
         return;
     }
 
-    let found = lib_dirs.iter().any(|dir| {
-        std::path::Path::new(dir).join("libopenless.so").exists()
-    });
-
-    if !found {
+    if !so_ok {
         log::warn!(
-            "[fcitx] fcitx5 plugin .so not found in any of {:?}. \
+            "[fcitx] fcitx5 plugin .so not found in {:?} or {:?}. \
              The OpenLess package may be incomplete.",
-            lib_dirs
+            lib_dirs, user_so
         );
     }
 }

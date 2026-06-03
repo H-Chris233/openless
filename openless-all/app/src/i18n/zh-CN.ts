@@ -680,7 +680,7 @@ export const zhCN = {
       startStop: '开始 / 停止录音',
       cancel: '取消本次录音',
       confirm: '胶囊确认插入',
-      switchStyle: '切换上一次风格',
+      switchStyle: '切换到上一个风格',
       openApp: '打开 OpenLess',
       confirmHint: '点击右侧 ✓',
       notSupported: '暂未支持',
