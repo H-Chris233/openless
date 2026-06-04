@@ -184,7 +184,9 @@ fn active_asr_provider_kind(id: &str) -> ActiveAsrProviderKind {
 
 fn batch_asr_chunk_limit_ms(provider_id: &str) -> Option<u64> {
     match provider_id {
-        "zhipu" => Some(30_000),
+        // OpenRouter 把音频 base64 进 JSON body，体积比二进制大 ~33%，长录音易撞
+        // body/时长上限，保守按 30s 切分（与 zhipu 同）。
+        "zhipu" | "openrouter" => Some(30_000),
         _ => None,
     }
 }
@@ -2489,7 +2491,16 @@ async fn build_local_qwen3(
 /// (messages=[{content:[{audio:...}]}]) 协议，不是 Whisper multipart，需要
 /// 单独 ASR 客户端，留给 V2。
 fn is_whisper_compatible_provider(id: &str) -> bool {
-    matches!(id, "whisper" | "siliconflow" | "zhipu" | "groq")
+    matches!(id, "whisper" | "siliconflow" | "zhipu" | "groq" | "openrouter")
+}
+
+/// 该 provider 的请求体编码方式。OpenRouter 的 `/audio/transcriptions` 是
+/// `application/json` + base64 音频（issue #582），其余兼容厂商沿用 multipart。
+fn whisper_request_format(provider_id: &str) -> crate::asr::whisper::AsrRequestFormat {
+    match provider_id {
+        "openrouter" => crate::asr::whisper::AsrRequestFormat::OpenRouterJson,
+        _ => crate::asr::whisper::AsrRequestFormat::Multipart,
+    }
 }
 
 /// 该 provider 的 `/audio/transcriptions` 是否支持 `response_format=verbose_json`
@@ -2665,14 +2676,17 @@ async fn build_qa_asr_start(inner: &Arc<Inner>, active_asr: &str) -> Result<QaAs
             let (api_key, base_url, model) = read_whisper_credentials();
             let whisper_prompt =
                 crate::asr::whisper::build_prompt_from_phrases(&enabled_phrases(inner));
-            let whisper = Arc::new(WhisperBatchASR::new(
-                api_key,
-                base_url,
-                model,
-                whisper_prompt,
-                batch_asr_chunk_limit_ms(active_asr),
-                whisper_supports_verbose_json(active_asr),
-            ));
+            let whisper = Arc::new(
+                WhisperBatchASR::new(
+                    api_key,
+                    base_url,
+                    model,
+                    whisper_prompt,
+                    batch_asr_chunk_limit_ms(active_asr),
+                    whisper_supports_verbose_json(active_asr),
+                )
+                .with_request_format(whisper_request_format(active_asr)),
+            );
             let active = ActiveAsr::Whisper(Arc::clone(&whisper));
             let consumer: Arc<dyn crate::recorder::AudioConsumer> = whisper;
             Ok(QaAsrStart::Ready { active, consumer })
@@ -4055,6 +4069,27 @@ mod tests {
         // SiliconFlow(SenseVoice/TeleSpeech) / Zhipu(GLM-ASR) 保持旧的 json 行为。
         assert!(!whisper_supports_verbose_json("siliconflow"));
         assert!(!whisper_supports_verbose_json("zhipu"));
+    }
+
+    #[test]
+    fn openrouter_is_whisper_compatible_json_provider() {
+        use crate::asr::whisper::AsrRequestFormat;
+        // issue #582：OpenRouter 走 whisper 兼容路由，但请求体是 JSON+base64。
+        assert!(is_whisper_compatible_provider("openrouter"));
+        assert_eq!(
+            whisper_request_format("openrouter"),
+            AsrRequestFormat::OpenRouterJson
+        );
+        // 其余兼容厂商保持 multipart。
+        assert_eq!(
+            whisper_request_format("whisper"),
+            AsrRequestFormat::Multipart
+        );
+        assert_eq!(whisper_request_format("groq"), AsrRequestFormat::Multipart);
+        // OpenRouter 的 JSON 协议不吃 response_format，verbose_json 保持关闭。
+        assert!(!whisper_supports_verbose_json("openrouter"));
+        // base64 膨胀，长录音保守按 30s 切分。
+        assert_eq!(batch_asr_chunk_limit_ms("openrouter"), Some(30_000));
     }
 
     #[test]

@@ -30,6 +30,7 @@ const ASR_NAME_KEY_BY_ID: Record<string, string> = {
   zhipu: 'asrZhipu',
   groq: 'asrGroq',
   whisper: 'asrWhisper',
+  openrouter: 'asrOpenrouter',
   'foundry-local-whisper': 'asrFoundryLocalWhisper',
   'sherpa-onnx-local': 'asrSherpaOnnxLocal',
   'local-qwen3': 'asrLocalQwen3',
