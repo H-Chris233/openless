@@ -2,6 +2,7 @@
 //! to any OpenAI-compatible `/audio/transcriptions` endpoint on session end.
 
 use anyhow::{Context, Result};
+use base64::Engine;
 use parking_lot::Mutex;
 
 use crate::asr::wav::encode_wav_16k_mono;
@@ -21,6 +22,19 @@ pub const PROMPT_CHAR_BUDGET: usize = 240;
 /// 区切り文字（ASCII）。Whisper のトークナイザはどの言語でも安定して扱える。
 const PROMPT_SEPARATOR: &str = ", ";
 
+/// `/audio/transcriptions` 请求体编码方式。
+///
+/// OpenAI 官方及多数兼容厂商用 `multipart/form-data`（file + model）。
+/// OpenRouter 虽路径相同、也走 Bearer，但请求体是 `application/json`：
+/// `{model, input_audio:{data:<base64 wav>, format:"wav"}}`（issue #582）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AsrRequestFormat {
+    /// `multipart/form-data`（既有行为，默认）。
+    Multipart,
+    /// OpenRouter `application/json` + base64 音频。
+    OpenRouterJson,
+}
+
 pub struct WhisperBatchASR {
     api_key: String,
     base_url: String,
@@ -36,6 +50,8 @@ pub struct WhisperBatchASR {
     /// （SiliconFlow）は response_format 自体が無いので false にして従来の
     /// `json` のまま送る（壊さない）。
     verbose_json: bool,
+    /// 请求体编码方式。默认 `Multipart`，OpenRouter 走 `OpenRouterJson`。
+    request_format: AsrRequestFormat,
     buffer: Mutex<Vec<u8>>,
 }
 
@@ -55,8 +71,16 @@ impl WhisperBatchASR {
             prompt,
             max_chunk_duration_ms,
             verbose_json,
+            request_format: AsrRequestFormat::Multipart,
             buffer: Mutex::new(Vec::new()),
         }
+    }
+
+    /// 设置请求体编码方式（默认 `Multipart`）。OpenRouter 需 `OpenRouterJson`。
+    /// 用 builder 而非给 `new()` 加参数，避免改动既有 4 处构造点的签名。
+    pub fn with_request_format(mut self, request_format: AsrRequestFormat) -> Self {
+        self.request_format = request_format;
+        self
     }
 
     /// Stop collecting audio, encode the buffer as WAV, and POST to the
@@ -110,40 +134,62 @@ impl WhisperBatchASR {
             .collect();
         let wav = encode_wav_16k_mono(&samples);
         let url = transcription_url(&self.base_url)?;
-
-        let wav_part = reqwest::multipart::Part::bytes(wav)
-            .file_name("audio.wav")
-            .mime_str("audio/wav")
-            .context("set MIME type")?;
-        let mut form = reqwest::multipart::Form::new()
-            .part("file", wav_part)
-            .text("model", self.model.clone());
-
-        // verbose_json 対応プロバイダ（OpenAI / Groq）のときだけ、セグメント
-        // メタデータ付きの応答を要求し、temperature も 0 に固定する。非対応
-        // プロバイダ（SiliconFlow の SenseVoice / TeleSpeech 等）には送らず
-        // 従来どおりの応答にして、未知パラメータでの 4xx を避ける。
-        if self.verbose_json {
-            form = form
-                .text("response_format", "verbose_json")
-                .text("temperature", "0");
-        }
-
-        // `prompt` は空文字を送らない：OpenAI 互換実装によっては空文字でエラーに
-        // なるリスクがある（Groq は許容するが防御的にスキップ）。`trim()` で
-        // 空白のみのケースも除外。
-        if let Some(prompt) = self.prompt.as_ref() {
-            let trimmed = prompt.trim();
-            if !trimmed.is_empty() {
-                form = form.text("prompt", trimmed.to_string());
-            }
-        }
-
         let client = reqwest::Client::new();
-        let resp = client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .multipart(form)
+
+        let request = match self.request_format {
+            AsrRequestFormat::Multipart => {
+                let wav_part = reqwest::multipart::Part::bytes(wav)
+                    .file_name("audio.wav")
+                    .mime_str("audio/wav")
+                    .context("set MIME type")?;
+                let mut form = reqwest::multipart::Form::new()
+                    .part("file", wav_part)
+                    .text("model", self.model.clone());
+
+                // verbose_json 対応プロバイダ（OpenAI / Groq）のときだけ、セグメント
+                // メタデータ付きの応答を要求し、temperature も 0 に固定する。非対応
+                // プロバイダ（SiliconFlow の SenseVoice / TeleSpeech 等）には送らず
+                // 従来どおりの応答にして、未知パラメータでの 4xx を避ける。
+                if self.verbose_json {
+                    form = form
+                        .text("response_format", "verbose_json")
+                        .text("temperature", "0");
+                }
+
+                // `prompt` は空文字を送らない：OpenAI 互換実装によっては空文字でエラーに
+                // なるリスクがある（Groq は許容するが防御的にスキップ）。`trim()` で
+                // 空白のみのケースも除外。
+                if let Some(prompt) = self.prompt.as_ref() {
+                    let trimmed = prompt.trim();
+                    if !trimmed.is_empty() {
+                        form = form.text("prompt", trimmed.to_string());
+                    }
+                }
+
+                client
+                    .post(&url)
+                    .header("Authorization", format!("Bearer {}", self.api_key))
+                    .multipart(form)
+            }
+            AsrRequestFormat::OpenRouterJson => {
+                // OpenRouter /audio/transcriptions：application/json，音频走标准
+                // base64（带 padding）。不带 multipart 专属的 prompt/response_format
+                // 字段，避免未知字段导致 4xx；verbose_json 对该协议保持关闭。
+                let body = serde_json::json!({
+                    "model": self.model,
+                    "input_audio": {
+                        "data": base64::engine::general_purpose::STANDARD.encode(&wav),
+                        "format": "wav",
+                    },
+                });
+                client
+                    .post(&url)
+                    .header("Authorization", format!("Bearer {}", self.api_key))
+                    .json(&body)
+            }
+        };
+
+        let resp = request
             .send()
             .await
             .context("Whisper HTTP request failed")?;
@@ -722,6 +768,63 @@ mod tests {
 
         assert_eq!(transcript.text, "你好 world 尾");
         assert_eq!(transcript.duration_ms, 65_000);
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn openrouter_format_posts_json_with_base64_audio() {
+        // issue #582：OpenRouterJson 走 application/json + input_audio.data(base64)，
+        // 而非 multipart；响应仍按 {text} 解析。
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            Instant::now() < deadline,
+                            "timed out waiting for ASR test request"
+                        );
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(err) => panic!("accept ASR test request failed: {err}"),
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let request = read_http_request(&mut stream);
+            let request_text = String::from_utf8_lossy(&request);
+            let lower = request_text.to_ascii_lowercase();
+            assert!(request_text.starts_with("POST /audio/transcriptions HTTP/1.1"));
+            assert!(lower.contains("content-type: application/json"));
+            assert!(lower.contains("authorization: bearer key"));
+            // body 是 JSON：含 input_audio.data + format:"wav"，且不是 multipart。
+            assert!(request_text.contains("input_audio"));
+            assert!(request_text.contains(r#""format":"wav""#));
+            assert!(!lower.contains("multipart/form-data"));
+            write_json_response(&mut stream, r#"{"text":"openrouter ok"}"#);
+        });
+        let base_url = format!("http://{}", addr);
+
+        let asr = WhisperBatchASR::new(
+            "key".to_string(),
+            base_url,
+            "openai/whisper-large-v3-turbo".to_string(),
+            None,
+            None,
+            false,
+        )
+        .with_request_format(AsrRequestFormat::OpenRouterJson);
+        let pcm = vec![0u8; 32_000 * 2];
+        asr.consume_pcm_chunk(&pcm);
+
+        let transcript = asr.transcribe().await.unwrap();
+        assert_eq!(transcript.text, "openrouter ok");
         server.join().unwrap();
     }
 
