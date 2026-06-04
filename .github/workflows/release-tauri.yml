@@ -637,3 +637,93 @@ jobs:
             openless-all/app/src-tauri/target/release/bundle/appimage/*.AppImage
             openless-all/app/src-tauri/target/release/bundle/appimage/*.AppImage.sig
             openless-all/app/src-tauri/target/release/bundle/latest-*.json
+
+  # ── 正式版发布后，自动更新 Homebrew cask ──
+  # 为什么放进这条流水线，而不是单独的 `release: published` 工作流：softprops 用默认
+  # GITHUB_TOKEN 创建的 Release 不会触发 `release` 事件的其它工作流（GitHub 防递归），
+  # 所以独立的 update-cask 工作流永远不会被自动触发（历史上只在一次手动场景跑过且失败）。
+  # 用 needs: build 串在构建之后、同一条流水线里，才能保证每次正式发版都自动更新 cask。
+  #
+  # 仅正式版：v*-tauri 且非 -beta-tauri。beta 不碰 Homebrew，避免把预发布版推给
+  # `brew install --cask openless` 的用户。cask 文件在默认分支（beta）上，提交回该分支。
+  update-homebrew-cask:
+    name: Update Homebrew cask (stable only)
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    if: >-
+      startsWith(github.ref, 'refs/tags/v')
+      && endsWith(github.ref, '-tauri')
+      && !endsWith(github.ref, '-beta-tauri')
+    steps:
+      - name: Checkout default branch (cask 住在这里)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve version + DMG sha256 from the release
+        id: meta
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          version="${version%-tauri}"
+
+          # 直接下载 DMG 自己算 sha256，不依赖 GitHub 资产 digest 字段的时序/可用性。
+          mkdir -p "$RUNNER_TEMP/dmg"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --dir "$RUNNER_TEMP/dmg" \
+            --pattern '*aarch64.dmg' --pattern '*_x64.dmg'
+
+          arm_sha="$(sha256sum "$RUNNER_TEMP"/dmg/*aarch64.dmg | cut -d' ' -f1)"
+          intel_sha="$(sha256sum "$RUNNER_TEMP"/dmg/*_x64.dmg | cut -d' ' -f1)"
+
+          {
+            echo "version=$version"
+            echo "arm_sha=$arm_sha"
+            echo "intel_sha=$intel_sha"
+          } >> "$GITHUB_OUTPUT"
+          echo "cask → version=$version arm=$arm_sha intel=$intel_sha"
+
+      - name: Update Casks/openless.rb
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          ARM_SHA: ${{ steps.meta.outputs.arm_sha }}
+          INTEL_SHA: ${{ steps.meta.outputs.intel_sha }}
+        run: |
+          set -euo pipefail
+          cask="Casks/openless.rb"
+          # ⚠️ cask 第 2 行 `arch arm: "aarch64", intel: "x64"` 也含 `intel: "..."`，
+          # 裸 `s/intel: "..."/` 会把 arch 指令一起改成哈希 → Intel 用户 brew 装包 404。
+          # 所以 intel 的 sed 用 `^[[:space:]]*intel:` 锚定 sha256 块那一行；arm 的 sed
+          # 靠 `sha256 arm:   ` 前缀天然只命中 sha256 行。捕获组 \1 保留原缩进。
+          sed -i "s/version \"[^\"]*\"/version \"$VERSION\"/" "$cask"
+          sed -i "s/sha256 arm:   \"[^\"]*\"/sha256 arm:   \"$ARM_SHA\"/" "$cask"
+          sed -i "s/^\([[:space:]]*\)intel: \"[^\"]*\"/\1intel: \"$INTEL_SHA\"/" "$cask"
+          # 防呆：arch 指令必须原样保留，且本次 sha256 必须确实写进去了，否则让 job 失败。
+          grep -q 'arch arm: "aarch64", intel: "x64"' "$cask" \
+            || { echo "::error::arch 指令被 sed 误伤"; exit 1; }
+          grep -q "\"$ARM_SHA\"" "$cask" && grep -q "\"$INTEL_SHA\"" "$cask" \
+            || { echo "::error::sha256 未正确写入 cask"; exit 1; }
+          echo "----- updated $cask -----"
+          cat "$cask"
+
+      - name: Commit & push cask bump
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/openless.rb
+          if git diff --cached --quiet; then
+            echo "cask 已是 $VERSION，无需提交"
+            exit 0
+          fi
+          # [skip ci]：cask 文本改动不需要再跑一遍跨平台 ci.yml。
+          git commit -m "[cask] openless $VERSION (auto from release) [skip ci]"
+          git push
