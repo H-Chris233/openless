@@ -11,6 +11,7 @@ import { PermissionsSection } from './PermissionsSection';
 import { DataStorageSection } from './DataStorageSection';
 import { LocalModelSection } from './LocalModelSection';
 import { DebugToolsSection } from './DebugToolsSection';
+import { ClaudeConsoleSection } from './ClaudeConsoleSection';
 import { BetaChannelSection } from './BetaChannelSection';
 
 // 通用：录音与输入 · 快捷键 · 语言。
@@ -72,6 +73,7 @@ export function AdvancedTab() {
     <>
       <LocalModelSection />
       <DebugToolsSection />
+      <ClaudeConsoleSection />
       <BetaChannelSection />
     </>
   );

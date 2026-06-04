@@ -14,6 +14,7 @@
 mod asr;
 mod audio_mute;
 mod cli;
+mod coding_agent;
 mod combo_hotkey;
 mod commands;
 mod coordinator;
@@ -375,6 +376,10 @@ pub fn run() {
             commands::start_dictation,
             commands::stop_dictation,
             commands::cancel_dictation,
+            coding_agent::commands::coding_agent_detect,
+            coding_agent::commands::coding_agent_run_test,
+            coding_agent::commands::coding_agent_cancel_test,
+            coding_agent::commands::coding_agent_command_risk,
             commands::handle_window_hotkey_event,
             #[cfg(debug_assertions)]
             commands::inject_hotkey_click_for_dev,
