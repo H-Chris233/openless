@@ -686,6 +686,8 @@ export const ja: typeof zhCN = {
       confirm: 'カプセル入力を確定',
       switchStyle: '前のスタイルに切り替え',
       openApp: 'OpenLess を開く',
+      enable: '有効化',
+      disable: '無効化',
       confirmHint: '右側の ✓ をクリック',
       notSupported: '未対応',
     },

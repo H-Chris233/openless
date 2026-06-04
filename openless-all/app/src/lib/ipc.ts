@@ -1100,11 +1100,12 @@ export function setTranslationHotkey(binding: ShortcutBinding): Promise<void> {
     return invokeOrMock("set_translation_hotkey", { binding }, () => undefined)
 }
 
-export function setSwitchStyleHotkey(binding: ShortcutBinding): Promise<void> {
+// binding = null 表示停用（清空全局键），与 set_qa_hotkey 一致（issue #576）。
+export function setSwitchStyleHotkey(binding: ShortcutBinding | null): Promise<void> {
     return invokeOrMock("set_switch_style_hotkey", { binding }, () => undefined)
 }
 
-export function setOpenAppHotkey(binding: ShortcutBinding): Promise<void> {
+export function setOpenAppHotkey(binding: ShortcutBinding | null): Promise<void> {
     return invokeOrMock("set_open_app_hotkey", { binding }, () => undefined)
 }
 

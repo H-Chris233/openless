@@ -686,6 +686,8 @@ export const ko: typeof zhCN = {
       confirm: '캡슐 입력 확정',
       switchStyle: '이전 스타일로 전환',
       openApp: 'OpenLess 열기',
+      enable: '활성화',
+      disable: '비활성화',
       confirmHint: '오른쪽 ✓ 클릭',
       notSupported: '지원되지 않음',
     },

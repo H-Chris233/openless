@@ -684,6 +684,8 @@ export const en: typeof zhCN = {
       confirm: 'Confirm capsule insertion',
       switchStyle: 'Switch to previous style',
       openApp: 'Open OpenLess',
+      enable: 'Enable',
+      disable: 'Disable',
       confirmHint: 'Click ✓ on the capsule',
       notSupported: 'Not yet supported',
     },

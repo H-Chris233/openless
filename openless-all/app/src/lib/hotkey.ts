@@ -12,6 +12,16 @@ export function defaultAppShortcutModifiers(): string[] {
   return currentPlatform().isMac ? ['cmd', 'shift'] : ['ctrl', 'shift'];
 }
 
+// 「停用」后重新「启用」时恢复的默认键，与后端 default_switch_style_hotkey /
+// default_open_app_hotkey 保持一致（issue #576）。
+export function defaultSwitchStyleShortcut(): ShortcutBinding {
+  return { primary: 'S', modifiers: defaultAppShortcutModifiers() };
+}
+
+export function defaultOpenAppShortcut(): ShortcutBinding {
+  return { primary: 'O', modifiers: defaultAppShortcutModifiers() };
+}
+
 export function getHotkeyTriggerLabel(trigger: HotkeyTrigger | null | undefined): string {
   if (!trigger) return i18n.t('hotkey.fallback');
   if (trigger === 'custom') return i18n.t('hotkey.triggers.custom');

@@ -1879,8 +1879,12 @@ pub fn set_qa_hotkey(
     if let Some(binding) = binding.as_ref() {
         reject_dictation_qa_hotkey_overlap(&prefs.dictation_hotkey, binding)?;
         reject_qa_translation_hotkey_overlap(binding, &prefs.translation_hotkey)?;
-        reject_qa_switch_style_hotkey_overlap(binding, &prefs.switch_style_hotkey)?;
-        reject_qa_open_app_hotkey_overlap(binding, &prefs.open_app_hotkey)?;
+        if let Some(switch_style) = prefs.switch_style_hotkey.as_ref() {
+            reject_qa_switch_style_hotkey_overlap(binding, switch_style)?;
+        }
+        if let Some(open_app) = prefs.open_app_hotkey.as_ref() {
+            reject_qa_open_app_hotkey_overlap(binding, open_app)?;
+        }
     }
     prefs.qa_hotkey = binding;
     coord.prefs().set(prefs).map_err(|e| e.to_string())?;
@@ -1920,8 +1924,12 @@ pub fn set_dictation_hotkey(
         reject_dictation_qa_hotkey_overlap(&binding, qa_hotkey)?;
     }
     reject_dictation_translation_hotkey_overlap(&binding, &prefs.translation_hotkey)?;
-    reject_dictation_switch_style_hotkey_overlap(&binding, &prefs.switch_style_hotkey)?;
-    reject_dictation_open_app_hotkey_overlap(&binding, &prefs.open_app_hotkey)?;
+    if let Some(switch_style) = prefs.switch_style_hotkey.as_ref() {
+        reject_dictation_switch_style_hotkey_overlap(&binding, switch_style)?;
+    }
+    if let Some(open_app) = prefs.open_app_hotkey.as_ref() {
+        reject_dictation_open_app_hotkey_overlap(&binding, open_app)?;
+    }
     prefs.dictation_hotkey = binding;
     sync_dictation_hotkey_legacy_fields(&mut prefs);
     coord.prefs().set(prefs).map_err(|e| e.to_string())?;
@@ -1941,8 +1949,12 @@ pub fn set_translation_hotkey(
     if let Some(qa_hotkey) = previous.qa_hotkey.as_ref() {
         reject_qa_translation_hotkey_overlap(qa_hotkey, &binding)?;
     }
-    reject_translation_switch_style_hotkey_overlap(&binding, &previous.switch_style_hotkey)?;
-    reject_translation_open_app_hotkey_overlap(&binding, &previous.open_app_hotkey)?;
+    if let Some(switch_style) = previous.switch_style_hotkey.as_ref() {
+        reject_translation_switch_style_hotkey_overlap(&binding, switch_style)?;
+    }
+    if let Some(open_app) = previous.open_app_hotkey.as_ref() {
+        reject_translation_open_app_hotkey_overlap(&binding, open_app)?;
+    }
     let mut prefs = previous.clone();
     prefs.translation_hotkey = binding;
     coord.prefs().set(prefs).map_err(|e| e.to_string())?;
@@ -1956,40 +1968,55 @@ pub fn set_translation_hotkey(
     Ok(())
 }
 
+/// 设置「切换风格」全局快捷键。`binding == None`（前端传 null）= 停用：清空绑定并
+/// 反注册全局键。镜像 `set_qa_hotkey` 的 `Option=None` 停用模式（issue #576）。
 #[tauri::command]
 pub fn set_switch_style_hotkey(
     coord: CoordinatorState<'_>,
-    binding: ShortcutBinding,
+    binding: Option<ShortcutBinding>,
 ) -> Result<(), String> {
-    crate::shortcut_binding::validate_binding(&binding).map_err(|e| e.to_string())?;
-    reject_modifier_only_action_shortcut(&binding)?;
-    let mut prefs = coord.prefs().get();
-    reject_dictation_switch_style_hotkey_overlap(&prefs.dictation_hotkey, &binding)?;
-    reject_translation_switch_style_hotkey_overlap(&prefs.translation_hotkey, &binding)?;
-    if let Some(qa_hotkey) = prefs.qa_hotkey.as_ref() {
-        reject_qa_switch_style_hotkey_overlap(qa_hotkey, &binding)?;
+    if let Some(binding) = binding.as_ref() {
+        crate::shortcut_binding::validate_binding(binding).map_err(|e| e.to_string())?;
+        reject_modifier_only_action_shortcut(binding)?;
     }
-    reject_switch_style_open_app_hotkey_overlap(&binding, &prefs.open_app_hotkey)?;
+    let mut prefs = coord.prefs().get();
+    if let Some(binding) = binding.as_ref() {
+        reject_dictation_switch_style_hotkey_overlap(&prefs.dictation_hotkey, binding)?;
+        reject_translation_switch_style_hotkey_overlap(&prefs.translation_hotkey, binding)?;
+        if let Some(qa_hotkey) = prefs.qa_hotkey.as_ref() {
+            reject_qa_switch_style_hotkey_overlap(qa_hotkey, binding)?;
+        }
+        if let Some(open_app) = prefs.open_app_hotkey.as_ref() {
+            reject_switch_style_open_app_hotkey_overlap(binding, open_app)?;
+        }
+    }
     prefs.switch_style_hotkey = binding;
     coord.prefs().set(prefs).map_err(|e| e.to_string())?;
     coord.update_switch_style_hotkey_binding();
     Ok(())
 }
 
+/// 设置「唤起 App」全局快捷键。`binding == None`（前端传 null）= 停用（同上）。
 #[tauri::command]
 pub fn set_open_app_hotkey(
     coord: CoordinatorState<'_>,
-    binding: ShortcutBinding,
+    binding: Option<ShortcutBinding>,
 ) -> Result<(), String> {
-    crate::shortcut_binding::validate_binding(&binding).map_err(|e| e.to_string())?;
-    reject_modifier_only_action_shortcut(&binding)?;
-    let mut prefs = coord.prefs().get();
-    reject_dictation_open_app_hotkey_overlap(&prefs.dictation_hotkey, &binding)?;
-    reject_translation_open_app_hotkey_overlap(&prefs.translation_hotkey, &binding)?;
-    if let Some(qa_hotkey) = prefs.qa_hotkey.as_ref() {
-        reject_qa_open_app_hotkey_overlap(qa_hotkey, &binding)?;
+    if let Some(binding) = binding.as_ref() {
+        crate::shortcut_binding::validate_binding(binding).map_err(|e| e.to_string())?;
+        reject_modifier_only_action_shortcut(binding)?;
     }
-    reject_switch_style_open_app_hotkey_overlap(&prefs.switch_style_hotkey, &binding)?;
+    let mut prefs = coord.prefs().get();
+    if let Some(binding) = binding.as_ref() {
+        reject_dictation_open_app_hotkey_overlap(&prefs.dictation_hotkey, binding)?;
+        reject_translation_open_app_hotkey_overlap(&prefs.translation_hotkey, binding)?;
+        if let Some(qa_hotkey) = prefs.qa_hotkey.as_ref() {
+            reject_qa_open_app_hotkey_overlap(qa_hotkey, binding)?;
+        }
+        if let Some(switch_style) = prefs.switch_style_hotkey.as_ref() {
+            reject_switch_style_open_app_hotkey_overlap(switch_style, binding)?;
+        }
+    }
     prefs.open_app_hotkey = binding;
     coord.prefs().set(prefs).map_err(|e| e.to_string())?;
     coord.update_open_app_hotkey_binding();
@@ -2030,8 +2057,12 @@ pub fn set_combo_hotkey(coord: CoordinatorState<'_>, binding: ComboBinding) -> R
         reject_dictation_qa_hotkey_overlap(&shortcut, qa_hotkey)?;
     }
     reject_dictation_translation_hotkey_overlap(&shortcut, &prefs.translation_hotkey)?;
-    reject_dictation_switch_style_hotkey_overlap(&shortcut, &prefs.switch_style_hotkey)?;
-    reject_dictation_open_app_hotkey_overlap(&shortcut, &prefs.open_app_hotkey)?;
+    if let Some(switch_style) = prefs.switch_style_hotkey.as_ref() {
+        reject_dictation_switch_style_hotkey_overlap(&shortcut, switch_style)?;
+    }
+    if let Some(open_app) = prefs.open_app_hotkey.as_ref() {
+        reject_dictation_open_app_hotkey_overlap(&shortcut, open_app)?;
+    }
     prefs.custom_combo_hotkey = Some(binding);
     prefs.dictation_hotkey = shortcut;
     sync_dictation_hotkey_legacy_fields(&mut prefs);
@@ -2088,30 +2119,34 @@ fn reject_hotkey_overlap(
 }
 
 fn reject_hotkey_collisions(prefs: &UserPreferences) -> Result<(), String> {
+    // 停用（None）的 action 快捷键不参与任何冲突检测。
+    let switch_style = prefs.switch_style_hotkey.as_ref();
+    let open_app = prefs.open_app_hotkey.as_ref();
     if let Some(qa_hotkey) = prefs.qa_hotkey.as_ref() {
         reject_dictation_qa_hotkey_overlap(&prefs.dictation_hotkey, qa_hotkey)?;
         reject_qa_translation_hotkey_overlap(qa_hotkey, &prefs.translation_hotkey)?;
-        reject_qa_switch_style_hotkey_overlap(qa_hotkey, &prefs.switch_style_hotkey)?;
-        reject_qa_open_app_hotkey_overlap(qa_hotkey, &prefs.open_app_hotkey)?;
+        if let Some(switch_style) = switch_style {
+            reject_qa_switch_style_hotkey_overlap(qa_hotkey, switch_style)?;
+        }
+        if let Some(open_app) = open_app {
+            reject_qa_open_app_hotkey_overlap(qa_hotkey, open_app)?;
+        }
     }
     reject_dictation_translation_hotkey_overlap(
         &prefs.dictation_hotkey,
         &prefs.translation_hotkey,
     )?;
-    reject_dictation_switch_style_hotkey_overlap(
-        &prefs.dictation_hotkey,
-        &prefs.switch_style_hotkey,
-    )?;
-    reject_dictation_open_app_hotkey_overlap(&prefs.dictation_hotkey, &prefs.open_app_hotkey)?;
-    reject_translation_switch_style_hotkey_overlap(
-        &prefs.translation_hotkey,
-        &prefs.switch_style_hotkey,
-    )?;
-    reject_translation_open_app_hotkey_overlap(&prefs.translation_hotkey, &prefs.open_app_hotkey)?;
-    reject_switch_style_open_app_hotkey_overlap(
-        &prefs.switch_style_hotkey,
-        &prefs.open_app_hotkey,
-    )?;
+    if let Some(switch_style) = switch_style {
+        reject_dictation_switch_style_hotkey_overlap(&prefs.dictation_hotkey, switch_style)?;
+        reject_translation_switch_style_hotkey_overlap(&prefs.translation_hotkey, switch_style)?;
+    }
+    if let Some(open_app) = open_app {
+        reject_dictation_open_app_hotkey_overlap(&prefs.dictation_hotkey, open_app)?;
+        reject_translation_open_app_hotkey_overlap(&prefs.translation_hotkey, open_app)?;
+    }
+    if let (Some(switch_style), Some(open_app)) = (switch_style, open_app) {
+        reject_switch_style_open_app_hotkey_overlap(switch_style, open_app)?;
+    }
     Ok(())
 }
 
@@ -4064,14 +4099,14 @@ mod tests {
                 primary: "T".to_string(),
                 modifiers: vec!["ctrl".to_string(), "alt".to_string()],
             },
-            switch_style_hotkey: ShortcutBinding {
+            switch_style_hotkey: Some(ShortcutBinding {
                 primary: "S".to_string(),
                 modifiers: vec!["ctrl".to_string(), "alt".to_string()],
-            },
-            open_app_hotkey: ShortcutBinding {
+            }),
+            open_app_hotkey: Some(ShortcutBinding {
                 primary: "O".to_string(),
                 modifiers: vec!["ctrl".to_string(), "alt".to_string()],
-            },
+            }),
             hotkey: HotkeyBinding {
                 trigger: HotkeyTrigger::Custom,
                 mode: HotkeyMode::Hold,
@@ -4488,7 +4523,7 @@ mod tests {
         };
         let prefs = UserPreferences {
             translation_hotkey: binding.clone(),
-            switch_style_hotkey: binding,
+            switch_style_hotkey: Some(binding),
             ..Default::default()
         };
 
@@ -4507,8 +4542,8 @@ mod tests {
             modifiers: vec!["cmd".into(), "shift".into()],
         };
         let prefs = UserPreferences {
-            switch_style_hotkey: binding.clone(),
-            open_app_hotkey: binding,
+            switch_style_hotkey: Some(binding.clone()),
+            open_app_hotkey: Some(binding),
             ..Default::default()
         };
 
