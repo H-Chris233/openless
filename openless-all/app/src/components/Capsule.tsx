@@ -7,7 +7,7 @@ import {
   getCapsulePillMetrics,
 } from '../lib/capsuleLayout';
 import { getSettings, invokeOrMock, isTauri } from '../lib/ipc';
-import { playRecordStartCue, stopAudioCue } from '../lib/audioCue';
+import { playRecordStartCue, primeAudioCue, stopAudioCue } from '../lib/audioCue';
 import type { CapsulePayload, CapsuleState, UserPreferences } from '../lib/types';
 
 interface AudioBarsProps {
@@ -364,6 +364,13 @@ export function Capsule() {
       cancelled = true;
       if (unlisten) unlisten();
     };
+  }, []);
+
+  // 预热 AudioContext：胶囊挂载时就 resume，让录音开始时提示音能同步播放，
+  // 避免 suspended→resume 的异步竞态在「快速录音」时整段丢音（提示音偶尔消失的根因）。
+  useEffect(() => {
+    if (!isTauri) return;
+    primeAudioCue();
   }, []);
 
   // 提示音触发：检测 capsule 状态进入 recording 的边沿就播放（提醒「已开始录音」）；

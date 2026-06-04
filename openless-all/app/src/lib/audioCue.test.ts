@@ -2,7 +2,12 @@
 // （无独立 runner —— 在 tsc 类型检查下编译，必要时可用 tsx 直接跑）。
 // 播放/停止依赖 Web Audio 运行时，不在此单测覆盖；这里只钉住可被回归的音符规划。
 
-import { cueTotalDurationMs, recordStartCueTones, type CueTone } from './audioCue';
+import {
+  cueTotalDurationMs,
+  recordStartCueTones,
+  shouldPlayDeferredCue,
+  type CueTone,
+} from './audioCue';
 
 function assert(cond: boolean, name: string) {
   if (!cond) throw new Error(`assertion failed: ${name}`);
@@ -43,6 +48,64 @@ function assertEqual<T>(actual: T, expected: T, name: string) {
   assertEqual(cueTotalDurationMs(flat), 260, 'total duration is last tone end (90 + 170)');
   assertEqual(cueTotalDurationMs([]), 0, 'empty cue has zero duration');
   assert(cueTotalDurationMs(recordStartCueTones()) > 0, 'start cue has positive total duration');
+}
+
+{
+  // 挂起期间被更新一轮播放接管 → 不播，避免叠音。
+  assertEqual(
+    shouldPlayDeferredCue({
+      superseded: true,
+      stoppedWhileWaiting: false,
+      elapsedMs: 10,
+      lateThresholdMs: 400,
+    }),
+    false,
+    'superseded cue does not play',
+  );
+  // 没被打断 → 正常播放。
+  assertEqual(
+    shouldPlayDeferredCue({
+      superseded: false,
+      stoppedWhileWaiting: false,
+      elapsedMs: 5000,
+      lateThresholdMs: 400,
+    }),
+    true,
+    'cue plays when nothing interrupted it',
+  );
+  // 修复点：快速录音——resume 期间录音已停，但 resume 很快（未超阈值）→ 仍补响一声。
+  assertEqual(
+    shouldPlayDeferredCue({
+      superseded: false,
+      stoppedWhileWaiting: true,
+      elapsedMs: 120,
+      lateThresholdMs: 400,
+    }),
+    true,
+    'quick recording still gets a slightly-late cue',
+  );
+  // 录音已停且 resume 真迟到（超阈值）→ 丢弃，避免提示音姗姗来迟。
+  assertEqual(
+    shouldPlayDeferredCue({
+      superseded: false,
+      stoppedWhileWaiting: true,
+      elapsedMs: 800,
+      lateThresholdMs: 400,
+    }),
+    false,
+    'genuinely late cue is dropped',
+  );
+  // 边界：恰好等于阈值不算迟到（> 才丢），仍补播。
+  assertEqual(
+    shouldPlayDeferredCue({
+      superseded: false,
+      stoppedWhileWaiting: true,
+      elapsedMs: 400,
+      lateThresholdMs: 400,
+    }),
+    true,
+    'cue at exactly the threshold still plays',
+  );
 }
 
 // 静默成功难以与「没跑」区分；直接 tsx 跑时给个明确通过信号。
