@@ -783,10 +783,15 @@ pub fn set_credential(window: Window, account: String, value: String) -> Result<
     ensure_main_window(&window)?;
     let acc = parse_account(&account)?;
     if value.is_empty() {
-        CredentialsVault::remove(acc).map_err(|e| e.to_string())
+        CredentialsVault::remove(acc).map_err(|e| e.to_string())?;
     } else {
-        CredentialsVault::set(acc, &value).map_err(|e| e.to_string())
+        CredentialsVault::set(acc, &value).map_err(|e| e.to_string())?;
     }
+    // 通知前端凭据已变更（如 Overview 页需要刷新 asrConfigured 状态）。
+    // issue #532 / #573：在 Settings 填写凭据但不切换提供商时，Overview 不会重拉状态，
+    // 仍显示「未配置」。该修复曾随 #538 合入 main，但被 beta→main 合并覆盖，beta 上缺失。
+    let _ = window.emit("credentials:changed", ());
+    Ok(())
 }
 
 #[tauri::command]
