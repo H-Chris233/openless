@@ -47,10 +47,39 @@ interface ActiveVoice {
   gain: GainNode;
 }
 let activeVoices: ActiveVoice[] = [];
-// 每次「关闭」或「新一轮播放」自增。suspended 时 play 会等 resume() 再排期，
-// 这个代号让挂起的 resume 回调能判断「等待期间是否已被叫停/被新一轮取代」，
-// 避免录音已经结束、提示音却姗姗来迟地响起来（冷启动 WebView 上快按热键可复现）。
-let playGeneration = 0;
+// suspended 的 AudioContext 要先 resume（异步）再排期。等待 resume 期间可能发生两类事件，
+// 用两个序号分别记，避免两个极端——「快速录音整段丢音」和「录音停了提示音才姗姗来迟」：
+//   playSeq —— 每次新的播放请求自增；resume 回来若已被更新一轮播放接管，本次让位（防叠音）。
+//   stopSeq —— 每次 stopAudioCue 自增；resume 回来若期间发生过 stop，再按「是否真迟到」决定。
+let playSeq = 0;
+let stopSeq = 0;
+
+// resume 期间录音已结束（发生过 stop）时，只有当「请求 → resume 完成」耗时超过这个阈值
+// 才判定真迟到并丢弃；阈值内仍补响一声——快速点一下录音（resume 没跑完就已结束）也该有反馈。
+const DEFERRED_CUE_LATE_THRESHOLD_MS = 400;
+
+// 无 performance（理论兜底，Tauri WebView 里恒有）时回退 0：elapsedMs 恒为 0、永不判迟到，
+// 即宁可补播一声也不丢音——与"修复丢音"的初衷一致的安全方向。
+function nowMs(): number {
+  return typeof performance !== 'undefined' ? performance.now() : 0;
+}
+
+/**
+ * resume 完成后，判断这次「挂起期间排期」的提示音是否还该播放。纯函数，便于单测：
+ * - 被更新一轮播放接管 → 不播（让新的那轮来，避免叠音）；
+ * - 等待期间录音已停且已真迟到（超阈值）→ 不播（避免提示音晚到）；
+ * - 其余（含「停了但 resume 很快」的快速录音）→ 照常补播。
+ */
+export function shouldPlayDeferredCue(params: {
+  superseded: boolean;
+  stoppedWhileWaiting: boolean;
+  elapsedMs: number;
+  lateThresholdMs: number;
+}): boolean {
+  if (params.superseded) return false;
+  if (params.stoppedWhileWaiting && params.elapsedMs > params.lateThresholdMs) return false;
+  return true;
+}
 
 function resolveAudioContextCtor(): AudioContextCtor | null {
   if (typeof window === 'undefined') return null;
@@ -73,7 +102,7 @@ function getContext(): AudioContext | null {
   return sharedCtx;
 }
 
-// 停掉当前正在发声的节点（不影响 playGeneration —— 仅做去叠音 / 收尾）。
+// 停掉当前正在发声的节点（不动 playSeq / stopSeq —— 仅做去叠音 / 收尾）。
 function stopVoices(): void {
   const ctx = sharedCtx;
   const now = ctx?.currentTime ?? 0;
@@ -90,9 +119,9 @@ function stopVoices(): void {
   activeVoices = [];
 }
 
-/** 关闭/停止提示音：停掉在播节点，并作废任何还挂在 resume() 上、尚未排期的播放。 */
+/** 关闭/停止提示音：停掉在播节点，并标记「期间发生过 stop」，供挂起的 resume 回调判定迟到。 */
 export function stopAudioCue(): void {
-  playGeneration++;
+  stopSeq++;
   stopVoices();
 }
 
@@ -137,6 +166,21 @@ function scheduleCueVoices(ctx: AudioContext): void {
   }
 }
 
+/**
+ * 预热 AudioContext：尽早创建并 resume，让录音真正开始时 ctx 已是 running，
+ * playRecordStartCue 能同步排期，绕开 suspended→resume 的异步竞态——快速录音丢音的根因。
+ * 注：严格 autoplay policy 下无用户手势的 resume 可能被拒（已静默降级），此时预热不生效，
+ * 退回 playRecordStartCue 里的 playSeq/stopSeq + 迟到阈值兜底。Tauri WebView 多对首次
+ * resume 宽松，预热通常能让常见路径走同步分支。胶囊窗口挂载时调用一次即可。
+ */
+export function primeAudioCue(): void {
+  const ctx = getContext();
+  if (!ctx) return;
+  if (ctx.state === 'suspended') {
+    ctx.resume().catch(() => undefined);
+  }
+}
+
 /** 播放「开始录音」提示音。无 Web Audio 或被挂起且无法恢复时静默降级。 */
 export function playRecordStartCue(): void {
   const ctx = getContext();
@@ -145,14 +189,24 @@ export function playRecordStartCue(): void {
   // WKWebView / WebView2 的 AudioContext 常处于 suspended：必须先 resume 再排期，
   // 不能在 resume 未完成时就用冻结的 currentTime 排节点。resume() 失败也不抛（无声降级）。
   if (ctx.state === 'suspended') {
-    const gen = ++playGeneration;
+    const myPlay = ++playSeq;
+    const stopAtRequest = stopSeq;
+    const requestedAt = nowMs();
     ctx
       .resume()
       .then(() => {
-        // 等待 resume 期间若已 stopAudioCue（录音结束）或有新一轮播放，本次作废，
-        // 否则会出现「录音已停，提示音却晚到」。
-        if (gen !== playGeneration) return;
-        scheduleCueVoices(ctx);
+        // 被更新一轮播放接管就让位；期间录音已停且 resume 真迟到才丢弃；
+        // 否则照常补响——快速点一下录音（resume 没跑完就已结束）也该有提示音。
+        if (
+          shouldPlayDeferredCue({
+            superseded: myPlay !== playSeq,
+            stoppedWhileWaiting: stopSeq !== stopAtRequest,
+            elapsedMs: nowMs() - requestedAt,
+            lateThresholdMs: DEFERRED_CUE_LATE_THRESHOLD_MS,
+          })
+        ) {
+          scheduleCueVoices(ctx);
+        }
       })
       .catch(() => undefined);
     return;
