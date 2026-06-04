@@ -1473,6 +1473,8 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
             raw_transcript: raw.text.clone(),
             final_text: String::new(),
             mode: inner.prefs.get().default_mode,
+            style_pack_id: None,
+            translation_active: false,
             app_bundle_id: None,
             app_name: None,
             insert_status: InsertStatus::Failed,
@@ -1565,8 +1567,8 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         working_languages
     );
     // 对话感知 polish：拉最近 N 分钟的会话作为 LLM 上下文。仅在非翻译路径且非 Raw mode
-    // 才有意义（Raw 不走 LLM、翻译走单轮独立 prompt）。窗口=0 时 prior_turns 是空 Vec，
-    // polish 路径自动退化成单轮单消息——跟历史行为一致。
+    // 才有意义（Raw 不走 LLM、翻译走单轮独立 prompt）。窗口=0 时 prior_turns 是空 Vec。
+    // 只复用同一 active style pack 的历史；翻译会话永远不进入后续普通 polish 上下文。
     let polish_context_window_minutes = prefs.polish_context_window_minutes;
     let prior_turns: Vec<(String, String)> = if !translation_active
         && (mode != PolishMode::Raw || raw_uses_llm)
@@ -1576,13 +1578,7 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
             .history
             .recent_within_minutes(polish_context_window_minutes)
         {
-            Ok(sessions) => sessions
-                .into_iter()
-                // 只取实际成功润色过的会话作为上下文：失败的会话 final_text 是 raw 兜底，
-                // 喂回 LLM 会让模型以为"上一轮我什么都没做"——没意义且占 token。
-                .filter(|s| s.error_code.is_none() && !s.final_text.trim().is_empty())
-                .map(|s| (s.raw_transcript, s.final_text))
-                .collect(),
+            Ok(sessions) => eligible_polish_context_turns(sessions, &pack.id),
             Err(e) => {
                 log::warn!("[coord] fetch polish context failed: {e}; fall back to single-turn");
                 Vec::new()
@@ -1790,6 +1786,8 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         raw_transcript: raw.text.clone(),
         final_text: polished.clone(),
         mode,
+        style_pack_id: Some(pack.id.clone()),
+        translation_active,
         app_bundle_id: None,
         app_name: None,
         insert_status: status,
@@ -1904,14 +1902,33 @@ fn append_typed_prefix(target: &mut String, delta: &str, typed_chars: usize) -> 
     appended
 }
 
+fn eligible_polish_context_turns(
+    sessions: Vec<DictationSession>,
+    active_style_pack_id: &str,
+) -> Vec<(String, String)> {
+    sessions
+        .into_iter()
+        // 只取实际成功润色过的会话作为上下文：失败的会话 final_text 是 raw 兜底，
+        // 喂回 LLM 会让模型以为"上一轮我什么都没做"——没意义且占 token。
+        .filter(|s| s.error_code.is_none() && !s.final_text.trim().is_empty())
+        // 风格包切换 = 上下文边界。旧历史没有 style_pack_id，无法证明同源，保守排除。
+        .filter(|s| s.style_pack_id.as_deref() == Some(active_style_pack_id))
+        // 翻译输出不参与后续普通润色上下文，避免英文翻译指令 / 译文污染下一次中文输入。
+        .filter(|s| !s.translation_active)
+        .map(|s| (s.raw_transcript, s.final_text))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         append_typed_prefix, batch_asr_chunk_limit_ms, default_done_message,
-        drain_streaming_insert_deltas_with, finalize_polished_text,
+        drain_streaming_insert_deltas_with, eligible_polish_context_turns, finalize_polished_text,
         flush_streaming_insert_buffer_with, streaming_insert_eligible,
     };
-    use crate::types::{ChineseScriptPreference, CorrectionRule, InsertStatus, PolishMode};
+    use crate::types::{
+        ChineseScriptPreference, CorrectionRule, DictationSession, InsertStatus, PolishMode,
+    };
 
     fn correction_rule(pattern: &str, replacement: &str) -> CorrectionRule {
         CorrectionRule {
@@ -1921,6 +1938,58 @@ mod tests {
             enabled: true,
             created_at: String::new(),
         }
+    }
+
+    fn history_session(
+        id: &str,
+        raw: &str,
+        final_text: &str,
+        style_pack_id: Option<&str>,
+        translation_active: bool,
+    ) -> DictationSession {
+        DictationSession {
+            id: id.into(),
+            created_at: "2026-06-03T00:00:00Z".into(),
+            raw_transcript: raw.into(),
+            final_text: final_text.into(),
+            mode: PolishMode::Structured,
+            app_bundle_id: None,
+            app_name: None,
+            insert_status: InsertStatus::Inserted,
+            error_code: None,
+            duration_ms: Some(1000),
+            dictionary_entry_count: None,
+            has_audio_recording: None,
+            style_pack_id: style_pack_id.map(str::to_string),
+            translation_active,
+        }
+    }
+
+    #[test]
+    fn polish_context_resets_when_active_style_pack_changes() {
+        let sessions = vec![
+            history_session("new", "raw new", "final new", Some("pack.new"), false),
+            history_session("old", "raw old", "final old", Some("pack.old"), false),
+        ];
+
+        let turns = eligible_polish_context_turns(sessions, "pack.new");
+
+        assert_eq!(
+            turns,
+            vec![("raw new".to_string(), "final new".to_string())]
+        );
+    }
+
+    #[test]
+    fn polish_context_excludes_translation_sessions() {
+        let sessions = vec![
+            history_session("translation", "你好", "Hello", Some("pack.new"), true),
+            history_session("dictation", "继续", "继续。", Some("pack.new"), false),
+        ];
+
+        let turns = eligible_polish_context_turns(sessions, "pack.new");
+
+        assert_eq!(turns, vec![("继续".to_string(), "继续。".to_string())]);
     }
 
     #[test]

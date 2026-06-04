@@ -92,6 +92,13 @@ pub struct DictationSession {
     pub raw_transcript: String,
     pub final_text: String,
     pub mode: PolishMode,
+    /// 本次 dictation 使用的风格包。旧历史没有此字段时为 None；对话感知 polish
+    /// 只复用同一风格包的历史，避免切换风格包后旧上下文污染新提示词。
+    #[serde(default)]
+    pub style_pack_id: Option<String>,
+    /// 本次是否走翻译路径。翻译结果不应再作为下一次普通润色的上下文。
+    #[serde(default)]
+    pub translation_active: bool,
     pub app_bundle_id: Option<String>,
     pub app_name: Option<String>,
     pub insert_status: InsertStatus,

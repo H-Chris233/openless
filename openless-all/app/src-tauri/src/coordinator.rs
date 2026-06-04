@@ -3566,6 +3566,8 @@ async fn end_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
             raw_transcript: question.clone(),
             final_text: answer.clone(),
             mode: PolishMode::Raw,
+            style_pack_id: None,
+            translation_active: false,
             app_bundle_id: None,
             app_name: front_app.clone(),
             insert_status: InsertStatus::CopiedFallback,

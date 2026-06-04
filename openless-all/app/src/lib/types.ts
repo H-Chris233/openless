@@ -12,6 +12,8 @@ export interface DictationSession {
   rawTranscript: string;
   finalText: string;
   mode: PolishMode;
+  stylePackId: string | null;
+  translationActive: boolean;
   appBundleId: string | null;
   appName: string | null;
   insertStatus: InsertStatus;
