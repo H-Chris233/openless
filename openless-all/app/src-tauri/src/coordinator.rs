@@ -100,6 +100,8 @@ fn capsule_show_strategy_for_platform() -> CapsuleShowStrategy {
 static CAPSULE_NO_ACTIVATE_FALLBACK_WARNED: AtomicBool = AtomicBool::new(false);
 static CAPSULE_SUPPRESSED_BY_TOGGLE_LOGGED: AtomicBool = AtomicBool::new(false);
 static CAPSULE_FIRST_SHOW_LOGGED: AtomicBool = AtomicBool::new(false);
+// #470 诊断 v2：capsule webview 句柄取不到时的一次性门，区分「窗口压根没创建」(A0)。
+static CAPSULE_WINDOW_MISSING_LOGGED: AtomicBool = AtomicBool::new(false);
 
 /// 给 #470 诊断日志用的 capsule 状态短名。显式枚举每个变体到 &'static str，
 /// 不走 `Debug` —— 哪天 CapsuleState 加了 `String` 字段，`:?` 会把 ASR / polish
@@ -5003,9 +5005,13 @@ fn show_capsule_window_no_activate<R: tauri::Runtime>(
     };
 
     let Ok(handle) = window.window_handle() else {
+        // #470 诊断 v2：Win32 show 路径最可能的暗点之一。此前静默 return，
+        // 无法观测「胶囊完全不显示」是否卡在这里。
+        log::warn!("[capsule] no_activate failed: window_handle() unavailable — Win32 show skipped");
         return false;
     };
     let RawWindowHandle::Win32(raw) = handle.as_raw() else {
+        log::warn!("[capsule] no_activate failed: non-Win32 RawWindowHandle — Win32 show skipped");
         return false;
     };
     let hwnd = HWND(raw.hwnd.get() as *mut _);
@@ -5240,6 +5246,14 @@ fn emit_capsule(
     let app_for_main = app.clone();
     let _ = app.run_on_main_thread(move || {
         let Some(window) = app_for_main.get_webview_window("capsule") else {
+            // #470 诊断 v2：比 A/B/C 更靠前的暗点 A0 —— capsule webview 句柄取不到
+            // （窗口未创建/已销毁）。此前静默 return，无法观测。一次性 warn。
+            if !CAPSULE_WINDOW_MISSING_LOGGED.swap(true, Ordering::SeqCst) {
+                log::warn!(
+                    "[capsule] capsule webview window not found — emit_capsule show path skipped (state={})",
+                    capsule_state_log_name(state)
+                );
+            }
             return;
         };
         let show_capsule = inner_for_main.prefs.get().show_capsule;

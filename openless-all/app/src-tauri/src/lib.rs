@@ -1376,7 +1376,15 @@ pub(crate) fn position_capsule_bottom_center<R: tauri::Runtime>(
             let offset_from_bottom =
                 (capsule_visual_height(translation_active) + 80.0 + bounds.bottom_inset) * scale;
             let y = ((mon.bottom as f64) - offset_from_bottom).round() as i32;
-            window.set_position(PhysicalPosition::new(x, y.max(mon.top)))?;
+            let clamped_y = y.max(mon.top);
+            // #470 诊断 v2：当前只夹了上边（.max(mon.top)），未夹下/左/右。多显示器、
+            // 负坐标或异常 DPI 下胶囊可能被算到屏幕外却无任何观测。记录显示器几何与
+            // 最终落点，用于证伪/证实「胶囊定位到屏幕外」(C 子嫌疑)。
+            log::debug!(
+                "[capsule] win position: mon=({},{})..({},{}) scale={:.2} size=({}x{}) -> x={} y={} clamped_y={}",
+                mon.left, mon.top, mon.right, mon.bottom, scale, phys_w, phys_h, x, y, clamped_y
+            );
+            window.set_position(PhysicalPosition::new(x, clamped_y))?;
             return Ok(());
         }
         // 仅当 Win32 取不到前台显示器时，落回下面的 current_monitor 逻辑。
