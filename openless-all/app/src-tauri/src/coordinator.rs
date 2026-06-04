@@ -1761,7 +1761,10 @@ fn sync_custom_dictation_to_plugin(inner: &Arc<Inner>) {
         return;
     }
     match crate::linux_fcitx::set_custom_dictation_trigger(&key_string) {
-        Ok(()) => log::info!("[fcitx] Synced custom dictation trigger '{}' to plugin", key_string),
+        Ok(()) => log::info!(
+            "[fcitx] Synced custom dictation trigger '{}' to plugin",
+            key_string
+        ),
         Err(e) => log::warn!("[fcitx] Failed to sync custom dictation trigger: {e}"),
     }
 }
@@ -2877,36 +2880,8 @@ async fn polish_text(
         .await?)
 }
 
-/// 翻译路径——和 polish 一样失败时返回原文 + 失败原因，避免"不丢字"约定被违反（CLAUDE.md）。
-async fn translate_or_passthrough(
-    raw: &RawTranscript,
-    target_language: &str,
-    working_languages: &[String],
-    chinese_script_preference: ChineseScriptPreference,
-    output_language_preference: OutputLanguagePreference,
-    llm_thinking_enabled: bool,
-    front_app: Option<&str>,
-) -> (String, Option<String>) {
-    match translate_text(
-        &raw.text,
-        target_language,
-        working_languages,
-        chinese_script_preference,
-        output_language_preference,
-        llm_thinking_enabled,
-        front_app,
-    )
-    .await
-    {
-        Ok(s) => (s, None),
-        Err(e) => {
-            let reason = e.to_string();
-            log::error!("[coord] translate failed, falling back to raw: {reason}");
-            (raw.text.clone(), Some(reason))
-        }
-    }
-}
-
+/// 专用翻译（仅翻译、不润色、单轮）。现作为"润色+翻译"合成调用解析失败时的兜底——
+/// 模型没按两段格式输出时，退回这里拿一段干净译文，而不是把畸形输出当译文插入。
 async fn translate_text(
     raw: &str,
     target_language: &str,
@@ -2946,6 +2921,124 @@ async fn translate_text(
             front_app,
         )
         .await?)
+}
+
+/// "润色+翻译"单次调用的两段哨兵。模型按 `SRC\n源文\nTGT\n译文` 输出，解析器据此切分。
+/// 这两个串必须与 build_polish_translate_system_prompt 写给模型的完全一致。
+const POLISH_TRANSLATE_SRC_MARKER: &str = "[[OPENLESS_POLISHED_SOURCE]]";
+const POLISH_TRANSLATE_TGT_MARKER: &str = "[[OPENLESS_TRANSLATION]]";
+
+/// 合成"先润色源文、再翻译"的系统提示词：在原翻译 prompt 之上追加"额外输出润色后源文"
+/// 与严格两段格式（覆盖原 prompt 末尾的"只输出译文"）。译文仍是要插入用户光标的主产物，
+/// 故完整保留原翻译规则；润色后的源文只作对话上下文用，轻量清理即可。
+fn build_polish_translate_system_prompt(target_language: &str) -> String {
+    let base = crate::polish::prompts::translate_system_prompt(target_language);
+    format!(
+        "{base}\n\n\
+         # 额外输出：润色后的源文（仅用于对话上下文，不展示给用户）\n\
+         在译文之前，先把上面的原始转写**按它本来的语言**润色一遍：去掉口癖（嗯 / 那个 / um）、\
+         补必要标点、纠正明显的识别错误，但**不翻译、不改写风格、不增删意思**。\n\n\
+         # 输出格式（覆盖上面\u{201C}只输出译文\u{201D}的说明，严格遵守）\n\
+         严格按下面两段输出，两个标记必须原样出现、各占一行，标记之外不要有任何多余文字：\n\
+         {src}\n\
+         （这里放润色后的源文，保持原语言）\n\
+         {tgt}\n\
+         （这里放翻译成\u{300C}{lang}\u{300D}的译文）",
+        base = base,
+        src = POLISH_TRANSLATE_SRC_MARKER,
+        tgt = POLISH_TRANSLATE_TGT_MARKER,
+        lang = target_language,
+    )
+}
+
+/// 解析"润色+翻译"单次调用输出 → Some((润色后源文, 译文))。
+/// 找到译文标记且译文非空 → Some((源文, 译文))：源文标记缺失 / 源文段为空时源文为 None，
+/// 译文取标记之后的干净正文。**没有译文标记、或译文段为空（模型截断 / 只吐了标记）→ None**，
+/// 表示没拿到可信译文，交由调用方退回专用翻译——避免把空串当"成功译文"插进光标而丢字。
+fn split_polish_translate_output(raw: &str) -> Option<(Option<String>, String)> {
+    let tgt_idx = raw.find(POLISH_TRANSLATE_TGT_MARKER)?;
+    let translation = raw[tgt_idx + POLISH_TRANSLATE_TGT_MARKER.len()..]
+        .trim()
+        .to_string();
+    if translation.is_empty() {
+        return None;
+    }
+    let before_tgt = &raw[..tgt_idx];
+    let source = before_tgt
+        .find(POLISH_TRANSLATE_SRC_MARKER)
+        .map(|i| {
+            before_tgt[i + POLISH_TRANSLATE_SRC_MARKER.len()..]
+                .trim()
+                .to_string()
+        })
+        .filter(|s| !s.is_empty());
+    Some((source, translation))
+}
+
+/// 翻译路径——单次 LLM 调用同时润色源文 + 翻译。和 polish 一样失败时返回原文 + 失败原因，
+/// 避免"不丢字"约定被违反（CLAUDE.md）。返回 (要插入的译文, 润色后源文供上下文用, 失败原因)。
+#[allow(clippy::too_many_arguments)]
+async fn polish_and_translate_or_passthrough(
+    raw: &RawTranscript,
+    target_language: &str,
+    mode: PolishMode,
+    hotwords: &[String],
+    working_languages: &[String],
+    chinese_script_preference: ChineseScriptPreference,
+    output_language_preference: OutputLanguagePreference,
+    llm_thinking_enabled: bool,
+    front_app: Option<&str>,
+    prior_turns: &[(String, String)],
+) -> (String, Option<String>, Option<String>) {
+    let system_prompt = build_polish_translate_system_prompt(target_language);
+    match polish_text(
+        &raw.text,
+        mode,
+        hotwords,
+        &system_prompt,
+        working_languages,
+        chinese_script_preference,
+        output_language_preference,
+        llm_thinking_enabled,
+        front_app,
+        prior_turns,
+    )
+    .await
+    {
+        Ok(out) => match split_polish_translate_output(&out) {
+            Some((source, translation)) => (translation, source, None),
+            None => {
+                // 模型没按两段格式输出：退回专用翻译拿一段干净译文，避免把畸形输出插进光标。
+                // 此时无可信源文，这条翻译历史不参与后续普通润色上下文。
+                log::warn!(
+                    "[coord] polish+translate output missing markers; falling back to plain translate"
+                );
+                match translate_text(
+                    &raw.text,
+                    target_language,
+                    working_languages,
+                    chinese_script_preference,
+                    output_language_preference,
+                    llm_thinking_enabled,
+                    front_app,
+                )
+                .await
+                {
+                    Ok(translation) => (translation, None, None),
+                    Err(e) => {
+                        let reason = e.to_string();
+                        log::error!("[coord] fallback translate failed, using raw: {reason}");
+                        (raw.text.clone(), None, Some(reason))
+                    }
+                }
+            }
+        },
+        Err(e) => {
+            let reason = e.to_string();
+            log::error!("[coord] polish+translate failed, falling back to raw: {reason}");
+            (raw.text.clone(), None, Some(reason))
+        }
+    }
 }
 
 fn read_whisper_credentials() -> (String, String, String) {
@@ -3567,6 +3660,9 @@ async fn end_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
             raw_transcript: question.clone(),
             final_text: answer.clone(),
             mode: PolishMode::Raw,
+            style_pack_id: None,
+            translation_active: false,
+            polish_source: None,
             app_bundle_id: None,
             app_name: front_app.clone(),
             insert_status: InsertStatus::CopiedFallback,
@@ -3781,6 +3877,54 @@ mod tests {
 
     fn session_id(n: u128) -> SessionId {
         Uuid::from_u128(n)
+    }
+
+    #[test]
+    fn split_polish_translate_parses_both_sections() {
+        let out = format!(
+            "{POLISH_TRANSLATE_SRC_MARKER}\n你好，世界。\n{POLISH_TRANSLATE_TGT_MARKER}\nHello, world."
+        );
+        let (source, translation) = split_polish_translate_output(&out).expect("both markers");
+        assert_eq!(source.as_deref(), Some("你好，世界。"));
+        assert_eq!(translation, "Hello, world.");
+    }
+
+    #[test]
+    fn split_polish_translate_no_translation_marker_returns_none_for_fallback() {
+        // 完全没有译文标记 → None，调用方据此退回专用翻译拿干净译文。
+        assert_eq!(split_polish_translate_output("  Hello, world.  "), None);
+    }
+
+    #[test]
+    fn split_polish_translate_empty_translation_returns_none_for_fallback() {
+        // 有译文标记但内容为空（截断 / 只吐标记）→ None，避免空串当成功译文插入光标。
+        let out =
+            format!("{POLISH_TRANSLATE_SRC_MARKER}\n你好。\n{POLISH_TRANSLATE_TGT_MARKER}\n   ");
+        assert_eq!(split_polish_translate_output(&out), None);
+    }
+
+    #[test]
+    fn split_polish_translate_only_translation_marker_keeps_clean_translation() {
+        let out = format!("noise{POLISH_TRANSLATE_TGT_MARKER}\nHola");
+        let (source, translation) = split_polish_translate_output(&out).expect("tgt marker");
+        assert_eq!(source, None);
+        assert_eq!(translation, "Hola");
+    }
+
+    #[test]
+    fn split_polish_translate_empty_source_section_is_none() {
+        let out = format!("{POLISH_TRANSLATE_SRC_MARKER}\n   \n{POLISH_TRANSLATE_TGT_MARKER}\nHi");
+        let (source, translation) = split_polish_translate_output(&out).expect("tgt marker");
+        assert_eq!(source, None);
+        assert_eq!(translation, "Hi");
+    }
+
+    #[test]
+    fn build_polish_translate_prompt_contains_markers_and_target() {
+        let p = build_polish_translate_system_prompt("日本語");
+        assert!(p.contains(POLISH_TRANSLATE_SRC_MARKER));
+        assert!(p.contains(POLISH_TRANSLATE_TGT_MARKER));
+        assert!(p.contains("日本語"));
     }
 
     #[tokio::test]
@@ -5013,7 +5157,9 @@ fn emit_capsule(
                     std::thread::spawn(move || {
                         let current = LAST_AUX.lock().unwrap().clone();
                         if current.as_deref() != Some(&text) {
-                            log::info!("[capsule] set_aux_down skipped: state changed to {current:?}");
+                            log::info!(
+                                "[capsule] set_aux_down skipped: state changed to {current:?}"
+                            );
                             return;
                         }
                         if let Err(e) = crate::linux_fcitx::set_aux_down(&text) {
@@ -5021,7 +5167,10 @@ fn emit_capsule(
                         }
                     });
                     // 终态（Done/Cancelled/Error）3 秒后自动清除，避免一直跟随焦点。
-                    if matches!(state, CapsuleState::Done | CapsuleState::Cancelled | CapsuleState::Error) {
+                    if matches!(
+                        state,
+                        CapsuleState::Done | CapsuleState::Cancelled | CapsuleState::Error
+                    ) {
                         let text = t.to_string();
                         std::thread::spawn(move || {
                             std::thread::sleep(std::time::Duration::from_secs(3));
@@ -5044,12 +5193,16 @@ fn emit_capsule(
                     std::thread::spawn(move || {
                         let latest_gen = RETRY_GEN.load(std::sync::atomic::Ordering::SeqCst);
                         if latest_gen > gen + 1 {
-                            log::info!("[capsule] clear_aux_down skipped: gen {gen}, latest {latest_gen}");
+                            log::info!(
+                                "[capsule] clear_aux_down skipped: gen {gen}, latest {latest_gen}"
+                            );
                             return;
                         }
                         let current = LAST_AUX.lock().unwrap().clone();
                         if current.is_some() {
-                            log::info!("[capsule] clear_aux_down skipped: state changed to {current:?}");
+                            log::info!(
+                                "[capsule] clear_aux_down skipped: state changed to {current:?}"
+                            );
                             return;
                         }
                         if let Err(e) = crate::linux_fcitx::clear_aux_down() {
