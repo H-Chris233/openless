@@ -697,9 +697,18 @@ jobs:
         run: |
           set -euo pipefail
           cask="Casks/openless.rb"
+          # ⚠️ cask 第 2 行 `arch arm: "aarch64", intel: "x64"` 也含 `intel: "..."`，
+          # 裸 `s/intel: "..."/` 会把 arch 指令一起改成哈希 → Intel 用户 brew 装包 404。
+          # 所以 intel 的 sed 用 `^[[:space:]]*intel:` 锚定 sha256 块那一行；arm 的 sed
+          # 靠 `sha256 arm:   ` 前缀天然只命中 sha256 行。捕获组 \1 保留原缩进。
           sed -i "s/version \"[^\"]*\"/version \"$VERSION\"/" "$cask"
           sed -i "s/sha256 arm:   \"[^\"]*\"/sha256 arm:   \"$ARM_SHA\"/" "$cask"
-          sed -i "s/intel: \"[^\"]*\"/intel: \"$INTEL_SHA\"/" "$cask"
+          sed -i "s/^\([[:space:]]*\)intel: \"[^\"]*\"/\1intel: \"$INTEL_SHA\"/" "$cask"
+          # 防呆：arch 指令必须原样保留，且本次 sha256 必须确实写进去了，否则让 job 失败。
+          grep -q 'arch arm: "aarch64", intel: "x64"' "$cask" \
+            || { echo "::error::arch 指令被 sed 误伤"; exit 1; }
+          grep -q "\"$ARM_SHA\"" "$cask" && grep -q "\"$INTEL_SHA\"" "$cask" \
+            || { echo "::error::sha256 未正确写入 cask"; exit 1; }
           echo "----- updated $cask -----"
           cat "$cask"
 
