@@ -47,6 +47,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const LOG_ROTATE_LIMIT_BYTES: u64 = 10 * 1024 * 1024;
+#[cfg(target_os = "macos")]
+const OPENLESS_BUNDLE_ID: &str = "com.openless.app";
 
 /// 第一次 show 时把 QA 浮窗摆到屏幕底部居中；之后的 show 不再 reposition，
 /// 让用户拖动后的位置在 hide → show 之间得以保持。详见 issue #118 v2。
@@ -820,7 +822,47 @@ fn restart_app(app: AppHandle) {
             log::info!("[updater] stripped xattr on {:?} before restart", bundle);
         }
     }
+    #[cfg(target_os = "macos")]
+    reset_tcc_for_beta_restart();
     app.restart();
+}
+
+#[cfg(target_os = "macos")]
+fn reset_tcc_for_beta_restart() {
+    if !is_beta_build() {
+        log::info!("[updater] skipping TCC reset before stable restart");
+        return;
+    }
+
+    // Beta builds are currently ad-hoc signed. Their code hash changes across builds, so
+    // old TCC rows can leave System Settings checked while AXIsProcessTrusted() is false.
+    reset_tcc_service_for_beta_restart("Accessibility");
+    reset_tcc_service_for_beta_restart("Microphone");
+}
+
+#[cfg(target_os = "macos")]
+fn is_beta_build() -> bool {
+    env!("CARGO_PKG_VERSION").contains('-')
+}
+
+#[cfg(target_os = "macos")]
+fn reset_tcc_service_for_beta_restart(service: &str) {
+    match std::process::Command::new("/usr/bin/tccutil")
+        .args(["reset", service, OPENLESS_BUNDLE_ID])
+        .status()
+    {
+        Ok(status) if status.success() => {
+            log::info!("[updater] reset TCC {service} before beta restart");
+        }
+        Ok(status) => {
+            log::warn!(
+                "[updater] reset TCC {service} before beta restart exited with {status}"
+            );
+        }
+        Err(e) => {
+            log::warn!("[updater] reset TCC {service} before beta restart failed: {e}");
+        }
+    }
 }
 
 /// 把日志同时写到 stderr + ~/Library/Logs/OpenLess/openless.log（match Swift `Log.swift`）。
