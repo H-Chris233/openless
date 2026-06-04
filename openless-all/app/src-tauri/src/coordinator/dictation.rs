@@ -2065,6 +2065,23 @@ mod tests {
     }
 
     #[test]
+    fn translation_turn_uses_normal_history_final_text() {
+        // 当前是翻译轮，普通历史照常喂 final_text（本就是源语言润色结果，不需要剔除）。
+        let sessions = vec![history_session(
+            "dictation",
+            "继续",
+            "继续。",
+            Some("pack.new"),
+            false,
+            None,
+        )];
+
+        let turns = eligible_polish_context_turns(sessions, "pack.new", true);
+
+        assert_eq!(turns, vec![("继续".to_string(), "继续。".to_string())]);
+    }
+
+    #[test]
     fn streamed_output_skips_postprocessing_mutations() {
         let rules = vec![correction_rule("Open AI", "OpenAI")];
 
