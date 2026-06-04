@@ -466,6 +466,7 @@ const mockHistory: DictationSession[] = OL_DATA.history.map((h, i) => ({
     mode: "structured",
     stylePackId: "builtin.structured",
     translationActive: false,
+    polishSource: null,
     appBundleId: null,
     appName: "VS Code",
     insertStatus: "inserted",

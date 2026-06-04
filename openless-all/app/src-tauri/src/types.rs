@@ -96,9 +96,15 @@ pub struct DictationSession {
     /// 只复用同一风格包的历史，避免切换风格包后旧上下文污染新提示词。
     #[serde(default)]
     pub style_pack_id: Option<String>,
-    /// 本次是否走翻译路径。翻译结果不应再作为下一次普通润色的上下文。
+    /// 本次是否走翻译路径。决定对话感知上下文怎么复用这条历史：下一轮也是翻译时喂
+    /// `final_text`（译文）保持一致；下一轮是普通润色时改喂 `polish_source`（润色后的源文）
+    /// 以剔除译文、避免外语污染。
     #[serde(default)]
     pub translation_active: bool,
+    /// 翻译会话润色后的**源语言**文本（译文前的润色中间产物）。普通会话、解析失败或旧
+    /// 历史为 None。仅用于对话感知上下文：普通润色轮复用翻译历史时喂这一段而非译文。
+    #[serde(default)]
+    pub polish_source: Option<String>,
     pub app_bundle_id: Option<String>,
     pub app_name: Option<String>,
     pub insert_status: InsertStatus,
@@ -1569,14 +1575,16 @@ pub fn default_style_system_prompt_for_mode(mode: PolishMode) -> String {
     // 到这里只剩 Raw 一种模式（Light / Structured / Formal 都在上面 early-return 了）。
     // 仍用 match 把 _ 兜底为 unreachable!()，让编译期挡住未来加新 mode 时忘了在上面分流。
     let task_and_example = match mode {
-        PolishMode::Raw => "# 任务（原文）\n\
+        PolishMode::Raw => {
+            "# 任务（原文）\n\
             仅做最小化整理：补全标点、必要分句。\n\
             保留原话顺序、用词、语气；\u{4E0D}改写、\u{4E0D}扩写、\u{4E0D}重排。\n\
             可去除明显口癖（\u{55EF}、\u{554A}、那个、就是、you know），但\u{4E0D}改变信息密度。\n\
             \n\
             # 示例\n\
             原：\u{55EF}那个我刚刚跟客户聊完然后他说下周三可以给反馈\n\
-            出：我刚刚跟客户聊完，他说下周三可以给反馈。",
+            出：我刚刚跟客户聊完，他说下周三可以给反馈。"
+        }
 
         PolishMode::Light | PolishMode::Structured | PolishMode::Formal => {
             unreachable!("light/structured/formal handled by early return above")
