@@ -684,6 +684,8 @@ export const zhTW: typeof zhCN = {
       confirm: '膠囊確認插入',
       switchStyle: '切換上一次風格',
       openApp: '打開 OpenLess',
+      enable: '啟用',
+      disable: '停用',
       confirmHint: '點擊右側 ✓',
       notSupported: '暫未支持',
     },

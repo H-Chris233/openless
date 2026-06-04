@@ -682,6 +682,8 @@ export const zhCN = {
       confirm: '胶囊确认插入',
       switchStyle: '切换上一次风格',
       openApp: '打开 OpenLess',
+      enable: '启用',
+      disable: '停用',
       confirmHint: '点击右侧 ✓',
       notSupported: '暂未支持',
     },

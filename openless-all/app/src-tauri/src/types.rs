@@ -604,10 +604,13 @@ pub struct UserPreferences {
     pub custom_combo_hotkey: Option<ComboBinding>,
     #[serde(default = "default_translation_hotkey")]
     pub translation_hotkey: ShortcutBinding,
+    /// 「切换风格」全局快捷键。`None` = 停用（不注册全局键）；`Some(...)` = 注册。
+    /// 默认 `Some(默认键)`，对老用户零行为变化，仅新增可清空（issue #576）。
     #[serde(default = "default_switch_style_hotkey")]
-    pub switch_style_hotkey: ShortcutBinding,
+    pub switch_style_hotkey: Option<ShortcutBinding>,
+    /// 「唤起 App」全局快捷键。`None` = 停用；`Some(...)` = 注册。默认 `Some(默认键)`。
     #[serde(default = "default_open_app_hotkey")]
-    pub open_app_hotkey: ShortcutBinding,
+    pub open_app_hotkey: Option<ShortcutBinding>,
     /// 本地 Qwen3-ASR 当前激活的模型 id（"qwen3-asr-0.6b" / "qwen3-asr-1.7b"）。
     /// 仅在 active_asr_provider == "local-qwen3" 时有意义。
     #[serde(default = "default_local_asr_model")]
@@ -886,8 +889,9 @@ impl Default for UserPreferencesWire {
             qa_save_history: prefs.qa_save_history,
             custom_combo_hotkey: prefs.custom_combo_hotkey,
             translation_hotkey: None,
-            switch_style_hotkey: None,
-            open_app_hotkey: None,
+            // 默认携带默认键（Some），保证缺字段时仍是启用状态；None 专表「用户主动停用」。
+            switch_style_hotkey: prefs.switch_style_hotkey,
+            open_app_hotkey: prefs.open_app_hotkey,
             local_asr_active_model: prefs.local_asr_active_model,
             local_asr_mirror: prefs.local_asr_mirror,
             local_asr_keep_loaded_secs: prefs.local_asr_keep_loaded_secs,
@@ -968,10 +972,11 @@ impl<'de> Deserialize<'de> for UserPreferences {
             translation_hotkey: wire
                 .translation_hotkey
                 .unwrap_or_else(default_translation_hotkey),
-            switch_style_hotkey: wire
-                .switch_style_hotkey
-                .unwrap_or_else(default_switch_style_hotkey),
-            open_app_hotkey: wire.open_app_hotkey.unwrap_or_else(default_open_app_hotkey),
+            // 直传 Option：None = 用户主动停用，不再用 unwrap_or_else 塌缩成默认键
+            // （那正是 #576「无法关闭」的根因）。缺字段时 wire 的 serde struct-default
+            // 会落到 Some(默认键)，保证老用户/新用户仍是启用。
+            switch_style_hotkey: wire.switch_style_hotkey,
+            open_app_hotkey: wire.open_app_hotkey,
             local_asr_active_model: wire.local_asr_active_model,
             local_asr_mirror: wire.local_asr_mirror,
             local_asr_keep_loaded_secs: wire.local_asr_keep_loaded_secs,
@@ -1014,18 +1019,18 @@ fn default_translation_hotkey() -> ShortcutBinding {
     }
 }
 
-fn default_switch_style_hotkey() -> ShortcutBinding {
-    ShortcutBinding {
+fn default_switch_style_hotkey() -> Option<ShortcutBinding> {
+    Some(ShortcutBinding {
         primary: "S".into(),
         modifiers: default_app_shortcut_modifiers(),
-    }
+    })
 }
 
-fn default_open_app_hotkey() -> ShortcutBinding {
-    ShortcutBinding {
+fn default_open_app_hotkey() -> Option<ShortcutBinding> {
+    Some(ShortcutBinding {
         primary: "O".into(),
         modifiers: default_app_shortcut_modifiers(),
-    }
+    })
 }
 
 fn default_app_shortcut_modifiers() -> Vec<String> {
@@ -2318,6 +2323,53 @@ mod tests {
 
         let restored: UserPreferences = serde_json::from_str(&json).unwrap();
         assert!(!restored.audio_cue_on_record);
+    }
+
+    #[test]
+    fn action_hotkeys_default_to_enabled() {
+        // issue #576：默认仍开启（Some 默认键），对老用户零行为变化。
+        let prefs = UserPreferences::default();
+        assert!(prefs.switch_style_hotkey.is_some());
+        assert!(prefs.open_app_hotkey.is_some());
+    }
+
+    #[test]
+    fn missing_action_hotkeys_default_to_enabled() {
+        // 老用户/缺字段：wire 的 struct-default 落到 Some(默认键)，不应被当成停用。
+        let prefs: UserPreferences = serde_json::from_str("{}").unwrap();
+        assert!(prefs.switch_style_hotkey.is_some());
+        assert!(prefs.open_app_hotkey.is_some());
+    }
+
+    #[test]
+    fn disabled_action_hotkeys_round_trip_as_null() {
+        // issue #576：用户清空（None=停用）后存盘→读回必须仍是 None，
+        // 不能像旧逻辑那样被 unwrap_or_else 塌缩回默认键。
+        let disabled = UserPreferences {
+            switch_style_hotkey: None,
+            open_app_hotkey: None,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&disabled).unwrap();
+        assert!(
+            json.contains("\"switchStyleHotkey\":null"),
+            "停用应序列化成 null，实际: {json}"
+        );
+        let restored: UserPreferences = serde_json::from_str(&json).unwrap();
+        assert!(restored.switch_style_hotkey.is_none());
+        assert!(restored.open_app_hotkey.is_none());
+    }
+
+    #[test]
+    fn explicit_action_hotkey_binding_round_trips() {
+        // 旧 preferences.json 里带实际绑定 → 读回应保留为 Some（启用）。
+        let prefs: UserPreferences = serde_json::from_str(
+            r#"{"switchStyleHotkey":{"primary":"S","modifiers":["cmd","shift"]}}"#,
+        )
+        .unwrap();
+        let binding = prefs.switch_style_hotkey.expect("应保留为 Some");
+        assert_eq!(binding.primary, "S");
+        assert_eq!(binding.modifiers, vec!["cmd".to_string(), "shift".to_string()]);
     }
 
     #[test]

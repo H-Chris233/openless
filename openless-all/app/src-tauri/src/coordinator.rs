@@ -728,7 +728,12 @@ impl Coordinator {
     }
 
     fn update_action_hotkey_binding(&self, kind: ActionHotkeyKind) {
-        let binding = action_hotkey_binding(&self.inner, kind);
+        // None = 用户主动停用：反注册全局键，立即生效。
+        let Some(binding) = action_hotkey_binding(&self.inner, kind) else {
+            take_action_hotkey_on_main_thread(&self.inner, kind);
+            log::info!("[coord] action hotkey {kind:?} 已停用（用户清空）");
+            return;
+        };
         if is_modifier_only_shortcut(&binding) {
             take_action_hotkey_on_main_thread(&self.inner, kind);
             log::warn!("[coord] action hotkey {kind:?} 使用了不支持的 modifier-only 绑定，已关闭");
@@ -1517,7 +1522,12 @@ fn action_hotkey_supervisor_loop(inner: Arc<Inner>, kind: ActionHotkeyKind) {
         if inner.shutdown.load(Ordering::SeqCst) {
             return;
         }
-        let binding = action_hotkey_binding(&inner, kind);
+        // None = 用户主动停用：反注册并睡着等 prefs 改动（由 update 路径唤醒）。
+        let Some(binding) = action_hotkey_binding(&inner, kind) else {
+            take_action_hotkey_on_main_thread(&inner, kind);
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            continue;
+        };
         if is_modifier_only_shortcut(&binding) {
             take_action_hotkey_on_main_thread(&inner, kind);
             std::thread::sleep(std::time::Duration::from_secs(5));
@@ -1711,7 +1721,7 @@ fn action_hotkey_slot(
 fn action_hotkey_binding(
     inner: &Arc<Inner>,
     kind: ActionHotkeyKind,
-) -> crate::types::ShortcutBinding {
+) -> Option<crate::types::ShortcutBinding> {
     let prefs = inner.prefs.get();
     match kind {
         ActionHotkeyKind::SwitchStyle => prefs.switch_style_hotkey,
@@ -1868,17 +1878,21 @@ fn reset_shortcut_held_state(inner: &Arc<Inner>) {
             }
         }
     }
-    if !is_modifier_only_shortcut(&prefs.switch_style_hotkey) {
-        if let Some(monitor) = inner.switch_style_hotkey.lock().as_ref() {
-            if let Err(e) = monitor.update_binding(prefs.switch_style_hotkey.clone()) {
-                log::warn!("[coord] reset switch-style hotkey latch failed: {e}");
+    if let Some(switch_style) = prefs.switch_style_hotkey.as_ref() {
+        if !is_modifier_only_shortcut(switch_style) {
+            if let Some(monitor) = inner.switch_style_hotkey.lock().as_ref() {
+                if let Err(e) = monitor.update_binding(switch_style.clone()) {
+                    log::warn!("[coord] reset switch-style hotkey latch failed: {e}");
+                }
             }
         }
     }
-    if !is_modifier_only_shortcut(&prefs.open_app_hotkey) {
-        if let Some(monitor) = inner.open_app_hotkey.lock().as_ref() {
-            if let Err(e) = monitor.update_binding(prefs.open_app_hotkey.clone()) {
-                log::warn!("[coord] reset open-app hotkey latch failed: {e}");
+    if let Some(open_app) = prefs.open_app_hotkey.as_ref() {
+        if !is_modifier_only_shortcut(open_app) {
+            if let Some(monitor) = inner.open_app_hotkey.lock().as_ref() {
+                if let Err(e) = monitor.update_binding(open_app.clone()) {
+                    log::warn!("[coord] reset open-app hotkey latch failed: {e}");
+                }
             }
         }
     }
