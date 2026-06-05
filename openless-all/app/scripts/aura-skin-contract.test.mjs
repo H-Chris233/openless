@@ -7,6 +7,31 @@ async function read(relPath) {
   return readFile(new URL(relPath, root), 'utf8');
 }
 
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function assertUsesClassName(source, className, message) {
+  const escapedClassName = escapeRegExp(className);
+  const patterns = [
+    new RegExp(`className\\s*=\\s*(?:\\{\\s*)?"[^"]*\\b${escapedClassName}\\b[^"]*"(?:\\s*\\})?`),
+    new RegExp(`className\\s*=\\s*(?:\\{\\s*)?'[^']*\\b${escapedClassName}\\b[^']*'(?:\\s*\\})?`),
+    new RegExp(`className\\s*=\\s*(?:\\{\\s*)?\`[^\`]*\\b${escapedClassName}\\b[^\`]*\`(?:\\s*\\})?`),
+  ];
+
+  assert.ok(patterns.some((pattern) => pattern.test(source)), message);
+}
+
+assert.throws(
+  () => assertUsesClassName('<div>ol-app-shell-bg</div>', 'ol-app-shell-bg', 'sample must require className usage'),
+  /sample must require className usage/,
+);
+assertUsesClassName(
+  '<div className="foo ol-app-shell-bg bar" />',
+  'ol-app-shell-bg',
+  'sample should accept className usage',
+);
+
 const [tokens, globalCss, shell, settingsModal, overview] = await Promise.all([
   read('src/styles/tokens.css'),
   read('src/styles/global.css'),
@@ -24,11 +49,11 @@ assert.match(globalCss, /\.ol-app-shell-bg\b/, 'global.css must expose .ol-app-s
 assert.match(globalCss, /\.ol-aura-panel\b/, 'global.css must expose .ol-aura-panel');
 assert.doesNotMatch(globalCss, /@keyframes ol-aura-halo/, 'global.css must not add an animated halo');
 
-assert.match(shell, /ol-app-shell-bg/, 'FloatingShell must use the app shell background class');
-assert.match(shell, /ol-aura-sidebar/, 'FloatingShell must expose an Aura sidebar hook');
-assert.match(shell, /ol-aura-panel/, 'FloatingShell must expose an Aura panel hook');
+assertUsesClassName(shell, 'ol-app-shell-bg', 'FloatingShell must use the app shell background class');
+assertUsesClassName(shell, 'ol-aura-sidebar', 'FloatingShell must expose an Aura sidebar hook');
+assertUsesClassName(shell, 'ol-aura-panel', 'FloatingShell must expose an Aura panel hook');
 
-assert.match(settingsModal, /ol-aura-settings/, 'SettingsModal must expose an Aura settings wrapper');
-assert.match(overview, /ol-overview-hero/, 'Overview must expose a high-visibility overview surface hook');
+assertUsesClassName(settingsModal, 'ol-aura-settings', 'SettingsModal must expose an Aura settings wrapper');
+assertUsesClassName(overview, 'ol-overview-hero', 'Overview must expose a high-visibility overview surface hook');
 
 console.log('Aura skin contract OK');
