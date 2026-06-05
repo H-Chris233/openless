@@ -611,7 +611,7 @@ pub struct UserPreferences {
     /// 「唤起 App」全局快捷键。`None` = 停用；`Some(...)` = 注册。默认 `Some(默认键)`。
     #[serde(default = "default_open_app_hotkey")]
     pub open_app_hotkey: Option<ShortcutBinding>,
-    /// 快速 Agent（Voice Coding Agent）：是否启用。默认关闭，需用户在高级设置开启。
+    /// Less Computer：是否启用。默认关闭，需用户在高级设置开启。
     #[serde(default)]
     pub coding_agent_enabled: bool,
     /// Agent 后端：`claude-code-cli`（默认）或 `opencode-cli`。
@@ -626,6 +626,10 @@ pub struct UserPreferences {
     /// Agent 工作目录（`None` = 临时目录）。
     #[serde(default)]
     pub coding_agent_workdir: Option<String>,
+    /// Less Computer 语音触发键。macOS 生效；支持单修饰键（左/右 Control、左/右 Option、Fn）
+    /// 和普通组合键。`None` = 停用。
+    #[serde(default = "default_coding_agent_voice_hotkey")]
+    pub coding_agent_voice_hotkey: Option<ShortcutBinding>,
     /// 热键 1：语音 Agent 面板键。默认 Cmd/Ctrl+Shift+Enter。`None` = 停用。
     #[serde(default = "default_coding_agent_panel_hotkey")]
     pub coding_agent_panel_hotkey: Option<ShortcutBinding>,
@@ -840,6 +844,8 @@ struct UserPreferencesWire {
     coding_agent_permission_mode: String,
     #[serde(default)]
     coding_agent_workdir: Option<String>,
+    #[serde(default = "default_coding_agent_voice_hotkey")]
+    coding_agent_voice_hotkey: Option<ShortcutBinding>,
     #[serde(default = "default_coding_agent_panel_hotkey")]
     coding_agent_panel_hotkey: Option<ShortcutBinding>,
     #[serde(default)]
@@ -932,6 +938,7 @@ impl Default for UserPreferencesWire {
             coding_agent_model: prefs.coding_agent_model,
             coding_agent_permission_mode: prefs.coding_agent_permission_mode,
             coding_agent_workdir: prefs.coding_agent_workdir,
+            coding_agent_voice_hotkey: prefs.coding_agent_voice_hotkey,
             coding_agent_panel_hotkey: prefs.coding_agent_panel_hotkey,
             coding_agent_quick_hotkey: prefs.coding_agent_quick_hotkey,
             local_asr_active_model: prefs.local_asr_active_model,
@@ -1015,6 +1022,7 @@ impl<'de> Deserialize<'de> for UserPreferences {
             coding_agent_model: wire.coding_agent_model,
             coding_agent_permission_mode: wire.coding_agent_permission_mode,
             coding_agent_workdir: wire.coding_agent_workdir,
+            coding_agent_voice_hotkey: wire.coding_agent_voice_hotkey,
             coding_agent_panel_hotkey: wire.coding_agent_panel_hotkey,
             coding_agent_quick_hotkey: wire.coding_agent_quick_hotkey,
             custom_combo_hotkey: wire.custom_combo_hotkey,
@@ -1067,6 +1075,13 @@ fn default_coding_agent_provider() -> String {
 
 fn default_coding_agent_permission_mode() -> String {
     "acceptEdits".to_string()
+}
+
+pub(crate) fn default_coding_agent_voice_hotkey() -> Option<ShortcutBinding> {
+    Some(ShortcutBinding {
+        primary: "LeftControl".into(),
+        modifiers: Vec::new(),
+    })
 }
 
 pub(crate) fn default_coding_agent_panel_hotkey() -> Option<ShortcutBinding> {
@@ -1739,6 +1754,7 @@ impl Default for UserPreferences {
             coding_agent_model: None,
             coding_agent_permission_mode: default_coding_agent_permission_mode(),
             coding_agent_workdir: None,
+            coding_agent_voice_hotkey: default_coding_agent_voice_hotkey(),
             coding_agent_panel_hotkey: default_coding_agent_panel_hotkey(),
             coding_agent_quick_hotkey: None,
             local_asr_active_model: default_local_asr_model(),

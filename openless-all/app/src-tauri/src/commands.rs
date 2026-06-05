@@ -86,6 +86,7 @@ trait SettingsWriter {
     fn refresh_translation_hotkey(&self);
     fn refresh_switch_style_hotkey(&self);
     fn refresh_open_app_hotkey(&self);
+    fn refresh_coding_agent_hotkey(&self);
 }
 
 impl SettingsWriter for Coordinator {
@@ -123,6 +124,10 @@ impl SettingsWriter for Coordinator {
 
     fn refresh_open_app_hotkey(&self) {
         self.update_open_app_hotkey_binding();
+    }
+
+    fn refresh_coding_agent_hotkey(&self) {
+        self.update_coding_agent_hotkey_binding();
     }
 }
 
@@ -162,6 +167,10 @@ impl<T: SettingsWriter + ?Sized> SettingsWriter for Arc<T> {
     fn refresh_open_app_hotkey(&self) {
         (**self).refresh_open_app_hotkey();
     }
+
+    fn refresh_coding_agent_hotkey(&self) {
+        (**self).refresh_coding_agent_hotkey();
+    }
 }
 
 fn persist_settings<T: SettingsWriter>(
@@ -178,6 +187,8 @@ fn persist_settings<T: SettingsWriter>(
     let translation_changed = previous.translation_hotkey != prefs.translation_hotkey;
     let switch_style_changed = previous.switch_style_hotkey != prefs.switch_style_hotkey;
     let open_app_changed = previous.open_app_hotkey != prefs.open_app_hotkey;
+    let coding_agent_changed = previous.coding_agent_enabled != prefs.coding_agent_enabled
+        || previous.coding_agent_voice_hotkey != prefs.coding_agent_voice_hotkey;
     let active_asr_provider_changed = previous.active_asr_provider != prefs.active_asr_provider;
     let active_asr_provider = prefs.active_asr_provider.clone();
     if active_asr_provider_changed {
@@ -217,6 +228,9 @@ fn persist_settings<T: SettingsWriter>(
     }
     if open_app_changed {
         coord.refresh_open_app_hotkey();
+    }
+    if coding_agent_changed {
+        coord.refresh_coding_agent_hotkey();
     }
     Ok(())
 }
@@ -2127,9 +2141,13 @@ fn reject_hotkey_collisions(prefs: &UserPreferences) -> Result<(), String> {
     // 停用（None）的 action 快捷键不参与任何冲突检测。
     let switch_style = prefs.switch_style_hotkey.as_ref();
     let open_app = prefs.open_app_hotkey.as_ref();
+    let less_computer = prefs.coding_agent_voice_hotkey.as_ref();
     if let Some(qa_hotkey) = prefs.qa_hotkey.as_ref() {
         reject_dictation_qa_hotkey_overlap(&prefs.dictation_hotkey, qa_hotkey)?;
         reject_qa_translation_hotkey_overlap(qa_hotkey, &prefs.translation_hotkey)?;
+        if let Some(less_computer) = less_computer {
+            reject_qa_less_computer_hotkey_overlap(qa_hotkey, less_computer)?;
+        }
         if let Some(switch_style) = switch_style {
             reject_qa_switch_style_hotkey_overlap(qa_hotkey, switch_style)?;
         }
@@ -2141,13 +2159,23 @@ fn reject_hotkey_collisions(prefs: &UserPreferences) -> Result<(), String> {
         &prefs.dictation_hotkey,
         &prefs.translation_hotkey,
     )?;
+    if let Some(less_computer) = less_computer {
+        reject_dictation_less_computer_hotkey_overlap(&prefs.dictation_hotkey, less_computer)?;
+        reject_translation_less_computer_hotkey_overlap(&prefs.translation_hotkey, less_computer)?;
+    }
     if let Some(switch_style) = switch_style {
         reject_dictation_switch_style_hotkey_overlap(&prefs.dictation_hotkey, switch_style)?;
         reject_translation_switch_style_hotkey_overlap(&prefs.translation_hotkey, switch_style)?;
+        if let Some(less_computer) = less_computer {
+            reject_less_computer_switch_style_hotkey_overlap(less_computer, switch_style)?;
+        }
     }
     if let Some(open_app) = open_app {
         reject_dictation_open_app_hotkey_overlap(&prefs.dictation_hotkey, open_app)?;
         reject_translation_open_app_hotkey_overlap(&prefs.translation_hotkey, open_app)?;
+        if let Some(less_computer) = less_computer {
+            reject_less_computer_open_app_hotkey_overlap(less_computer, open_app)?;
+        }
     }
     if let (Some(switch_style), Some(open_app)) = (switch_style, open_app) {
         reject_switch_style_open_app_hotkey_overlap(switch_style, open_app)?;
@@ -2180,6 +2208,17 @@ fn reject_dictation_open_app_hotkey_overlap(
     reject_hotkey_overlap(dictation, open_app, "打开应用快捷键不能和听写快捷键相同")
 }
 
+fn reject_dictation_less_computer_hotkey_overlap(
+    dictation: &ShortcutBinding,
+    less_computer: &ShortcutBinding,
+) -> Result<(), String> {
+    reject_hotkey_overlap(
+        dictation,
+        less_computer,
+        "Less Computer 快捷键不能和听写快捷键相同",
+    )
+}
+
 fn reject_qa_translation_hotkey_overlap(
     qa: &ShortcutBinding,
     translation: &ShortcutBinding,
@@ -2201,6 +2240,17 @@ fn reject_qa_open_app_hotkey_overlap(
     reject_hotkey_overlap(qa, open_app, "打开应用快捷键不能和 QA 快捷键相同")
 }
 
+fn reject_qa_less_computer_hotkey_overlap(
+    qa: &ShortcutBinding,
+    less_computer: &ShortcutBinding,
+) -> Result<(), String> {
+    reject_hotkey_overlap(
+        qa,
+        less_computer,
+        "Less Computer 快捷键不能和 QA 快捷键相同",
+    )
+}
+
 fn reject_translation_switch_style_hotkey_overlap(
     translation: &ShortcutBinding,
     switch_style: &ShortcutBinding,
@@ -2219,6 +2269,17 @@ fn reject_translation_open_app_hotkey_overlap(
     reject_hotkey_overlap(translation, open_app, "打开应用快捷键不能和翻译快捷键相同")
 }
 
+fn reject_translation_less_computer_hotkey_overlap(
+    translation: &ShortcutBinding,
+    less_computer: &ShortcutBinding,
+) -> Result<(), String> {
+    reject_hotkey_overlap(
+        translation,
+        less_computer,
+        "Less Computer 快捷键不能和翻译快捷键相同",
+    )
+}
+
 fn reject_switch_style_open_app_hotkey_overlap(
     switch_style: &ShortcutBinding,
     open_app: &ShortcutBinding,
@@ -2227,6 +2288,28 @@ fn reject_switch_style_open_app_hotkey_overlap(
         switch_style,
         open_app,
         "打开应用快捷键不能和切换风格快捷键相同",
+    )
+}
+
+fn reject_less_computer_switch_style_hotkey_overlap(
+    less_computer: &ShortcutBinding,
+    switch_style: &ShortcutBinding,
+) -> Result<(), String> {
+    reject_hotkey_overlap(
+        less_computer,
+        switch_style,
+        "Less Computer 快捷键不能和切换风格快捷键相同",
+    )
+}
+
+fn reject_less_computer_open_app_hotkey_overlap(
+    less_computer: &ShortcutBinding,
+    open_app: &ShortcutBinding,
+) -> Result<(), String> {
+    reject_hotkey_overlap(
+        less_computer,
+        open_app,
+        "Less Computer 快捷键不能和打开应用快捷键相同",
     )
 }
 
@@ -3605,6 +3688,7 @@ mod tests {
         translation_refreshes: Mutex<u32>,
         switch_style_refreshes: Mutex<u32>,
         open_app_refreshes: Mutex<u32>,
+        coding_agent_refreshes: Mutex<u32>,
     }
 
     fn snapshot() -> CredentialsSnapshot {
@@ -3975,6 +4059,10 @@ mod tests {
         fn refresh_open_app_hotkey(&self) {
             *self.open_app_refreshes.lock().unwrap() += 1;
         }
+
+        fn refresh_coding_agent_hotkey(&self) {
+            *self.coding_agent_refreshes.lock().unwrap() += 1;
+        }
     }
 
     #[test]
@@ -4112,6 +4200,10 @@ mod tests {
                 primary: "O".to_string(),
                 modifiers: vec!["ctrl".to_string(), "alt".to_string()],
             }),
+            coding_agent_voice_hotkey: Some(ShortcutBinding {
+                primary: "RightControl".to_string(),
+                modifiers: vec![],
+            }),
             hotkey: HotkeyBinding {
                 trigger: HotkeyTrigger::Custom,
                 mode: HotkeyMode::Hold,
@@ -4141,6 +4233,27 @@ mod tests {
         assert_eq!(*writer.translation_refreshes.lock().unwrap(), 1);
         assert_eq!(*writer.switch_style_refreshes.lock().unwrap(), 1);
         assert_eq!(*writer.open_app_refreshes.lock().unwrap(), 1);
+        assert_eq!(*writer.coding_agent_refreshes.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn persist_settings_rejects_less_computer_dictation_overlap() {
+        let writer = FakeSettingsWriter::default();
+        let binding = ShortcutBinding {
+            primary: "LeftControl".into(),
+            modifiers: vec![],
+        };
+        let prefs = UserPreferences {
+            dictation_hotkey: binding.clone(),
+            coding_agent_voice_hotkey: Some(binding),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            persist_settings(&writer, prefs),
+            Err("Less Computer 快捷键不能和听写快捷键相同".into())
+        );
+        assert!(writer.saved.lock().unwrap().is_none());
     }
 
     #[test]
@@ -4180,6 +4293,7 @@ mod tests {
         assert_eq!(*writer.translation_refreshes.lock().unwrap(), 0);
         assert_eq!(*writer.switch_style_refreshes.lock().unwrap(), 0);
         assert_eq!(*writer.open_app_refreshes.lock().unwrap(), 0);
+        assert_eq!(*writer.coding_agent_refreshes.lock().unwrap(), 0);
     }
 
     #[test]
@@ -4221,6 +4335,7 @@ mod tests {
         assert_eq!(*writer.translation_refreshes.lock().unwrap(), 0);
         assert_eq!(*writer.switch_style_refreshes.lock().unwrap(), 0);
         assert_eq!(*writer.open_app_refreshes.lock().unwrap(), 0);
+        assert_eq!(*writer.coding_agent_refreshes.lock().unwrap(), 0);
     }
 
     #[test]
@@ -4265,6 +4380,7 @@ mod tests {
         assert_eq!(*writer.translation_refreshes.lock().unwrap(), 0);
         assert_eq!(*writer.switch_style_refreshes.lock().unwrap(), 0);
         assert_eq!(*writer.open_app_refreshes.lock().unwrap(), 0);
+        assert_eq!(*writer.coding_agent_refreshes.lock().unwrap(), 0);
     }
 
     #[test]
@@ -4308,6 +4424,7 @@ mod tests {
         assert_eq!(*writer.translation_refreshes.lock().unwrap(), 0);
         assert_eq!(*writer.switch_style_refreshes.lock().unwrap(), 0);
         assert_eq!(*writer.open_app_refreshes.lock().unwrap(), 0);
+        assert_eq!(*writer.coding_agent_refreshes.lock().unwrap(), 0);
     }
 
     #[test]

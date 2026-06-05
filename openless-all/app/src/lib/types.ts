@@ -266,7 +266,7 @@ export interface UserPreferences {
   switchStyleHotkey: ShortcutBinding | null;
   /** 打开 OpenLess 主窗口的全局快捷键。null = 用户已停用（issue #576）。 */
   openAppHotkey: ShortcutBinding | null;
-  /** 快速 Agent（Voice Coding Agent）：是否启用。默认关闭。 */
+  /** Less Computer：是否启用。默认关闭。 */
   codingAgentEnabled: boolean;
   /** Agent 后端：claude-code-cli（默认）/ opencode-cli。 */
   codingAgentProvider: CodingAgentProviderId;
@@ -276,6 +276,8 @@ export interface UserPreferences {
   codingAgentPermissionMode: CodingAgentPermissionMode;
   /** Agent 工作目录，null = 临时目录。 */
   codingAgentWorkdir: string | null;
+  /** Less Computer 按住说话快捷键。null = 停用；目前仅 macOS 显示/生效。 */
+  codingAgentVoiceHotkey: ShortcutBinding | null;
   /** 热键 1：语音 Agent 面板键。null = 停用。 */
   codingAgentPanelHotkey: ShortcutBinding | null;
   /** 热键 2：快取用键（选中→Claude→回插）。null = 未配置。 */

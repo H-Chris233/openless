@@ -54,6 +54,7 @@ const previousPrefs: UserPreferences = {
   codingAgentModel: null,
   codingAgentPermissionMode: 'acceptEdits',
   codingAgentWorkdir: null,
+  codingAgentVoiceHotkey: { primary: 'LeftControl', modifiers: [] },
   codingAgentPanelHotkey: { primary: 'Enter', modifiers: ['cmd', 'shift'] },
   codingAgentQuickHotkey: null,
   localAsrActiveModel: '',

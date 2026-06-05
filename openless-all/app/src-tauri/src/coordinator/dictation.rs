@@ -14,10 +14,6 @@ use super::*;
 const HOTKEY_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(250);
 const STREAMING_INSERT_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(12);
 
-/// Cloud Agent 语音：长按听写键达到此阈值（仍按住 + 仍在录音）即把当前会话升级成语音
-/// Agent。设得比正常点按明显长，避免误触；短按（点一下开始听写）完全不受影响。
-const VOICE_AGENT_LONG_PRESS: std::time::Duration = std::time::Duration::from_millis(550);
-
 /// 跑流式润色路径（opt-in，跨平台）。
 ///
 /// 平台差异：
@@ -479,10 +475,6 @@ pub(super) async fn handle_pressed(inner: &Arc<Inner>) {
                 return;
             }
             let _ = begin_session(inner).await;
-            // 点按 = 听写（不变）；长按超阈值 = 升级成语音 Agent。仅在 Agent 功能开启时武装。
-            if inner.prefs.get().coding_agent_enabled {
-                arm_voice_agent_long_press(inner);
-            }
         }
         (HotkeyMode::Toggle, SessionPhase::Listening) => {
             let _ = end_session(inner).await;
@@ -519,24 +511,8 @@ pub(super) async fn handle_released(inner: &Arc<Inner>) {
     let mode = inner.prefs.get().hotkey.mode;
     let phase = inner.state.lock().phase;
     log::info!("[coord] hotkey released (mode={mode:?}, phase={phase:?})");
-    // Toggle 模式下，普通听写松手不做事（点一下停）；但若当前会话已升级成语音 Agent
-    // （长按触发），松手 = 结束「按住说话」并把转写交给 Claude。Starting 阶段则排队。
     if mode == HotkeyMode::Toggle {
-        let voice_agent = {
-            let st = inner.state.lock();
-            st.voice_agent && matches!(st.phase, SessionPhase::Listening | SessionPhase::Starting)
-        };
-        if voice_agent {
-            match phase {
-                SessionPhase::Listening => {
-                    let _ = end_session(inner).await;
-                }
-                SessionPhase::Starting => {
-                    request_stop_during_starting(inner, "voice-agent release edge");
-                }
-                _ => {}
-            }
-        }
+        // Toggle 听写松手不做事（点一下停）。Less Computer 走独立专用键监听器。
         return;
     }
     if mode == HotkeyMode::Hold {
@@ -553,35 +529,7 @@ pub(super) async fn handle_released(inner: &Arc<Inner>) {
     }
 }
 
-/// 长按计时器：begin_session 后武装。到点时若热键仍按住、仍是同一会话、且尚未升级，
-/// 就把当前会话标记为语音 Agent。短按（计时器到点前已松手）不受影响。
-fn arm_voice_agent_long_press(inner: &Arc<Inner>) {
-    // 阈值从会话开始（≈按下时刻）算起，扣掉 begin_session（含 ASR 握手）已耗时间，
-    // 否则握手慢时实际阈值会被拉长、长按判定不稳定。
-    let (session_id, started_at) = {
-        let st = inner.state.lock();
-        (st.session_id, st.started_at)
-    };
-    let remaining = VOICE_AGENT_LONG_PRESS.saturating_sub(started_at.elapsed());
-    let inner = Arc::clone(inner);
-    async_runtime::spawn(async move {
-        tokio::time::sleep(remaining).await;
-        // 已松手 → 这是一次普通点按（听写），不升级。
-        if !inner.hotkey_trigger_held.load(Ordering::SeqCst) {
-            return;
-        }
-        let mut st = inner.state.lock();
-        if st.session_id == session_id
-            && !st.voice_agent
-            && matches!(st.phase, SessionPhase::Starting | SessionPhase::Listening)
-        {
-            st.voice_agent = true;
-            log::info!("[coord] 长按升级为 Cloud Agent 语音会话 (session={session_id:?})");
-        }
-    });
-}
-
-/// 语音 Agent 收尾：把转写当作指令交给无头 Claude，结果以胶囊展示（不插入到光标）。
+/// Less Computer 收尾：把转写当作指令交给无头 Claude，结果以胶囊展示（不插入到光标）。
 async fn run_voice_agent_transcript(
     inner: &Arc<Inner>,
     _session_id: SessionId,

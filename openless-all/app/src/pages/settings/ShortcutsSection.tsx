@@ -155,16 +155,6 @@ export function ShortcutsSection() {
           </button>
         )}
       </SettingRow>
-      <SettingRow label={t('settings.shortcuts.agentVoice')} desc={t('settings.shortcuts.agentVoiceHint')}>
-        <kbd style={{
-          display: 'inline-flex', alignItems: 'center', gap: 4,
-          padding: '4px 10px', fontSize: 12, fontFamily: 'var(--ol-font-mono)',
-          borderRadius: 6, background: 'var(--ol-surface-2)',
-          border: '0.5px solid var(--ol-line-strong)',
-          boxShadow: '0 1px 0 rgba(0,0,0,0.04)',
-          color: 'var(--ol-ink-2)',
-        }}>{t('settings.shortcuts.agentVoiceTrigger')}</kbd>
-      </SettingRow>
       {readonlyRows.map(([k, v]) => (
         <SettingRow key={k} label={k}>
           <kbd style={{

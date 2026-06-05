@@ -44,9 +44,6 @@ use crate::polish::{
     ActiveLLMProvider, CodexOAuthConfig, CodexOAuthLLMProvider, OpenAICompatibleConfig,
     OpenAICompatibleLLMProvider, CODEX_DEFAULT_MODEL, CODEX_OAUTH_PROVIDER_ID,
 };
-use crate::coding_agent_hotkey::{
-    CodingAgentHotkeyError, CodingAgentHotkeyEvent, CodingAgentHotkeyMonitor,
-};
 use crate::qa_hotkey::{QaHotkeyError, QaHotkeyEvent, QaHotkeyMonitor};
 use crate::recorder::{Recorder, RecorderError};
 use crate::selection::capture_selection;
@@ -68,9 +65,11 @@ mod resources;
 #[cfg(test)]
 use dictation::dictation_error_code;
 use dictation::{
-    begin_session, cancel_session, end_session, handle_pressed, handle_pressed_edge,
-    handle_released, handle_released_edge, request_stop_during_starting,
+    begin_session, cancel_session, end_session, handle_pressed_edge, handle_released_edge,
+    request_stop_during_starting,
 };
+#[cfg(any(debug_assertions, test))]
+use dictation::{handle_pressed, handle_released};
 use qa::{close_qa_panel, handle_qa_hotkey_pressed, QaPhase, QaSessionState};
 #[cfg(test)]
 use resources::discard_startup_resources_for_session;
@@ -258,7 +257,8 @@ struct Inner {
     /// 划词语音问答（issue #118）：与 dictation hotkey 平行的全局快捷键
     /// 监听器（global-hotkey crate）。`None` 表示功能关闭或还没成功安装。
     qa_hotkey: Mutex<Option<QaHotkeyMonitor>>,
-    coding_agent_hotkey: Mutex<Option<CodingAgentHotkeyMonitor>>,
+    coding_agent_modifier_hotkey: Mutex<Option<HotkeyMonitor>>,
+    coding_agent_combo_hotkey: Mutex<Option<ComboHotkeyMonitor>>,
     /// 最近一次 emit_capsule 下发的 state，纯内省/测试用途（在 app 句柄校验之前写入，
     /// 因此无 GUI 的测试环境也能断言「按下热键 → 弹了哪种胶囊」）。写入是单次廉价
     /// 加锁，对 ~30Hz 录音回调可忽略。
@@ -343,7 +343,8 @@ impl Coordinator {
                     open_app_hotkey: Mutex::new(None),
                     translation_modifier_seen: AtomicBool::new(false),
                     qa_hotkey: Mutex::new(None),
-                    coding_agent_hotkey: Mutex::new(None),
+                    coding_agent_modifier_hotkey: Mutex::new(None),
+                    coding_agent_combo_hotkey: Mutex::new(None),
                     last_capsule_state: Mutex::new(None),
                     qa_state: Mutex::new(QaSessionState::default()),
                     capsule_layout: Mutex::new(None),
@@ -407,7 +408,8 @@ impl Coordinator {
                 open_app_hotkey: Mutex::new(None),
                 translation_modifier_seen: AtomicBool::new(false),
                 qa_hotkey: Mutex::new(None),
-                coding_agent_hotkey: Mutex::new(None),
+                coding_agent_modifier_hotkey: Mutex::new(None),
+                coding_agent_combo_hotkey: Mutex::new(None),
                 last_capsule_state: Mutex::new(None),
                 qa_state: Mutex::new(QaSessionState::default()),
                 capsule_layout: Mutex::new(None),
@@ -517,6 +519,14 @@ impl Coordinator {
             .name("openless-coding-agent-hotkey-supervisor".into())
             .spawn(move || coding_agent_hotkey_supervisor_loop(inner))
             .ok();
+    }
+
+    pub fn stop_coding_agent_hotkey_listener(&self) {
+        take_coding_agent_hotkeys_on_main_thread(&self.inner);
+    }
+
+    pub fn update_coding_agent_hotkey_binding(&self) {
+        update_coding_agent_hotkey_binding_now(&self.inner);
     }
 
     pub fn stop_qa_hotkey_listener(&self) {
@@ -1336,127 +1346,198 @@ fn qa_hotkey_bridge_loop(inner: Arc<Inner>, rx: mpsc::Receiver<QaHotkeyEvent>) {
 // ─────────────────────── coding agent hotkey supervisor ───────────────────────
 
 fn coding_agent_hotkey_supervisor_loop(inner: Arc<Inner>) {
-    let mut attempts: u32 = 0;
     loop {
         if inner.shutdown.load(Ordering::SeqCst) {
             return;
         }
-        // 退役：Cloud Agent 的触发已统一到「长按右 Option」（见 dictation 长按计时器），
-        // 不再使用 ⌘⇧J/⌘⇧Enter 全局组合键。把残留的 panel/quick 绑定一次性清空并持久化，
-        // 之后 panel/quick 恒为 None，本监听器只会反注册 + 空转。
-        {
-            let prefs = inner.prefs.get();
-            if prefs.coding_agent_panel_hotkey.is_some() || prefs.coding_agent_quick_hotkey.is_some()
-            {
-                let mut migrated = prefs.clone();
-                migrated.coding_agent_panel_hotkey = None;
-                migrated.coding_agent_quick_hotkey = None;
-                if inner.prefs.set(migrated.clone()).is_ok() {
-                    if let Some(app) = inner.app.lock().clone() {
-                        let _ = app.emit("prefs:changed", &migrated);
-                        let _ = app.emit_to("main", "prefs:changed", &migrated);
-                    }
-                }
-                log::info!("[coord] Cloud Agent 组合键已清空，改用长按右 Option 触发");
-            }
-        }
-        let prefs = inner.prefs.get();
-        let panel = prefs.coding_agent_panel_hotkey.clone();
-        let quick = prefs.coding_agent_quick_hotkey.clone();
-
-        // 功能关闭，或两个键都没配 → 反注册并睡着等 prefs 改动。
-        if !prefs.coding_agent_enabled || (panel.is_none() && quick.is_none()) {
-            inner.coding_agent_hotkey.lock().take();
-            std::thread::sleep(std::time::Duration::from_secs(5));
-            continue;
-        }
-        if inner.coding_agent_hotkey.lock().is_some() {
-            std::thread::sleep(std::time::Duration::from_secs(5));
-            continue;
-        }
-        let app = match inner.app.lock().clone() {
-            Some(a) => a,
-            None => {
-                std::thread::sleep(std::time::Duration::from_secs(1));
-                continue;
-            }
-        };
-        let (tx, rx) = mpsc::channel::<CodingAgentHotkeyEvent>();
-        let (init_tx, init_rx) =
-            mpsc::sync_channel::<Result<CodingAgentHotkeyMonitor, CodingAgentHotkeyError>>(1);
-        let panel_for_main = panel.clone();
-        let quick_for_main = quick.clone();
-        let _ = app.run_on_main_thread(move || {
-            let result = CodingAgentHotkeyMonitor::start(panel_for_main, quick_for_main, tx);
-            let _ = init_tx.send(result);
-        });
-        let init_result = match init_rx.recv_timeout(std::time::Duration::from_secs(5)) {
-            Ok(r) => r,
-            Err(_) => {
-                attempts += 1;
-                if attempts <= 3 || attempts % 10 == 0 {
-                    log::warn!("[coord] 快速 Agent 热键第 {attempts} 次注册超时；3s 后重试");
-                }
-                std::thread::sleep(std::time::Duration::from_secs(3));
-                continue;
-            }
-        };
-        match init_result {
-            Ok(monitor) => {
-                *inner.coding_agent_hotkey.lock() = Some(monitor);
-                log::info!("[coord] 快速 Agent 热键已注册（panel + quick）");
-                let inner_clone = Arc::clone(&inner);
-                std::thread::Builder::new()
-                    .name("openless-coding-agent-hotkey-bridge".into())
-                    .spawn(move || coding_agent_hotkey_bridge_loop(inner_clone, rx))
-                    .ok();
-                attempts = 0;
-            }
-            Err(e) => {
-                attempts += 1;
-                if attempts <= 3 || attempts % 10 == 0 {
-                    log::warn!("[coord] 快速 Agent 热键第 {attempts} 次注册失败: {e}; 3s 后重试");
-                }
-                std::thread::sleep(std::time::Duration::from_secs(3));
-            }
-        }
+        update_coding_agent_hotkey_binding_now(&inner);
+        std::thread::sleep(std::time::Duration::from_secs(5));
     }
 }
 
-fn coding_agent_hotkey_bridge_loop(inner: Arc<Inner>, rx: mpsc::Receiver<CodingAgentHotkeyEvent>) {
+fn update_coding_agent_hotkey_binding_now(inner: &Arc<Inner>) {
+    #[cfg(not(target_os = "macos"))]
+    {
+        // Less Computer is intentionally macOS-only for now; keep Windows/Linux hidden and inert.
+        take_coding_agent_hotkeys_on_main_thread(inner);
+        return;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let prefs = inner.prefs.get();
+        let Some(binding) = prefs.coding_agent_voice_hotkey.clone() else {
+            take_coding_agent_hotkeys_on_main_thread(inner);
+            log::info!("[less-computer] hotkey disabled");
+            return;
+        };
+        if !prefs.coding_agent_enabled || is_unconfigured_shortcut(&binding) {
+            take_coding_agent_hotkeys_on_main_thread(inner);
+            return;
+        }
+
+        if let Some(modifier_binding) = less_computer_modifier_binding(&binding) {
+            take_coding_agent_combo_hotkey_on_main_thread(inner);
+            if let Some(monitor) = inner.coding_agent_modifier_hotkey.lock().as_ref() {
+                monitor.update_binding(modifier_binding);
+                return;
+            }
+            let (tx, rx) = mpsc::channel::<HotkeyEvent>();
+            match HotkeyMonitor::start(modifier_binding, tx) {
+                Ok(monitor) => {
+                    *inner.coding_agent_modifier_hotkey.lock() = Some(monitor);
+                    log::info!("[less-computer] modifier hotkey installed ({})", binding.display_label());
+                    let bridge_inner = Arc::clone(inner);
+                    std::thread::Builder::new()
+                        .name("openless-less-computer-modifier-bridge".into())
+                        .spawn(move || less_computer_modifier_bridge_loop(bridge_inner, rx))
+                        .ok();
+                }
+                Err(e) => log::warn!("[less-computer] modifier hotkey install failed: {e}"),
+            }
+            return;
+        }
+
+        inner.coding_agent_modifier_hotkey.lock().take();
+        let app = match inner.app.lock().clone() {
+            Some(app) => app,
+            None => {
+                log::warn!("[less-computer] AppHandle 未 bind，跳过组合键注册");
+                return;
+            }
+        };
+        let inner_clone = Arc::clone(inner);
+        let binding_for_main = binding.clone();
+        let _ = app.run_on_main_thread(move || {
+            if let Some(monitor) = inner_clone.coding_agent_combo_hotkey.lock().as_ref() {
+                if let Err(e) = monitor.update_binding(binding_for_main.clone()) {
+                    log::warn!("[less-computer] combo hotkey update failed: {e}");
+                }
+                return;
+            }
+            let (tx, rx) = mpsc::channel::<ComboHotkeyEvent>();
+            match ComboHotkeyMonitor::start(binding_for_main.clone(), tx) {
+                Ok(monitor) => {
+                    *inner_clone.coding_agent_combo_hotkey.lock() = Some(monitor);
+                    log::info!("[less-computer] combo hotkey installed ({})", binding_for_main.display_label());
+                    let bridge_inner = Arc::clone(&inner_clone);
+                    std::thread::Builder::new()
+                        .name("openless-less-computer-combo-bridge".into())
+                        .spawn(move || less_computer_combo_bridge_loop(bridge_inner, rx))
+                        .ok();
+                }
+                Err(e) => log::warn!("[less-computer] combo hotkey install failed: {e}"),
+            }
+        });
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn less_computer_modifier_binding(
+    binding: &crate::types::ShortcutBinding,
+) -> Option<crate::types::HotkeyBinding> {
+    let trigger = crate::shortcut_binding::legacy_modifier_trigger(binding)?;
+    Some(crate::types::HotkeyBinding {
+        trigger,
+        mode: crate::types::HotkeyMode::Hold,
+        keys: None,
+    })
+}
+
+fn less_computer_modifier_bridge_loop(inner: Arc<Inner>, rx: mpsc::Receiver<HotkeyEvent>) {
     while let Ok(evt) = rx.recv() {
         if inner.shortcut_recording_active.load(Ordering::SeqCst) {
             continue;
         }
         let inner_cloned = Arc::clone(&inner);
-        async_runtime::spawn(async move {
-            match evt {
-                // 快取用键 = 选中文本润色（选中→Claude 润色→回插替换）。
-                CodingAgentHotkeyEvent::QuickPressed => {
-                    handle_coding_agent_quick(&inner_cloned).await;
-                }
-                // 面板键 = Cloud Agent（语音→ASR→Claude→结果弹窗），完整流程开发中。
-                CodingAgentHotkeyEvent::PanelPressed => {
-                    handle_coding_agent_panel(&inner_cloned).await;
-                }
+        match evt {
+            HotkeyEvent::Pressed => {
+                async_runtime::block_on(async { handle_less_computer_pressed(&inner_cloned).await });
             }
-        });
+            HotkeyEvent::Released => {
+                async_runtime::block_on(async { handle_less_computer_released(&inner_cloned).await });
+            }
+            HotkeyEvent::Cancelled => cancel_session(&inner_cloned),
+            HotkeyEvent::TranslationModifierPressed | HotkeyEvent::QaShortcutPressed => {}
+        }
     }
 }
 
-/// 面板键 = Cloud Agent：录音 → ASR → Claude 无头跑小任务 → 结果弹窗。
-/// 完整语音流程开发中，先给用户一个明确的可见提示，避免静默。
-async fn handle_coding_agent_panel(inner: &Arc<Inner>) {
-    log::info!("[coding-agent] 面板键：Cloud Agent 语音功能开发中");
-    // 用 Done（中性色）而非 Error（红色）——这是「敬请期待」的信息提示，不是报错。
-    emit_capsule(
-        inner,
-        CapsuleState::Done,
-        0.0,
-        0,
-        Some("Cloud Agent 语音功能开发中，敬请期待".to_string()),
-        None,
-    );
+fn less_computer_combo_bridge_loop(inner: Arc<Inner>, rx: mpsc::Receiver<ComboHotkeyEvent>) {
+    while let Ok(evt) = rx.recv() {
+        if inner.shortcut_recording_active.load(Ordering::SeqCst) {
+            continue;
+        }
+        let inner_cloned = Arc::clone(&inner);
+        match evt {
+            ComboHotkeyEvent::Pressed => {
+                async_runtime::block_on(async { handle_less_computer_pressed(&inner_cloned).await });
+            }
+            ComboHotkeyEvent::Released => {
+                async_runtime::block_on(async { handle_less_computer_released(&inner_cloned).await });
+            }
+        }
+    }
+}
+
+async fn handle_less_computer_pressed(inner: &Arc<Inner>) {
+    let prefs = inner.prefs.get();
+    if !prefs.coding_agent_enabled {
+        return;
+    }
+    if !matches!(inner.state.lock().phase, SessionPhase::Idle) {
+        log::info!("[less-computer] press ignored: dictation session already active");
+        return;
+    }
+    if !matches!(inner.qa_state.lock().phase, QaPhase::Idle) {
+        log::info!("[less-computer] press ignored: QA session active");
+        return;
+    }
+
+    if begin_session(inner).await.is_err() {
+        return;
+    }
+    let mut state = inner.state.lock();
+    if matches!(state.phase, SessionPhase::Starting | SessionPhase::Listening) {
+        state.voice_agent = true;
+        log::info!("[less-computer] voice session started (session={:?})", state.session_id);
+    }
+}
+
+async fn handle_less_computer_released(inner: &Arc<Inner>) {
+    let (phase, voice_agent) = {
+        let state = inner.state.lock();
+        (state.phase, state.voice_agent)
+    };
+    if !voice_agent {
+        return;
+    }
+    match phase {
+        SessionPhase::Listening => {
+            let _ = end_session(inner).await;
+        }
+        SessionPhase::Starting => {
+            request_stop_during_starting(inner, "less-computer release edge");
+        }
+        _ => {}
+    }
+}
+
+fn take_coding_agent_hotkeys_on_main_thread(inner: &Arc<Inner>) {
+    inner.coding_agent_modifier_hotkey.lock().take();
+    take_coding_agent_combo_hotkey_on_main_thread(inner);
+}
+
+fn take_coding_agent_combo_hotkey_on_main_thread(inner: &Arc<Inner>) {
+    let app = inner.app.lock().clone();
+    if let Some(app) = app {
+        let inner = Arc::clone(inner);
+        let _ = app.run_on_main_thread(move || {
+            inner.coding_agent_combo_hotkey.lock().take();
+        });
+    } else {
+        inner.coding_agent_combo_hotkey.lock().take();
+    }
 }
 
 /// 快取用：抓当前选中文本 → Claude 润色 → 回插（替换选区）。全程胶囊反馈。
@@ -4222,11 +4303,10 @@ mod tests {
         std::env::remove_var("OPENLESS_HOTKEY_INJECTION_DRY_RUN");
     }
 
-    /// 复现并验证目标 2(a)：按下 Cloud Agent 面板键必须弹出可见胶囊。
-    /// 修复前因热键注册失败，按下根本到不了 handler，屏幕毫无反应；这里直接驱动
-    /// bridge 会调用的 handler，断言 emit_capsule 确实下发了可见的 Error 胶囊。
+    /// 复现并验证目标 2(a)：按下 Less Computer 键必须弹出可见胶囊。
+    /// 这里直接驱动 bridge 会调用的 handler，断言 begin_session 确实下发了可见胶囊。
     #[tokio::test]
-    async fn coding_agent_panel_press_emits_visible_capsule() {
+    async fn less_computer_press_emits_visible_capsule() {
         let _guard = ENV_LOCK.lock().await;
         std::env::set_var("OPENLESS_HOTKEY_INJECTION_DRY_RUN", "1");
 
@@ -4239,13 +4319,13 @@ mod tests {
         // 前置：还没弹过任何胶囊。
         assert!(coordinator.inner.last_capsule_state.lock().is_none());
 
-        // 等价于「按下面板键」：bridge_loop 收到 PanelPressed 后就是调这个 handler。
-        super::handle_coding_agent_panel(&coordinator.inner).await;
+        // 等价于「按下 Less Computer 键」：bridge_loop 收到 Pressed 后就是调这个 handler。
+        super::handle_less_computer_pressed(&coordinator.inner).await;
 
         assert_eq!(
             *coordinator.inner.last_capsule_state.lock(),
-            Some(CapsuleState::Done),
-            "按下 Cloud Agent 面板键必须弹出可见胶囊（中性的开发中提示，非红色报错）"
+            Some(CapsuleState::Recording),
+            "按下 Less Computer 键必须进入录音并弹出可见胶囊"
         );
         std::env::remove_var("OPENLESS_HOTKEY_INJECTION_DRY_RUN");
     }

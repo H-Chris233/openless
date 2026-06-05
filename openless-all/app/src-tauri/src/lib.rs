@@ -15,7 +15,6 @@ mod asr;
 mod audio_mute;
 mod cli;
 mod coding_agent;
-mod coding_agent_hotkey;
 mod combo_hotkey;
 mod commands;
 mod coordinator;
@@ -510,6 +509,7 @@ pub fn run() {
                 let coordinator = app.state::<Arc<coordinator::Coordinator>>();
                 coordinator.stop_hotkey_listener();
                 coordinator.stop_qa_hotkey_listener();
+                coordinator.stop_coding_agent_hotkey_listener();
                 coordinator.stop_combo_hotkey_listener();
                 coordinator.stop_translation_hotkey_listener();
                 coordinator.stop_switch_style_hotkey_listener();
