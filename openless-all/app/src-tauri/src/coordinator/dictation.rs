@@ -14,6 +14,10 @@ use super::*;
 const HOTKEY_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(250);
 const STREAMING_INSERT_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(12);
 
+/// Cloud Agent 语音：长按听写键达到此阈值（仍按住 + 仍在录音）即把当前会话升级成语音
+/// Agent。设得比正常点按明显长，避免误触；短按（点一下开始听写）完全不受影响。
+const VOICE_AGENT_LONG_PRESS: std::time::Duration = std::time::Duration::from_millis(550);
+
 /// 跑流式润色路径（opt-in，跨平台）。
 ///
 /// 平台差异：
@@ -475,6 +479,10 @@ pub(super) async fn handle_pressed(inner: &Arc<Inner>) {
                 return;
             }
             let _ = begin_session(inner).await;
+            // 点按 = 听写（不变）；长按超阈值 = 升级成语音 Agent。仅在 Agent 功能开启时武装。
+            if inner.prefs.get().coding_agent_enabled {
+                arm_voice_agent_long_press(inner);
+            }
         }
         (HotkeyMode::Toggle, SessionPhase::Listening) => {
             let _ = end_session(inner).await;
@@ -511,6 +519,26 @@ pub(super) async fn handle_released(inner: &Arc<Inner>) {
     let mode = inner.prefs.get().hotkey.mode;
     let phase = inner.state.lock().phase;
     log::info!("[coord] hotkey released (mode={mode:?}, phase={phase:?})");
+    // Toggle 模式下，普通听写松手不做事（点一下停）；但若当前会话已升级成语音 Agent
+    // （长按触发），松手 = 结束「按住说话」并把转写交给 Claude。Starting 阶段则排队。
+    if mode == HotkeyMode::Toggle {
+        let voice_agent = {
+            let st = inner.state.lock();
+            st.voice_agent && matches!(st.phase, SessionPhase::Listening | SessionPhase::Starting)
+        };
+        if voice_agent {
+            match phase {
+                SessionPhase::Listening => {
+                    let _ = end_session(inner).await;
+                }
+                SessionPhase::Starting => {
+                    request_stop_during_starting(inner, "voice-agent release edge");
+                }
+                _ => {}
+            }
+        }
+        return;
+    }
     if mode == HotkeyMode::Hold {
         match phase {
             SessionPhase::Listening => {
@@ -523,6 +551,108 @@ pub(super) async fn handle_released(inner: &Arc<Inner>) {
             _ => {}
         }
     }
+}
+
+/// 长按计时器：begin_session 后武装。到点时若热键仍按住、仍是同一会话、且尚未升级，
+/// 就把当前会话标记为语音 Agent。短按（计时器到点前已松手）不受影响。
+fn arm_voice_agent_long_press(inner: &Arc<Inner>) {
+    let session_id = inner.state.lock().session_id;
+    let inner = Arc::clone(inner);
+    async_runtime::spawn(async move {
+        tokio::time::sleep(VOICE_AGENT_LONG_PRESS).await;
+        // 已松手 → 这是一次普通点按（听写），不升级。
+        if !inner.hotkey_trigger_held.load(Ordering::SeqCst) {
+            return;
+        }
+        let mut st = inner.state.lock();
+        if st.session_id == session_id
+            && !st.voice_agent
+            && matches!(st.phase, SessionPhase::Starting | SessionPhase::Listening)
+        {
+            st.voice_agent = true;
+            log::info!("[coord] 长按升级为 Cloud Agent 语音会话 (session={session_id:?})");
+        }
+    });
+}
+
+/// 语音 Agent 收尾：把转写当作指令交给无头 Claude，结果以胶囊展示（不插入到光标）。
+async fn run_voice_agent_transcript(
+    inner: &Arc<Inner>,
+    _session_id: SessionId,
+    transcript: String,
+    elapsed: u64,
+) -> Result<(), String> {
+    log::info!(
+        "[coord] Cloud Agent 语音：指令 {} 字",
+        transcript.chars().count()
+    );
+    emit_capsule(
+        inner,
+        CapsuleState::Polishing,
+        0.0,
+        elapsed,
+        Some("Claude 处理中…".to_string()),
+        None,
+    );
+
+    let prefs = inner.prefs.get();
+    let prompt = format!(
+        "下面是用户的语音指令，请直接完成它并只返回结果文本（不要解释、不要前后缀、不要引号）：\n\n{transcript}"
+    );
+    let mut req = crate::coding_agent::CodingAgentRequest::new("voice-agent", prompt);
+    req.model = prefs
+        .coding_agent_model
+        .clone()
+        .filter(|m| !m.trim().is_empty())
+        .or_else(|| Some("sonnet".to_string()));
+    // 只读 Plan 模式：安全 MVP——返回文本、不产生副作用。后续要工具操作再放开。
+    req.permission_mode = crate::coding_agent::CodingAgentPermissionMode::Plan;
+    req.allowed_tools = Vec::new();
+    req.max_budget_usd = Some(0.5);
+    req.timeout_secs = 90;
+    req.session_persistence = false;
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let run = async_runtime::spawn(async move {
+        crate::coding_agent::run_claude_agent("claude", req, tx, cancel).await
+    });
+
+    let mut final_text = String::new();
+    let mut error_msg: Option<String> = None;
+    while let Some(ev) = rx.recv().await {
+        match ev {
+            crate::coding_agent::CodingAgentEvent::Completed { text, .. } => final_text = text,
+            crate::coding_agent::CodingAgentEvent::Error { message, .. } => {
+                error_msg = Some(message)
+            }
+            _ => {}
+        }
+    }
+    let run_result = run.await;
+    let final_text = final_text.trim().to_string();
+
+    inner.state.lock().phase = SessionPhase::Idle;
+    if final_text.is_empty() {
+        let msg = error_msg
+            .or_else(|| match run_result {
+                Ok(Err(e)) => Some(e.to_string()),
+                _ => None,
+            })
+            .unwrap_or_else(|| "Claude 无结果（确认已登录 claude 且额度充足）".to_string());
+        log::warn!("[coord] Cloud Agent 语音失败: {msg}");
+        emit_capsule(inner, CapsuleState::Error, 0.0, elapsed, Some(msg), None);
+        schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
+        return Err("voice agent empty".to_string());
+    }
+
+    log::info!(
+        "[coord] Cloud Agent 语音：返回 {} 字",
+        final_text.chars().count()
+    );
+    emit_capsule(inner, CapsuleState::Done, 0.0, elapsed, Some(final_text), None);
+    schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
+    Ok(())
 }
 
 pub(super) fn request_stop_during_starting(inner: &Arc<Inner>, reason: &str) {
@@ -1531,6 +1661,12 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
             raw.text = corrected;
         }
     }
+
+    // Cloud Agent 语音分流：长按升级的会话不走润色/插入，转写交给 Claude 跑任务、结果弹胶囊。
+    if inner.state.lock().voice_agent {
+        return run_voice_agent_transcript(inner, current_session_id, raw.text.clone(), elapsed).await;
+    }
+
     emit_capsule(inner, CapsuleState::Polishing, 0.0, elapsed, None, None);
 
     let prefs = inner.prefs.get();

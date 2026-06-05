@@ -1076,14 +1076,6 @@ pub(crate) fn default_coding_agent_panel_hotkey() -> Option<ShortcutBinding> {
     })
 }
 
-/// 快取键（选中文本润色）默认值：⌘⇧J。供热键自愈逻辑回退使用。
-pub(crate) fn default_coding_agent_quick_hotkey() -> Option<ShortcutBinding> {
-    Some(ShortcutBinding {
-        primary: "J".into(),
-        modifiers: vec!["cmd".into(), "shift".into()],
-    })
-}
-
 fn default_translation_hotkey() -> ShortcutBinding {
     ShortcutBinding {
         primary: "Shift".into(),

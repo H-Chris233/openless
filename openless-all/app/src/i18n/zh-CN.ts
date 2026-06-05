@@ -739,6 +739,8 @@ export const zhCN = {
       agentPolishDesc: '选中文本 → 按键 → Claude 润色 → 替换选区。',
       agentVoice: 'Cloud Agent（语音）',
       agentVoiceDesc: '按键 → 说话 → Claude 执行任务 → 结果弹胶囊显示。（开发中）',
+      agentVoiceHint: '长按听写键说话，松开后 Claude 执行并把结果弹胶囊显示。需先在「高级」里开启。',
+      agentVoiceTrigger: '长按听写键',
       enable: '启用',
       disable: '停用',
       confirmHint: '点击右侧 ✓',

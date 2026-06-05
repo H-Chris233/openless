@@ -741,6 +741,8 @@ export const zhTW: typeof zhCN = {
       agentPolishDesc: '選取文字 → 按鍵 → Claude 潤色 → 取代選取。',
       agentVoice: 'Cloud Agent（語音）',
       agentVoiceDesc: '按鍵 → 說話 → Claude 執行任務 → 結果彈膠囊顯示。（開發中）',
+      agentVoiceHint: '長按聽寫鍵說話，放開後 Claude 執行並把結果彈膠囊顯示。需先在「進階」裡開啟。',
+      agentVoiceTrigger: '長按聽寫鍵',
       enable: '啟用',
       disable: '停用',
       confirmHint: '點擊右側 ✓',

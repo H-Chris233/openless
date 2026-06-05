@@ -743,6 +743,8 @@ export const ko: typeof zhCN = {
       agentPolishDesc: '텍스트 선택 → 키 → Claude 다듬기 → 선택 영역 교체.',
       agentVoice: 'Cloud Agent(음성)',
       agentVoiceDesc: '키 → 말하기 → Claude 작업 실행 → 결과 캡슐 표시. (곧 지원)',
+      agentVoiceHint: '받아쓰기 키를 길게 눌러 말하고 손을 떼면 Claude가 작업을 실행해 결과를 캡슐로 표시합니다. 먼저 「고급」에서 켜세요.',
+      agentVoiceTrigger: '받아쓰기 키 길게 누르기',
       enable: '활성화',
       disable: '비활성화',
       confirmHint: '오른쪽 ✓ 클릭',

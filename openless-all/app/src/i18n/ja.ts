@@ -743,6 +743,8 @@ export const ja: typeof zhCN = {
       agentPolishDesc: 'テキスト選択 → キー → Claude が推敲 → 選択範囲を置換。',
       agentVoice: 'Cloud Agent（音声）',
       agentVoiceDesc: 'キー → 話す → Claude がタスク実行 → 結果をカプセル表示。（近日対応）',
+      agentVoiceHint: 'ディクテーションキーを長押しして話し、離すと Claude が実行して結果をカプセル表示します。先に「詳細」で有効化してください。',
+      agentVoiceTrigger: 'ディクテーションキー長押し',
       enable: '有効化',
       disable: '無効化',
       confirmHint: '右側の ✓ をクリック',

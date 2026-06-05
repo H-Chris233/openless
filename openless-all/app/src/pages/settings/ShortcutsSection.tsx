@@ -155,55 +155,15 @@ export function ShortcutsSection() {
           </button>
         )}
       </SettingRow>
-      <SettingRow label={t('settings.shortcuts.agentPolish')} desc={t('settings.shortcuts.agentPolishDesc')}>
-        {prefs.codingAgentQuickHotkey ? (
-          <ShortcutRecorder
-            value={prefs.codingAgentQuickHotkey}
-            alignRecordButton
-            comboOnly
-            onSave={async b => {
-              await savePrefs({ ...prefs, codingAgentQuickHotkey: b });
-            }}
-            onDisable={() => void savePrefs({ ...prefs, codingAgentQuickHotkey: null })}
-          />
-        ) : (
-          <button
-            onClick={() =>
-              void savePrefs({
-                ...prefs,
-                codingAgentQuickHotkey: { primary: 'J', modifiers: ['cmd', 'shift'] },
-              })
-            }
-            style={enableBtnStyle}
-          >
-            {t('settings.shortcuts.enable', 'Enable')}
-          </button>
-        )}
-      </SettingRow>
-      <SettingRow label={t('settings.shortcuts.agentVoice')} desc={t('settings.shortcuts.agentVoiceDesc')}>
-        {prefs.codingAgentPanelHotkey ? (
-          <ShortcutRecorder
-            value={prefs.codingAgentPanelHotkey}
-            alignRecordButton
-            comboOnly
-            onSave={async b => {
-              await savePrefs({ ...prefs, codingAgentPanelHotkey: b });
-            }}
-            onDisable={() => void savePrefs({ ...prefs, codingAgentPanelHotkey: null })}
-          />
-        ) : (
-          <button
-            onClick={() =>
-              void savePrefs({
-                ...prefs,
-                codingAgentPanelHotkey: { primary: 'Enter', modifiers: ['cmd', 'shift'] },
-              })
-            }
-            style={enableBtnStyle}
-          >
-            {t('settings.shortcuts.enable', 'Enable')}
-          </button>
-        )}
+      <SettingRow label={t('settings.shortcuts.agentVoice')} desc={t('settings.shortcuts.agentVoiceHint')}>
+        <kbd style={{
+          display: 'inline-flex', alignItems: 'center', gap: 4,
+          padding: '4px 10px', fontSize: 12, fontFamily: 'var(--ol-font-mono)',
+          borderRadius: 6, background: 'var(--ol-surface-2)',
+          border: '0.5px solid var(--ol-line-strong)',
+          boxShadow: '0 1px 0 rgba(0,0,0,0.04)',
+          color: 'var(--ol-ink-2)',
+        }}>{t('settings.shortcuts.agentVoiceTrigger')}</kbd>
       </SettingRow>
       {readonlyRows.map(([k, v]) => (
         <SettingRow key={k} label={k}>

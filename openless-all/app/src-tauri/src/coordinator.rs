@@ -1341,27 +1341,28 @@ fn coding_agent_hotkey_supervisor_loop(inner: Arc<Inner>) {
         if inner.shutdown.load(Ordering::SeqCst) {
             return;
         }
-        let prefs = inner.prefs.get();
-
-        // 自愈：global-hotkey 无法注册「单修饰键」(如 Right ⌘)。历史版本/手滑可能存进
-        // 这种无效绑定，导致热键彻底失效且无任何反馈。检测到就换成有效默认组合键并持久化
-        // + 通知前端，保证「按下有反应」。逻辑见 coding_agent_hotkey::sanitize_agent_hotkeys。
-        let (panel, quick, sanitized) = crate::coding_agent_hotkey::sanitize_agent_hotkeys(
-            prefs.coding_agent_panel_hotkey.clone(),
-            prefs.coding_agent_quick_hotkey.clone(),
-        );
-        if sanitized {
-            log::warn!("[coord] 快速 Agent 热键含无效单修饰键，已自愈为有效组合键");
-            let mut migrated = prefs.clone();
-            migrated.coding_agent_panel_hotkey = panel.clone();
-            migrated.coding_agent_quick_hotkey = quick.clone();
-            if inner.prefs.set(migrated.clone()).is_ok() {
-                if let Some(app) = inner.app.lock().clone() {
-                    let _ = app.emit("prefs:changed", &migrated);
-                    let _ = app.emit_to("main", "prefs:changed", &migrated);
+        // 退役：Cloud Agent 的触发已统一到「长按右 Option」（见 dictation 长按计时器），
+        // 不再使用 ⌘⇧J/⌘⇧Enter 全局组合键。把残留的 panel/quick 绑定一次性清空并持久化，
+        // 之后 panel/quick 恒为 None，本监听器只会反注册 + 空转。
+        {
+            let prefs = inner.prefs.get();
+            if prefs.coding_agent_panel_hotkey.is_some() || prefs.coding_agent_quick_hotkey.is_some()
+            {
+                let mut migrated = prefs.clone();
+                migrated.coding_agent_panel_hotkey = None;
+                migrated.coding_agent_quick_hotkey = None;
+                if inner.prefs.set(migrated.clone()).is_ok() {
+                    if let Some(app) = inner.app.lock().clone() {
+                        let _ = app.emit("prefs:changed", &migrated);
+                        let _ = app.emit_to("main", "prefs:changed", &migrated);
+                    }
                 }
+                log::info!("[coord] Cloud Agent 组合键已清空，改用长按右 Option 触发");
             }
         }
+        let prefs = inner.prefs.get();
+        let panel = prefs.coding_agent_panel_hotkey.clone();
+        let quick = prefs.coding_agent_quick_hotkey.clone();
 
         // 功能关闭，或两个键都没配 → 反注册并睡着等 prefs 改动。
         if !prefs.coding_agent_enabled || (panel.is_none() && quick.is_none()) {

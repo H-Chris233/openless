@@ -741,6 +741,8 @@ export const en: typeof zhCN = {
       agentPolishDesc: 'Select text → press → Claude polishes it → replaces the selection.',
       agentVoice: 'Cloud Agent (voice)',
       agentVoiceDesc: 'Press → speak → Claude runs the task → result shown in a capsule. (Coming soon)',
+      agentVoiceHint: 'Long-press the dictation key to talk; release and Claude runs the task and shows the result in a capsule. Enable it under Advanced first.',
+      agentVoiceTrigger: 'Long-press dictation key',
       enable: 'Enable',
       disable: 'Disable',
       confirmHint: 'Click ✓ on the capsule',
