@@ -259,6 +259,10 @@ struct Inner {
     /// 监听器（global-hotkey crate）。`None` 表示功能关闭或还没成功安装。
     qa_hotkey: Mutex<Option<QaHotkeyMonitor>>,
     coding_agent_hotkey: Mutex<Option<CodingAgentHotkeyMonitor>>,
+    /// 最近一次 emit_capsule 下发的 state，纯内省/测试用途（在 app 句柄校验之前写入，
+    /// 因此无 GUI 的测试环境也能断言「按下热键 → 弹了哪种胶囊」）。写入是单次廉价
+    /// 加锁，对 ~30Hz 录音回调可忽略。
+    last_capsule_state: Mutex<Option<CapsuleState>>,
     /// QA 单独的 session 状态，与 dictation 的 SessionPhase 不冲突。
     qa_state: Mutex<QaSessionState>,
     /// 最近一次应用到 capsule 窗口的几何状态。避免录音 level tick 反复触发
@@ -340,6 +344,7 @@ impl Coordinator {
                     translation_modifier_seen: AtomicBool::new(false),
                     qa_hotkey: Mutex::new(None),
                     coding_agent_hotkey: Mutex::new(None),
+                    last_capsule_state: Mutex::new(None),
                     qa_state: Mutex::new(QaSessionState::default()),
                     capsule_layout: Mutex::new(None),
                     qa_asr: Mutex::new(None),
@@ -403,6 +408,7 @@ impl Coordinator {
                 translation_modifier_seen: AtomicBool::new(false),
                 qa_hotkey: Mutex::new(None),
                 coding_agent_hotkey: Mutex::new(None),
+                last_capsule_state: Mutex::new(None),
                 qa_state: Mutex::new(QaSessionState::default()),
                 capsule_layout: Mutex::new(None),
                 qa_asr: Mutex::new(None),
@@ -4214,6 +4220,34 @@ mod tests {
         std::env::remove_var("OPENLESS_HOTKEY_INJECTION_DRY_RUN");
     }
 
+    /// 复现并验证目标 2(a)：按下 Cloud Agent 面板键必须弹出可见胶囊。
+    /// 修复前因热键注册失败，按下根本到不了 handler，屏幕毫无反应；这里直接驱动
+    /// bridge 会调用的 handler，断言 emit_capsule 确实下发了可见的 Error 胶囊。
+    #[tokio::test]
+    async fn coding_agent_panel_press_emits_visible_capsule() {
+        let _guard = ENV_LOCK.lock().await;
+        std::env::set_var("OPENLESS_HOTKEY_INJECTION_DRY_RUN", "1");
+
+        let coordinator = Coordinator::new();
+        {
+            let mut prefs = coordinator.inner.prefs.get();
+            prefs.coding_agent_enabled = true;
+            coordinator.inner.prefs.set(prefs).unwrap();
+        }
+        // 前置：还没弹过任何胶囊。
+        assert!(coordinator.inner.last_capsule_state.lock().is_none());
+
+        // 等价于「按下面板键」：bridge_loop 收到 PanelPressed 后就是调这个 handler。
+        super::handle_coding_agent_panel(&coordinator.inner).await;
+
+        assert_eq!(
+            *coordinator.inner.last_capsule_state.lock(),
+            Some(CapsuleState::Error),
+            "按下 Cloud Agent 面板键必须弹出可见胶囊（开发中提示）"
+        );
+        std::env::remove_var("OPENLESS_HOTKEY_INJECTION_DRY_RUN");
+    }
+
     #[tokio::test]
     async fn begin_session_dry_run_enters_listening_and_clears_stale_edges() {
         let _guard = ENV_LOCK.lock().await;
@@ -5404,6 +5438,8 @@ fn emit_capsule(
     message: Option<String>,
     inserted_chars: Option<u32>,
 ) {
+    // 在 app 句柄校验之前记录，便于无 GUI 的测试断言「按下热键 → 弹了哪种胶囊」。
+    *inner.last_capsule_state.lock() = Some(state);
     let app_opt = inner.app.lock().clone();
     let Some(app) = app_opt else { return };
     let translation = inner.translation_modifier_seen.load(Ordering::SeqCst);
