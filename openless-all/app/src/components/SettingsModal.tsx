@@ -91,10 +91,6 @@ export function SettingsModal({ os: _os, onClose, initialSettingsSection }: Sett
           maxWidth: 920,
           height: '100%',
           maxHeight: 620,
-          background: 'var(--ol-surface)',
-          borderRadius: 'var(--ol-shell-radius)',
-          border: '1px solid rgba(255,255,255,0.62)',
-          boxShadow: 'var(--ol-aura-shadow)',
           display: 'flex',
           overflow: 'hidden',
           animation: 'ol-modal-card-in 0.24s var(--ol-motion-spring)',
@@ -103,21 +99,19 @@ export function SettingsModal({ os: _os, onClose, initialSettingsSection }: Sett
 
         {/* ─── 单层侧栏 ────────────────────────────────────────────── */}
         <aside
+          className="ol-aura-settings-rail"
           style={{
             width: 214,
             flexShrink: 0,
-            background: 'linear-gradient(180deg, rgba(255,255,255,0.58), rgba(246,248,252,0.72))',
-            borderRight: '1px solid rgba(255,255,255,0.52)',
-            padding: '20px 14px',
             display: 'flex',
             flexDirection: 'column',
-            gap: 16,
           }}>
 
           {/* tab 组 */}
           <div style={{ position: 'relative', display: 'flex', flexDirection: 'column', gap: 1 }}>
             {pillRect && (
               <div
+                className="ol-aura-settings-pill"
                 aria-hidden
                 style={{
                   position: 'absolute',
@@ -125,10 +119,6 @@ export function SettingsModal({ os: _os, onClose, initialSettingsSection }: Sett
                   right: 0,
                   top: pillRect.top,
                   height: pillRect.height,
-                  background: 'linear-gradient(180deg, rgba(255,255,255,0.84), rgba(255,255,255,0.58))',
-                  borderRadius: 14,
-                  border: '1px solid rgba(255,255,255,0.62)',
-                  boxShadow: 'var(--ol-aura-shadow-soft)',
                   transition: 'top 0.36s var(--ol-motion-spring), height 0.36s var(--ol-motion-spring)',
                   pointerEvents: 'none',
                   zIndex: 0,
@@ -142,7 +132,7 @@ export function SettingsModal({ os: _os, onClose, initialSettingsSection }: Sett
                   key={it.id}
                   ref={el => { tabRefs.current[idx] = el; }}
                   onClick={() => setSection(it.id as SettingsSectionId)}
-                  className={active ? 'ol-nav-btn ol-nav-btn-active' : 'ol-nav-btn'}
+                  className={active ? 'ol-nav-btn ol-nav-btn-active ol-aura-settings-nav-btn' : 'ol-nav-btn ol-aura-settings-nav-btn'}
                   style={navBtnStyle}>
                   <Icon name={it.icon} size={14} />
                   <span style={{ flex: 1 }}>{t(`modal.sections.${it.id}`)}</span>
@@ -152,12 +142,12 @@ export function SettingsModal({ os: _os, onClose, initialSettingsSection }: Sett
           </div>
 
           {/* 外链组 */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 1, paddingTop: 10, borderTop: '1px solid rgba(255,255,255,0.46)' }}>
+          <div className="ol-aura-settings-links">
             {LINK_ITEMS.map(it => (
               <button
                 key={it.id}
                 onClick={() => { if (it.href) void openExternal(it.href); }}
-                className="ol-nav-btn"
+                className="ol-nav-btn ol-aura-settings-nav-btn"
                 style={navBtnStyle}>
                 <Icon name={it.icon} size={14} />
                 <span style={{ flex: 1 }}>{t(`modal.sections.${it.id}`)}</span>
@@ -171,6 +161,7 @@ export function SettingsModal({ os: _os, onClose, initialSettingsSection }: Sett
             父容器 overflow:hidden + 列向 flex；关闭按钮、section 标题固定在头部，
             只有最里层的 scroll wrapper 真正滚动。 */}
         <div
+          className="ol-aura-settings-content"
           style={{
             flex: 1,
             minWidth: 0,
@@ -178,7 +169,6 @@ export function SettingsModal({ os: _os, onClose, initialSettingsSection }: Sett
             position: 'relative',
             display: 'flex',
             flexDirection: 'column',
-            background: 'linear-gradient(180deg, rgba(255,255,255,0.56), rgba(249,250,252,0.74))',
           }}
         >
           {/* "已保存" toast：right:54 避开 28×28 关闭按钮 + 12px gap。 */}
@@ -189,33 +179,19 @@ export function SettingsModal({ os: _os, onClose, initialSettingsSection }: Sett
             offsetStyle={{ position: 'absolute', top: 16, right: 54 }}
           />
           <button
+            className="ol-aura-settings-close"
             onClick={onClose}
             style={{
               position: 'absolute', top: 14, right: 14, zIndex: 2,
               width: 28, height: 28, border: 0, borderRadius: 999,
-              background: 'rgba(255,255,255,0.38)', color: 'var(--ol-ink-3)',
               display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
               cursor: 'default',
-              transition: 'background 0.16s var(--ol-motion-quick)',
             }}
-            onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.72)')}
-            onMouseLeave={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.38)')}
             title={t('common.close')}>
             <Icon name="close" size={14} />
           </button>
 
-          <h2
-            style={{
-              margin: 0,
-              padding: '24px 28px 10px',
-              fontSize: 22,
-              fontWeight: 600,
-              letterSpacing: '-0.02em',
-              flexShrink: 0,
-              fontFamily: 'var(--ol-font-display)',
-              color: 'var(--ol-ink)',
-            }}
-          >
+          <h2 className="ol-aura-settings-title" style={{ margin: 0, flexShrink: 0 }}>
             {t(`modal.sections.${section}`)}
           </h2>
 
@@ -235,18 +211,69 @@ export function SettingsModal({ os: _os, onClose, initialSettingsSection }: Sett
           </div>
         </div>
       </div>
+      <style>{`
+        .ol-aura-settings {
+          background: var(--ol-surface);
+          border-radius: var(--ol-shell-radius);
+          border: 1px solid rgba(255,255,255,0.62);
+          box-shadow: var(--ol-aura-shadow);
+        }
+        .ol-aura-settings-rail {
+          padding: 20px 14px;
+          gap: 16px;
+          background: linear-gradient(180deg, rgba(255,255,255,0.58), rgba(246,248,252,0.72));
+          border-right: 1px solid rgba(255,255,255,0.52);
+        }
+        .ol-aura-settings-pill {
+          background: linear-gradient(180deg, rgba(255,255,255,0.84), rgba(255,255,255,0.58));
+          border-radius: 14px;
+          border: 1px solid rgba(255,255,255,0.62);
+          box-shadow: var(--ol-aura-shadow-soft);
+        }
+        .ol-aura-settings-nav-btn {
+          padding: 7px 10px;
+          border-radius: 8px;
+          border: 0;
+          background: transparent;
+          font-family: inherit;
+          font-size: 13px;
+          cursor: default;
+          text-align: left;
+          position: relative;
+          z-index: 1;
+          transition: color 0.16s var(--ol-motion-quick), background 0.16s var(--ol-motion-quick);
+        }
+        .ol-aura-settings-links {
+          display: flex;
+          flex-direction: column;
+          gap: 1px;
+          padding-top: 10px;
+          border-top: 1px solid rgba(255,255,255,0.46);
+        }
+        .ol-aura-settings-content {
+          background: linear-gradient(180deg, rgba(255,255,255,0.56), rgba(249,250,252,0.74));
+        }
+        .ol-aura-settings-close {
+          background: rgba(255,255,255,0.38);
+          color: var(--ol-ink-3);
+          transition: background 0.16s var(--ol-motion-quick);
+        }
+        .ol-aura-settings-close:hover {
+          background: rgba(255,255,255,0.72);
+        }
+        .ol-aura-settings-title {
+          padding: 24px 28px 10px;
+          font-size: 22px;
+          font-weight: 600;
+          letter-spacing: -0.02em;
+          font-family: var(--ol-font-display);
+          color: var(--ol-ink);
+        }
+      `}</style>
     </div>
   );
 }
 
 const navBtnStyle = {
   display: 'flex', alignItems: 'center', gap: 10,
-  padding: '7px 10px',
-  borderRadius: 8, border: 0,
-  background: 'transparent',
-  fontFamily: 'inherit', fontSize: 13,
-  cursor: 'default', textAlign: 'left' as const,
-  position: 'relative' as const,
-  zIndex: 1,
-  transition: 'color 0.16s var(--ol-motion-quick), background 0.16s var(--ol-motion-quick)',
 };

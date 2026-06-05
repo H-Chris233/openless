@@ -204,48 +204,19 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
             flexShrink: 0,
             display: 'flex',
             flexDirection: 'column',
-            background: 'linear-gradient(180deg, rgba(255,255,255,0.34), rgba(255,255,255,0.12))',
-            borderRight: '1px solid rgba(255,255,255,0.38)',
-            padding: '14px 12px 14px',
           }}>
 
           {/* brand */}
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 10,
-              padding: '6px 10px 16px',
-              marginBottom: 6,
-              borderRadius: 18,
-              background: 'linear-gradient(180deg, rgba(255,255,255,0.72), rgba(255,255,255,0.36))',
-              border: '1px solid rgba(255,255,255,0.5)',
-              boxShadow: 'var(--ol-aura-shadow-soft)',
-            }}
-          >
+          <div className="ol-aura-sidebar-brand">
             <img
+              className="ol-aura-sidebar-brand-mark"
               src="AppIcon.png"
               alt="OpenLess"
-              style={{
-                width: 26,
-                height: 26,
-                borderRadius: 8,
-                boxShadow: '0 10px 24px -16px rgba(47, 109, 246, 0.45)',
-              }}
             />
 
             <div>
-              <div style={{ fontSize: 14, fontWeight: 600, fontFamily: 'var(--ol-font-display)', color: 'var(--ol-ink)' }}>OpenLess</div>
-              <div
-                style={{
-                  fontSize: 10.5,
-                  color: 'var(--ol-ink-4)',
-                  fontFamily: 'var(--ol-font-mono)',
-                  letterSpacing: '.08em',
-                }}
-              >
-                VOICE CONSOLE
-              </div>
+              <div className="ol-aura-sidebar-brand-title">OpenLess</div>
+              <div className="ol-aura-sidebar-brand-kicker">VOICE CONSOLE</div>
             </div>
           </div>
 
@@ -255,6 +226,7 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
           <nav style={{ position: 'relative', display: 'flex', flexDirection: 'column', gap: 1 }}>
             {pillRect && (
               <div
+                className="ol-aura-sidebar-pill"
                 aria-hidden
                 style={{
                   position: 'absolute',
@@ -262,10 +234,6 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
                   right: 0,
                   top: pillRect.top,
                   height: pillRect.height,
-                  background: 'linear-gradient(180deg, rgba(255,255,255,0.84), rgba(255,255,255,0.58))',
-                  borderRadius: 14,
-                  border: '1px solid rgba(255,255,255,0.62)',
-                  boxShadow: 'var(--ol-aura-shadow-soft)',
                   transition: 'top 0.36s var(--ol-motion-spring), height 0.36s var(--ol-motion-spring)',
                   pointerEvents: 'none',
                   zIndex: 0,
@@ -279,18 +247,9 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
                   key={n.id}
                   ref={el => { navItemRefs.current[i] = el; }}
                   onClick={() => setCurrentTab(n.id)}
-                  className={active ? 'ol-nav-btn ol-nav-btn-active' : 'ol-nav-btn'}
+                  className={active ? 'ol-nav-btn ol-nav-btn-active ol-aura-sidebar-nav-btn' : 'ol-nav-btn ol-aura-sidebar-nav-btn'}
                   style={{
                     display: 'flex', alignItems: 'center', gap: 10,
-                    padding: '8px 12px',
-                    borderRadius: 14, border: 0,
-                    background: 'transparent',
-                    fontFamily: 'inherit', fontSize: 13,
-                    cursor: 'default',
-                    transition: 'color 0.16s var(--ol-motion-quick), background 0.16s var(--ol-motion-quick)',
-                    textAlign: 'left',
-                    position: 'relative',
-                    zIndex: 1,
                   }}>
 
                   <Icon name={n.icon} size={14} />
@@ -305,44 +264,10 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
           {/* 底部两行：上行 = 版本 chip（含 BETA 标），下行 = 设置按钮。
               单行布局在窄 sidebar 下会把「设置」挤成两行竖字 + 版本糊一起；
               翻回两行同时把顺序反过来：设置真正落到最底，版本在它上面。 */}
-          <div
-            style={{
-              display: 'flex',
-              flexDirection: 'column',
-              gap: 10,
-              padding: '12px 10px 0',
-              marginTop: 10,
-              borderTop: '1px solid rgba(255,255,255,0.36)',
-            }}
-          >
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 8,
-                flexWrap: 'wrap',
-                padding: '10px 12px',
-                fontFamily: 'var(--ol-font-sans)',
-                fontSize: 11,
-                color: 'var(--ol-ink-4)',
-                background: 'linear-gradient(180deg, rgba(255,255,255,0.68), rgba(255,255,255,0.34))',
-                border: '1px solid rgba(255,255,255,0.56)',
-                borderRadius: 'var(--ol-pill-radius)',
-                boxShadow: 'var(--ol-aura-shadow-soft)',
-              }}
-            >
+          <div className="ol-aura-sidebar-footer">
+            <div className="ol-aura-sidebar-version">
               {IS_BETA_BUILD && (
-                <span style={{
-                  display: 'inline-block',
-                  padding: '2px 8px',
-                  fontSize: 10,
-                  fontWeight: 600,
-                  letterSpacing: '0.04em',
-                  textTransform: 'uppercase',
-                  color: 'var(--ol-blue)',
-                  background: 'rgba(37,99,235,0.10)',
-                  borderRadius: 999,
-                }}>{t('shell.betaTag')}</span>
+                <span className="ol-aura-beta-tag">{t('shell.betaTag')}</span>
               )}
 
               <span>{t('shell.footer.version', { version: APP_VERSION_LABEL })}</span>
@@ -350,20 +275,9 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
 
             <button
               onClick={() => openSettings()}
-              className={settingsOpen ? 'ol-nav-btn ol-nav-btn-active' : 'ol-nav-btn'}
+              className={settingsOpen ? 'ol-nav-btn ol-nav-btn-active ol-aura-sidebar-settings' : 'ol-nav-btn ol-aura-sidebar-settings'}
               style={{
                 display: 'flex', alignItems: 'center', gap: 10,
-                padding: '10px 12px',
-                borderRadius: 16,
-                border: '1px solid rgba(255,255,255,0.5)',
-                background: settingsOpen
-                  ? 'linear-gradient(180deg, rgba(255,255,255,0.82), rgba(255,255,255,0.48))'
-                  : 'linear-gradient(180deg, rgba(255,255,255,0.48), rgba(255,255,255,0.24))',
-                boxShadow: settingsOpen ? 'var(--ol-aura-shadow-soft)' : 'none',
-                fontFamily: 'inherit', fontSize: 13,
-                cursor: 'default',
-                transition: 'color 0.16s var(--ol-motion-quick), background 0.16s var(--ol-motion-quick)',
-                textAlign: 'left',
               }}
             >
               <Icon name="settings" size={14} />
@@ -377,11 +291,10 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
             一起坐在 WindowChrome 的磨砂底板上，整体一块连续玻璃。 */}
         <div style={{ flex: 1, minWidth: 0, padding: '4px 8px 6px 0', display: 'flex' }}>
           <main
-            className="ol-console-main ol-aura-panel"
+            className="ol-console-main ol-aura-panel ol-aura-console-main"
             style={{
               flex: 1, minWidth: 0,
               overflow: 'hidden',
-              borderRadius: 'var(--ol-panel-radius)',
               display: 'flex',
               flexDirection: 'column',
             }}
@@ -462,6 +375,106 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
         .ol-nav-btn {
           color: var(--ol-ink-3);
           font-weight: 500;
+        }
+        .ol-aura-sidebar {
+          padding: 14px 12px 14px;
+          background: linear-gradient(180deg, rgba(255,255,255,0.34), rgba(255,255,255,0.12));
+          border-right: 1px solid rgba(255,255,255,0.38);
+        }
+        .ol-aura-sidebar-brand {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          padding: 6px 10px 16px;
+          margin-bottom: 6px;
+          border-radius: 18px;
+          background: linear-gradient(180deg, rgba(255,255,255,0.72), rgba(255,255,255,0.36));
+          border: 1px solid rgba(255,255,255,0.5);
+          box-shadow: var(--ol-aura-shadow-soft);
+        }
+        .ol-aura-sidebar-brand-mark {
+          width: 26px;
+          height: 26px;
+          border-radius: 8px;
+          box-shadow: 0 10px 24px -16px rgba(47, 109, 246, 0.45);
+        }
+        .ol-aura-sidebar-brand-title {
+          font-size: 14px;
+          font-weight: 600;
+          font-family: var(--ol-font-display);
+          color: var(--ol-ink);
+        }
+        .ol-aura-sidebar-brand-kicker {
+          font-size: 10.5px;
+          color: var(--ol-ink-4);
+          font-family: var(--ol-font-mono);
+          letter-spacing: .08em;
+        }
+        .ol-aura-sidebar-pill {
+          background: linear-gradient(180deg, rgba(255,255,255,0.84), rgba(255,255,255,0.58));
+          border-radius: 14px;
+          border: 1px solid rgba(255,255,255,0.62);
+          box-shadow: var(--ol-aura-shadow-soft);
+        }
+        .ol-aura-sidebar-nav-btn {
+          padding: 8px 12px;
+          border-radius: 14px;
+          border: 0;
+          background: transparent;
+          font-family: inherit;
+          font-size: 13px;
+          cursor: default;
+          transition: color 0.16s var(--ol-motion-quick), background 0.16s var(--ol-motion-quick);
+          text-align: left;
+          position: relative;
+          z-index: 1;
+        }
+        .ol-aura-sidebar-footer {
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+          padding: 12px 10px 0;
+          margin-top: 10px;
+          border-top: 1px solid rgba(255,255,255,0.36);
+        }
+        .ol-aura-sidebar-version {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          flex-wrap: wrap;
+          padding: 10px 12px;
+          font-family: var(--ol-font-sans);
+          font-size: 11px;
+          color: var(--ol-ink-4);
+          background: linear-gradient(180deg, rgba(255,255,255,0.68), rgba(255,255,255,0.34));
+          border: 1px solid rgba(255,255,255,0.56);
+          border-radius: var(--ol-pill-radius);
+          box-shadow: var(--ol-aura-shadow-soft);
+        }
+        .ol-aura-beta-tag {
+          display: inline-block;
+          padding: 2px 8px;
+          font-size: 10px;
+          font-weight: 600;
+          letter-spacing: 0.04em;
+          text-transform: uppercase;
+          color: var(--ol-blue);
+          background: rgba(37,99,235,0.10);
+          border-radius: 999px;
+        }
+        .ol-aura-sidebar-settings {
+          padding: 10px 12px;
+          border-radius: 16px;
+          border: 1px solid rgba(255,255,255,0.5);
+          background: linear-gradient(180deg, rgba(255,255,255,0.48), rgba(255,255,255,0.24));
+          box-shadow: none;
+        }
+        .ol-aura-sidebar-settings.ol-nav-btn-active {
+          background: linear-gradient(180deg, rgba(255,255,255,0.82), rgba(255,255,255,0.48));
+          box-shadow: var(--ol-aura-shadow-soft);
+        }
+        .ol-aura-console-main {
+          border-radius: var(--ol-panel-radius);
         }
         .ol-nav-btn.ol-nav-btn-active {
           color: var(--ol-ink);
