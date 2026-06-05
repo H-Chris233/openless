@@ -180,7 +180,10 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
   };
 
   return (
-    <div style={{ flex: 1, position: 'relative', display: 'flex', flexDirection: 'column', minHeight: 0, paddingTop: os === 'mac' ? 28 : 0 }}>
+    <div
+      className="ol-app-shell-bg"
+      style={{ flex: 1, position: 'relative', display: 'flex', flexDirection: 'column', minHeight: 0, paddingTop: os === 'mac' ? 28 : 0 }}
+    >
 
       {/* Main shell — flush with the frosted backplate (no separate float). */}
       <div
@@ -195,22 +198,55 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
 
         {/* Sidebar — 透明地坐在外层磨砂底板上，让 LOGO/导航/快捷键/BETA/footer 共用同一片磨砂玻璃 */}
         <aside
+          className="ol-aura-sidebar"
           style={{
-            width: 188,
+            width: 196,
             flexShrink: 0,
-            display: 'flex', flexDirection: 'column',
-            background: 'transparent',
-            padding: '10px 10px 12px',
+            display: 'flex',
+            flexDirection: 'column',
+            background: 'linear-gradient(180deg, rgba(255,255,255,0.34), rgba(255,255,255,0.12))',
+            borderRight: '1px solid rgba(255,255,255,0.38)',
+            padding: '14px 12px 14px',
           }}>
 
           {/* brand */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '2px 8px 12px' }}>
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+              padding: '6px 10px 16px',
+              marginBottom: 6,
+              borderRadius: 18,
+              background: 'linear-gradient(180deg, rgba(255,255,255,0.72), rgba(255,255,255,0.36))',
+              border: '1px solid rgba(255,255,255,0.5)',
+              boxShadow: 'var(--ol-aura-shadow-soft)',
+            }}
+          >
             <img
               src="AppIcon.png"
               alt="OpenLess"
-              style={{ width: 22, height: 22, borderRadius: 5, boxShadow: '0 1px 2px rgba(0,0,0,.1), 0 0 0 0.5px rgba(0,0,0,.06)' }} />
+              style={{
+                width: 26,
+                height: 26,
+                borderRadius: 8,
+                boxShadow: '0 10px 24px -16px rgba(47, 109, 246, 0.45)',
+              }}
+            />
 
-            <div style={{ fontSize: 13.5, fontWeight: 600, letterSpacing: '-0.01em', color: 'var(--ol-ink)' }}>OpenLess</div>
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 600, fontFamily: 'var(--ol-font-display)', color: 'var(--ol-ink)' }}>OpenLess</div>
+              <div
+                style={{
+                  fontSize: 10.5,
+                  color: 'var(--ol-ink-4)',
+                  fontFamily: 'var(--ol-font-mono)',
+                  letterSpacing: '.08em',
+                }}
+              >
+                VOICE CONSOLE
+              </div>
+            </div>
           </div>
 
           {/* nav — 滑动指示器：active pill 是 absolute 元素，currentTab 改变时 top/height
@@ -226,9 +262,10 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
                   right: 0,
                   top: pillRect.top,
                   height: pillRect.height,
-                  background: 'var(--ol-surface)',
-                  borderRadius: 8,
-                  boxShadow: '0 1px 2px rgba(0,0,0,.05), 0 0 0 0.5px rgba(0,0,0,.06)',
+                  background: 'linear-gradient(180deg, rgba(255,255,255,0.84), rgba(255,255,255,0.58))',
+                  borderRadius: 14,
+                  border: '1px solid rgba(255,255,255,0.62)',
+                  boxShadow: 'var(--ol-aura-shadow-soft)',
                   transition: 'top 0.36s var(--ol-motion-spring), height 0.36s var(--ol-motion-spring)',
                   pointerEvents: 'none',
                   zIndex: 0,
@@ -245,8 +282,8 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
                   className={active ? 'ol-nav-btn ol-nav-btn-active' : 'ol-nav-btn'}
                   style={{
                     display: 'flex', alignItems: 'center', gap: 10,
-                    padding: '7px 10px',
-                    borderRadius: 8, border: 0,
+                    padding: '8px 12px',
+                    borderRadius: 14, border: 0,
                     background: 'transparent',
                     fontFamily: 'inherit', fontSize: 13,
                     cursor: 'default',
@@ -268,17 +305,30 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
           {/* 底部两行：上行 = 版本 chip（含 BETA 标），下行 = 设置按钮。
               单行布局在窄 sidebar 下会把「设置」挤成两行竖字 + 版本糊一起；
               翻回两行同时把顺序反过来：设置真正落到最底，版本在它上面。 */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, paddingTop: 10 }}>
+          <div
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 10,
+              padding: '12px 10px 0',
+              marginTop: 10,
+              borderTop: '1px solid rgba(255,255,255,0.36)',
+            }}
+          >
             <div
               style={{
                 display: 'flex',
                 alignItems: 'center',
                 gap: 8,
                 flexWrap: 'wrap',
-                padding: '0 10px',
+                padding: '10px 12px',
                 fontFamily: 'var(--ol-font-sans)',
                 fontSize: 11,
                 color: 'var(--ol-ink-4)',
+                background: 'linear-gradient(180deg, rgba(255,255,255,0.68), rgba(255,255,255,0.34))',
+                border: '1px solid rgba(255,255,255,0.56)',
+                borderRadius: 'var(--ol-pill-radius)',
+                boxShadow: 'var(--ol-aura-shadow-soft)',
               }}
             >
               {IS_BETA_BUILD && (
@@ -303,10 +353,13 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
               className={settingsOpen ? 'ol-nav-btn ol-nav-btn-active' : 'ol-nav-btn'}
               style={{
                 display: 'flex', alignItems: 'center', gap: 10,
-                padding: '7px 10px',
-                borderRadius: 8, border: 0,
-                background: settingsOpen ? 'var(--ol-surface)' : 'transparent',
-                boxShadow: settingsOpen ? '0 1px 2px rgba(0,0,0,.05), 0 0 0 0.5px rgba(0,0,0,.06)' : 'none',
+                padding: '10px 12px',
+                borderRadius: 16,
+                border: '1px solid rgba(255,255,255,0.5)',
+                background: settingsOpen
+                  ? 'linear-gradient(180deg, rgba(255,255,255,0.82), rgba(255,255,255,0.48))'
+                  : 'linear-gradient(180deg, rgba(255,255,255,0.48), rgba(255,255,255,0.24))',
+                boxShadow: settingsOpen ? 'var(--ol-aura-shadow-soft)' : 'none',
                 fontFamily: 'inherit', fontSize: 13,
                 cursor: 'default',
                 transition: 'color 0.16s var(--ol-motion-quick), background 0.16s var(--ol-motion-quick)',
@@ -324,16 +377,11 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
             一起坐在 WindowChrome 的磨砂底板上，整体一块连续玻璃。 */}
         <div style={{ flex: 1, minWidth: 0, padding: '4px 8px 6px 0', display: 'flex' }}>
           <main
-            className="ol-console-main"
+            className="ol-console-main ol-aura-panel"
             style={{
               flex: 1, minWidth: 0,
               overflow: 'hidden',
-              background: 'rgba(255, 255, 255, 0.62)',
-              backdropFilter: 'blur(18px) saturate(170%)',
-              WebkitBackdropFilter: 'blur(18px) saturate(170%)',
-              borderRadius: 'var(--ol-window-console-radius)',
-              border: '0.5px solid rgba(0,0,0,0.06)',
-              boxShadow: '0 1px 0 rgba(255,255,255,0.8) inset, 0 8px 24px -12px rgba(15,17,22,0.10), 0 2px 6px -2px rgba(15,17,22,0.06)',
+              borderRadius: 'var(--ol-panel-radius)',
               display: 'flex',
               flexDirection: 'column',
             }}

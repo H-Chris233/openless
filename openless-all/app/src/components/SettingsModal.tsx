@@ -84,14 +84,19 @@ export function SettingsModal({ os: _os, onClose, initialSettingsSection }: Sett
       }}>
 
       <div
+        className="ol-aura-settings"
         onClick={(e) => e.stopPropagation()}
         style={{
-          width: '100%', maxWidth: 880, height: '100%', maxHeight: 600,
+          width: '100%',
+          maxWidth: 920,
+          height: '100%',
+          maxHeight: 620,
           background: 'var(--ol-surface)',
-          borderRadius: 14,
-          border: '0.5px solid rgba(0,0,0,.08)',
-          boxShadow: '0 30px 80px -20px rgba(15,17,22,.35), 0 0 0 0.5px rgba(0,0,0,.06)',
-          display: 'flex', overflow: 'hidden',
+          borderRadius: 'var(--ol-shell-radius)',
+          border: '1px solid rgba(255,255,255,0.62)',
+          boxShadow: 'var(--ol-aura-shadow)',
+          display: 'flex',
+          overflow: 'hidden',
           animation: 'ol-modal-card-in 0.24s var(--ol-motion-spring)',
           position: 'relative',
         }}>
@@ -99,11 +104,14 @@ export function SettingsModal({ os: _os, onClose, initialSettingsSection }: Sett
         {/* ─── 单层侧栏 ────────────────────────────────────────────── */}
         <aside
           style={{
-            width: 200, flexShrink: 0,
-            background: 'rgba(247,247,250,0.7)',
-            borderRight: '0.5px solid var(--ol-line-soft)',
-            padding: '18px 12px',
-            display: 'flex', flexDirection: 'column', gap: 14,
+            width: 214,
+            flexShrink: 0,
+            background: 'linear-gradient(180deg, rgba(255,255,255,0.58), rgba(246,248,252,0.72))',
+            borderRight: '1px solid rgba(255,255,255,0.52)',
+            padding: '20px 14px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 16,
           }}>
 
           {/* tab 组 */}
@@ -117,9 +125,10 @@ export function SettingsModal({ os: _os, onClose, initialSettingsSection }: Sett
                   right: 0,
                   top: pillRect.top,
                   height: pillRect.height,
-                  background: '#fff',
-                  borderRadius: 8,
-                  boxShadow: '0 1px 2px rgba(0,0,0,.05), 0 0 0 0.5px rgba(0,0,0,.06)',
+                  background: 'linear-gradient(180deg, rgba(255,255,255,0.84), rgba(255,255,255,0.58))',
+                  borderRadius: 14,
+                  border: '1px solid rgba(255,255,255,0.62)',
+                  boxShadow: 'var(--ol-aura-shadow-soft)',
                   transition: 'top 0.36s var(--ol-motion-spring), height 0.36s var(--ol-motion-spring)',
                   pointerEvents: 'none',
                   zIndex: 0,
@@ -143,7 +152,7 @@ export function SettingsModal({ os: _os, onClose, initialSettingsSection }: Sett
           </div>
 
           {/* 外链组 */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 1, paddingTop: 8, borderTop: '0.5px solid var(--ol-line-soft)' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 1, paddingTop: 10, borderTop: '1px solid rgba(255,255,255,0.46)' }}>
             {LINK_ITEMS.map(it => (
               <button
                 key={it.id}
@@ -161,7 +170,17 @@ export function SettingsModal({ os: _os, onClose, initialSettingsSection }: Sett
         {/* ─── 内容区 ──────────────────────────────────────────────
             父容器 overflow:hidden + 列向 flex；关闭按钮、section 标题固定在头部，
             只有最里层的 scroll wrapper 真正滚动。 */}
-        <div style={{ flex: 1, minWidth: 0, overflow: 'hidden', position: 'relative', display: 'flex', flexDirection: 'column' }}>
+        <div
+          style={{
+            flex: 1,
+            minWidth: 0,
+            overflow: 'hidden',
+            position: 'relative',
+            display: 'flex',
+            flexDirection: 'column',
+            background: 'linear-gradient(180deg, rgba(255,255,255,0.56), rgba(249,250,252,0.74))',
+          }}
+        >
           {/* "已保存" toast：right:54 避开 28×28 关闭按钮 + 12px gap。 */}
           <SavedToast
             saveState={savedToast.state}
@@ -174,18 +193,29 @@ export function SettingsModal({ os: _os, onClose, initialSettingsSection }: Sett
             style={{
               position: 'absolute', top: 14, right: 14, zIndex: 2,
               width: 28, height: 28, border: 0, borderRadius: 999,
-              background: 'transparent', color: 'var(--ol-ink-3)',
+              background: 'rgba(255,255,255,0.38)', color: 'var(--ol-ink-3)',
               display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
               cursor: 'default',
               transition: 'background 0.16s var(--ol-motion-quick)',
             }}
-            onMouseEnter={e => (e.currentTarget.style.background = 'rgba(0,0,0,0.05)')}
-            onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+            onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.72)')}
+            onMouseLeave={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.38)')}
             title={t('common.close')}>
             <Icon name="close" size={14} />
           </button>
 
-          <h2 style={{ margin: 0, padding: '22px 28px 8px', fontSize: 22, fontWeight: 600, letterSpacing: '-0.02em', flexShrink: 0 }}>
+          <h2
+            style={{
+              margin: 0,
+              padding: '24px 28px 10px',
+              fontSize: 22,
+              fontWeight: 600,
+              letterSpacing: '-0.02em',
+              flexShrink: 0,
+              fontFamily: 'var(--ol-font-display)',
+              color: 'var(--ol-ink)',
+            }}
+          >
             {t(`modal.sections.${section}`)}
           </h2>
 
