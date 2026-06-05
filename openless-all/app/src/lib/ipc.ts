@@ -15,6 +15,7 @@ import type {
     HotkeyStatus,
     MicrophoneDevice,
     PermissionStatus,
+    CodingAgentPermissionMode,
     PolishMode,
     QaHotkeyBinding,
     ShortcutBinding,
@@ -100,6 +101,13 @@ let mockSettings: UserPreferences = {
         modifiers: defaultAppShortcutModifiers(),
     },
     openAppHotkey: { primary: "O", modifiers: defaultAppShortcutModifiers() },
+    codingAgentEnabled: false,
+    codingAgentProvider: "claude-code-cli",
+    codingAgentModel: null,
+    codingAgentPermissionMode: "acceptEdits",
+    codingAgentWorkdir: null,
+    codingAgentPanelHotkey: { primary: "Enter", modifiers: ["cmd", "shift"] },
+    codingAgentQuickHotkey: null,
     localAsrActiveModel: "qwen3-asr-0.6b",
     localAsrMirror: "huggingface",
     localAsrKeepLoadedSecs: 300,
@@ -1153,11 +1161,7 @@ export async function exportErrorLog(
 export { isTauri }
 
 // ── Coding Agent / Claude 控制台 ───────────────────────────────────────
-export type CodingAgentPermissionMode =
-    | "plan"
-    | "default"
-    | "acceptEdits"
-    | "bypassPermissions"
+export type { CodingAgentPermissionMode }
 
 export type McpHealth = "connected" | "failed" | "needs_auth" | "unknown"
 

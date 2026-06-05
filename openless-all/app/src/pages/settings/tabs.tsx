@@ -11,6 +11,7 @@ import { PermissionsSection } from './PermissionsSection';
 import { DataStorageSection } from './DataStorageSection';
 import { LocalModelSection } from './LocalModelSection';
 import { DebugToolsSection } from './DebugToolsSection';
+import { CodingAgentSection } from './CodingAgentSection';
 import { ClaudeConsoleSection } from './ClaudeConsoleSection';
 import { BetaChannelSection } from './BetaChannelSection';
 
@@ -73,6 +74,7 @@ export function AdvancedTab() {
     <>
       <LocalModelSection />
       <DebugToolsSection />
+      <CodingAgentSection />
       <ClaudeConsoleSection />
       <BetaChannelSection />
     </>

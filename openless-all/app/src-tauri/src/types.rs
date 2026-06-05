@@ -611,6 +611,27 @@ pub struct UserPreferences {
     /// 「唤起 App」全局快捷键。`None` = 停用；`Some(...)` = 注册。默认 `Some(默认键)`。
     #[serde(default = "default_open_app_hotkey")]
     pub open_app_hotkey: Option<ShortcutBinding>,
+    /// 快速 Agent（Voice Coding Agent）：是否启用。默认关闭，需用户在高级设置开启。
+    #[serde(default)]
+    pub coding_agent_enabled: bool,
+    /// Agent 后端：`claude-code-cli`（默认）或 `opencode-cli`。
+    #[serde(default = "default_coding_agent_provider")]
+    pub coding_agent_provider: String,
+    /// Agent 模型（`None` = 运行时取便宜默认 sonnet）。
+    #[serde(default)]
+    pub coding_agent_model: Option<String>,
+    /// 权限模式：plan/default/acceptEdits/bypassPermissions。默认 acceptEdits（放行+护栏）。
+    #[serde(default = "default_coding_agent_permission_mode")]
+    pub coding_agent_permission_mode: String,
+    /// Agent 工作目录（`None` = 临时目录）。
+    #[serde(default)]
+    pub coding_agent_workdir: Option<String>,
+    /// 热键 1：语音 Agent 面板键。默认 Cmd/Ctrl+Shift+Enter。`None` = 停用。
+    #[serde(default = "default_coding_agent_panel_hotkey")]
+    pub coding_agent_panel_hotkey: Option<ShortcutBinding>,
+    /// 热键 2：快取用键（选中→Claude→回插）。默认 `None`（用户自配）。
+    #[serde(default)]
+    pub coding_agent_quick_hotkey: Option<ShortcutBinding>,
     /// 本地 Qwen3-ASR 当前激活的模型 id（"qwen3-asr-0.6b" / "qwen3-asr-1.7b"）。
     /// 仅在 active_asr_provider == "local-qwen3" 时有意义。
     #[serde(default = "default_local_asr_model")]
@@ -809,6 +830,20 @@ struct UserPreferencesWire {
     translation_hotkey: Option<ShortcutBinding>,
     switch_style_hotkey: Option<ShortcutBinding>,
     open_app_hotkey: Option<ShortcutBinding>,
+    #[serde(default)]
+    coding_agent_enabled: bool,
+    #[serde(default = "default_coding_agent_provider")]
+    coding_agent_provider: String,
+    #[serde(default)]
+    coding_agent_model: Option<String>,
+    #[serde(default = "default_coding_agent_permission_mode")]
+    coding_agent_permission_mode: String,
+    #[serde(default)]
+    coding_agent_workdir: Option<String>,
+    #[serde(default = "default_coding_agent_panel_hotkey")]
+    coding_agent_panel_hotkey: Option<ShortcutBinding>,
+    #[serde(default)]
+    coding_agent_quick_hotkey: Option<ShortcutBinding>,
     #[serde(default = "default_local_asr_model")]
     local_asr_active_model: String,
     #[serde(default = "default_local_asr_mirror")]
@@ -892,6 +927,13 @@ impl Default for UserPreferencesWire {
             // 默认携带默认键（Some），保证缺字段时仍是启用状态；None 专表「用户主动停用」。
             switch_style_hotkey: prefs.switch_style_hotkey,
             open_app_hotkey: prefs.open_app_hotkey,
+            coding_agent_enabled: prefs.coding_agent_enabled,
+            coding_agent_provider: prefs.coding_agent_provider,
+            coding_agent_model: prefs.coding_agent_model,
+            coding_agent_permission_mode: prefs.coding_agent_permission_mode,
+            coding_agent_workdir: prefs.coding_agent_workdir,
+            coding_agent_panel_hotkey: prefs.coding_agent_panel_hotkey,
+            coding_agent_quick_hotkey: prefs.coding_agent_quick_hotkey,
             local_asr_active_model: prefs.local_asr_active_model,
             local_asr_mirror: prefs.local_asr_mirror,
             local_asr_keep_loaded_secs: prefs.local_asr_keep_loaded_secs,
@@ -968,6 +1010,13 @@ impl<'de> Deserialize<'de> for UserPreferences {
             output_language_preference: wire.output_language_preference,
             qa_hotkey: wire.qa_hotkey,
             qa_save_history: wire.qa_save_history,
+            coding_agent_enabled: wire.coding_agent_enabled,
+            coding_agent_provider: wire.coding_agent_provider,
+            coding_agent_model: wire.coding_agent_model,
+            coding_agent_permission_mode: wire.coding_agent_permission_mode,
+            coding_agent_workdir: wire.coding_agent_workdir,
+            coding_agent_panel_hotkey: wire.coding_agent_panel_hotkey,
+            coding_agent_quick_hotkey: wire.coding_agent_quick_hotkey,
             custom_combo_hotkey: wire.custom_combo_hotkey,
             translation_hotkey: wire
                 .translation_hotkey
@@ -1010,6 +1059,21 @@ impl<'de> Deserialize<'de> for UserPreferences {
 
 fn default_qa_hotkey() -> Option<ShortcutBinding> {
     Some(ShortcutBinding::default_qa())
+}
+
+fn default_coding_agent_provider() -> String {
+    "claude-code-cli".to_string()
+}
+
+fn default_coding_agent_permission_mode() -> String {
+    "acceptEdits".to_string()
+}
+
+fn default_coding_agent_panel_hotkey() -> Option<ShortcutBinding> {
+    Some(ShortcutBinding {
+        primary: "Enter".into(),
+        modifiers: vec!["cmd".into(), "shift".into()],
+    })
 }
 
 fn default_translation_hotkey() -> ShortcutBinding {
@@ -1670,6 +1734,13 @@ impl Default for UserPreferences {
             translation_hotkey: default_translation_hotkey(),
             switch_style_hotkey: default_switch_style_hotkey(),
             open_app_hotkey: default_open_app_hotkey(),
+            coding_agent_enabled: false,
+            coding_agent_provider: default_coding_agent_provider(),
+            coding_agent_model: None,
+            coding_agent_permission_mode: default_coding_agent_permission_mode(),
+            coding_agent_workdir: None,
+            coding_agent_panel_hotkey: default_coding_agent_panel_hotkey(),
+            coding_agent_quick_hotkey: None,
             local_asr_active_model: default_local_asr_model(),
             local_asr_mirror: default_local_asr_mirror(),
             local_asr_keep_loaded_secs: default_local_asr_keep_loaded_secs(),

@@ -117,6 +117,13 @@ export type QaHotkeyBinding = ShortcutBinding;
 /** 自定义录音组合键绑定。当 hotkey.trigger == 'custom' 时使用。 */
 export type ComboBinding = ShortcutBinding;
 
+export type CodingAgentProviderId = "claude-code-cli" | "opencode-cli";
+export type CodingAgentPermissionMode =
+  | "plan"
+  | "default"
+  | "acceptEdits"
+  | "bypassPermissions";
+
 /** 模拟粘贴时按下的快捷键。仅 Windows/Linux 生效；macOS 走 AX 直写。
  *  - ctrlV       : 标准粘贴（默认；大多数编辑器、浏览器、IDE）
  *  - ctrlShiftV  : kitty / alacritty / wezterm / gnome-terminal / foot 等终端
@@ -259,6 +266,20 @@ export interface UserPreferences {
   switchStyleHotkey: ShortcutBinding | null;
   /** 打开 OpenLess 主窗口的全局快捷键。null = 用户已停用（issue #576）。 */
   openAppHotkey: ShortcutBinding | null;
+  /** 快速 Agent（Voice Coding Agent）：是否启用。默认关闭。 */
+  codingAgentEnabled: boolean;
+  /** Agent 后端：claude-code-cli（默认）/ opencode-cli。 */
+  codingAgentProvider: CodingAgentProviderId;
+  /** Agent 模型，null = 运行时取便宜默认（sonnet）。 */
+  codingAgentModel: string | null;
+  /** 权限模式：plan/default/acceptEdits/bypassPermissions。 */
+  codingAgentPermissionMode: CodingAgentPermissionMode;
+  /** Agent 工作目录，null = 临时目录。 */
+  codingAgentWorkdir: string | null;
+  /** 热键 1：语音 Agent 面板键。null = 停用。 */
+  codingAgentPanelHotkey: ShortcutBinding | null;
+  /** 热键 2：快取用键（选中→Claude→回插）。null = 未配置。 */
+  codingAgentQuickHotkey: ShortcutBinding | null;
   /** 本地 Qwen3-ASR 当前激活的模型 id。仅在 activeAsrProvider === 'local-qwen3' 时有意义。 */
   localAsrActiveModel: string;
   /** 本地模型下载源镜像（'huggingface' / 'hf-mirror'）。 */
