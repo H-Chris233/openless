@@ -1069,9 +1069,17 @@ fn default_coding_agent_permission_mode() -> String {
     "acceptEdits".to_string()
 }
 
-fn default_coding_agent_panel_hotkey() -> Option<ShortcutBinding> {
+pub(crate) fn default_coding_agent_panel_hotkey() -> Option<ShortcutBinding> {
     Some(ShortcutBinding {
         primary: "Enter".into(),
+        modifiers: vec!["cmd".into(), "shift".into()],
+    })
+}
+
+/// 快取键（选中文本润色）默认值：⌘⇧J。供热键自愈逻辑回退使用。
+pub(crate) fn default_coding_agent_quick_hotkey() -> Option<ShortcutBinding> {
+    Some(ShortcutBinding {
+        primary: "J".into(),
         modifiers: vec!["cmd".into(), "shift".into()],
     })
 }

@@ -9,11 +9,19 @@ export function ShortcutRecorder({
   onSave,
   alignRecordButton = false,
   disabled = false,
+  onDisable,
+  disableLabel,
+  comboOnly = false,
 }: {
   value: ShortcutBinding;
   onSave: (binding: ShortcutBinding) => Promise<void>;
   alignRecordButton?: boolean;
   disabled?: boolean;
+  /** 提供则在「录制」按钮左侧并排渲染一个「停用」旋钮。 */
+  onDisable?: () => void | Promise<void>;
+  disableLabel?: string;
+  /** 仅允许组合键（修饰键+主键 / 功能键）；拒绝单修饰键，因为全局热键无法注册它。 */
+  comboOnly?: boolean;
 }) {
   const { t } = useTranslation();
   const [recording, setRecording] = useState(false);
@@ -70,6 +78,11 @@ export function ShortcutRecorder({
       return;
     }
     if (isModifierKey(e.key)) {
+      // comboOnly：快速 Agent 等全局热键不支持单修饰键，提示用户配真正的组合键。
+      if (comboOnly) {
+        setError(t('settings.recording.comboNeedKey', '请配组合键（如 ⌘⇧J），不支持单独的修饰键'));
+        return;
+      }
       const primary = modifierPrimaryFromCode(e.code, e.key);
       if (!primary || pendingModifier.current?.primary === primary) return;
       clearPendingModifier();
@@ -123,6 +136,24 @@ export function ShortcutRecorder({
     fontWeight: 500,
     cursor: recording || disabled ? 'default' : 'pointer',
     opacity: disabled ? 0.68 : 1,
+  };
+  // 「停用」旋钮：与「录制快捷键」同高、紧贴在它左边，组成两个并排的小旋钮。
+  const disableKnobStyle: CSSProperties = {
+    fontSize: 12,
+    padding: '5px 12px',
+    background: 'transparent',
+    color: 'var(--ol-ink-4)',
+    border: '0.5px solid var(--ol-line-strong)',
+    borderRadius: 6,
+    fontFamily: 'inherit',
+    fontWeight: 500,
+    cursor: recording ? 'default' : 'pointer',
+  };
+  // 录制按钮（+ 可选停用旋钮）成组靠右，保证「停用」永远贴着「录制」。
+  const controlsGroupStyle: CSSProperties = {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 8,
     marginLeft: alignRecordButton ? 'auto' : undefined,
   };
 
@@ -132,18 +163,32 @@ export function ShortcutRecorder({
         <span style={{ padding: '4px 10px', borderRadius: 6, background: 'rgba(0,0,0,0.06)', fontSize: 13, fontFamily: 'var(--ol-font-mono)', fontWeight: 500, color: 'var(--ol-ink)' }}>
           {formatComboLabel(value)}
         </span>
-        <button
-          onClick={() => {
-            if (disabled) return;
-            setRecording(true);
-            setError(null);
-            clearPendingModifier();
-          }}
-          disabled={recording || disabled}
-          style={recordButtonStyle}
-        >
-          {recording ? t('settings.recording.comboRecordHint') : t('settings.recording.comboRecordBtn')}
-        </button>
+        <div style={controlsGroupStyle}>
+          {onDisable && (
+            <button
+              onClick={() => {
+                if (recording) return;
+                void onDisable();
+              }}
+              disabled={recording}
+              style={disableKnobStyle}
+            >
+              {disableLabel ?? t('settings.shortcuts.disable', 'Disable')}
+            </button>
+          )}
+          <button
+            onClick={() => {
+              if (disabled) return;
+              setRecording(true);
+              setError(null);
+              clearPendingModifier();
+            }}
+            disabled={recording || disabled}
+            style={recordButtonStyle}
+          >
+            {recording ? t('settings.recording.comboRecordHint') : t('settings.recording.comboRecordBtn')}
+          </button>
+        </div>
       </div>
       {recording && (
         <div

@@ -29,18 +29,6 @@ const enableBtnStyle: CSSProperties = {
   cursor: 'pointer',
 };
 
-const disableBtnStyle: CSSProperties = {
-  alignSelf: 'flex-start',
-  fontSize: 11,
-  padding: '3px 10px',
-  background: 'transparent',
-  color: 'var(--ol-ink-4)',
-  border: '0.5px solid var(--ol-line-strong)',
-  borderRadius: 6,
-  fontFamily: 'inherit',
-  cursor: 'pointer',
-};
-
 export function ShortcutsSection() {
   const { t } = useTranslation();
   const os = detectOS();
@@ -95,6 +83,10 @@ export function ShortcutsSection() {
               await setQaHotkey(binding);
               await savePrefs({ ...prefs, qaHotkey: binding });
             }}
+            onDisable={async () => {
+              await setQaHotkey(null);
+              await savePrefs({ ...prefs, qaHotkey: null });
+            }}
           />
         ) : (
           <button
@@ -111,25 +103,18 @@ export function ShortcutsSection() {
       </SettingRow>
       <SettingRow label={t('settings.shortcuts.switchStyle')}>
         {prefs.switchStyleHotkey ? (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, width: '100%' }}>
-            <ShortcutRecorder
-              value={prefs.switchStyleHotkey}
-              alignRecordButton
-              onSave={async binding => {
-                await setSwitchStyleHotkey(binding);
-                await savePrefs({ ...prefs, switchStyleHotkey: binding });
-              }}
-            />
-            <button
-              onClick={async () => {
-                await setSwitchStyleHotkey(null);
-                await savePrefs({ ...prefs, switchStyleHotkey: null });
-              }}
-              style={disableBtnStyle}
-            >
-              {t('settings.shortcuts.disable', 'Disable')}
-            </button>
-          </div>
+          <ShortcutRecorder
+            value={prefs.switchStyleHotkey}
+            alignRecordButton
+            onSave={async binding => {
+              await setSwitchStyleHotkey(binding);
+              await savePrefs({ ...prefs, switchStyleHotkey: binding });
+            }}
+            onDisable={async () => {
+              await setSwitchStyleHotkey(null);
+              await savePrefs({ ...prefs, switchStyleHotkey: null });
+            }}
+          />
         ) : (
           <button
             onClick={async () => {
@@ -145,25 +130,18 @@ export function ShortcutsSection() {
       </SettingRow>
       <SettingRow label={t('settings.shortcuts.openApp')}>
         {prefs.openAppHotkey ? (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, width: '100%' }}>
-            <ShortcutRecorder
-              value={prefs.openAppHotkey}
-              alignRecordButton
-              onSave={async binding => {
-                await setOpenAppHotkey(binding);
-                await savePrefs({ ...prefs, openAppHotkey: binding });
-              }}
-            />
-            <button
-              onClick={async () => {
-                await setOpenAppHotkey(null);
-                await savePrefs({ ...prefs, openAppHotkey: null });
-              }}
-              style={disableBtnStyle}
-            >
-              {t('settings.shortcuts.disable', 'Disable')}
-            </button>
-          </div>
+          <ShortcutRecorder
+            value={prefs.openAppHotkey}
+            alignRecordButton
+            onSave={async binding => {
+              await setOpenAppHotkey(binding);
+              await savePrefs({ ...prefs, openAppHotkey: binding });
+            }}
+            onDisable={async () => {
+              await setOpenAppHotkey(null);
+              await savePrefs({ ...prefs, openAppHotkey: null });
+            }}
+          />
         ) : (
           <button
             onClick={async () => {
@@ -179,21 +157,15 @@ export function ShortcutsSection() {
       </SettingRow>
       <SettingRow label={t('settings.shortcuts.agentPolish')} desc={t('settings.shortcuts.agentPolishDesc')}>
         {prefs.codingAgentQuickHotkey ? (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%' }}>
-            <button
-              onClick={() => void savePrefs({ ...prefs, codingAgentQuickHotkey: null })}
-              style={disableBtnStyle}
-            >
-              {t('settings.shortcuts.disable', 'Disable')}
-            </button>
-            <ShortcutRecorder
-              value={prefs.codingAgentQuickHotkey}
-              alignRecordButton
-              onSave={async b => {
-                await savePrefs({ ...prefs, codingAgentQuickHotkey: b });
-              }}
-            />
-          </div>
+          <ShortcutRecorder
+            value={prefs.codingAgentQuickHotkey}
+            alignRecordButton
+            comboOnly
+            onSave={async b => {
+              await savePrefs({ ...prefs, codingAgentQuickHotkey: b });
+            }}
+            onDisable={() => void savePrefs({ ...prefs, codingAgentQuickHotkey: null })}
+          />
         ) : (
           <button
             onClick={() =>
@@ -210,21 +182,15 @@ export function ShortcutsSection() {
       </SettingRow>
       <SettingRow label={t('settings.shortcuts.agentVoice')} desc={t('settings.shortcuts.agentVoiceDesc')}>
         {prefs.codingAgentPanelHotkey ? (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%' }}>
-            <button
-              onClick={() => void savePrefs({ ...prefs, codingAgentPanelHotkey: null })}
-              style={disableBtnStyle}
-            >
-              {t('settings.shortcuts.disable', 'Disable')}
-            </button>
-            <ShortcutRecorder
-              value={prefs.codingAgentPanelHotkey}
-              alignRecordButton
-              onSave={async b => {
-                await savePrefs({ ...prefs, codingAgentPanelHotkey: b });
-              }}
-            />
-          </div>
+          <ShortcutRecorder
+            value={prefs.codingAgentPanelHotkey}
+            alignRecordButton
+            comboOnly
+            onSave={async b => {
+              await savePrefs({ ...prefs, codingAgentPanelHotkey: b });
+            }}
+            onDisable={() => void savePrefs({ ...prefs, codingAgentPanelHotkey: null })}
+          />
         ) : (
           <button
             onClick={() =>

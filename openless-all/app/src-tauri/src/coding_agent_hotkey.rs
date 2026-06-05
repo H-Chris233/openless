@@ -65,10 +65,22 @@ impl CodingAgentHotkeyMonitor {
             (quick, CodingAgentHotkeyEvent::QuickPressed),
         ] {
             let Some(binding) = binding else { continue };
-            let hotkey = parse_binding(&binding)?;
-            let (reg, rx) = runtime
-                .register(hotkey)
-                .map_err(|e| CodingAgentHotkeyError::RegisterFailed(e.to_string()))?;
+            // 单个 binding 无效（如单修饰键 Right ⌘）只跳过它，绝不让一个坏键拖垮
+            // 另一个有效键的注册，也避免 supervisor 因为 Err 而陷入无限重试。
+            let hotkey = match parse_binding(&binding) {
+                Ok(h) => h,
+                Err(e) => {
+                    log::warn!("[coding-agent] 跳过无法解析的快捷键 ({event:?}): {e}");
+                    continue;
+                }
+            };
+            let (reg, rx) = match runtime.register(hotkey) {
+                Ok(v) => v,
+                Err(e) => {
+                    log::warn!("[coding-agent] 注册快捷键失败 ({event:?}): {e}");
+                    continue;
+                }
+            };
             spawn_forward(reg.hotkey().id(), rx, tx.clone(), event);
             registered.push(reg);
         }
