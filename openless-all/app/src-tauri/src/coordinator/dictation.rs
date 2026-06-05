@@ -594,7 +594,7 @@ async fn run_voice_agent_transcript(
     // 聊天浮窗：显示窗口 + 落用户气泡（语音指令转写）。macOS only（helper 内部 gating）。
     if let Some(app) = inner.app.lock().clone() {
         crate::show_less_computer_window(&app);
-        crate::show_less_computer_glow(&app);
+        // 全屏彩虹描边已在按下键时（handle_less_computer_pressed）点亮，这里不重复。
     }
     // 连续对话：浮窗里已有进行中的会话 → 本轮 `claude --continue` 续上下文；否则是新会话（fresh）。
     // dismiss 关窗会把标志复位为 false。
@@ -764,8 +764,10 @@ async fn run_less_computer_once(
         "WebSearch".into(),
     ];
     req.allowed_tools.extend(allow_rules);
-    req.max_budget_usd = Some(0.5);
-    req.timeout_secs = 120;
+    // 真实任务（开应用、多步操作、读写文件）常超过 120s/0.5$ → 老是「运行超时」。放宽到
+    // 5 分钟 / 2$，给多步任务足够空间；仍有硬上限兜底，不会无限跑/烧钱。
+    req.max_budget_usd = Some(2.0);
+    req.timeout_secs = 300;
     // 连续对话需要保留会话：本轮保存（供下轮 --continue），第二轮起带 --continue 续上下文。
     req.session_persistence = true;
     req.continue_session = continue_session;
@@ -2291,6 +2293,10 @@ pub(super) fn cancel_session(inner: &Arc<Inner>) {
     emit_capsule(inner, CapsuleState::Cancelled, 0.0, 0, None, None);
     log::info!("[coord] session cancelled (was {:?})", decision.phase);
     schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
+    // 取消时也熄灭整屏彩虹描边（dictation session 没开描边，hide 是无害 no-op）。
+    if let Some(app) = inner.app.lock().clone() {
+        crate::hide_less_computer_glow(&app);
+    }
 }
 
 fn append_typed_prefix(target: &mut String, delta: &str, typed_chars: usize) -> usize {

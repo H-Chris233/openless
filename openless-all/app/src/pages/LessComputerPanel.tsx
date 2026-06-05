@@ -247,8 +247,9 @@ function TurnView({
 
 function Toolbar({ label, onClose }: { label: string; onClose: () => void }) {
   return (
-    <div style={toolbarStyle}>
-      <div style={{ flex: 1 }} />
+    // 顶栏作为拖动把手：按住空白处可把整个聊天框拖到屏幕任意位置（resize 会保住拖后的位置）。
+    <div data-tauri-drag-region style={{ ...toolbarStyle, cursor: 'grab' }}>
+      <div data-tauri-drag-region style={{ flex: 1, alignSelf: 'stretch' }} />
       <button onClick={onClose} title={label} aria-label={label} style={closeBtnStyle}>
         <svg width="11" height="11" viewBox="0 0 11 11">
           <path

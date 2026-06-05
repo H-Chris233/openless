@@ -1526,10 +1526,24 @@ async fn handle_less_computer_pressed(inner: &Arc<Inner>) {
     if begin_session(inner).await.is_err() {
         return;
     }
-    let mut state = inner.state.lock();
-    if matches!(state.phase, SessionPhase::Starting | SessionPhase::Listening) {
-        state.voice_agent = true;
-        log::info!("[less-computer] voice session started (session={:?})", state.session_id);
+    let started = {
+        let mut state = inner.state.lock();
+        if matches!(state.phase, SessionPhase::Starting | SessionPhase::Listening) {
+            state.voice_agent = true;
+            log::info!(
+                "[less-computer] voice session started (session={:?})",
+                state.session_id
+            );
+            true
+        } else {
+            false
+        }
+    };
+    // 一按下键（开始录音）就点亮整屏彩虹描边，贯穿 录音 → 处理 → 出结果，完成/关闭才熄灭。
+    if started {
+        if let Some(app) = inner.app.lock().clone() {
+            crate::show_less_computer_glow(&app);
+        }
     }
 }
 
@@ -1544,8 +1558,14 @@ async fn handle_less_computer_released(inner: &Arc<Inner>) {
     match phase {
         SessionPhase::Listening => {
             let _ = end_session(inner).await;
+            // 收尾后熄灭整屏描边。正常路径 run_voice_agent_transcript 已熄过、这里兜底；
+            // 空转写/出错路径不进 run_voice_agent_transcript，全靠这里熄，否则描边卡住不灭。
+            if let Some(app) = inner.app.lock().clone() {
+                crate::hide_less_computer_glow(&app);
+            }
         }
         SessionPhase::Starting => {
+            // 握手中松手：排队；真正收尾在 begin 续流的 end_session → run_voice_agent_transcript 熄灭。
             request_stop_during_starting(inner, "less-computer release edge");
         }
         _ => {}

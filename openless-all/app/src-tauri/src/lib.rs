@@ -1384,15 +1384,25 @@ pub(crate) fn show_less_computer_glow<R: tauri::Runtime>(app: &AppHandle<R>) {
     let Some(window) = app.get_webview_window("less-computer-glow") else {
         return;
     };
-    // 盖满当前（否则主）显示器，含菜单栏/Dock 区域 —— 屏幕边缘环绕发光。
+    // 盖满当前（否则主）显示器，含菜单栏/Dock 区域。关键：用「逻辑坐标」(物理/缩放) ——
+    // Retina 上 monitor.size() 是物理像素(2x)，直接 set_size 会把窗口铺成两倍、错位、不贴边。
     let monitor = window
         .current_monitor()
         .ok()
         .flatten()
         .or_else(|| app.primary_monitor().ok().flatten());
     if let Some(monitor) = monitor {
-        let _ = window.set_position(*monitor.position());
-        let _ = window.set_size(*monitor.size());
+        let scale = monitor.scale_factor();
+        let size = monitor.size();
+        let pos = monitor.position();
+        let _ = window.set_position(tauri::LogicalPosition::new(
+            pos.x as f64 / scale,
+            pos.y as f64 / scale,
+        ));
+        let _ = window.set_size(tauri::LogicalSize::new(
+            size.width as f64 / scale,
+            size.height as f64 / scale,
+        ));
     }
     // 点击穿透：纯视觉浮层，绝不拦截鼠标。
     let _ = window.set_ignore_cursor_events(true);
@@ -1407,6 +1417,11 @@ pub(crate) fn show_less_computer_glow<R: tauri::Runtime>(app: &AppHandle<R>) {
                     let _ = window_clone.show();
                 } else {
                     unsafe {
+                        // 抬到菜单栏(24)/Dock 之上，让描边能真正贴到屏幕最外缘（含顶部菜单栏区域）。
+                        let _: () = msg_send![ns, setLevel: 25i64];
+                        // 所有 Space 都显示、不参与窗口循环、全屏 app 上也叠加。
+                        let _: () = msg_send![ns, setCollectionBehavior: 273u64];
+                        let _: () = msg_send![ns, setIgnoresMouseEvents: true];
                         let _: () = msg_send![ns, orderFrontRegardless];
                     }
                 }
@@ -1432,12 +1447,33 @@ pub(crate) fn hide_less_computer_glow<R: tauri::Runtime>(app: &AppHandle<R>) {
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn hide_less_computer_glow<R: tauri::Runtime>(_app: &AppHandle<R>) {}
 
-/// 前端按内容测高后回传，Rust 端 clamp + bottom-anchored 重新摆放。`macos` 专用。
+/// 前端按内容测高后回传。以「当前窗口底边」为锚向上生长——只改高度、保住用户拖动后的位置，
+/// 不再重新居中（否则一改内容就把拖走的框拉回屏幕底部中间）。`macos` 专用。
 #[cfg(target_os = "macos")]
 pub(crate) fn resize_less_computer_window<R: tauri::Runtime>(app: &AppHandle<R>, height: f64) {
-    if let Some(window) = app.get_webview_window("less-computer") {
-        if let Err(e) = position_less_computer_window(&window, height) {
-            log::warn!("[less-computer] resize failed: {e}");
+    let Some(window) = app.get_webview_window("less-computer") else {
+        return;
+    };
+    let height = height.clamp(
+        LESS_COMPUTER_WINDOW_MIN_HEIGHT,
+        LESS_COMPUTER_WINDOW_MAX_HEIGHT,
+    );
+    let scale = window.scale_factor().unwrap_or(1.0);
+    match (window.outer_position(), window.outer_size()) {
+        (Ok(pos), Ok(size)) => {
+            let x = pos.x as f64 / scale;
+            let cur_top = pos.y as f64 / scale;
+            let cur_h = size.height as f64 / scale;
+            let bottom = cur_top + cur_h;
+            let new_y = (bottom - height).max(0.0);
+            let _ = window.set_size(tauri::LogicalSize::new(LESS_COMPUTER_WINDOW_WIDTH, height));
+            let _ = window.set_position(tauri::LogicalPosition::new(x, new_y));
+        }
+        // 拿不到当前位置（极少见）→ 退回首屏居中摆放。
+        _ => {
+            if let Err(e) = position_less_computer_window(&window, height) {
+                log::warn!("[less-computer] resize fallback failed: {e}");
+            }
         }
     }
 }
