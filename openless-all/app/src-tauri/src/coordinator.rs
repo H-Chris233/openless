@@ -44,6 +44,9 @@ use crate::polish::{
     ActiveLLMProvider, CodexOAuthConfig, CodexOAuthLLMProvider, OpenAICompatibleConfig,
     OpenAICompatibleLLMProvider, CODEX_DEFAULT_MODEL, CODEX_OAUTH_PROVIDER_ID,
 };
+use crate::coding_agent_hotkey::{
+    CodingAgentHotkeyError, CodingAgentHotkeyEvent, CodingAgentHotkeyMonitor,
+};
 use crate::qa_hotkey::{QaHotkeyError, QaHotkeyEvent, QaHotkeyMonitor};
 use crate::recorder::{Recorder, RecorderError};
 use crate::selection::capture_selection;
@@ -255,6 +258,7 @@ struct Inner {
     /// 划词语音问答（issue #118）：与 dictation hotkey 平行的全局快捷键
     /// 监听器（global-hotkey crate）。`None` 表示功能关闭或还没成功安装。
     qa_hotkey: Mutex<Option<QaHotkeyMonitor>>,
+    coding_agent_hotkey: Mutex<Option<CodingAgentHotkeyMonitor>>,
     /// QA 单独的 session 状态，与 dictation 的 SessionPhase 不冲突。
     qa_state: Mutex<QaSessionState>,
     /// 最近一次应用到 capsule 窗口的几何状态。避免录音 level tick 反复触发
@@ -335,6 +339,7 @@ impl Coordinator {
                     open_app_hotkey: Mutex::new(None),
                     translation_modifier_seen: AtomicBool::new(false),
                     qa_hotkey: Mutex::new(None),
+                    coding_agent_hotkey: Mutex::new(None),
                     qa_state: Mutex::new(QaSessionState::default()),
                     capsule_layout: Mutex::new(None),
                     qa_asr: Mutex::new(None),
@@ -397,6 +402,7 @@ impl Coordinator {
                 open_app_hotkey: Mutex::new(None),
                 translation_modifier_seen: AtomicBool::new(false),
                 qa_hotkey: Mutex::new(None),
+                coding_agent_hotkey: Mutex::new(None),
                 qa_state: Mutex::new(QaSessionState::default()),
                 capsule_layout: Mutex::new(None),
                 qa_asr: Mutex::new(None),
@@ -494,6 +500,16 @@ impl Coordinator {
         std::thread::Builder::new()
             .name("openless-qa-hotkey-supervisor".into())
             .spawn(move || qa_hotkey_supervisor_loop(inner))
+            .ok();
+    }
+
+    /// 启动「快速 Agent」双热键 supervisor。与 QA hotkey 平行；功能默认关闭，
+    /// 仅在 `coding_agent_enabled` 时注册。
+    pub fn start_coding_agent_hotkey_listener(&self) {
+        let inner = Arc::clone(&self.inner);
+        std::thread::Builder::new()
+            .name("openless-coding-agent-hotkey-supervisor".into())
+            .spawn(move || coding_agent_hotkey_supervisor_loop(inner))
             .ok();
     }
 
@@ -1310,6 +1326,195 @@ fn qa_hotkey_bridge_loop(inner: Arc<Inner>, rx: mpsc::Receiver<QaHotkeyEvent>) {
 }
 
 // ─────────────────────────── combo hotkey supervisor ───────────────────────────
+
+// ─────────────────────── coding agent hotkey supervisor ───────────────────────
+
+fn coding_agent_hotkey_supervisor_loop(inner: Arc<Inner>) {
+    let mut attempts: u32 = 0;
+    loop {
+        if inner.shutdown.load(Ordering::SeqCst) {
+            return;
+        }
+        let prefs = inner.prefs.get();
+        let panel = prefs.coding_agent_panel_hotkey.clone();
+        let quick = prefs.coding_agent_quick_hotkey.clone();
+        // 功能关闭，或两个键都没配 → 反注册并睡着等 prefs 改动。
+        if !prefs.coding_agent_enabled || (panel.is_none() && quick.is_none()) {
+            inner.coding_agent_hotkey.lock().take();
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            continue;
+        }
+        if inner.coding_agent_hotkey.lock().is_some() {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            continue;
+        }
+        let app = match inner.app.lock().clone() {
+            Some(a) => a,
+            None => {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                continue;
+            }
+        };
+        let (tx, rx) = mpsc::channel::<CodingAgentHotkeyEvent>();
+        let (init_tx, init_rx) =
+            mpsc::sync_channel::<Result<CodingAgentHotkeyMonitor, CodingAgentHotkeyError>>(1);
+        let panel_for_main = panel.clone();
+        let quick_for_main = quick.clone();
+        let _ = app.run_on_main_thread(move || {
+            let result = CodingAgentHotkeyMonitor::start(panel_for_main, quick_for_main, tx);
+            let _ = init_tx.send(result);
+        });
+        let init_result = match init_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(r) => r,
+            Err(_) => {
+                attempts += 1;
+                if attempts <= 3 || attempts % 10 == 0 {
+                    log::warn!("[coord] 快速 Agent 热键第 {attempts} 次注册超时；3s 后重试");
+                }
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                continue;
+            }
+        };
+        match init_result {
+            Ok(monitor) => {
+                *inner.coding_agent_hotkey.lock() = Some(monitor);
+                log::info!("[coord] 快速 Agent 热键已注册（panel + quick）");
+                let inner_clone = Arc::clone(&inner);
+                std::thread::Builder::new()
+                    .name("openless-coding-agent-hotkey-bridge".into())
+                    .spawn(move || coding_agent_hotkey_bridge_loop(inner_clone, rx))
+                    .ok();
+                attempts = 0;
+            }
+            Err(e) => {
+                attempts += 1;
+                if attempts <= 3 || attempts % 10 == 0 {
+                    log::warn!("[coord] 快速 Agent 热键第 {attempts} 次注册失败: {e}; 3s 后重试");
+                }
+                std::thread::sleep(std::time::Duration::from_secs(3));
+            }
+        }
+    }
+}
+
+fn coding_agent_hotkey_bridge_loop(inner: Arc<Inner>, rx: mpsc::Receiver<CodingAgentHotkeyEvent>) {
+    while let Ok(evt) = rx.recv() {
+        if inner.shortcut_recording_active.load(Ordering::SeqCst) {
+            continue;
+        }
+        let inner_cloned = Arc::clone(&inner);
+        async_runtime::spawn(async move {
+            // 本版面板键与快取用键都走「选中→Claude→回插」；语音 + 面板随后续版本。
+            let _ = evt;
+            handle_coding_agent_quick(&inner_cloned).await;
+        });
+    }
+}
+
+/// 快取用：抓当前选中文本作为指令 → 护栏化无头 Claude → 结果回插光标处。
+async fn handle_coding_agent_quick(inner: &Arc<Inner>) {
+    let prefs = inner.prefs.get();
+    if !prefs.coding_agent_enabled {
+        return;
+    }
+    let selection =
+        tauri::async_runtime::spawn_blocking(crate::selection::capture_selection)
+            .await
+            .ok()
+            .flatten();
+    let prompt = match selection {
+        Some(ctx) => ctx.text,
+        None => {
+            log::info!("[coding-agent] 快取用：没有选中文本，忽略");
+            return;
+        }
+    };
+
+    let mode = prefs.coding_agent_permission_mode.clone();
+    let settings_json = crate::coding_agent::guard::build_guard_settings_json(&mode, &[]);
+    let settings_path =
+        std::env::temp_dir().join(format!("openless-agent-guard-{}.json", uuid::Uuid::new_v4()));
+    if std::fs::write(
+        &settings_path,
+        serde_json::to_vec(&settings_json).unwrap_or_default(),
+    )
+    .is_err()
+    {
+        log::warn!("[coding-agent] 写护栏配置失败");
+        return;
+    }
+
+    let cwd = prefs
+        .coding_agent_workdir
+        .clone()
+        .filter(|w| !w.trim().is_empty())
+        .map(std::path::PathBuf::from);
+    if let Some(dir) = &cwd {
+        if let Some(sha) = crate::coding_agent::create_git_snapshot(dir) {
+            log::info!("[coding-agent] 运行前 git 快照 {sha}");
+        }
+    }
+
+    let mut req = crate::coding_agent::CodingAgentRequest::new("quick", prompt);
+    req.cwd = cwd;
+    req.model = prefs
+        .coding_agent_model
+        .clone()
+        .filter(|m| !m.trim().is_empty())
+        .or_else(|| Some("sonnet".to_string()));
+    req.permission_mode = parse_coding_agent_permission_mode(&mode);
+    req.settings_json_path = Some(settings_path.clone());
+    req.max_budget_usd = Some(0.5);
+    req.timeout_secs = 120;
+    req.session_persistence = false;
+    req.allowed_tools = vec![
+        "Bash".into(),
+        "Read".into(),
+        "Edit".into(),
+        "Write".into(),
+        "Glob".into(),
+        "Grep".into(),
+    ];
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let run = async_runtime::spawn(async move {
+        crate::coding_agent::run_claude_agent("claude", req, tx, cancel).await
+    });
+
+    let mut final_text = String::new();
+    while let Some(ev) = rx.recv().await {
+        if let crate::coding_agent::CodingAgentEvent::Completed { text, .. } = ev {
+            final_text = text;
+        }
+    }
+    let _ = run.await;
+    let _ = std::fs::remove_file(&settings_path);
+
+    let final_text = final_text.trim().to_string();
+    if final_text.is_empty() {
+        log::info!("[coding-agent] 快取用：Claude 无文本结果");
+        return;
+    }
+
+    let inner2 = Arc::clone(inner);
+    let restore = prefs.restore_clipboard_after_paste;
+    let paste_shortcut = prefs.paste_shortcut;
+    let _ = tauri::async_runtime::spawn_blocking(move || {
+        inner2.inserter.insert(&final_text, restore, paste_shortcut)
+    })
+    .await;
+}
+
+fn parse_coding_agent_permission_mode(s: &str) -> crate::coding_agent::CodingAgentPermissionMode {
+    use crate::coding_agent::CodingAgentPermissionMode as M;
+    match s {
+        "plan" => M::Plan,
+        "default" => M::Default,
+        "bypassPermissions" => M::BypassPermissions,
+        _ => M::AcceptEdits,
+    }
+}
 
 fn combo_hotkey_supervisor_loop(inner: Arc<Inner>) {
     let mut attempts: u32 = 0;

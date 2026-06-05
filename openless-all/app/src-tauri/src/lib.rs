@@ -15,6 +15,7 @@ mod asr;
 mod audio_mute;
 mod cli;
 mod coding_agent;
+mod coding_agent_hotkey;
 mod combo_hotkey;
 mod commands;
 mod coordinator;
@@ -486,6 +487,8 @@ pub fn run() {
                 let coordinator = app.state::<Arc<coordinator::Coordinator>>();
                 // 同步启动 QA hotkey listener。和 dictation hotkey 平行，互不抢状态。
                 coordinator.start_qa_hotkey_listener();
+                // 启动「快速 Agent」双热键监听（功能默认关闭，启用后才注册）。
+                coordinator.start_coding_agent_hotkey_listener();
                 // 启动自定义组合键监听器。当 trigger == Custom 时替代 modifier-only 监听器。
                 coordinator.start_combo_hotkey_listener();
                 coordinator.start_translation_hotkey_listener();
