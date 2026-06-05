@@ -5341,7 +5341,10 @@ fn emit_capsule(
         }
     });
 
-    let _ = app.emit_to("capsule", "capsule:state", payload);
+    let _ = app.emit_to("capsule", "capsule:state", &payload);
+    // 主窗口也需要 capsule:state 事件：AudioCueListener 用它触发录音提示音。
+    // Linux 上胶囊隐藏时提示音仍应工作，所以同时发给 main 窗口。
+    let _ = app.emit_to("main", "capsule:state", &payload);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
