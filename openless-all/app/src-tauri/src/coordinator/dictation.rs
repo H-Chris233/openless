@@ -595,9 +595,14 @@ async fn run_voice_agent_transcript(
     if let Some(app) = inner.app.lock().clone() {
         crate::show_less_computer_window(&app);
     }
+    // 连续对话：浮窗里已有进行中的会话 → 本轮 `claude --continue` 续上下文；否则是新会话（fresh）。
+    // dismiss 关窗会把标志复位为 false。
+    let continue_session = inner
+        .less_computer_conversation
+        .swap(true, Ordering::SeqCst);
     emit_less_computer(
         inner,
-        serde_json::json!({ "kind": "user", "text": transcript }),
+        serde_json::json!({ "kind": "user", "text": transcript, "fresh": !continue_session }),
     );
 
     let prefs = inner.prefs.get();
@@ -625,8 +630,16 @@ async fn run_voice_agent_transcript(
 
     // 第一轮：默认护栏（高风险全 deny）。运行后若检测到护栏拦截，弹审批卡；
     // 用户 Approve 则在第二轮把该高风险模式从 deny 移除 + 加进 allowed，重跑一次。
-    let outcome =
-        run_less_computer_once(inner, &prompt, cwd.as_deref(), mode, model.as_deref(), &[]).await;
+    let outcome = run_less_computer_once(
+        inner,
+        &prompt,
+        cwd.as_deref(),
+        mode,
+        model.as_deref(),
+        &[],
+        continue_session,
+    )
+    .await;
 
     let final_outcome = match maybe_request_approval(inner, &outcome).await {
         Some(approved_pattern) => {
@@ -638,6 +651,7 @@ async fn run_voice_agent_transcript(
                 mode,
                 model.as_deref(),
                 &[approved_pattern],
+                continue_session,
             )
             .await
         }
@@ -704,6 +718,7 @@ async fn run_less_computer_once(
     mode: crate::coding_agent::CodingAgentPermissionMode,
     model: Option<&str>,
     extra_allow_patterns: &[String],
+    continue_session: bool,
 ) -> LessComputerOutcome {
     // 护栏 deny：默认全量；审批放行的模式从 deny 中剔除。
     let mut deny = crate::coding_agent::guard::default_deny_rules();
@@ -746,7 +761,9 @@ async fn run_less_computer_once(
     req.allowed_tools.extend(allow_rules);
     req.max_budget_usd = Some(0.5);
     req.timeout_secs = 120;
-    req.session_persistence = false;
+    // 连续对话需要保留会话：本轮保存（供下轮 --continue），第二轮起带 --continue 续上下文。
+    req.session_persistence = true;
+    req.continue_session = continue_session;
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));

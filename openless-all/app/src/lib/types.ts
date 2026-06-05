@@ -406,8 +406,8 @@ export interface QaStatePayload {
  * `less-computer:event`）。后端按 `kind` 标记，前端据此把交互渲染成聊天结构。
  */
 export type LessComputerEvent =
-  /** 新会话：用户气泡（语音指令转写）。重置浮窗内容。 */
-  | { kind: 'user'; text: string }
+  /** 一轮用户气泡（语音指令转写）。fresh=true 表示新会话（清空历史）；否则追加为后续轮次。 */
+  | { kind: 'user'; text: string; fresh?: boolean }
   /** Agent 启动，进入运行态。 */
   | { kind: 'started' }
   /** 流式回复增量（来自 CodingAgentEvent::Delta）。 */

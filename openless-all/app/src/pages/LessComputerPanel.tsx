@@ -46,18 +46,30 @@ interface ApprovalCard {
 /** 助手回复流里穿插的工具 chip / 审批卡，按到达顺序排列。 */
 type Activity = ToolChip | ApprovalCard;
 
+/** 一轮对话：用户一句 + 助手流式回复 + 其间的工具/审批 + 本轮收尾态。连续对话累积成数组。 */
+interface Turn {
+  user: string;
+  answer: string;
+  activities: Activity[];
+  status: RunStatus;
+  errorMsg: string;
+  costUsd: number | null;
+}
+
+/** 对 turns 数组「最后一轮」做不可变更新。 */
+function updateLastTurn(turns: Turn[], fn: (t: Turn) => Turn): Turn[] {
+  if (turns.length === 0) return turns;
+  return [...turns.slice(0, -1), fn(turns[turns.length - 1])];
+}
+
 const WINDOW_MIN_HEIGHT = 120;
 const WINDOW_MAX_HEIGHT = 520;
 const TOOLBAR_HEIGHT = 28;
 
 export function LessComputerPanel() {
   const { t } = useTranslation();
-  const [userText, setUserText] = useState('');
-  const [answer, setAnswer] = useState('');
-  const [activities, setActivities] = useState<Activity[]>([]);
-  const [status, setStatus] = useState<RunStatus>('idle');
-  const [errorMsg, setErrorMsg] = useState('');
-  const [costUsd, setCostUsd] = useState<number | null>(null);
+  // 连续对话：每按一次说话键追加一轮（除非后端标记 fresh=新会话则清空重开）。
+  const [turns, setTurns] = useState<Turn[]>([]);
 
   // ── 后端事件订阅（mount 一次）────────────────────────────────────────
   useEffect(() => {
@@ -85,54 +97,70 @@ export function LessComputerPanel() {
 
   const applyEvent = (ev: LessComputerEvent) => {
     switch (ev.kind) {
-      case 'user':
-        // 新会话：清空旧内容，落用户气泡。
-        setUserText(ev.text);
-        setAnswer('');
-        setActivities([]);
-        setErrorMsg('');
-        setCostUsd(null);
-        setStatus('working');
+      case 'user': {
+        // 一轮新对话。fresh=true（后端无可续会话→新会话）则清空历史重开；否则追加为后续轮次。
+        const fresh: Turn = {
+          user: ev.text,
+          answer: '',
+          activities: [],
+          status: 'working',
+          errorMsg: '',
+          costUsd: null,
+        };
+        setTurns(prev => (ev.fresh ? [fresh] : [...prev, fresh]));
         break;
+      }
       case 'started':
-        setStatus('working');
+        setTurns(prev => updateLastTurn(prev, tn => ({ ...tn, status: 'working' })));
         break;
       case 'delta':
-        setAnswer(prev => prev + ev.text);
+        setTurns(prev => updateLastTurn(prev, tn => ({ ...tn, answer: tn.answer + ev.text })));
         break;
       case 'tool':
-        setActivities(prev => [...prev, { kind: 'tool', name: ev.name }]);
+        setTurns(prev =>
+          updateLastTurn(prev, tn => ({
+            ...tn,
+            activities: [...tn.activities, { kind: 'tool', name: ev.name }],
+          })),
+        );
         break;
       case 'approval':
-        setActivities(prev => [
-          ...prev,
-          {
-            kind: 'approval',
-            token: ev.token,
-            command: ev.command,
-            reason: ev.reason,
-          },
-        ]);
+        setTurns(prev =>
+          updateLastTurn(prev, tn => ({
+            ...tn,
+            activities: [
+              ...tn.activities,
+              { kind: 'approval', token: ev.token, command: ev.command, reason: ev.reason },
+            ],
+          })),
+        );
         break;
       case 'completed':
-        if (ev.text) setAnswer(ev.text);
-        setCostUsd(ev.costUsd ?? null);
-        setStatus('done');
+        setTurns(prev =>
+          updateLastTurn(prev, tn => ({
+            ...tn,
+            answer: ev.text || tn.answer,
+            costUsd: ev.costUsd ?? null,
+            status: 'done',
+          })),
+        );
         break;
       case 'error':
-        setErrorMsg(ev.message);
-        setStatus('error');
+        setTurns(prev => updateLastTurn(prev, tn => ({ ...tn, errorMsg: ev.message, status: 'error' })));
         break;
     }
   };
 
   const onApproval = (token: string, approved: boolean) => {
-    setActivities(prev =>
-      prev.map(a =>
-        a.kind === 'approval' && a.token === token
-          ? { ...a, decision: approved ? 'approved' : 'denied' }
-          : a,
-      ),
+    setTurns(prev =>
+      prev.map(tn => ({
+        ...tn,
+        activities: tn.activities.map(a =>
+          a.kind === 'approval' && a.token === token
+            ? { ...a, decision: approved ? 'approved' : 'denied' }
+            : a,
+        ),
+      })),
     );
     void lessComputerApprove(token, approved);
   };
@@ -161,34 +189,24 @@ export function LessComputerPanel() {
     const measured = Math.ceil(el.scrollHeight) + TOOLBAR_HEIGHT;
     const target = Math.min(WINDOW_MAX_HEIGHT, Math.max(WINDOW_MIN_HEIGHT, measured));
     void lessComputerWindowResize(target);
-  }, [userText, answer, activities, status, errorMsg, costUsd]);
+  }, [turns]);
 
   // 自动滚动到底
   const scrollRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [answer, activities, status]);
+  }, [turns]);
 
   return (
-    <div className="ol-frost" style={shellStyle}>
+    <div className="ol-frost lc-shell" style={shellStyle}>
+      <div className="lc-bg" aria-hidden />
       <Toolbar label={t('lessComputer.closeTooltip')} onClose={onClose} />
       <div ref={scrollRef} style={scrollStyle}>
         <div ref={contentRef} style={contentStyle}>
-          {userText && <UserBubble text={userText} label={t('lessComputer.you')} />}
-          {activities.map((a, i) =>
-            a.kind === 'tool' ? (
-              <ToolChipRow key={`t${i}`} name={a.name} t={t} />
-            ) : (
-              <ApprovalRow key={a.token} card={a} onDecide={onApproval} t={t} />
-            ),
-          )}
-          {answer && <AssistantBubble markdown={answer} working={status === 'working'} />}
-          {status === 'working' && !answer && <WorkingRow label={t('lessComputer.working')} />}
-          {status === 'error' && <ErrorRow message={errorMsg || t('lessComputer.error')} />}
-          {status === 'done' && costUsd != null && (
-            <CostRow label={t('lessComputer.cost', { cost: costUsd.toFixed(3) })} />
-          )}
+          {turns.map((turn, ti) => (
+            <TurnView key={ti} turn={turn} onApproval={onApproval} t={t} />
+          ))}
         </div>
       </div>
     </div>
@@ -196,6 +214,36 @@ export function LessComputerPanel() {
 }
 
 // ── 子组件 ────────────────────────────────────────────────────────────
+
+/** 渲染单轮对话：用户气泡 → 工具/审批 → 助手流式回复 → 收尾(错误/花费)。 */
+function TurnView({
+  turn,
+  onApproval,
+  t,
+}: {
+  turn: Turn;
+  onApproval: (token: string, approved: boolean) => void;
+  t: ReturnType<typeof useTranslation>['t'];
+}) {
+  return (
+    <>
+      <UserBubble text={turn.user} label={t('lessComputer.you')} />
+      {turn.activities.map((a, i) =>
+        a.kind === 'tool' ? (
+          <ToolChipRow key={`t${i}`} name={a.name} t={t} />
+        ) : (
+          <ApprovalRow key={a.token} card={a} onDecide={onApproval} t={t} />
+        ),
+      )}
+      {turn.answer && <AssistantBubble markdown={turn.answer} working={turn.status === 'working'} />}
+      {turn.status === 'working' && !turn.answer && <WorkingRow label={t('lessComputer.working')} />}
+      {turn.status === 'error' && <ErrorRow message={turn.errorMsg || t('lessComputer.error')} />}
+      {turn.status === 'done' && turn.costUsd != null && (
+        <CostRow label={t('lessComputer.cost', { cost: turn.costUsd.toFixed(3) })} />
+      )}
+    </>
+  );
+}
 
 function Toolbar({ label, onClose }: { label: string; onClose: () => void }) {
   return (
@@ -349,6 +397,8 @@ const toolbarStyle: CSSProperties = {
   padding: '0 8px',
   borderBottom: '0.5px solid rgba(0, 0, 0, 0.06)',
   flexShrink: 0,
+  position: 'relative',
+  zIndex: 1,
 };
 
 const closeBtnStyle: CSSProperties = {
@@ -370,6 +420,8 @@ const scrollStyle: CSSProperties = {
   flex: 1,
   minHeight: 0,
   overflow: 'auto',
+  position: 'relative',
+  zIndex: 1,
 };
 
 const contentStyle: CSSProperties = {
@@ -502,6 +554,44 @@ const globalCss = `
 @keyframes lc-pulse {
   0%, 100% { opacity: 1; transform: scale(1); }
   50%      { opacity: 0.35; transform: scale(.94); }
+}
+/* 彩虹跑马灯描边：conic-gradient 绕 @property --lc-angle 旋转，mask 抠出一圈边框。 */
+@property --lc-angle { syntax: '<angle>'; initial-value: 0deg; inherits: false; }
+@keyframes lc-spin    { to { --lc-angle: 360deg; } }
+@keyframes lc-flow    { 0% { background-position: 0% 50%; } 100% { background-position: 220% 50%; } }
+@keyframes lc-breathe { 0%, 100% { opacity: .40; } 50% { opacity: .80; } }
+.lc-shell { position: relative; }
+.lc-shell::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 14px;
+  padding: 1.5px;
+  background: conic-gradient(from var(--lc-angle),
+    #ff2d78, #ff8a00, #ffd400, #38e08a, #00c2ff, #7a5cff, #ff2d78);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+          mask-composite: exclude;
+  animation: lc-spin 5s linear infinite;
+  pointer-events: none;
+  z-index: 3;
+}
+/* 流动+呼吸的彩虹背景层：低透明度，文字仍清晰可读。 */
+.lc-bg {
+  position: absolute;
+  inset: 0;
+  border-radius: 14px;
+  background: linear-gradient(115deg,
+    rgba(255,45,120,.14), rgba(255,138,0,.12), rgba(255,212,0,.12),
+    rgba(56,224,138,.12), rgba(0,194,255,.13), rgba(122,92,255,.14), rgba(255,45,120,.14));
+  background-size: 220% 220%;
+  animation: lc-flow 14s linear infinite, lc-breathe 6.5s ease-in-out infinite;
+  pointer-events: none;
+  z-index: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  .lc-shell::before { animation: none; }
+  .lc-bg { animation: none; opacity: .5; }
 }
 .lc-answer p        { margin: 0 0 6px; }
 .lc-answer p:last-child { margin-bottom: 0; }

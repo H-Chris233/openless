@@ -61,6 +61,8 @@ pub struct CodingAgentRequest {
     pub settings_json_path: Option<PathBuf>,
     /// 是否保留会话（false 时加 `--no-session-persistence`，快取用走 false 更快）。
     pub session_persistence: bool,
+    /// 续接最近一次会话（`--continue`）。Less Computer 连续对话用：第二轮起带上下文。
+    pub continue_session: bool,
 }
 
 impl CodingAgentRequest {
@@ -80,6 +82,7 @@ impl CodingAgentRequest {
             extra_system_prompt: None,
             settings_json_path: None,
             session_persistence: true,
+            continue_session: false,
         }
     }
 }
@@ -133,6 +136,9 @@ pub fn build_claude_args(req: &CodingAgentRequest) -> Vec<String> {
     }
     if !req.session_persistence {
         args.push("--no-session-persistence".into());
+    }
+    if req.continue_session {
+        args.push("--continue".into());
     }
 
     args

@@ -281,6 +281,9 @@ struct Inner {
     /// supervisor 线程，但 integration test 和未来 RunEvent::Exit 钩子需要这条
     /// 显式退出路径。审计 3.1.2。
     shutdown: AtomicBool,
+    /// Less Computer 连续对话：true=浮窗里已有进行中的会话，下一轮 `claude --continue` 续上下文；
+    /// 关闭浮窗（dismiss）复位为 false，下次说话开新会话。
+    less_computer_conversation: AtomicBool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -353,6 +356,7 @@ impl Coordinator {
                     qa_stream_cancelled: Arc::new(AtomicBool::new(false)),
                     local_asr_cache: Arc::new(crate::asr::local::LocalAsrCache::new()),
                     shutdown: AtomicBool::new(false),
+                    less_computer_conversation: AtomicBool::new(false),
                 }),
             }
         }
@@ -420,6 +424,7 @@ impl Coordinator {
                 foundry_local_runtime,
                 sherpa_onnx_runtime,
                 shutdown: AtomicBool::new(false),
+                less_computer_conversation: AtomicBool::new(false),
             }),
         }
     }
@@ -828,8 +833,12 @@ impl Coordinator {
         log::info!("[coord] QA window pinned={pinned}");
     }
 
-    /// 用户点 ✕ / 按 Esc 关 Less Computer 浮窗：隐藏窗口。
+    /// 用户点 ✕ / 按 Esc 关 Less Computer 浮窗：隐藏窗口 + 结束连续对话
+    /// （下次说话开新会话，不再 --continue 续旧上下文）。
     pub fn less_computer_window_dismiss(&self) {
+        self.inner
+            .less_computer_conversation
+            .store(false, Ordering::SeqCst);
         if let Some(app) = self.inner.app.lock().clone() {
             crate::hide_less_computer_window(&app);
         }
