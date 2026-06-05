@@ -550,19 +550,59 @@ async fn run_voice_agent_transcript(
     );
 
     let prefs = inner.prefs.get();
+    // 工作目录：用户设的 workdir，否则 $HOME。--add-dir 把文件作用域限定在此。
+    let cwd = prefs
+        .coding_agent_workdir
+        .clone()
+        .filter(|d| !d.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var("HOME").ok().map(std::path::PathBuf::from));
+    // 运行前 git 快照（cwd 是 git 仓库才有效；非仓库无副作用），便于回滚文件改动。
+    if let Some(dir) = &cwd {
+        if let Some(sha) = crate::coding_agent::create_git_snapshot(dir) {
+            log::info!("[less-computer] 运行前 git 快照 {sha}（git stash apply 可回滚）");
+        }
+    }
+    // 「放行 + 护栏」：让 Agent 真正动手（开应用 / 跑命令 / 读写文件）完成任务；
+    // 高风险/不可逆命令（rm -rf / sudo / 强推等）由护栏 deny 清单自动拦截（混合模式 MVP，
+    // 高风险=拦截；交互式弹审批为后续）。权限模式尊重高级设置，默认 acceptEdits。
+    let mode = coding_agent_mode_from_pref(&prefs.coding_agent_permission_mode);
+    let settings_json =
+        crate::coding_agent::guard::build_guard_settings_json(mode.as_cli_arg(), &[]);
+    let settings_path = std::env::temp_dir().join(format!(
+        "openless-less-computer-guard-{}.json",
+        uuid::Uuid::new_v4()
+    ));
+    if let Err(e) = std::fs::write(
+        &settings_path,
+        serde_json::to_vec_pretty(&settings_json).unwrap_or_default(),
+    ) {
+        log::warn!("[less-computer] 写护栏配置失败: {e}");
+    }
+
     // 无头单次运行没有多轮兜底：包一层目标驱动的自动化前置说明，逼 Claude 一口气做完。
     let prompt = crate::coding_agent::autonomous_prompt(&transcript);
-    let mut req = crate::coding_agent::CodingAgentRequest::new("voice-agent", prompt);
+    let mut req = crate::coding_agent::CodingAgentRequest::new("less-computer", prompt);
+    req.cwd = cwd;
     req.model = prefs
         .coding_agent_model
         .clone()
         .filter(|m| !m.trim().is_empty())
         .or_else(|| Some("sonnet".to_string()));
-    // 只读 Plan 模式：安全 MVP——返回文本、不产生副作用。后续要工具操作再放开。
-    req.permission_mode = crate::coding_agent::CodingAgentPermissionMode::Plan;
-    req.allowed_tools = Vec::new();
+    req.permission_mode = mode;
+    req.settings_json_path = Some(settings_path.clone());
+    req.allowed_tools = vec![
+        "Bash".into(),
+        "Read".into(),
+        "Edit".into(),
+        "Write".into(),
+        "Glob".into(),
+        "Grep".into(),
+        "WebFetch".into(),
+        "WebSearch".into(),
+    ];
     req.max_budget_usd = Some(0.5);
-    req.timeout_secs = 90;
+    req.timeout_secs = 120;
     req.session_persistence = false;
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -583,6 +623,7 @@ async fn run_voice_agent_transcript(
         }
     }
     let run_result = run.await;
+    let _ = std::fs::remove_file(&settings_path);
     let final_text = final_text.trim().to_string();
 
     inner.state.lock().phase = SessionPhase::Idle;
@@ -606,6 +647,17 @@ async fn run_voice_agent_transcript(
     emit_capsule(inner, CapsuleState::Done, 0.0, elapsed, Some(final_text), None);
     schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
     Ok(())
+}
+
+/// 把 prefs 里的权限模式字符串映射成枚举；未知值回落到 acceptEdits（放行+护栏的默认）。
+fn coding_agent_mode_from_pref(s: &str) -> crate::coding_agent::CodingAgentPermissionMode {
+    use crate::coding_agent::CodingAgentPermissionMode as M;
+    match s.trim() {
+        "plan" => M::Plan,
+        "default" => M::Default,
+        "bypassPermissions" => M::BypassPermissions,
+        _ => M::AcceptEdits,
+    }
 }
 
 pub(super) fn request_stop_during_starting(inner: &Arc<Inner>, reason: &str) {
