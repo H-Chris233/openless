@@ -556,10 +556,16 @@ pub(super) async fn handle_released(inner: &Arc<Inner>) {
 /// 长按计时器：begin_session 后武装。到点时若热键仍按住、仍是同一会话、且尚未升级，
 /// 就把当前会话标记为语音 Agent。短按（计时器到点前已松手）不受影响。
 fn arm_voice_agent_long_press(inner: &Arc<Inner>) {
-    let session_id = inner.state.lock().session_id;
+    // 阈值从会话开始（≈按下时刻）算起，扣掉 begin_session（含 ASR 握手）已耗时间，
+    // 否则握手慢时实际阈值会被拉长、长按判定不稳定。
+    let (session_id, started_at) = {
+        let st = inner.state.lock();
+        (st.session_id, st.started_at)
+    };
+    let remaining = VOICE_AGENT_LONG_PRESS.saturating_sub(started_at.elapsed());
     let inner = Arc::clone(inner);
     async_runtime::spawn(async move {
-        tokio::time::sleep(VOICE_AGENT_LONG_PRESS).await;
+        tokio::time::sleep(remaining).await;
         // 已松手 → 这是一次普通点按（听写），不升级。
         if !inner.hotkey_trigger_held.load(Ordering::SeqCst) {
             return;
