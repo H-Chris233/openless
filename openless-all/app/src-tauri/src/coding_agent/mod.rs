@@ -27,6 +27,26 @@ pub use args::{build_claude_args, CodingAgentPermissionMode, CodingAgentRequest}
 pub use detect::McpServerStatus;
 pub use stream::{parse_stream_json_line, CodingAgentEvent};
 
+/// 无头 Claude 的「自动化前置说明」。
+///
+/// 无头 `claude -p` 是单次运行、没有多轮对话兜底：模型若中途提问、只给计划 / 半成品，
+/// 这一轮就废了。所以在把用户的真实需求交给它之前，统一包一层目标驱动（/goal 式）的
+/// 自动化指令，要求它一口气把任务彻底做完、只回最终结果。所有走 [`run_claude_agent`]
+/// 的「让 Claude 干活」入口都应该用它来构造 prompt。
+pub fn autonomous_prompt(task: &str) -> String {
+    format!(
+        "【自动化任务 · 一次性完成】这是一次无人值守的单次无头运行，没有多轮对话机会，\
+你无法事后追问或补充。请把下面的需求当成一个必须在本次运行内彻底达成的目标（等价于先 /goal \
+设定目标与完成标准，再自主执行直到达成）：\n\
+- 先想清楚目标和「完成」的判定标准，再开始动手；\n\
+- 自主、连续地一口气执行到完全完成，不要中途停下来提问或等待确认；遇到歧义按最合理的方式继续；\n\
+- 不要只给计划、思路或半成品，也不要留「后续步骤」给别人——要交付最终可用的结果；\n\
+- 任务较长也要想办法在这一次运行内拆解并跑完；\n\
+- 全部完成后，只输出最终结果本身，不要解释过程、不要前后缀、不要引号。\n\n\
+需求：\n{task}"
+    )
+}
+
 /// 运行器把事件投递到这个 sink（coordinator / 命令层再转成 Tauri event）。
 pub type CodingAgentEventSink = tokio::sync::mpsc::UnboundedSender<CodingAgentEvent>;
 
@@ -241,4 +261,25 @@ pub async fn run_claude_agent(
     }
 
     outcome
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn autonomous_prompt_wraps_task_with_oneshot_directive() {
+        let p = autonomous_prompt("把这段话翻译成英文：你好");
+        // 原始需求必须原样带上。
+        assert!(p.contains("把这段话翻译成英文：你好"));
+        // 必含「一次性完成 / 单次无头运行 / 不要提问 / 只输出最终结果」这些核心约束。
+        assert!(p.contains("一次性完成"));
+        assert!(p.contains("无头"));
+        assert!(p.contains("不要中途停下来提问"));
+        assert!(p.contains("只输出最终结果"));
+        // 需求要排在自动化说明之后（前置说明在前）。
+        let directive_idx = p.find("自动化任务").unwrap();
+        let task_idx = p.find("把这段话翻译成英文").unwrap();
+        assert!(directive_idx < task_idx, "自动化前置说明必须在需求之前");
+    }
 }

@@ -602,9 +602,8 @@ async fn run_voice_agent_transcript(
     );
 
     let prefs = inner.prefs.get();
-    let prompt = format!(
-        "下面是用户的语音指令，请直接完成它并只返回结果文本（不要解释、不要前后缀、不要引号）：\n\n{transcript}"
-    );
+    // 无头单次运行没有多轮兜底：包一层目标驱动的自动化前置说明，逼 Claude 一口气做完。
+    let prompt = crate::coding_agent::autonomous_prompt(&transcript);
     let mut req = crate::coding_agent::CodingAgentRequest::new("voice-agent", prompt);
     req.model = prefs
         .coding_agent_model
