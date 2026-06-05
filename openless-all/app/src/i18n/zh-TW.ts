@@ -737,7 +737,7 @@ export const zhTW: typeof zhCN = {
       startStop: '開始 / 停止錄音',
       cancel: '取消本次錄音',
       confirm: '膠囊確認插入',
-      switchStyle: '切換上一次風格',
+      switchStyle: '切換到上一個風格',
       openApp: '打開 OpenLess',
       agentPolish: '選取文字潤色',
       agentPolishDesc: '選取文字 → 按鍵 → Claude 潤色 → 取代選取。',

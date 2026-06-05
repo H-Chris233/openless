@@ -26,7 +26,7 @@ interface AppProps {
   forcedOs?: OS | null;
 }
 
-type Gate = 'checking' | 'onboarding' | 'ready';
+type Gate = 'onboarding' | 'ready';
 
 export function App({ isCapsule, isQa, forcedOs }: AppProps) {
   if (isCapsule) {
@@ -38,11 +38,10 @@ export function App({ isCapsule, isQa, forcedOs }: AppProps) {
 
   const os = forcedOs ?? detectOS();
   // Windows 启动不应被权限探测阻塞首屏。
-  const [gate, setGate] = useState<Gate>(isTauri ? 'checking' : 'ready');
+  const [gate, setGate] = useState<Gate>('ready');
 
   useEffect(() => {
     if (!isTauri) return;
-    if (os === 'win' && gate === 'checking') return;
     let cancelled = false;
     requestAnimationFrame(() => {
       if (cancelled) return;
@@ -80,7 +79,7 @@ export function App({ isCapsule, isQa, forcedOs }: AppProps) {
     return () => {
       cancelled = true;
     };
-  }, [gate, os]);
+  }, [os]);
 
   useEffect(() => {
     if (!isTauri) return;
@@ -170,7 +169,7 @@ export function App({ isCapsule, isQa, forcedOs }: AppProps) {
     };
   }, [os]);
 
-  // Linux: 检测 WEBKIT_DISABLE_COMPOSITING_MODE → 禁用 backdrop-filter fallback
+  // Linux: 检测 WEBKIT_DISABLE_COMPOSITING_MODE → 触发磨砂 fallback（#570, #553）
   useEffect(() => {
     if (!isTauri) return;
     invoke<boolean>('is_no_compositing_mode').then((val) => {
@@ -182,9 +181,6 @@ export function App({ isCapsule, isQa, forcedOs }: AppProps) {
     });
   }, []);
 
-  if (gate === 'checking') {
-    return <StartupShell />;
-  }
   return (
     <HotkeySettingsProvider>
       {gate === 'onboarding' ? <Onboarding onComplete={() => setGate('ready')} /> : <FloatingShell os={os} />}
@@ -193,42 +189,3 @@ export function App({ isCapsule, isQa, forcedOs }: AppProps) {
   );
 }
 
-function StartupShell() {
-  // 用透明背景：main window 是 transparent + macOSPrivateApi（NSVisualEffectView 磨砂）。
-  // 之前用 linear-gradient(rgba(245,245,247,0.96)...) 会盖过 macOS vibrancy，启动时
-  // 长时间在 'checking' phase（凭据迁移 / 权限 probe 慢）会让窗口看起来「左侧白屏 +
-  // 右侧磨砂」割裂。现在背景全透明，让磨砂统一展开，提示文字 + icon 用一个轻量
-  // pill 卡片承载，跟 capsule 视觉一致。
-  return (
-    <div
-      style={{
-        minHeight: '100vh',
-        display: 'grid',
-        placeItems: 'center',
-        background: 'transparent',
-        color: 'var(--ol-ink-3)',
-        fontFamily: 'var(--ol-font-sans)',
-      }}
-    >
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 10,
-          fontSize: 13,
-          fontWeight: 500,
-          padding: '10px 16px',
-          borderRadius: 999,
-          background: 'rgba(255, 255, 255, 0.55)',
-          backdropFilter: 'blur(20px) saturate(180%)',
-          WebkitBackdropFilter: 'blur(20px) saturate(180%)',
-          border: '0.5px solid rgba(0, 0, 0, 0.06)',
-          boxShadow: '0 4px 14px -6px rgba(0, 0, 0, 0.18), 0 0 0 0.5px rgba(0,0,0,0.04)',
-        }}
-      >
-        <img src="AppIcon.png" alt="" style={{ width: 18, height: 18, borderRadius: 4 }} />
-        <span>OpenLess 正在启动</span>
-      </div>
-    </div>
-  );
-}
