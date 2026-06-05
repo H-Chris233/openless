@@ -286,6 +286,9 @@ function Pill({ os, state, level, insertedChars, message, onCancel, onConfirm }:
 // 动画结束就 unmount → 用户看到半截动画被截断。
 // v1.3.1-6: 从 240ms 加到 360ms 让用户看清退出动画（240ms 太快感知不到）。
 const EXIT_ANIM_MS = 360;
+// #470 诊断 v2：模块级一次性门，只在 webview 收到第一个 capsule:state 事件时打 log。
+let capsuleStateFirstLogged = false;
+
 // 初始可见 state：Tauri 内运行从 idle 开始（等后端 capsule:state 事件），
 // 浏览器 dev 模式从 recording 开始以便直接看到胶囊。
 const INITIAL_VISIBLE_STATE: CapsuleState = isTauri ? 'idle' : 'recording';
@@ -321,6 +324,12 @@ export function Capsule() {
       const { listen } = await import('@tauri-apps/api/event');
       const handle = await listen<CapsulePayload>('capsule:state', event => {
         const p = event.payload;
+        if (!capsuleStateFirstLogged) {
+          capsuleStateFirstLogged = true;
+          // #470 诊断 v2：确认 capsule webview 确实收到了后端事件 —— 区分「后端没
+          // emit」与「emit 了但窗口没显示/没渲染」。配合后端 [capsule] 日志定位根因。
+          console.info('[capsule] first capsule:state received in webview, state=', p.state);
+        }
         setState(p.state);
         setLevel(p.level ?? 0);
         setMessage(p.message ?? undefined);

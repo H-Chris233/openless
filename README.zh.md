@@ -27,6 +27,7 @@
   <a href="https://github.com/appergb/openless/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/appergb/openless?style=flat-square&color=2c5282" /></a>
   <a href="https://github.com/appergb/openless/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/github/license/appergb/openless?style=flat-square&color=2f855a" /></a>
   <a href="https://github.com/appergb/openless/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/appergb/openless?style=flat-square&color=805ad5" /></a>
+  <a href="https://discord.gg/vTZHTFGFm"><img alt="Discord" src="https://img.shields.io/badge/Discord-Join-5865F2?style=flat-square&logo=discord&logoColor=white" /></a>
 </p>
 
 <p align="center">
@@ -37,7 +38,7 @@
 </p>
 
 <p align="center">
-  💬 &nbsp;QQ 群&nbsp; <strong>1078960553</strong>
+  💬 &nbsp;<a href="https://discord.gg/vTZHTFGFm"><strong>加入 Discord 社区</strong></a> &nbsp;·&nbsp; QQ 群&nbsp; <strong>1078960553</strong>
 </p>
 
 <br/>
@@ -122,20 +123,21 @@ OpenLess 是一款跨平台(macOS 与 Windows)语音输入应用,是 [Typeless](
 
 按住快捷键,说:
 
-> 嗯…那个…我想让 ChatGPT 帮我写个 SQL,从 orders 表里取上个月的订单,按客户分组,金额从大到小排,取前十条
+> 嗯…那个,我要给客户回个邮件,就是上次他们提的那个方案嘛,我们内部讨论了一下觉得大方向没问题,但是有几个细节要改,第一个就是交付时间太紧了我们希望延两周,第二个是预算那块他们报的价格比我们预期高了大概百分之二十能不能谈一下,然后整体合作意向是积极的让他们放心,语气客气一点别太生硬
 
 松开快捷键。片刻之后,你的输入框里出现:
 
 ```text
-请写一条 SQL 查询,要求:
+给客户回邮件,关于上次他们提的方案,我们内部讨论后认为大方向没问题,但有几个细节需要调整:
 
-- 从 `orders` 表中取出上个月的订单。
-- 按客户分组。
-- 按总金额降序排列。
-- 仅返回前 10 行。
+1. 交付时间
+   (a) 目前交付时间太紧,希望延长两周。
+2. 预算
+   (a) 他们的报价比我们预期高了大约 20%,能否再谈一下？
+整体合作意向是积极的,语气上请客气一点,不要太生硬。
 ```
 
-无需任何修改——按下回车发送即可。这就是核心理念:**用嘴写提示词,比打字更快、更干净。**
+无需任何修改——直接粘贴给 ChatGPT 或 Claude,让它替你把邮件写完。这就是核心理念:**用嘴写提示词,比打字更快、更干净。**
 
 ## 为什么 OpenLess 选择开源
 

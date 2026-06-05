@@ -179,6 +179,7 @@ export type AsrPresetId =
     | "zhipu"
     | "groq"
     | "whisper"
+    | "openrouter"
     | "foundry-local-whisper"
     | "sherpa-onnx-local"
     | "local-qwen3"

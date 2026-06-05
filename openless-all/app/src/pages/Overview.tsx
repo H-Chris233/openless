@@ -30,6 +30,7 @@ const ASR_NAME_KEY_BY_ID: Record<string, string> = {
   zhipu: 'asrZhipu',
   groq: 'asrGroq',
   whisper: 'asrWhisper',
+  openrouter: 'asrOpenrouter',
   'foundry-local-whisper': 'asrFoundryLocalWhisper',
   'sherpa-onnx-local': 'asrSherpaOnnxLocal',
   'local-qwen3': 'asrLocalQwen3',
@@ -100,6 +101,34 @@ export function Overview({ onOpenHistory }: OverviewProps) {
   useEffect(() => {
     refreshCredentials();
   }, [refreshCredentials, prefs?.activeAsrProvider, prefs?.activeLlmProvider]);
+
+  // 凭据被保存后重新拉取状态（issue #532 / #573：在 Settings 中填写/更新凭据
+  // 但不切换提供商时，上面的 useEffect 不会重跑，导致概览页的状态仍停留在「未配置」）。
+  // 复用 refreshCredentials() 以带上 credentialsRequestSeq 防竞态。
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    (async () => {
+      try {
+        const { listen } = await import('@tauri-apps/api/event');
+        const handle = await listen('credentials:changed', () => {
+          if (cancelled) return;
+          refreshCredentials();
+        });
+        if (cancelled) {
+          handle();
+        } else {
+          unlisten = handle;
+        }
+      } catch {
+        // browser dev mock — 没有 Tauri event bridge
+      }
+    })();
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [refreshCredentials]);
 
   const metrics = useMemo(() => {
     const today = new Date();

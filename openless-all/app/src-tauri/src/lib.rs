@@ -48,6 +48,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const LOG_ROTATE_LIMIT_BYTES: u64 = 10 * 1024 * 1024;
+#[cfg(target_os = "macos")]
+const OPENLESS_BUNDLE_ID: &str = "com.openless.app";
 
 /// 第一次 show 时把 QA 浮窗摆到屏幕底部居中；之后的 show 不再 reposition，
 /// 让用户拖动后的位置在 hide → show 之间得以保持。详见 issue #118 v2。
@@ -825,7 +827,47 @@ fn restart_app(app: AppHandle) {
             log::info!("[updater] stripped xattr on {:?} before restart", bundle);
         }
     }
+    #[cfg(target_os = "macos")]
+    reset_tcc_for_beta_restart();
     app.restart();
+}
+
+#[cfg(target_os = "macos")]
+fn reset_tcc_for_beta_restart() {
+    if !is_beta_build() {
+        log::info!("[updater] skipping TCC reset before stable restart");
+        return;
+    }
+
+    // Beta builds are currently ad-hoc signed. Their code hash changes across builds, so
+    // old TCC rows can leave System Settings checked while AXIsProcessTrusted() is false.
+    reset_tcc_service_for_beta_restart("Accessibility");
+    reset_tcc_service_for_beta_restart("Microphone");
+}
+
+#[cfg(target_os = "macos")]
+fn is_beta_build() -> bool {
+    env!("CARGO_PKG_VERSION").contains('-')
+}
+
+#[cfg(target_os = "macos")]
+fn reset_tcc_service_for_beta_restart(service: &str) {
+    match std::process::Command::new("/usr/bin/tccutil")
+        .args(["reset", service, OPENLESS_BUNDLE_ID])
+        .status()
+    {
+        Ok(status) if status.success() => {
+            log::info!("[updater] reset TCC {service} before beta restart");
+        }
+        Ok(status) => {
+            log::warn!(
+                "[updater] reset TCC {service} before beta restart exited with {status}"
+            );
+        }
+        Err(e) => {
+            log::warn!("[updater] reset TCC {service} before beta restart failed: {e}");
+        }
+    }
 }
 
 /// 把日志同时写到 stderr + ~/Library/Logs/OpenLess/openless.log（match Swift `Log.swift`）。
@@ -1339,7 +1381,15 @@ pub(crate) fn position_capsule_bottom_center<R: tauri::Runtime>(
             let offset_from_bottom =
                 (capsule_visual_height(translation_active) + 80.0 + bounds.bottom_inset) * scale;
             let y = ((mon.bottom as f64) - offset_from_bottom).round() as i32;
-            window.set_position(PhysicalPosition::new(x, y.max(mon.top)))?;
+            let clamped_y = y.max(mon.top);
+            // #470 诊断 v2：当前只夹了上边（.max(mon.top)），未夹下/左/右。多显示器、
+            // 负坐标或异常 DPI 下胶囊可能被算到屏幕外却无任何观测。记录显示器几何与
+            // 最终落点，用于证伪/证实「胶囊定位到屏幕外」(C 子嫌疑)。
+            log::debug!(
+                "[capsule] win position: mon=({},{})..({},{}) scale={:.2} size=({}x{}) -> x={} y={} clamped_y={}",
+                mon.left, mon.top, mon.right, mon.bottom, scale, phys_w, phys_h, x, y, clamped_y
+            );
+            window.set_position(PhysicalPosition::new(x, clamped_y))?;
             return Ok(());
         }
         // 仅当 Win32 取不到前台显示器时，落回下面的 current_monitor 逻辑。

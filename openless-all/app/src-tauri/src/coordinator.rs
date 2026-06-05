@@ -100,6 +100,8 @@ fn capsule_show_strategy_for_platform() -> CapsuleShowStrategy {
 static CAPSULE_NO_ACTIVATE_FALLBACK_WARNED: AtomicBool = AtomicBool::new(false);
 static CAPSULE_SUPPRESSED_BY_TOGGLE_LOGGED: AtomicBool = AtomicBool::new(false);
 static CAPSULE_FIRST_SHOW_LOGGED: AtomicBool = AtomicBool::new(false);
+// #470 诊断 v2：capsule webview 句柄取不到时的一次性门，区分「窗口压根没创建」(A0)。
+static CAPSULE_WINDOW_MISSING_LOGGED: AtomicBool = AtomicBool::new(false);
 
 /// 给 #470 诊断日志用的 capsule 状态短名。显式枚举每个变体到 &'static str，
 /// 不走 `Debug` —— 哪天 CapsuleState 加了 `String` 字段，`:?` 会把 ASR / polish
@@ -184,7 +186,9 @@ fn active_asr_provider_kind(id: &str) -> ActiveAsrProviderKind {
 
 fn batch_asr_chunk_limit_ms(provider_id: &str) -> Option<u64> {
     match provider_id {
-        "zhipu" => Some(30_000),
+        // OpenRouter 把音频 base64 进 JSON body，体积比二进制大 ~33%，长录音易撞
+        // body/时长上限，保守按 30s 切分（与 zhipu 同）。
+        "zhipu" | "openrouter" => Some(30_000),
         _ => None,
     }
 }
@@ -728,7 +732,12 @@ impl Coordinator {
     }
 
     fn update_action_hotkey_binding(&self, kind: ActionHotkeyKind) {
-        let binding = action_hotkey_binding(&self.inner, kind);
+        // None = 用户主动停用：反注册全局键，立即生效。
+        let Some(binding) = action_hotkey_binding(&self.inner, kind) else {
+            take_action_hotkey_on_main_thread(&self.inner, kind);
+            log::info!("[coord] action hotkey {kind:?} 已停用（用户清空）");
+            return;
+        };
         if is_modifier_only_shortcut(&binding) {
             take_action_hotkey_on_main_thread(&self.inner, kind);
             log::warn!("[coord] action hotkey {kind:?} 使用了不支持的 modifier-only 绑定，已关闭");
@@ -1517,7 +1526,12 @@ fn action_hotkey_supervisor_loop(inner: Arc<Inner>, kind: ActionHotkeyKind) {
         if inner.shutdown.load(Ordering::SeqCst) {
             return;
         }
-        let binding = action_hotkey_binding(&inner, kind);
+        // None = 用户主动停用：反注册并睡着等 prefs 改动（由 update 路径唤醒）。
+        let Some(binding) = action_hotkey_binding(&inner, kind) else {
+            take_action_hotkey_on_main_thread(&inner, kind);
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            continue;
+        };
         if is_modifier_only_shortcut(&binding) {
             take_action_hotkey_on_main_thread(&inner, kind);
             std::thread::sleep(std::time::Duration::from_secs(5));
@@ -1711,7 +1725,7 @@ fn action_hotkey_slot(
 fn action_hotkey_binding(
     inner: &Arc<Inner>,
     kind: ActionHotkeyKind,
-) -> crate::types::ShortcutBinding {
+) -> Option<crate::types::ShortcutBinding> {
     let prefs = inner.prefs.get();
     match kind {
         ActionHotkeyKind::SwitchStyle => prefs.switch_style_hotkey,
@@ -1868,17 +1882,21 @@ fn reset_shortcut_held_state(inner: &Arc<Inner>) {
             }
         }
     }
-    if !is_modifier_only_shortcut(&prefs.switch_style_hotkey) {
-        if let Some(monitor) = inner.switch_style_hotkey.lock().as_ref() {
-            if let Err(e) = monitor.update_binding(prefs.switch_style_hotkey.clone()) {
-                log::warn!("[coord] reset switch-style hotkey latch failed: {e}");
+    if let Some(switch_style) = prefs.switch_style_hotkey.as_ref() {
+        if !is_modifier_only_shortcut(switch_style) {
+            if let Some(monitor) = inner.switch_style_hotkey.lock().as_ref() {
+                if let Err(e) = monitor.update_binding(switch_style.clone()) {
+                    log::warn!("[coord] reset switch-style hotkey latch failed: {e}");
+                }
             }
         }
     }
-    if !is_modifier_only_shortcut(&prefs.open_app_hotkey) {
-        if let Some(monitor) = inner.open_app_hotkey.lock().as_ref() {
-            if let Err(e) = monitor.update_binding(prefs.open_app_hotkey.clone()) {
-                log::warn!("[coord] reset open-app hotkey latch failed: {e}");
+    if let Some(open_app) = prefs.open_app_hotkey.as_ref() {
+        if !is_modifier_only_shortcut(open_app) {
+            if let Some(monitor) = inner.open_app_hotkey.lock().as_ref() {
+                if let Err(e) = monitor.update_binding(open_app.clone()) {
+                    log::warn!("[coord] reset open-app hotkey latch failed: {e}");
+                }
             }
         }
     }
@@ -2489,7 +2507,16 @@ async fn build_local_qwen3(
 /// (messages=[{content:[{audio:...}]}]) 协议，不是 Whisper multipart，需要
 /// 单独 ASR 客户端，留给 V2。
 fn is_whisper_compatible_provider(id: &str) -> bool {
-    matches!(id, "whisper" | "siliconflow" | "zhipu" | "groq")
+    matches!(id, "whisper" | "siliconflow" | "zhipu" | "groq" | "openrouter")
+}
+
+/// 该 provider 的请求体编码方式。OpenRouter 的 `/audio/transcriptions` 是
+/// `application/json` + base64 音频（issue #582），其余兼容厂商沿用 multipart。
+fn whisper_request_format(provider_id: &str) -> crate::asr::whisper::AsrRequestFormat {
+    match provider_id {
+        "openrouter" => crate::asr::whisper::AsrRequestFormat::OpenRouterJson,
+        _ => crate::asr::whisper::AsrRequestFormat::Multipart,
+    }
 }
 
 /// 该 provider 的 `/audio/transcriptions` 是否支持 `response_format=verbose_json`
@@ -2665,14 +2692,17 @@ async fn build_qa_asr_start(inner: &Arc<Inner>, active_asr: &str) -> Result<QaAs
             let (api_key, base_url, model) = read_whisper_credentials();
             let whisper_prompt =
                 crate::asr::whisper::build_prompt_from_phrases(&enabled_phrases(inner));
-            let whisper = Arc::new(WhisperBatchASR::new(
-                api_key,
-                base_url,
-                model,
-                whisper_prompt,
-                batch_asr_chunk_limit_ms(active_asr),
-                whisper_supports_verbose_json(active_asr),
-            ));
+            let whisper = Arc::new(
+                WhisperBatchASR::new(
+                    api_key,
+                    base_url,
+                    model,
+                    whisper_prompt,
+                    batch_asr_chunk_limit_ms(active_asr),
+                    whisper_supports_verbose_json(active_asr),
+                )
+                .with_request_format(whisper_request_format(active_asr)),
+            );
             let active = ActiveAsr::Whisper(Arc::clone(&whisper));
             let consumer: Arc<dyn crate::recorder::AudioConsumer> = whisper;
             Ok(QaAsrStart::Ready { active, consumer })
@@ -4058,6 +4088,27 @@ mod tests {
     }
 
     #[test]
+    fn openrouter_is_whisper_compatible_json_provider() {
+        use crate::asr::whisper::AsrRequestFormat;
+        // issue #582：OpenRouter 走 whisper 兼容路由，但请求体是 JSON+base64。
+        assert!(is_whisper_compatible_provider("openrouter"));
+        assert_eq!(
+            whisper_request_format("openrouter"),
+            AsrRequestFormat::OpenRouterJson
+        );
+        // 其余兼容厂商保持 multipart。
+        assert_eq!(
+            whisper_request_format("whisper"),
+            AsrRequestFormat::Multipart
+        );
+        assert_eq!(whisper_request_format("groq"), AsrRequestFormat::Multipart);
+        // OpenRouter 的 JSON 协议不吃 response_format，verbose_json 保持关闭。
+        assert!(!whisper_supports_verbose_json("openrouter"));
+        // base64 膨胀，长录音保守按 30s 切分。
+        assert_eq!(batch_asr_chunk_limit_ms("openrouter"), Some(30_000));
+    }
+
+    #[test]
     fn qa_asr_provider_kind_tracks_active_provider() {
         assert_eq!(
             active_asr_provider_kind(crate::asr::bailian::PROVIDER_ID),
@@ -4989,9 +5040,13 @@ fn show_capsule_window_no_activate<R: tauri::Runtime>(
     };
 
     let Ok(handle) = window.window_handle() else {
+        // #470 诊断 v2：Win32 show 路径最可能的暗点之一。此前静默 return，
+        // 无法观测「胶囊完全不显示」是否卡在这里。
+        log::warn!("[capsule] no_activate failed: window_handle() unavailable — Win32 show skipped");
         return false;
     };
     let RawWindowHandle::Win32(raw) = handle.as_raw() else {
+        log::warn!("[capsule] no_activate failed: non-Win32 RawWindowHandle — Win32 show skipped");
         return false;
     };
     let hwnd = HWND(raw.hwnd.get() as *mut _);
@@ -5226,6 +5281,14 @@ fn emit_capsule(
     let app_for_main = app.clone();
     let _ = app.run_on_main_thread(move || {
         let Some(window) = app_for_main.get_webview_window("capsule") else {
+            // #470 诊断 v2：比 A/B/C 更靠前的暗点 A0 —— capsule webview 句柄取不到
+            // （窗口未创建/已销毁）。此前静默 return，无法观测。一次性 warn。
+            if !CAPSULE_WINDOW_MISSING_LOGGED.swap(true, Ordering::SeqCst) {
+                log::warn!(
+                    "[capsule] capsule webview window not found — emit_capsule show path skipped (state={})",
+                    capsule_state_log_name(state)
+                );
+            }
             return;
         };
         let show_capsule = inner_for_main.prefs.get().show_capsule;

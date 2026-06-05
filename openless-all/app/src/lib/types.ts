@@ -255,10 +255,10 @@ export interface UserPreferences {
   customComboHotkey: ComboBinding | null;
   /** 录音中触发翻译的全局快捷键。默认 Shift。 */
   translationHotkey: ShortcutBinding;
-  /** 切换到上一个润色风格的全局快捷键。 */
-  switchStyleHotkey: ShortcutBinding;
-  /** 打开 OpenLess 主窗口的全局快捷键。 */
-  openAppHotkey: ShortcutBinding;
+  /** 切换到上一个润色风格的全局快捷键。null = 用户已停用（issue #576）。 */
+  switchStyleHotkey: ShortcutBinding | null;
+  /** 打开 OpenLess 主窗口的全局快捷键。null = 用户已停用（issue #576）。 */
+  openAppHotkey: ShortcutBinding | null;
   /** 本地 Qwen3-ASR 当前激活的模型 id。仅在 activeAsrProvider === 'local-qwen3' 时有意义。 */
   localAsrActiveModel: string;
   /** 本地模型下载源镜像（'huggingface' / 'hf-mirror'）。 */

@@ -27,6 +27,7 @@
   <a href="https://github.com/appergb/openless/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/appergb/openless?style=flat-square&color=2c5282" /></a>
   <a href="https://github.com/appergb/openless/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/github/license/appergb/openless?style=flat-square&color=2f855a" /></a>
   <a href="https://github.com/appergb/openless/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/appergb/openless?style=flat-square&color=805ad5" /></a>
+  <a href="https://discord.gg/vTZHTFGFm"><img alt="Discord" src="https://img.shields.io/badge/Discord-Join-5865F2?style=flat-square&logo=discord&logoColor=white" /></a>
 </p>
 
 <p align="center">
@@ -37,7 +38,7 @@
 </p>
 
 <p align="center">
-  💬 &nbsp;QQ Group&nbsp; <strong>1078960553</strong>
+  💬 &nbsp;<a href="https://discord.gg/vTZHTFGFm"><strong>Join our Discord</strong></a> &nbsp;·&nbsp; QQ Group&nbsp; <strong>1078960553</strong>
 </p>
 
 <br/>
@@ -122,20 +123,21 @@ Two features define how OpenLess feels in daily use:
 
 Hold the hotkey and say:
 
-> uh… so… I want ChatGPT to write me a SQL query, from the orders table get last month's orders, group by customer, sort by amount desc, top ten
+> uh… so… I need to reply to the client about the proposal they sent last time, we talked it over internally and the overall direction is fine but a few details need changing, first the delivery timeline is too tight we'd like to push it back two weeks, second on budget their quote came in about twenty percent higher than we expected can we negotiate that, and overall we're positive about working together so reassure them, keep the tone polite not too blunt
 
 Release the hotkey. A moment later, your input box reads:
 
 ```text
-Please write a SQL query that:
+Reply to the client about the proposal they sent. After internal discussion, the overall direction is fine, but a few details need adjusting:
 
-- Pulls orders from last month from the `orders` table.
-- Groups by customer.
-- Sorts by total amount, descending.
-- Returns the top 10 rows only.
+1. Delivery timeline
+   (a) The current timeline is too tight; we'd like to extend it by two weeks.
+2. Budget
+   (a) Their quote is about 20% higher than we expected — can we renegotiate?
+Keep the overall message positive about the partnership, and keep the tone polite rather than blunt.
 ```
 
-No edits are required — press Enter and send. That is the core idea: **compose prompts by speaking, faster and more cleanly than typing them.**
+No edits are required — paste it into ChatGPT or Claude and let it draft the email. That is the core idea: **compose prompts by speaking, faster and more cleanly than typing them.**
 
 ## Why OpenLess is open source
 
