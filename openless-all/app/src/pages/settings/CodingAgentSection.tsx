@@ -1,10 +1,9 @@
-// 高级 → Less Computer 配置：启用开关、按住说话快捷键、Claude / OpenCode、模型 / 权限模式 / 工作目录。
+// 高级 → Less Computer 配置：启用开关、后端（Claude / OpenCode）、模型 / 权限模式 / 工作目录。
+// 「按住说话键」在 通用 → 快捷键 里配置（见 ShortcutsSection），这里不再重复。
 // 配置经 UserPreferences 持久化；启用后 coordinator 才注册热键。
 
 import { useTranslation } from 'react-i18next'
-import { ShortcutRecorder } from '../../components/ShortcutRecorder'
 import { detectOS } from '../../components/WindowChrome'
-import { defaultLessComputerShortcut } from '../../lib/hotkey'
 import type { CodingAgentPermissionMode, CodingAgentProviderId } from '../../lib/types'
 import { useHotkeySettings } from '../../state/HotkeySettingsContext'
 import { Card } from '../_atoms'
@@ -48,28 +47,7 @@ export function CodingAgentSection() {
 
       {enabled && (
         <>
-          <SettingRow label={t('settings.codingAgent.voiceHotkey')} desc={t('settings.codingAgent.voiceHotkeyDesc')}>
-            {prefs.codingAgentVoiceHotkey ? (
-              <ShortcutRecorder
-                value={prefs.codingAgentVoiceHotkey}
-                alignRecordButton
-                onSave={async binding => {
-                  await savePrefs({ ...prefs, codingAgentVoiceHotkey: binding })
-                }}
-                onDisable={async () => {
-                  await savePrefs({ ...prefs, codingAgentVoiceHotkey: null })
-                }}
-              />
-            ) : (
-              <button
-                onClick={() => void savePrefs({ ...prefs, codingAgentVoiceHotkey: defaultLessComputerShortcut() })}
-                style={{ fontSize: 12, padding: '5px 14px', background: 'var(--ol-blue)', color: '#fff', border: 0, borderRadius: 6, fontFamily: 'inherit', fontWeight: 500, cursor: 'pointer' }}
-              >
-                {t('settings.shortcuts.enable', 'Enable')}
-              </button>
-            )}
-          </SettingRow>
-
+          {/* 「按住说话键」配置已挪到 通用 → 快捷键，避免和这里重复。本区只留后端/模型等高级项。 */}
           <SettingRow label={t('settings.codingAgent.provider')}>
             <select
               value={prefs.codingAgentProvider}
