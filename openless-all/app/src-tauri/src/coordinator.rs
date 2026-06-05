@@ -1447,9 +1447,10 @@ fn coding_agent_hotkey_bridge_loop(inner: Arc<Inner>, rx: mpsc::Receiver<CodingA
 /// 完整语音流程开发中，先给用户一个明确的可见提示，避免静默。
 async fn handle_coding_agent_panel(inner: &Arc<Inner>) {
     log::info!("[coding-agent] 面板键：Cloud Agent 语音功能开发中");
+    // 用 Done（中性色）而非 Error（红色）——这是「敬请期待」的信息提示，不是报错。
     emit_capsule(
         inner,
-        CapsuleState::Error,
+        CapsuleState::Done,
         0.0,
         0,
         Some("Cloud Agent 语音功能开发中，敬请期待".to_string()),
@@ -4242,8 +4243,8 @@ mod tests {
 
         assert_eq!(
             *coordinator.inner.last_capsule_state.lock(),
-            Some(CapsuleState::Error),
-            "按下 Cloud Agent 面板键必须弹出可见胶囊（开发中提示）"
+            Some(CapsuleState::Done),
+            "按下 Cloud Agent 面板键必须弹出可见胶囊（中性的开发中提示，非红色报错）"
         );
         std::env::remove_var("OPENLESS_HOTKEY_INJECTION_DRY_RUN");
     }
