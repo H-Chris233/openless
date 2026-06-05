@@ -1378,6 +1378,60 @@ pub(crate) fn hide_less_computer_window<R: tauri::Runtime>(app: &AppHandle<R>) {
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn hide_less_computer_window<R: tauri::Runtime>(_app: &AppHandle<R>) {}
 
+/// 显示全屏彩虹描边浮层：盖满当前显示器、点击穿透、置顶。Agent 工作时点亮整屏边缘。
+#[cfg(target_os = "macos")]
+pub(crate) fn show_less_computer_glow<R: tauri::Runtime>(app: &AppHandle<R>) {
+    let Some(window) = app.get_webview_window("less-computer-glow") else {
+        return;
+    };
+    // 盖满当前（否则主）显示器，含菜单栏/Dock 区域 —— 屏幕边缘环绕发光。
+    let monitor = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| app.primary_monitor().ok().flatten());
+    if let Some(monitor) = monitor {
+        let _ = window.set_position(*monitor.position());
+        let _ = window.set_size(*monitor.size());
+    }
+    // 点击穿透：纯视觉浮层，绝不拦截鼠标。
+    let _ = window.set_ignore_cursor_events(true);
+    let window_clone = window.clone();
+    let _ = app.run_on_main_thread(move || {
+        use objc2::msg_send;
+        use objc2::runtime::AnyObject;
+        match window_clone.ns_window() {
+            Ok(handle) => {
+                let ns = handle as *mut AnyObject;
+                if ns.is_null() {
+                    let _ = window_clone.show();
+                } else {
+                    unsafe {
+                        let _: () = msg_send![ns, orderFrontRegardless];
+                    }
+                }
+            }
+            Err(_) => {
+                let _ = window_clone.show();
+            }
+        }
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn show_less_computer_glow<R: tauri::Runtime>(_app: &AppHandle<R>) {}
+
+/// 隐藏全屏彩虹描边浮层。
+#[cfg(target_os = "macos")]
+pub(crate) fn hide_less_computer_glow<R: tauri::Runtime>(app: &AppHandle<R>) {
+    if let Some(window) = app.get_webview_window("less-computer-glow") {
+        let _ = window.hide();
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn hide_less_computer_glow<R: tauri::Runtime>(_app: &AppHandle<R>) {}
+
 /// 前端按内容测高后回传，Rust 端 clamp + bottom-anchored 重新摆放。`macos` 专用。
 #[cfg(target_os = "macos")]
 pub(crate) fn resize_less_computer_window<R: tauri::Runtime>(app: &AppHandle<R>, height: f64) {

@@ -265,7 +265,7 @@ function Toolbar({ label, onClose }: { label: string; onClose: () => void }) {
 
 function UserBubble({ text, label }: { text: string; label: string }) {
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 3 }}>
+    <div className="lc-enter" style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 3 }}>
       <span style={roleLabelStyle}>{label}</span>
       <div style={userBubbleStyle}>{text}</div>
     </div>
@@ -282,7 +282,7 @@ function AssistantBubble({ markdown, working }: { markdown: string; working: boo
     }
   }, [markdown]);
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 3 }}>
+    <div className="lc-enter" style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 3 }}>
       <div
         className="lc-answer"
         style={assistantBubbleStyle}
@@ -302,7 +302,7 @@ function ToolChipRow({
   t: ReturnType<typeof useTranslation>['t'];
 }) {
   return (
-    <div style={{ display: 'flex' }}>
+    <div className="lc-enter" style={{ display: 'flex' }}>
       <span style={toolChipStyle}>
         <span aria-hidden style={{ marginRight: 4 }}>
           {'\u{1F6E0}'}
@@ -333,7 +333,7 @@ function ApprovalRow({
 }) {
   const decided = card.decision != null;
   return (
-    <div style={approvalCardStyle}>
+    <div className="lc-enter" style={approvalCardStyle}>
       <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--ol-ink)' }}>
         {t('lessComputer.approvalTitle')}
       </div>
@@ -555,43 +555,31 @@ const globalCss = `
   0%, 100% { opacity: 1; transform: scale(1); }
   50%      { opacity: 0.35; transform: scale(.94); }
 }
-/* 彩虹跑马灯描边：conic-gradient 绕 @property --lc-angle 旋转，mask 抠出一圈边框。 */
-@property --lc-angle { syntax: '<angle>'; initial-value: 0deg; inherits: false; }
-@keyframes lc-spin    { to { --lc-angle: 360deg; } }
+/* 彩虹跑马灯描边已挪到独立全屏浮层（LessComputerGlow），这里只保留极淡的流动呼吸底色。 */
 @keyframes lc-flow    { 0% { background-position: 0% 50%; } 100% { background-position: 220% 50%; } }
-@keyframes lc-breathe { 0%, 100% { opacity: .40; } 50% { opacity: .80; } }
-.lc-shell { position: relative; }
-.lc-shell::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  border-radius: 14px;
-  padding: 1.5px;
-  background: conic-gradient(from var(--lc-angle),
-    #ff2d78, #ff8a00, #ffd400, #38e08a, #00c2ff, #7a5cff, #ff2d78);
-  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
-  -webkit-mask-composite: xor;
-          mask-composite: exclude;
-  animation: lc-spin 5s linear infinite;
-  pointer-events: none;
-  z-index: 3;
+@keyframes lc-bg-breathe { 0%, 100% { opacity: .35; } 50% { opacity: .65; } }
+/* 内容进场：工具芯片 / 气泡 / 审批卡出现时柔和淡入上滑，而不是直接闪出。 */
+@keyframes lc-enter {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
-/* 流动+呼吸的彩虹背景层：低透明度，文字仍清晰可读。 */
+.lc-shell { position: relative; }
 .lc-bg {
   position: absolute;
   inset: 0;
   border-radius: 14px;
   background: linear-gradient(115deg,
-    rgba(255,45,120,.14), rgba(255,138,0,.12), rgba(255,212,0,.12),
-    rgba(56,224,138,.12), rgba(0,194,255,.13), rgba(122,92,255,.14), rgba(255,45,120,.14));
+    rgba(255,45,120,.12), rgba(255,138,0,.10), rgba(255,212,0,.10),
+    rgba(56,224,138,.10), rgba(0,194,255,.11), rgba(122,92,255,.12), rgba(255,45,120,.12));
   background-size: 220% 220%;
-  animation: lc-flow 14s linear infinite, lc-breathe 6.5s ease-in-out infinite;
+  animation: lc-flow 16s linear infinite, lc-bg-breathe 7s ease-in-out infinite;
   pointer-events: none;
   z-index: 0;
 }
+.lc-enter { animation: lc-enter 0.30s var(--ol-motion-soft, cubic-bezier(.16,1,.3,1)) both; }
 @media (prefers-reduced-motion: reduce) {
-  .lc-shell::before { animation: none; }
-  .lc-bg { animation: none; opacity: .5; }
+  .lc-bg { animation: none; opacity: .45; }
+  .lc-enter { animation: none; }
 }
 .lc-answer p        { margin: 0 0 6px; }
 .lc-answer p:last-child { margin-bottom: 0; }

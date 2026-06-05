@@ -56,7 +56,7 @@ export const zhTW: typeof zhCN = {
   },
   lessComputer: {
     you: '你',
-    working: '執行中…',
+    working: '正在操控電腦…',
     tool: '呼叫了 {{name}}',
     done: '完成',
     cost: '${{cost}}',

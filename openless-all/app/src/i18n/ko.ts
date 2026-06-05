@@ -58,7 +58,7 @@ export const ko: typeof zhCN = {
   },
   lessComputer: {
     you: '나',
-    working: '실행 중…',
+    working: '조작 중…',
     tool: '{{name}} 사용',
     done: '완료',
     cost: '${{cost}}',

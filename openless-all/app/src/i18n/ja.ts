@@ -58,7 +58,7 @@ export const ja: typeof zhCN = {
   },
   lessComputer: {
     you: 'あなた',
-    working: '実行中…',
+    working: '操作中…',
     tool: '{{name}} を使用',
     done: '完了',
     cost: '${{cost}}',

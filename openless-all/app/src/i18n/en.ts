@@ -56,7 +56,7 @@ export const en: typeof zhCN = {
   },
   lessComputer: {
     you: 'You',
-    working: 'Working…',
+    working: 'Operating…',
     tool: 'Used {{name}}',
     done: 'Done',
     cost: '${{cost}}',

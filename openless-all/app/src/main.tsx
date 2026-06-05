@@ -12,6 +12,7 @@ const windowKind = params.get("window");
 const isCapsule = windowKind === "capsule";
 const isQa = windowKind === "qa";
 const isLessComputer = windowKind === "less-computer";
+const isLessComputerGlow = windowKind === "less-computer-glow";
 const osQuery = params.get("os") as OS | null;
 
 const root = ReactDOM.createRoot(document.getElementById("root")!);
@@ -23,6 +24,7 @@ const renderApp = () => {
         isCapsule={isCapsule}
         isQa={isQa}
         isLessComputer={isLessComputer}
+        isLessComputerGlow={isLessComputerGlow}
         forcedOs={osQuery}
       />
     </React.StrictMode>,

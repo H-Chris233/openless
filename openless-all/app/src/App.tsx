@@ -18,6 +18,7 @@ import {
 } from './lib/windowHotkeyFallback';
 import { QaPanel } from './pages/QaPanel';
 import { LessComputerPanel } from './pages/LessComputerPanel';
+import { LessComputerGlow } from './pages/LessComputerGlow';
 import { invoke } from '@tauri-apps/api/core';
 import { HotkeySettingsProvider } from './state/HotkeySettingsContext';
 
@@ -25,12 +26,13 @@ interface AppProps {
   isCapsule: boolean;
   isQa: boolean;
   isLessComputer: boolean;
+  isLessComputerGlow: boolean;
   forcedOs?: OS | null;
 }
 
 type Gate = 'onboarding' | 'ready';
 
-export function App({ isCapsule, isQa, isLessComputer, forcedOs }: AppProps) {
+export function App({ isCapsule, isQa, isLessComputer, isLessComputerGlow, forcedOs }: AppProps) {
   if (isCapsule) {
     return <Capsule />;
   }
@@ -39,6 +41,9 @@ export function App({ isCapsule, isQa, isLessComputer, forcedOs }: AppProps) {
   }
   if (isLessComputer) {
     return <LessComputerPanel />;
+  }
+  if (isLessComputerGlow) {
+    return <LessComputerGlow />;
   }
 
   const os = forcedOs ?? detectOS();

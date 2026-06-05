@@ -841,6 +841,7 @@ impl Coordinator {
             .store(false, Ordering::SeqCst);
         if let Some(app) = self.inner.app.lock().clone() {
             crate::hide_less_computer_window(&app);
+            crate::hide_less_computer_glow(&app);
         }
     }
 

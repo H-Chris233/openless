@@ -594,6 +594,7 @@ async fn run_voice_agent_transcript(
     // 聊天浮窗：显示窗口 + 落用户气泡（语音指令转写）。macOS only（helper 内部 gating）。
     if let Some(app) = inner.app.lock().clone() {
         crate::show_less_computer_window(&app);
+        crate::show_less_computer_glow(&app);
     }
     // 连续对话：浮窗里已有进行中的会话 → 本轮 `claude --continue` 续上下文；否则是新会话（fresh）。
     // dismiss 关窗会把标志复位为 false。
@@ -659,6 +660,10 @@ async fn run_voice_agent_transcript(
     };
 
     inner.state.lock().phase = SessionPhase::Idle;
+    // 工作结束：熄灭全屏彩虹描边（聊天浮窗保留，等用户读完/关闭）。
+    if let Some(app) = inner.app.lock().clone() {
+        crate::hide_less_computer_glow(&app);
+    }
 
     match final_outcome {
         LessComputerOutcome::Done { text, cost_usd } => {

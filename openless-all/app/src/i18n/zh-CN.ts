@@ -54,7 +54,7 @@ export const zhCN = {
   },
   lessComputer: {
     you: '你',
-    working: '执行中…',
+    working: '正在操控电脑…',
     tool: '调用了 {{name}}',
     done: '完成',
     cost: '${{cost}}',

@@ -80,6 +80,22 @@
         "visible": false,
         "center": false,
         "acceptFirstMouse": true
+      },
+      {
+        "label": "less-computer-glow",
+        "url": "index.html?window=less-computer-glow",
+        "title": "OpenLess Less Computer Glow",
+        "width": 800,
+        "height": 600,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "focus": false,
+        "visible": false,
+        "center": false
       }
     ],
     "security": {
