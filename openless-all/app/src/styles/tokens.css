@@ -1,40 +1,39 @@
-/* OpenLess design tokens — black + white + electric blue accent, glassy */
+/* OpenLess Aura design tokens */
 
 :root {
-  /* Palette — neutrals */
+  /* Palette */
   --ol-white: #ffffff;
-  --ol-canvas: #f7f7f8;     /* outer chrome wash */
-  --ol-surface: #ffffff;
-  --ol-surface-2: #fafafa;
-  --ol-line: rgba(0, 0, 0, 0.08);
-  --ol-line-strong: rgba(0, 0, 0, 0.14);
-  --ol-line-soft: rgba(0, 0, 0, 0.05);
+  --ol-bg-base: #f3f4f6;
+  --ol-bg-elevated: #fbfbfc;
+  --ol-canvas: var(--ol-bg-base);
+  --ol-surface: rgba(255, 255, 255, 0.72);
+  --ol-surface-2: rgba(255, 255, 255, 0.88);
+  --ol-surface-solid: #ffffff;
+  --ol-line: rgba(15, 23, 42, 0.08);
+  --ol-line-strong: rgba(15, 23, 42, 0.14);
+  --ol-line-soft: rgba(255, 255, 255, 0.55);
 
   /* Ink */
-  --ol-ink: #0a0a0b;
-  --ol-ink-2: #2a2a2d;
-  --ol-ink-3: rgba(10, 10, 11, 0.62);
-  --ol-ink-4: rgba(10, 10, 11, 0.42);
-  --ol-ink-5: rgba(10, 10, 11, 0.24);
+  --ol-ink: #10131a;
+  --ol-ink-2: #222938;
+  --ol-ink-3: rgba(16, 19, 26, 0.64);
+  --ol-ink-4: rgba(16, 19, 26, 0.42);
+  --ol-ink-5: rgba(16, 19, 26, 0.24);
 
   /* Blue accent */
-  --ol-blue: #2563eb;
-  --ol-blue-hover: #1d4ed8;
-  --ol-blue-soft: #eff4ff;
-  --ol-blue-ring: rgba(37, 99, 235, 0.22);
+  --ol-blue: #2f6df6;
+  --ol-blue-hover: #2458c8;
+  --ol-blue-soft: rgba(47, 109, 246, 0.10);
+  --ol-blue-ring: rgba(47, 109, 246, 0.22);
 
   /* Glass */
-  --ol-glass-bg: rgba(255, 255, 255, 0.62);
-  --ol-glass-bg-strong: rgba(255, 255, 255, 0.78);
-  --ol-glass-border: rgba(255, 255, 255, 0.7);
-  --ol-glass-blur: 20px;
+  --ol-glass-bg: var(--ol-surface);
+  --ol-glass-bg-strong: var(--ol-surface-2);
+  --ol-glass-border: rgba(255, 255, 255, 0.58);
+  --ol-glass-blur: 24px;
   --ol-glass-blur-strong: 36px;
 
-  /* 假毛玻璃噪点 —— qa 追问框 / capsule 语音胶囊等透明浮窗用。详见 global.css .ol-frost。
-     关键点：feColorMatrix 用 matrix 把分形噪点**去色 + 强制 alpha=1**（不透明灰度噪点）。
-     早期版本用 saturate=0 保留了 feTurbulence 的随机 alpha，噪点本身就半透明，再叠
-     ::before 的低 opacity，等于洗没了 —— 看不出磨砂颗粒。现在用不透明灰度噪点，由
-     ::before 的 opacity 单独、可控地决定颗粒强度。 */
+  /* Frost grain texture used by the .ol-frost helpers in global.css. */
   --ol-frost-grain: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='100'%20height='100'%3E%3Cfilter%20id='g'%3E%3CfeTurbulence%20type='fractalNoise'%20baseFrequency='0.95'%20numOctaves='1'%20stitchTiles='stitch'/%3E%3CfeColorMatrix%20type='matrix'%20values='0.34%200.34%200.34%200%200%200.34%200.34%200.34%200%200%200.34%200.34%200.34%200%200%200%200%200%200%201'/%3E%3C/filter%3E%3Crect%20width='100'%20height='100'%20filter='url(%23g)'/%3E%3C/svg%3E");
 
   /* Motion */
@@ -45,22 +44,29 @@
   /* Shadows */
   --ol-shadow-sm: 0 1px 2px rgba(15, 17, 22, 0.04), 0 0 0 0.5px rgba(0, 0, 0, 0.04);
   --ol-shadow-md: 0 1px 2px rgba(15, 17, 22, 0.05), 0 6px 24px -12px rgba(15, 17, 22, 0.10), 0 0 0 0.5px rgba(0, 0, 0, 0.04);
-  --ol-shadow-lg: 0 20px 60px -20px rgba(15, 17, 22, 0.18), 0 8px 32px -16px rgba(15, 17, 22, 0.10), 0 0 0 0.5px rgba(0, 0, 0, 0.06);
+  --ol-aura-shadow: 0 24px 80px -32px rgba(15, 23, 42, 0.24), 0 12px 36px -18px rgba(15, 23, 42, 0.12);
+  --ol-aura-shadow-soft: 0 10px 30px -18px rgba(15, 23, 42, 0.16), 0 0 0 0.5px rgba(255, 255, 255, 0.55) inset;
+  --ol-shadow-lg: var(--ol-aura-shadow);
   --ol-shadow-xl: 0 40px 120px -40px rgba(15, 17, 22, 0.30), 0 24px 60px -24px rgba(15, 17, 22, 0.15), 0 0 0 0.5px rgba(0, 0, 0, 0.06);
 
   /* Radii */
+  --ol-shell-radius: 32px;
+  --ol-panel-radius: 28px;
+  --ol-card-radius: 22px;
+  --ol-pill-radius: 999px;
   --ol-r-sm: 6px;
   --ol-r-md: 10px;
   --ol-r-lg: 14px;
   --ol-r-xl: 18px;
-  --ol-r-2xl: 22px;
-  --ol-r-pill: 999px;
+  --ol-r-2xl: var(--ol-card-radius);
+  --ol-r-pill: var(--ol-pill-radius);
 
   /* Typography */
-  --ol-font-sans: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
-  --ol-font-mono: "SF Mono", "Cascadia Code", Consolas, monospace;
+  --ol-font-display: "Aptos", "Segoe UI Variable Display", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --ol-font-sans: "Aptos", "Segoe UI Variable Text", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --ol-font-mono: "JetBrains Mono", "SF Mono", "Cascadia Code", Consolas, monospace;
 
-  /* Status colors (sparse use only) */
+  /* Status colors */
   --ol-ok: #16a34a;
   --ol-ok-soft: #ecfdf5;
   --ol-warn: #d97706;
@@ -83,7 +89,7 @@ body {
 .ol-noscrollbar::-webkit-scrollbar { display: none; }
 .ol-noscrollbar { scrollbar-width: none; }
 
-/* Thin scrollbar — 细而可见，保留"可以滚"的可见性，但不抢眼。issue #243 */
+/* Thin scrollbar */
 .ol-thinscroll::-webkit-scrollbar { width: 6px; height: 6px; }
 .ol-thinscroll::-webkit-scrollbar-track { background: transparent; }
 .ol-thinscroll::-webkit-scrollbar-thumb {
