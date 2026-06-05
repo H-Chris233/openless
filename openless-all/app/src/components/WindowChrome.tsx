@@ -43,11 +43,7 @@ export function WindowChrome({
   //
   // 注意：三层渐变的参数与 global.css 中 [data-ol-no-compositing] .ol-winchrome
   // 的回退 background 同步（只 opacity 从 0.92 提到 0.96）。改这里时请同步更新 CSS。
-  const background = `
-    radial-gradient(120% 80% at 0% 0%, rgba(255,255,255,0.55) 0%, rgba(255,255,255,0) 60%),
-    radial-gradient(100% 70% at 100% 100%, rgba(37,99,235,0.07) 0%, rgba(37,99,235,0) 55%),
-    linear-gradient(180deg, rgba(245,245,247,0.92) 0%, rgba(232,232,236,0.92) 100%)
-  `;
+  const background = 'var(--ol-window-bg)';
 
   return (
     <div
@@ -64,7 +60,7 @@ export function WindowChrome({
         overflow: 'hidden',
         display: 'flex',
         flexDirection: 'column',
-        border: os === 'win' ? 'none' : os === 'mac' ? 'none' : '0.5px solid rgba(0,0,0,.10)',
+        border: os === 'win' ? 'none' : os === 'mac' ? 'none' : '0.5px solid var(--ol-window-border)',
         background,
         backdropFilter: 'blur(var(--ol-glass-blur-strong)) saturate(190%)',
         WebkitBackdropFilter: 'blur(var(--ol-glass-blur-strong)) saturate(190%)',
@@ -160,10 +156,10 @@ function LinuxTitlebar() {
         alignItems: 'center',
         justifyContent: 'space-between',
         padding: '0 6px 0 14px',
-        background: 'rgba(245,245,247,0.85)',
+        background: 'var(--ol-linux-titlebar-bg)',
         backdropFilter: 'blur(12px) saturate(180%)',
         WebkitBackdropFilter: 'blur(12px) saturate(180%)',
-        borderBottom: '0.5px solid rgba(0,0,0,0.08)',
+        borderBottom: '0.5px solid var(--ol-linux-titlebar-border)',
         color: 'var(--ol-ink-3)',
         fontSize: 13,
         fontWeight: 500,

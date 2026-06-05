@@ -74,7 +74,7 @@ export function SettingsModal({ os: _os, onClose, initialSettingsSection }: Sett
       onClick={onClose}
       style={{
         position: 'absolute', inset: 0,
-        background: 'rgba(15,17,22,0.32)',
+        background: 'var(--ol-overlay-bg)',
         backdropFilter: 'blur(8px) saturate(140%)',
         WebkitBackdropFilter: 'blur(8px) saturate(140%)',
         display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -215,19 +215,19 @@ export function SettingsModal({ os: _os, onClose, initialSettingsSection }: Sett
         .ol-aura-settings {
           background: var(--ol-surface);
           border-radius: var(--ol-shell-radius);
-          border: 1px solid rgba(255,255,255,0.62);
+          border: 1px solid var(--ol-panel-border);
           box-shadow: var(--ol-aura-shadow);
         }
         .ol-aura-settings-rail {
           padding: 20px 14px;
           gap: 16px;
-          background: linear-gradient(180deg, rgba(255,255,255,0.58), rgba(246,248,252,0.72));
-          border-right: 1px solid rgba(255,255,255,0.52);
+          background: var(--ol-settings-rail-bg);
+          border-right: 1px solid var(--ol-settings-rail-border);
         }
         .ol-aura-settings-pill {
-          background: linear-gradient(180deg, rgba(255,255,255,0.84), rgba(255,255,255,0.58));
+          background: var(--ol-sidebar-pill-bg);
           border-radius: 14px;
-          border: 1px solid rgba(255,255,255,0.62);
+          border: 1px solid var(--ol-sidebar-pill-border);
           box-shadow: var(--ol-aura-shadow-soft);
         }
         .ol-aura-settings-nav-btn {
@@ -248,18 +248,18 @@ export function SettingsModal({ os: _os, onClose, initialSettingsSection }: Sett
           flex-direction: column;
           gap: 1px;
           padding-top: 10px;
-          border-top: 1px solid rgba(255,255,255,0.46);
+          border-top: 1px solid var(--ol-settings-links-border);
         }
         .ol-aura-settings-content {
-          background: linear-gradient(180deg, rgba(255,255,255,0.56), rgba(249,250,252,0.74));
+          background: var(--ol-settings-content-bg);
         }
         .ol-aura-settings-close {
-          background: rgba(255,255,255,0.38);
+          background: var(--ol-settings-close-bg);
           color: var(--ol-ink-3);
           transition: background 0.16s var(--ol-motion-quick);
         }
         .ol-aura-settings-close:hover {
-          background: rgba(255,255,255,0.72);
+          background: var(--ol-settings-close-hover-bg);
         }
         .ol-aura-settings-title {
           padding: 24px 28px 10px;

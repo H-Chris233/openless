@@ -551,7 +551,20 @@ export function Style() {
         />
       )}
 
-      <Card padding={0} style={{ overflow: 'hidden', flex: '1 1 0', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+      <Card
+        padding={0}
+        glassy
+        style={{
+          overflow: 'hidden',
+          flex: '1 1 0',
+          minHeight: 0,
+          display: 'flex',
+          flexDirection: 'column',
+          background: 'var(--ol-style-shell-bg)',
+          border: '1px solid var(--ol-style-shell-border)',
+          boxShadow: 'var(--ol-style-shell-shadow)',
+        }}
+      >
           <div style={{ padding: 18, borderBottom: '0.5px solid var(--ol-line)', flexShrink: 0 }}>
             <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', minWidth: 0 }}>
@@ -572,13 +585,16 @@ export function Style() {
                       padding: '6px 12px',
                       borderRadius: 999,
                       border: '0.5px solid',
-                      borderColor: rawPack.active ? 'var(--ol-blue)' : 'var(--ol-line-strong)',
-                      background: rawPack.active ? 'var(--ol-blue-soft)' : 'transparent',
+                      borderColor: rawPack.active ? 'var(--ol-blue)' : 'var(--ol-style-subtle-border)',
+                      background: rawPack.active ? 'rgba(96,165,250,0.18)' : 'var(--ol-style-subtle-bg)',
                       color: rawPack.active ? 'var(--ol-blue)' : 'var(--ol-ink-2)',
                       fontSize: 12.5,
                       fontWeight: rawPack.active ? 600 : 500,
                       whiteSpace: 'nowrap',
                       cursor: rawPack.active ? 'default' : 'pointer',
+                      backdropFilter: 'blur(18px) saturate(150%)',
+                      WebkitBackdropFilter: 'blur(18px) saturate(150%)',
+                      boxShadow: 'var(--ol-style-subtle-shadow)',
                       transition: 'border-color 0.16s var(--ol-motion-quick), background 0.16s var(--ol-motion-quick), color 0.16s var(--ol-motion-quick)',
                     }}
                   >
@@ -591,7 +607,7 @@ export function Style() {
             </div>
           </div>
           <div className="ol-thinscroll" style={{ padding: 18, overflow: 'auto', flex: '1 1 0', minHeight: 0 }}>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 12 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(220px, 100%), 1fr))', gap: 12 }}>
             <AnimatePresence mode="sync">
             {bodyPacks.map(pack => {
               const isBuiltin = pack.kind === 'builtin';
@@ -612,24 +628,23 @@ export function Style() {
                     flexDirection: 'column',
                     textAlign: 'left',
                     position: 'relative',
-                    border: '0.5px solid',
-                    borderColor: pack.active ? 'var(--ol-blue)' : 'var(--ol-line)',
-                    background: pack.active
-                      ? 'linear-gradient(180deg, rgba(239,246,255,0.92), rgba(255,255,255,0.98))'
-                      : isBuiltin
-                        ? 'linear-gradient(180deg, rgba(248,250,252,0.92), rgba(241,245,249,0.85))'
-                        : 'linear-gradient(180deg, rgba(255,255,255,0.98), rgba(248,250,252,0.92))',
+                    border: '1px solid',
+                    borderColor: pack.active ? 'var(--ol-style-card-border-active)' : 'var(--ol-style-card-border)',
+                    background: pack.active ? 'var(--ol-style-card-bg-active)' : 'var(--ol-style-card-bg)',
+                    backdropFilter: 'blur(28px) saturate(165%)',
+                    WebkitBackdropFilter: 'blur(28px) saturate(165%)',
                     borderRadius: 18,
                     padding: 16,
-                    boxShadow: pack.active ? '0 0 0 3px var(--ol-blue-ring)' : 'none',
+                    boxShadow: pack.active ? 'var(--ol-style-card-shadow-active)' : 'var(--ol-style-card-shadow)',
                     cursor: 'default',
                     minHeight: 204,
+                    overflow: 'hidden',
                   }}
                 >
                   <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10, marginBottom: 10 }}>
                     <div style={{ minWidth: 0 }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                        <div style={{ fontSize: 14, fontWeight: 600, color: isBuiltin && !pack.active ? 'var(--ol-ink-2)' : 'var(--ol-ink)' }}>
+                        <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--ol-style-card-ink)' }}>
                           {pack.name}
                         </div>
                         <Pill tone={isBuiltin ? 'outline' : 'blue'} size="sm">
@@ -646,7 +661,7 @@ export function Style() {
                       <div
                         style={{
                           fontSize: 12.5,
-                          color: 'var(--ol-ink-3)',
+                          color: 'var(--ol-style-card-ink-3)',
                           lineHeight: 1.6,
                           display: '-webkit-box',
                           WebkitBoxOrient: 'vertical',
@@ -665,9 +680,11 @@ export function Style() {
                         style={{
                           width: 36, height: 36, borderRadius: 12,
                           display: 'grid', placeItems: 'center',
-                          background: pack.active ? 'rgba(37,99,235,0.12)' : 'rgba(15,23,42,0.05)',
-                          color: pack.active ? 'var(--ol-blue)' : 'var(--ol-ink-3)',
+                          background: pack.active ? 'var(--ol-style-card-icon-bg-active)' : 'var(--ol-style-card-icon-bg)',
+                          color: pack.active ? 'var(--ol-blue)' : 'var(--ol-style-card-ink-3)',
                           flexShrink: 0,
+                          backdropFilter: 'blur(14px)',
+                          WebkitBackdropFilter: 'blur(14px)',
                         }}
                       >
                         <Icon name="sparkle" size={16} />
@@ -683,8 +700,10 @@ export function Style() {
                           width: 36, height: 36, borderRadius: 12,
                           display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
                           flexShrink: 0,
-                          border: '0.5px solid rgba(239,68,68,0.32)',
-                          background: 'rgba(254,242,242,0.6)',
+                          border: '1px solid var(--ol-style-delete-border)',
+                          background: 'var(--ol-style-delete-bg)',
+                          backdropFilter: 'blur(14px)',
+                          WebkitBackdropFilter: 'blur(14px)',
                           color: 'var(--ol-red, #ef4444)',
                           cursor: busy === 'deleting' ? 'wait' : 'pointer',
                           opacity: busy === 'deleting' ? 0.55 : 1,
@@ -755,10 +774,12 @@ export function Style() {
                 justifyContent: 'center',
                 gap: 8,
                 textAlign: 'center',
-                border: '0.5px dashed var(--ol-line-strong)',
+                border: '1px dashed var(--ol-style-add-tile-border)',
                 borderRadius: 18,
                 padding: 16,
-                background: 'transparent',
+                background: 'var(--ol-style-add-tile-bg)',
+                backdropFilter: 'blur(24px) saturate(150%)',
+                WebkitBackdropFilter: 'blur(24px) saturate(150%)',
                 color: 'var(--ol-ink-3)',
                 cursor: busy === 'creating' ? 'wait' : 'pointer',
                 opacity: busy === 'creating' ? 0.55 : 1,
@@ -770,8 +791,10 @@ export function Style() {
                 style={{
                   width: 44, height: 44, borderRadius: 999,
                   display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                  background: 'rgba(15,23,42,0.04)',
+                  background: 'var(--ol-style-add-tile-icon-bg)',
                   color: 'var(--ol-ink-2)',
+                  backdropFilter: 'blur(14px)',
+                  WebkitBackdropFilter: 'blur(14px)',
                 }}
               >
                 <Icon name="plus" size={22} />
@@ -827,7 +850,9 @@ export function Style() {
                 display: 'grid',
                 gridTemplateRows: 'auto minmax(0, 1fr)',
                 overflow: 'hidden',
-                boxShadow: '0 24px 80px rgba(15,23,42,0.22)',
+                background: 'var(--ol-style-editor-bg)',
+                border: '1px solid var(--ol-style-editor-border)',
+                boxShadow: 'var(--ol-style-editor-shadow)',
               }}
             >
               <div style={{ padding: 18, borderBottom: '0.5px solid var(--ol-line)' }}>
@@ -990,8 +1015,11 @@ export function Style() {
                   <Card
                     padding={16}
                     style={{
-                      background: 'linear-gradient(180deg, rgba(255,255,255,0.98), rgba(246,248,252,0.95))',
-                      border: '0.5px solid rgba(148,163,184,0.24)',
+                      background: 'var(--ol-style-subtle-bg)',
+                      border: '1px solid var(--ol-style-subtle-border)',
+                      boxShadow: 'var(--ol-style-subtle-shadow)',
+                      backdropFilter: 'blur(20px) saturate(150%)',
+                      WebkitBackdropFilter: 'blur(20px) saturate(150%)',
                     }}
                   >
                     <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
@@ -1057,9 +1085,12 @@ export function Style() {
                   <div
                     style={{
                       padding: 14,
-                      borderRadius: 14,
-                      background: 'linear-gradient(180deg, rgba(248,250,252,0.98), rgba(241,245,249,0.95))',
-                      border: '0.5px solid var(--ol-line)',
+                      borderRadius: 16,
+                      background: 'var(--ol-style-subtle-bg)',
+                      border: '1px solid var(--ol-style-subtle-border)',
+                      boxShadow: 'var(--ol-style-subtle-shadow)',
+                      backdropFilter: 'blur(18px) saturate(145%)',
+                      WebkitBackdropFilter: 'blur(18px) saturate(145%)',
                     }}
                   >
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
@@ -1095,7 +1126,11 @@ export function Style() {
                         key={`${draft.id}-example-${index}`}
                         padding={16}
                         style={{
-                          background: 'linear-gradient(180deg, rgba(255,255,255,0.98), rgba(248,250,252,0.98))',
+                          background: 'var(--ol-style-subtle-bg)',
+                          border: '1px solid var(--ol-style-subtle-border)',
+                          boxShadow: 'var(--ol-style-subtle-shadow)',
+                          backdropFilter: 'blur(18px) saturate(145%)',
+                          WebkitBackdropFilter: 'blur(18px) saturate(145%)',
                         }}
                       >
                         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 12 }}>
@@ -1128,10 +1163,13 @@ export function Style() {
                         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 12 }}>
                           <div
                             style={{
-                              borderRadius: 14,
-                              border: '0.5px solid rgba(148,163,184,0.22)',
-                              background: 'rgba(248,250,252,0.9)',
+                              borderRadius: 16,
+                              border: '1px solid var(--ol-style-subtle-border)',
+                              background: 'var(--ol-style-subtle-bg)',
                               padding: 14,
+                              boxShadow: 'var(--ol-style-subtle-shadow)',
+                              backdropFilter: 'blur(16px) saturate(145%)',
+                              WebkitBackdropFilter: 'blur(16px) saturate(145%)',
                             }}
                           >
                             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
@@ -1140,16 +1178,19 @@ export function Style() {
                             <textarea
                               value={example.input}
                               onChange={event => patchExample(index, { input: event.target.value })}
-                              style={{ ...textareaStyle, minHeight: 120, background: '#fff' }}
+                              style={{ ...textareaStyle, minHeight: 120 }}
                             />
                           </div>
 
                           <div
                             style={{
-                              borderRadius: 14,
-                              border: '0.5px solid rgba(37,99,235,0.16)',
-                              background: 'rgba(239,246,255,0.86)',
+                              borderRadius: 16,
+                              border: '1px solid rgba(96,165,250,0.24)',
+                              background: 'color-mix(in srgb, var(--ol-style-subtle-bg) 82%, rgba(96,165,250,0.16) 18%)',
                               padding: 14,
+                              boxShadow: 'var(--ol-style-subtle-shadow)',
+                              backdropFilter: 'blur(16px) saturate(145%)',
+                              WebkitBackdropFilter: 'blur(16px) saturate(145%)',
                             }}
                           >
                             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
@@ -1158,7 +1199,7 @@ export function Style() {
                             <textarea
                               value={example.output}
                               onChange={event => patchExample(index, { output: event.target.value })}
-                              style={{ ...textareaStyle, minHeight: 120, background: '#fff' }}
+                              style={{ ...textareaStyle, minHeight: 120 }}
                             />
                           </div>
                         </div>
@@ -1180,10 +1221,13 @@ function MetaItem({ label, value }: { label: string; value: string }) {
   return (
     <div
       style={{
-        borderRadius: 12,
-        border: '0.5px solid rgba(148,163,184,0.2)',
-        background: 'rgba(255,255,255,0.92)',
+        borderRadius: 14,
+        border: '1px solid var(--ol-style-subtle-border)',
+        background: 'var(--ol-style-subtle-bg)',
         padding: '10px 12px',
+        boxShadow: 'var(--ol-style-subtle-shadow)',
+        backdropFilter: 'blur(16px) saturate(145%)',
+        WebkitBackdropFilter: 'blur(16px) saturate(145%)',
       }}
     >
       <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '.08em', color: 'var(--ol-ink-4)', marginBottom: 6 }}>
@@ -1217,9 +1261,12 @@ function DirectiveRow({
         justifyContent: 'space-between',
         gap: 12,
         padding: '10px 12px',
-        borderRadius: 12,
-        border: '0.5px solid rgba(148,163,184,0.2)',
-        background: 'rgba(255,255,255,0.92)',
+        borderRadius: 14,
+        border: '1px solid var(--ol-style-subtle-border)',
+        background: 'var(--ol-style-subtle-bg)',
+        boxShadow: 'var(--ol-style-subtle-shadow)',
+        backdropFilter: 'blur(16px) saturate(145%)',
+        WebkitBackdropFilter: 'blur(16px) saturate(145%)',
       }}
     >
       <div style={{ minWidth: 0 }}>
@@ -1238,24 +1285,30 @@ const inputStyle: CSSProperties = {
   boxSizing: 'border-box',
   minHeight: 38,
   padding: '9px 11px',
-  borderRadius: 10,
-  border: '0.5px solid var(--ol-line-strong)',
-  background: '#fff',
+  borderRadius: 12,
+  border: '1px solid var(--ol-style-input-border)',
+  background: 'var(--ol-style-input-bg)',
   color: 'var(--ol-ink)',
   font: 'inherit',
   fontSize: 12.5,
+  boxShadow: 'var(--ol-style-input-shadow)',
+  backdropFilter: 'blur(16px) saturate(145%)',
+  WebkitBackdropFilter: 'blur(16px) saturate(145%)',
 };
 
 const textareaStyle: CSSProperties = {
   width: '100%',
   boxSizing: 'border-box',
   padding: '11px 12px',
-  borderRadius: 12,
-  border: '0.5px solid var(--ol-line-strong)',
-  background: '#fff',
+  borderRadius: 14,
+  border: '1px solid var(--ol-style-input-border)',
+  background: 'var(--ol-style-input-bg)',
   color: 'var(--ol-ink)',
   font: 'inherit',
   fontSize: 12.5,
   lineHeight: 1.65,
   resize: 'vertical',
+  boxShadow: 'var(--ol-style-input-shadow)',
+  backdropFilter: 'blur(16px) saturate(145%)',
+  WebkitBackdropFilter: 'blur(16px) saturate(145%)',
 };

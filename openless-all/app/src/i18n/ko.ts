@@ -843,6 +843,10 @@ export const ko: typeof zhCN = {
       releaseNotes: '릴리스 노트',
     },
     personalize: {
+      theme: '테마',
+      themeDesc: '앱 외관을 라이트와 다크로 전환합니다.',
+      themeLight: '라이트',
+      themeDark: '다크',
       font: '글꼴 크기',
       fontDesc: 'UI 글꼴 크기를 전체 스케일. 즉시 반영.',
       fontSmall: '소',

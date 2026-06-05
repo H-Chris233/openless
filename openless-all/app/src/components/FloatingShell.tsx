@@ -378,8 +378,8 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
         }
         .ol-aura-sidebar {
           padding: 14px 12px 14px;
-          background: linear-gradient(180deg, rgba(255,255,255,0.34), rgba(255,255,255,0.12));
-          border-right: 1px solid rgba(255,255,255,0.38);
+          background: var(--ol-sidebar-bg);
+          border-right: 1px solid var(--ol-sidebar-border);
         }
         .ol-aura-sidebar-brand {
           display: flex;
@@ -388,8 +388,8 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
           padding: 6px 10px 16px;
           margin-bottom: 6px;
           border-radius: 18px;
-          background: linear-gradient(180deg, rgba(255,255,255,0.72), rgba(255,255,255,0.36));
-          border: 1px solid rgba(255,255,255,0.5);
+          background: var(--ol-sidebar-brand-bg);
+          border: 1px solid var(--ol-sidebar-brand-border);
           box-shadow: var(--ol-aura-shadow-soft);
         }
         .ol-aura-sidebar-brand-mark {
@@ -411,9 +411,9 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
           letter-spacing: .08em;
         }
         .ol-aura-sidebar-pill {
-          background: linear-gradient(180deg, rgba(255,255,255,0.84), rgba(255,255,255,0.58));
+          background: var(--ol-sidebar-pill-bg);
           border-radius: 14px;
-          border: 1px solid rgba(255,255,255,0.62);
+          border: 1px solid var(--ol-sidebar-pill-border);
           box-shadow: var(--ol-aura-shadow-soft);
         }
         .ol-aura-sidebar-nav-btn {
@@ -435,7 +435,7 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
           gap: 10px;
           padding: 12px 10px 0;
           margin-top: 10px;
-          border-top: 1px solid rgba(255,255,255,0.36);
+          border-top: 1px solid var(--ol-sidebar-footer-border);
         }
         .ol-aura-sidebar-version {
           display: flex;
@@ -446,8 +446,8 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
           font-family: var(--ol-font-sans);
           font-size: 11px;
           color: var(--ol-ink-4);
-          background: linear-gradient(180deg, rgba(255,255,255,0.68), rgba(255,255,255,0.34));
-          border: 1px solid rgba(255,255,255,0.56);
+          background: var(--ol-sidebar-version-bg);
+          border: 1px solid var(--ol-sidebar-version-border);
           border-radius: var(--ol-pill-radius);
           box-shadow: var(--ol-aura-shadow-soft);
         }
@@ -465,12 +465,12 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
         .ol-aura-sidebar-settings {
           padding: 10px 12px;
           border-radius: 16px;
-          border: 1px solid rgba(255,255,255,0.5);
-          background: linear-gradient(180deg, rgba(255,255,255,0.48), rgba(255,255,255,0.24));
+          border: 1px solid var(--ol-sidebar-settings-border);
+          background: var(--ol-sidebar-settings-bg);
           box-shadow: none;
         }
         .ol-aura-sidebar-settings.ol-nav-btn-active {
-          background: linear-gradient(180deg, rgba(255,255,255,0.82), rgba(255,255,255,0.48));
+          background: var(--ol-sidebar-settings-active-bg);
           box-shadow: var(--ol-aura-shadow-soft);
         }
         .ol-aura-console-main {
@@ -481,7 +481,7 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
           font-weight: 600;
         }
         .ol-nav-btn:not(.ol-nav-btn-active):hover {
-          background: rgba(0,0,0,0.04);
+          background: var(--ol-nav-hover-bg);
           color: var(--ol-ink);
         }
         @keyframes ol-page-slide {
@@ -517,7 +517,7 @@ function ProviderSetupPrompt({ onLater, onOpenSettings }: { onLater: () => void;
         alignItems: 'center',
         justifyContent: 'center',
         padding: 28,
-        background: 'rgba(15,17,22,0.28)',
+        background: 'var(--ol-overlay-bg)',
         backdropFilter: 'blur(6px) saturate(140%)',
         WebkitBackdropFilter: 'blur(6px) saturate(140%)',
         animation: 'ol-prompt-fade 0.2s var(--ol-motion-soft)',
@@ -582,7 +582,7 @@ function ProviderSetupPrompt({ onLater, onOpenSettings }: { onLater: () => void;
               borderRadius: 8,
               border: 0,
               background: 'var(--ol-ink)',
-              color: '#fff',
+              color: 'var(--ol-on-accent)',
               fontFamily: 'inherit',
               fontSize: 12.5,
               fontWeight: 500,
@@ -610,7 +610,7 @@ function HotkeyModeMigrationPrompt({ onLater, onOpenSettings }: { onLater: () =>
         alignItems: 'center',
         justifyContent: 'center',
         padding: 28,
-        background: 'rgba(15,17,22,0.28)',
+        background: 'var(--ol-overlay-bg)',
         backdropFilter: 'blur(6px) saturate(140%)',
         WebkitBackdropFilter: 'blur(6px) saturate(140%)',
         animation: 'ol-prompt-fade 0.2s var(--ol-motion-soft)',
@@ -675,7 +675,7 @@ function HotkeyModeMigrationPrompt({ onLater, onOpenSettings }: { onLater: () =>
               borderRadius: 8,
               border: 0,
               background: 'var(--ol-ink)',
-              color: '#fff',
+              color: 'var(--ol-on-accent)',
               fontFamily: 'inherit',
               fontSize: 12.5,
               fontWeight: 500,
