@@ -177,6 +177,68 @@ export function ShortcutsSection() {
           </button>
         )}
       </SettingRow>
+      <SettingRow label={t('settings.shortcuts.agentPolish')} desc={t('settings.shortcuts.agentPolishDesc')}>
+        {prefs.codingAgentQuickHotkey ? (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%' }}>
+            <button
+              onClick={() => void savePrefs({ ...prefs, codingAgentQuickHotkey: null })}
+              style={disableBtnStyle}
+            >
+              {t('settings.shortcuts.disable', 'Disable')}
+            </button>
+            <ShortcutRecorder
+              value={prefs.codingAgentQuickHotkey}
+              alignRecordButton
+              onSave={async b => {
+                await savePrefs({ ...prefs, codingAgentQuickHotkey: b });
+              }}
+            />
+          </div>
+        ) : (
+          <button
+            onClick={() =>
+              void savePrefs({
+                ...prefs,
+                codingAgentQuickHotkey: { primary: 'J', modifiers: ['cmd', 'shift'] },
+              })
+            }
+            style={enableBtnStyle}
+          >
+            {t('settings.shortcuts.enable', 'Enable')}
+          </button>
+        )}
+      </SettingRow>
+      <SettingRow label={t('settings.shortcuts.agentVoice')} desc={t('settings.shortcuts.agentVoiceDesc')}>
+        {prefs.codingAgentPanelHotkey ? (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%' }}>
+            <button
+              onClick={() => void savePrefs({ ...prefs, codingAgentPanelHotkey: null })}
+              style={disableBtnStyle}
+            >
+              {t('settings.shortcuts.disable', 'Disable')}
+            </button>
+            <ShortcutRecorder
+              value={prefs.codingAgentPanelHotkey}
+              alignRecordButton
+              onSave={async b => {
+                await savePrefs({ ...prefs, codingAgentPanelHotkey: b });
+              }}
+            />
+          </div>
+        ) : (
+          <button
+            onClick={() =>
+              void savePrefs({
+                ...prefs,
+                codingAgentPanelHotkey: { primary: 'Enter', modifiers: ['cmd', 'shift'] },
+              })
+            }
+            style={enableBtnStyle}
+          >
+            {t('settings.shortcuts.enable', 'Enable')}
+          </button>
+        )}
+      </SettingRow>
       {readonlyRows.map(([k, v]) => (
         <SettingRow key={k} label={k}>
           <kbd style={{

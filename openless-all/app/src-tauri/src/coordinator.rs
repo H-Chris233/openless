@@ -1404,77 +1404,90 @@ fn coding_agent_hotkey_bridge_loop(inner: Arc<Inner>, rx: mpsc::Receiver<CodingA
         }
         let inner_cloned = Arc::clone(&inner);
         async_runtime::spawn(async move {
-            // 本版面板键与快取用键都走「选中→Claude→回插」；语音 + 面板随后续版本。
-            let _ = evt;
-            handle_coding_agent_quick(&inner_cloned).await;
+            match evt {
+                // 快取用键 = 选中文本润色（选中→Claude 润色→回插替换）。
+                CodingAgentHotkeyEvent::QuickPressed => {
+                    handle_coding_agent_quick(&inner_cloned).await;
+                }
+                // 面板键 = Cloud Agent（语音→ASR→Claude→结果弹窗），完整流程开发中。
+                CodingAgentHotkeyEvent::PanelPressed => {
+                    handle_coding_agent_panel(&inner_cloned).await;
+                }
+            }
         });
     }
 }
 
-/// 快取用：抓当前选中文本作为指令 → 护栏化无头 Claude → 结果回插光标处。
+/// 面板键 = Cloud Agent：录音 → ASR → Claude 无头跑小任务 → 结果弹窗。
+/// 完整语音流程开发中，先给用户一个明确的可见提示，避免静默。
+async fn handle_coding_agent_panel(inner: &Arc<Inner>) {
+    log::info!("[coding-agent] 面板键：Cloud Agent 语音功能开发中");
+    emit_capsule(
+        inner,
+        CapsuleState::Error,
+        0.0,
+        0,
+        Some("Cloud Agent 语音功能开发中，敬请期待".to_string()),
+        None,
+    );
+}
+
+/// 快取用：抓当前选中文本 → Claude 润色 → 回插（替换选区）。全程胶囊反馈。
 async fn handle_coding_agent_quick(inner: &Arc<Inner>) {
     let prefs = inner.prefs.get();
     if !prefs.coding_agent_enabled {
         return;
     }
-    let selection =
-        tauri::async_runtime::spawn_blocking(crate::selection::capture_selection)
-            .await
-            .ok()
-            .flatten();
-    let prompt = match selection {
+    let selection = tauri::async_runtime::spawn_blocking(crate::selection::capture_selection)
+        .await
+        .ok()
+        .flatten();
+    let source_text = match selection {
         Some(ctx) => ctx.text,
         None => {
-            log::info!("[coding-agent] 快取用：没有选中文本，忽略");
+            log::info!("[coding-agent] 快取用：没有选中文本");
+            emit_capsule(
+                inner,
+                CapsuleState::Error,
+                0.0,
+                0,
+                Some("请先选中文本，再按快捷键".to_string()),
+                None,
+            );
             return;
         }
     };
 
-    let mode = prefs.coding_agent_permission_mode.clone();
-    let settings_json = crate::coding_agent::guard::build_guard_settings_json(&mode, &[]);
-    let settings_path =
-        std::env::temp_dir().join(format!("openless-agent-guard-{}.json", uuid::Uuid::new_v4()));
-    if std::fs::write(
-        &settings_path,
-        serde_json::to_vec(&settings_json).unwrap_or_default(),
-    )
-    .is_err()
-    {
-        log::warn!("[coding-agent] 写护栏配置失败");
-        return;
-    }
+    log::info!(
+        "[coding-agent] 快取用：润色 {} 字",
+        source_text.chars().count()
+    );
+    emit_capsule(
+        inner,
+        CapsuleState::Polishing,
+        0.0,
+        0,
+        Some("Claude 润色中…".to_string()),
+        None,
+    );
 
-    let cwd = prefs
-        .coding_agent_workdir
-        .clone()
-        .filter(|w| !w.trim().is_empty())
-        .map(std::path::PathBuf::from);
-    if let Some(dir) = &cwd {
-        if let Some(sha) = crate::coding_agent::create_git_snapshot(dir) {
-            log::info!("[coding-agent] 运行前 git 快照 {sha}");
-        }
-    }
+    let prompt = format!(
+        "请润色下面这段文字，使其更通顺自然、表达更清晰，保持原意、语言和事实不变。\
+         直接输出润色后的文本，不要加任何解释、前缀或引号：\n\n{source_text}"
+    );
 
-    let mut req = crate::coding_agent::CodingAgentRequest::new("quick", prompt);
-    req.cwd = cwd;
+    // 纯文本润色：不需要任何工具 → plan 只读、无 guard、便宜快、最可靠。
+    let mut req = crate::coding_agent::CodingAgentRequest::new("quick-polish", prompt);
     req.model = prefs
         .coding_agent_model
         .clone()
         .filter(|m| !m.trim().is_empty())
         .or_else(|| Some("sonnet".to_string()));
-    req.permission_mode = parse_coding_agent_permission_mode(&mode);
-    req.settings_json_path = Some(settings_path.clone());
-    req.max_budget_usd = Some(0.5);
-    req.timeout_secs = 120;
+    req.permission_mode = crate::coding_agent::CodingAgentPermissionMode::Plan;
+    req.allowed_tools = Vec::new();
+    req.max_budget_usd = Some(0.2);
+    req.timeout_secs = 60;
     req.session_persistence = false;
-    req.allowed_tools = vec![
-        "Bash".into(),
-        "Read".into(),
-        "Edit".into(),
-        "Write".into(),
-        "Glob".into(),
-        "Grep".into(),
-    ];
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1483,20 +1496,32 @@ async fn handle_coding_agent_quick(inner: &Arc<Inner>) {
     });
 
     let mut final_text = String::new();
+    let mut error_msg: Option<String> = None;
     while let Some(ev) = rx.recv().await {
-        if let crate::coding_agent::CodingAgentEvent::Completed { text, .. } = ev {
-            final_text = text;
+        match ev {
+            crate::coding_agent::CodingAgentEvent::Completed { text, .. } => final_text = text,
+            crate::coding_agent::CodingAgentEvent::Error { message, .. } => {
+                error_msg = Some(message)
+            }
+            _ => {}
         }
     }
-    let _ = run.await;
-    let _ = std::fs::remove_file(&settings_path);
+    let run_result = run.await;
 
     let final_text = final_text.trim().to_string();
     if final_text.is_empty() {
-        log::info!("[coding-agent] 快取用：Claude 无文本结果");
+        let msg = error_msg
+            .or_else(|| match run_result {
+                Ok(Err(e)) => Some(e.to_string()),
+                _ => None,
+            })
+            .unwrap_or_else(|| "Claude 无结果（确认已登录 claude 且额度充足）".to_string());
+        log::warn!("[coding-agent] 快取用失败: {msg}");
+        emit_capsule(inner, CapsuleState::Error, 0.0, 0, Some(msg), None);
         return;
     }
 
+    let inserted = final_text.chars().count() as u32;
     let inner2 = Arc::clone(inner);
     let restore = prefs.restore_clipboard_after_paste;
     let paste_shortcut = prefs.paste_shortcut;
@@ -1504,16 +1529,8 @@ async fn handle_coding_agent_quick(inner: &Arc<Inner>) {
         inner2.inserter.insert(&final_text, restore, paste_shortcut)
     })
     .await;
-}
-
-fn parse_coding_agent_permission_mode(s: &str) -> crate::coding_agent::CodingAgentPermissionMode {
-    use crate::coding_agent::CodingAgentPermissionMode as M;
-    match s {
-        "plan" => M::Plan,
-        "default" => M::Default,
-        "bypassPermissions" => M::BypassPermissions,
-        _ => M::AcceptEdits,
-    }
+    log::info!("[coding-agent] 快取用：已回插 {inserted} 字");
+    emit_capsule(inner, CapsuleState::Done, 0.0, 0, None, Some(inserted));
 }
 
 fn combo_hotkey_supervisor_loop(inner: Arc<Inner>) {

@@ -1,12 +1,11 @@
-// 高级 → 语音 Agent（快速 Agent）配置：启用开关、后端（Claude / OpenCode）、
-// 两个全局热键、模型 / 权限模式 / 工作目录。配置经 UserPreferences 持久化；
-// 热键的实时注册与触发链路由 coordinator 接线（随后续版本生效）。
+// 高级 → 快速 Agent 配置：启用开关、后端（Claude / OpenCode）、模型 / 权限模式 / 工作目录。
+// 两个热键（选中润色键、Cloud Agent 语音键）在「通用 → 快捷键」里配置。
+// 配置经 UserPreferences 持久化；启用后 coordinator 才注册热键。
 
 import { useTranslation } from 'react-i18next'
-import type { CodingAgentPermissionMode, CodingAgentProviderId, ShortcutBinding } from '../../lib/types'
+import type { CodingAgentPermissionMode, CodingAgentProviderId } from '../../lib/types'
 import { useHotkeySettings } from '../../state/HotkeySettingsContext'
-import { ShortcutRecorder } from '../../components/ShortcutRecorder'
-import { Btn, Card } from '../_atoms'
+import { Card } from '../_atoms'
 import { SectionDesc, SectionTitle, SettingRow, Toggle, inputStyle } from './shared'
 
 const PERMISSION_MODES: CodingAgentPermissionMode[] = [
@@ -15,9 +14,6 @@ const PERMISSION_MODES: CodingAgentPermissionMode[] = [
   'default',
   'bypassPermissions',
 ]
-
-const DEFAULT_PANEL_HOTKEY: ShortcutBinding = { primary: 'Enter', modifiers: ['cmd', 'shift'] }
-const DEFAULT_QUICK_HOTKEY: ShortcutBinding = { primary: 'J', modifiers: ['cmd', 'shift'] }
 
 export function CodingAgentSection() {
   const { t } = useTranslation()
@@ -33,55 +29,12 @@ export function CodingAgentSection() {
 
   const enabled = prefs.codingAgentEnabled
 
-  const setHotkey = (
-    key: 'codingAgentPanelHotkey' | 'codingAgentQuickHotkey',
-    binding: ShortcutBinding | null,
-  ) => savePrefs({ ...prefs, [key]: binding })
-
-  const hotkeyRow = (
-    key: 'codingAgentPanelHotkey' | 'codingAgentQuickHotkey',
-    label: string,
-    desc: string,
-    fallback: ShortcutBinding,
-  ) => {
-    const value = prefs[key]
-    return (
-      <SettingRow label={label} desc={desc}>
-        {value ? (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, width: '100%' }}>
-            <ShortcutRecorder value={value} alignRecordButton onSave={b => setHotkey(key, b)} />
-            <button
-              onClick={() => void setHotkey(key, null)}
-              style={{
-                alignSelf: 'flex-start',
-                fontSize: 11,
-                padding: '3px 10px',
-                background: 'transparent',
-                color: 'var(--ol-ink-4)',
-                border: '0.5px solid var(--ol-line-strong)',
-                borderRadius: 6,
-                fontFamily: 'inherit',
-                cursor: 'default',
-              }}
-            >
-              {t('settings.shortcuts.disable', 'Disable')}
-            </button>
-          </div>
-        ) : (
-          <Btn variant="blue" size="sm" onClick={() => void setHotkey(key, fallback)}>
-            {t('settings.shortcuts.enable', 'Enable')}
-          </Btn>
-        )}
-      </SettingRow>
-    )
-  }
-
   return (
     <Card>
       <SectionTitle>{t('settings.codingAgent.title')}</SectionTitle>
       <SectionDesc>{t('settings.codingAgent.desc')}</SectionDesc>
 
-      <SettingRow label={t('settings.codingAgent.enable')} desc={t('settings.codingAgent.comingSoonNote')}>
+      <SettingRow label={t('settings.codingAgent.enable')} desc={t('settings.codingAgent.hotkeyHint')}>
         <Toggle
           on={enabled}
           onToggle={next => void savePrefs({ ...prefs, codingAgentEnabled: next })}
@@ -105,19 +58,6 @@ export function CodingAgentSection() {
               <option value="opencode-cli">{t('settings.codingAgent.providerOpenCodeSoon')}</option>
             </select>
           </SettingRow>
-
-          {hotkeyRow(
-            'codingAgentPanelHotkey',
-            t('settings.codingAgent.panelHotkey'),
-            t('settings.codingAgent.panelHotkeyDesc'),
-            DEFAULT_PANEL_HOTKEY,
-          )}
-          {hotkeyRow(
-            'codingAgentQuickHotkey',
-            t('settings.codingAgent.quickHotkey'),
-            t('settings.codingAgent.quickHotkeyDesc'),
-            DEFAULT_QUICK_HOTKEY,
-          )}
 
           <SettingRow label={t('settings.codingConsole.permissionMode')}>
             <select
