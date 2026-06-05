@@ -1,37 +1,49 @@
-/* OpenLess Aura design tokens */
+/* OpenLess design tokens with Aura-specific extensions. */
 
 :root {
-  /* Palette */
+  /* Shared palette */
   --ol-white: #ffffff;
+  --ol-canvas: #f7f7f8;
+  --ol-surface: #ffffff;
+  --ol-surface-2: #fafafa;
+  --ol-surface-solid: #ffffff;
+  --ol-line: rgba(0, 0, 0, 0.08);
+  --ol-line-strong: rgba(0, 0, 0, 0.14);
+  --ol-line-soft: rgba(0, 0, 0, 0.05);
+
+  /* Aura palette */
   --ol-bg-base: #f3f4f6;
   --ol-bg-elevated: #fbfbfc;
-  --ol-canvas: var(--ol-bg-base);
-  --ol-surface: rgba(255, 255, 255, 0.72);
-  --ol-surface-2: rgba(255, 255, 255, 0.88);
-  --ol-surface-solid: #ffffff;
-  --ol-line: rgba(15, 23, 42, 0.08);
-  --ol-line-strong: rgba(15, 23, 42, 0.14);
-  --ol-line-soft: rgba(255, 255, 255, 0.55);
+  --ol-aura-surface: rgba(255, 255, 255, 0.72);
+  --ol-aura-surface-2: rgba(255, 255, 255, 0.88);
+  --ol-aura-surface-solid: #ffffff;
+  --ol-aura-line: rgba(15, 23, 42, 0.08);
+  --ol-aura-line-strong: rgba(15, 23, 42, 0.14);
+  --ol-aura-line-soft: rgba(255, 255, 255, 0.55);
 
   /* Ink */
-  --ol-ink: #10131a;
-  --ol-ink-2: #222938;
-  --ol-ink-3: rgba(16, 19, 26, 0.64);
-  --ol-ink-4: rgba(16, 19, 26, 0.42);
-  --ol-ink-5: rgba(16, 19, 26, 0.24);
+  --ol-ink: #0a0a0b;
+  --ol-ink-2: #2a2a2d;
+  --ol-ink-3: rgba(10, 10, 11, 0.62);
+  --ol-ink-4: rgba(10, 10, 11, 0.42);
+  --ol-ink-5: rgba(10, 10, 11, 0.24);
 
   /* Blue accent */
-  --ol-blue: #2f6df6;
-  --ol-blue-hover: #2458c8;
-  --ol-blue-soft: rgba(47, 109, 246, 0.10);
-  --ol-blue-ring: rgba(47, 109, 246, 0.22);
+  --ol-blue: #2563eb;
+  --ol-blue-hover: #1d4ed8;
+  --ol-blue-soft: #eff4ff;
+  --ol-blue-ring: rgba(37, 99, 235, 0.22);
 
-  /* Glass */
-  --ol-glass-bg: var(--ol-surface);
-  --ol-glass-bg-strong: var(--ol-surface-2);
-  --ol-glass-border: rgba(255, 255, 255, 0.58);
-  --ol-glass-blur: 24px;
+  /* Shared glass */
+  --ol-glass-bg: rgba(255, 255, 255, 0.62);
+  --ol-glass-bg-strong: rgba(255, 255, 255, 0.78);
+  --ol-glass-border: rgba(255, 255, 255, 0.7);
+  --ol-glass-blur: 20px;
   --ol-glass-blur-strong: 36px;
+
+  /* Aura glass */
+  --ol-aura-glass-border: rgba(255, 255, 255, 0.58);
+  --ol-aura-glass-blur: 24px;
 
   /* Frost grain texture used by the .ol-frost helpers in global.css. */
   --ol-frost-grain: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='100'%20height='100'%3E%3Cfilter%20id='g'%3E%3CfeTurbulence%20type='fractalNoise'%20baseFrequency='0.95'%20numOctaves='1'%20stitchTiles='stitch'/%3E%3CfeColorMatrix%20type='matrix'%20values='0.34%200.34%200.34%200%200%200.34%200.34%200.34%200%200%200.34%200.34%200.34%200%200%200%200%200%200%201'/%3E%3C/filter%3E%3Crect%20width='100'%20height='100'%20filter='url(%23g)'/%3E%3C/svg%3E");
@@ -44,10 +56,10 @@
   /* Shadows */
   --ol-shadow-sm: 0 1px 2px rgba(15, 17, 22, 0.04), 0 0 0 0.5px rgba(0, 0, 0, 0.04);
   --ol-shadow-md: 0 1px 2px rgba(15, 17, 22, 0.05), 0 6px 24px -12px rgba(15, 17, 22, 0.10), 0 0 0 0.5px rgba(0, 0, 0, 0.04);
+  --ol-shadow-lg: 0 20px 60px -20px rgba(15, 17, 22, 0.18), 0 8px 32px -16px rgba(15, 17, 22, 0.10), 0 0 0 0.5px rgba(0, 0, 0, 0.06);
+  --ol-shadow-xl: 0 40px 120px -40px rgba(15, 17, 22, 0.30), 0 24px 60px -24px rgba(15, 17, 22, 0.15), 0 0 0 0.5px rgba(0, 0, 0, 0.06);
   --ol-aura-shadow: 0 24px 80px -32px rgba(15, 23, 42, 0.24), 0 12px 36px -18px rgba(15, 23, 42, 0.12);
   --ol-aura-shadow-soft: 0 10px 30px -18px rgba(15, 23, 42, 0.16), 0 0 0 0.5px rgba(255, 255, 255, 0.55) inset;
-  --ol-shadow-lg: var(--ol-aura-shadow);
-  --ol-shadow-xl: 0 40px 120px -40px rgba(15, 17, 22, 0.30), 0 24px 60px -24px rgba(15, 17, 22, 0.15), 0 0 0 0.5px rgba(0, 0, 0, 0.06);
 
   /* Radii */
   --ol-shell-radius: 32px;
@@ -63,8 +75,8 @@
 
   /* Typography */
   --ol-font-display: "Aptos", "Segoe UI Variable Display", "PingFang SC", "Microsoft YaHei", sans-serif;
-  --ol-font-sans: "Aptos", "Segoe UI Variable Text", "PingFang SC", "Microsoft YaHei", sans-serif;
-  --ol-font-mono: "JetBrains Mono", "SF Mono", "Cascadia Code", Consolas, monospace;
+  --ol-font-sans: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  --ol-font-mono: "SF Mono", "Cascadia Code", Consolas, monospace;
 
   /* Status colors */
   --ol-ok: #16a34a;
