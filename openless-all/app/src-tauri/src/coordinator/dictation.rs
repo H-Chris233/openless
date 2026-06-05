@@ -14,6 +14,47 @@ use super::*;
 const HOTKEY_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(250);
 const STREAMING_INSERT_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(12);
 
+/// Less Computer 浮窗的 Tauri 事件名（前端 LessComputerPanel 订阅）。
+const LESS_COMPUTER_EVENT: &str = "less-computer:event";
+
+/// Less Computer 内联审批：等待用户决断的 token → oneshot sender 注册表。
+///
+/// 无头 `claude -p` 没有 mid-run 的 `--permission-prompt-tool` 通道（v2.1.165 不支持），
+/// 所以护栏拦截发生在「整轮跑完、护栏 deny 生效」之后。这个注册表是审批 UI 的实回路：
+/// 后端发 `approval` 事件后把一个 oneshot 接收端挂在这里，等前端 `less_computer_approve`
+/// 命令按 token 解析出用户决断（true=Approve / false=Deny）。
+static LESS_COMPUTER_APPROVALS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<bool>>>,
+> = std::sync::OnceLock::new();
+
+fn less_computer_approvals(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<bool>>>
+{
+    LESS_COMPUTER_APPROVALS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// 前端 `less_computer_approve` 命令调到这里：按 token 解析等待中的审批。
+/// token 不存在（已超时 / 已解析）时静默忽略。
+pub(super) fn resolve_less_computer_approval(token: &str, approved: bool) {
+    let sender = less_computer_approvals()
+        .lock()
+        .ok()
+        .and_then(|mut m| m.remove(token));
+    if let Some(tx) = sender {
+        let _ = tx.send(approved);
+        log::info!("[less-computer] 审批 token={token} approved={approved}");
+    } else {
+        log::info!("[less-computer] 审批 token={token} 已失效（超时/重复）");
+    }
+}
+
+/// 往 Less Computer 浮窗发一条事件（macOS only；前端按 `kind` 渲染聊天结构）。
+fn emit_less_computer(inner: &Arc<Inner>, payload: serde_json::Value) {
+    if let Some(app) = inner.app.lock().clone() {
+        let _ = app.emit_to("less-computer", LESS_COMPUTER_EVENT, payload);
+    }
+}
+
 /// 跑流式润色路径（opt-in，跨平台）。
 ///
 /// 平台差异：
@@ -540,6 +581,7 @@ async fn run_voice_agent_transcript(
         "[coord] Cloud Agent 语音：指令 {} 字",
         transcript.chars().count()
     );
+    // 胶囊保留「处理中」反馈（用户熟悉的小录音条状态机）；聊天浮窗承载完整对话。
     emit_capsule(
         inner,
         CapsuleState::Polishing,
@@ -547,6 +589,15 @@ async fn run_voice_agent_transcript(
         elapsed,
         Some("Claude 处理中…".to_string()),
         None,
+    );
+
+    // 聊天浮窗：显示窗口 + 落用户气泡（语音指令转写）。macOS only（helper 内部 gating）。
+    if let Some(app) = inner.app.lock().clone() {
+        crate::show_less_computer_window(&app);
+    }
+    emit_less_computer(
+        inner,
+        serde_json::json!({ "kind": "user", "text": transcript }),
     );
 
     let prefs = inner.prefs.get();
@@ -563,12 +614,109 @@ async fn run_voice_agent_transcript(
             log::info!("[less-computer] 运行前 git 快照 {sha}（git stash apply 可回滚）");
         }
     }
-    // 「放行 + 护栏」：让 Agent 真正动手（开应用 / 跑命令 / 读写文件）完成任务；
-    // 高风险/不可逆命令（rm -rf / sudo / 强推等）由护栏 deny 清单自动拦截（混合模式 MVP，
-    // 高风险=拦截；交互式弹审批为后续）。权限模式尊重高级设置，默认 acceptEdits。
+
     let mode = coding_agent_mode_from_pref(&prefs.coding_agent_permission_mode);
-    let settings_json =
-        crate::coding_agent::guard::build_guard_settings_json(mode.as_cli_arg(), &[]);
+    let model = prefs
+        .coding_agent_model
+        .clone()
+        .filter(|m| !m.trim().is_empty())
+        .or_else(|| Some("sonnet".to_string()));
+    let prompt = crate::coding_agent::autonomous_prompt(&transcript);
+
+    // 第一轮：默认护栏（高风险全 deny）。运行后若检测到护栏拦截，弹审批卡；
+    // 用户 Approve 则在第二轮把该高风险模式从 deny 移除 + 加进 allowed，重跑一次。
+    let outcome =
+        run_less_computer_once(inner, &prompt, cwd.as_deref(), mode, model.as_deref(), &[]).await;
+
+    let final_outcome = match maybe_request_approval(inner, &outcome).await {
+        Some(approved_pattern) => {
+            log::info!("[less-computer] 审批通过，放行高风险模式后重跑：{approved_pattern}");
+            run_less_computer_once(
+                inner,
+                &prompt,
+                cwd.as_deref(),
+                mode,
+                model.as_deref(),
+                &[approved_pattern],
+            )
+            .await
+        }
+        None => outcome,
+    };
+
+    inner.state.lock().phase = SessionPhase::Idle;
+
+    match final_outcome {
+        LessComputerOutcome::Done { text, cost_usd } => {
+            let text = text.trim().to_string();
+            if text.is_empty() {
+                let msg = "Claude 无结果（确认已登录 claude 且额度充足）".to_string();
+                emit_less_computer(
+                    inner,
+                    serde_json::json!({ "kind": "error", "message": msg }),
+                );
+                emit_capsule(inner, CapsuleState::Error, 0.0, elapsed, Some(msg), None);
+                schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
+                return Err("voice agent empty".to_string());
+            }
+            log::info!("[coord] Cloud Agent 语音：返回 {} 字", text.chars().count());
+            emit_less_computer(
+                inner,
+                serde_json::json!({ "kind": "completed", "text": text, "costUsd": cost_usd }),
+            );
+            emit_capsule(inner, CapsuleState::Done, 0.0, elapsed, Some(text), None);
+            schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
+            Ok(())
+        }
+        LessComputerOutcome::Failed { message } => {
+            log::warn!("[coord] Cloud Agent 语音失败: {message}");
+            emit_less_computer(
+                inner,
+                serde_json::json!({ "kind": "error", "message": message }),
+            );
+            emit_capsule(
+                inner,
+                CapsuleState::Error,
+                0.0,
+                elapsed,
+                Some(message),
+                None,
+            );
+            schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
+            Err("voice agent failed".to_string())
+        }
+    }
+}
+
+/// 一轮无头 Less Computer 运行的结果（终局二选一）。
+enum LessComputerOutcome {
+    Done { text: String, cost_usd: Option<f64> },
+    Failed { message: String },
+}
+
+/// 跑一轮无头 Claude（「放行 + 护栏」），把 Delta/ToolUse 实时 stream 到聊天浮窗，
+/// 终局收敛为 [`LessComputerOutcome`]。`extra_allow_patterns` 为审批通过后放行的
+/// 高风险子串（如 "git push --force"）：从 deny 清单剔除 + 作为 `Bash(<pat>:*)` 加进 allowed。
+async fn run_less_computer_once(
+    inner: &Arc<Inner>,
+    prompt: &str,
+    cwd: Option<&std::path::Path>,
+    mode: crate::coding_agent::CodingAgentPermissionMode,
+    model: Option<&str>,
+    extra_allow_patterns: &[String],
+) -> LessComputerOutcome {
+    // 护栏 deny：默认全量；审批放行的模式从 deny 中剔除。
+    let mut deny = crate::coding_agent::guard::default_deny_rules();
+    let allow_rules: Vec<String> = extra_allow_patterns
+        .iter()
+        .map(|p| format!("Bash({p}:*)"))
+        .collect();
+    if !allow_rules.is_empty() {
+        deny.retain(|d| !allow_rules.iter().any(|a| a == d));
+    }
+    let settings_json = serde_json::json!({
+        "permissions": { "defaultMode": mode.as_cli_arg(), "deny": deny }
+    });
     let settings_path = std::env::temp_dir().join(format!(
         "openless-less-computer-guard-{}.json",
         uuid::Uuid::new_v4()
@@ -580,15 +728,9 @@ async fn run_voice_agent_transcript(
         log::warn!("[less-computer] 写护栏配置失败: {e}");
     }
 
-    // 无头单次运行没有多轮兜底：包一层目标驱动的自动化前置说明，逼 Claude 一口气做完。
-    let prompt = crate::coding_agent::autonomous_prompt(&transcript);
-    let mut req = crate::coding_agent::CodingAgentRequest::new("less-computer", prompt);
-    req.cwd = cwd;
-    req.model = prefs
-        .coding_agent_model
-        .clone()
-        .filter(|m| !m.trim().is_empty())
-        .or_else(|| Some("sonnet".to_string()));
+    let mut req = crate::coding_agent::CodingAgentRequest::new("less-computer", prompt.to_string());
+    req.cwd = cwd.map(|p| p.to_path_buf());
+    req.model = model.map(|m| m.to_string());
     req.permission_mode = mode;
     req.settings_json_path = Some(settings_path.clone());
     req.allowed_tools = vec![
@@ -601,6 +743,7 @@ async fn run_voice_agent_transcript(
         "WebFetch".into(),
         "WebSearch".into(),
     ];
+    req.allowed_tools.extend(allow_rules);
     req.max_budget_usd = Some(0.5);
     req.timeout_secs = 120;
     req.session_persistence = false;
@@ -612,41 +755,122 @@ async fn run_voice_agent_transcript(
     });
 
     let mut final_text = String::new();
+    let mut cost_usd: Option<f64> = None;
     let mut error_msg: Option<String> = None;
     while let Some(ev) = rx.recv().await {
+        use crate::coding_agent::CodingAgentEvent as E;
         match ev {
-            crate::coding_agent::CodingAgentEvent::Completed { text, .. } => final_text = text,
-            crate::coding_agent::CodingAgentEvent::Error { message, .. } => {
-                error_msg = Some(message)
+            E::Started { .. } => {
+                emit_less_computer(inner, serde_json::json!({ "kind": "started" }));
             }
-            _ => {}
+            E::Delta { text, .. } => {
+                emit_less_computer(inner, serde_json::json!({ "kind": "delta", "text": text }));
+            }
+            E::ToolUse { name, .. } => {
+                emit_less_computer(inner, serde_json::json!({ "kind": "tool", "name": name }));
+            }
+            E::Completed {
+                text, cost_usd: c, ..
+            } => {
+                final_text = text;
+                cost_usd = c;
+            }
+            E::Error { message, .. } => error_msg = Some(message),
+            E::Cancelled { .. } => {}
         }
     }
     let run_result = run.await;
     let _ = std::fs::remove_file(&settings_path);
-    let final_text = final_text.trim().to_string();
 
-    inner.state.lock().phase = SessionPhase::Idle;
-    if final_text.is_empty() {
-        let msg = error_msg
+    let trimmed = final_text.trim().to_string();
+    if !trimmed.is_empty() {
+        LessComputerOutcome::Done {
+            text: trimmed,
+            cost_usd,
+        }
+    } else {
+        let message = error_msg
             .or_else(|| match run_result {
                 Ok(Err(e)) => Some(e.to_string()),
                 _ => None,
             })
             .unwrap_or_else(|| "Claude 无结果（确认已登录 claude 且额度充足）".to_string());
-        log::warn!("[coord] Cloud Agent 语音失败: {msg}");
-        emit_capsule(inner, CapsuleState::Error, 0.0, elapsed, Some(msg), None);
-        schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-        return Err("voice agent empty".to_string());
+        LessComputerOutcome::Failed { message }
     }
+}
 
-    log::info!(
-        "[coord] Cloud Agent 语音：返回 {} 字",
-        final_text.chars().count()
+/// 护栏拦截探测 + 内联审批（best-effort）。
+///
+/// 无头 `claude -p`（v2.1.165）没有 mid-run 的 `--permission-prompt-tool` 通道，所以
+/// 我们只能在「一轮跑完」后判断护栏是否拦了高风险动作：扫描终局文本里是否提到某个
+/// 高风险模式 + 权限/拒绝/blocked 关键词。命中则发 `approval` 事件、挂一个 oneshot 等
+/// 用户决断（前端 Approve/Deny → `less_computer_approve` 命令解析）。
+///
+/// 返回 `Some(pattern)` 表示用户 Approve 了某高风险模式 → 调用方应放行该模式重跑一轮；
+/// `None` 表示无需审批 / 用户 Deny / 超时。**注意**这是「重跑放行」而非真正的 mid-run
+/// 续跑——headless 下没有干净的 mid-run round-trip，详见 report。
+async fn maybe_request_approval(
+    inner: &Arc<Inner>,
+    outcome: &LessComputerOutcome,
+) -> Option<String> {
+    let text = match outcome {
+        LessComputerOutcome::Done { text, .. } => text.as_str(),
+        LessComputerOutcome::Failed { message } => message.as_str(),
+    };
+    let lowered = text.to_lowercase();
+    // 必须同时出现「拒绝/权限/blocked」语义 + 某个已知高风险模式，才认为是护栏拦截，
+    // 避免把正常提到 "rm" 的回答误判成审批请求。
+    let mentions_block = [
+        "denied",
+        "permission",
+        "not allowed",
+        "blocked",
+        "拒绝",
+        "权限",
+        "被拦",
+    ]
+    .iter()
+    .any(|kw| lowered.contains(kw));
+    if !mentions_block {
+        return None;
+    }
+    let hit = crate::coding_agent::guard::HIGH_RISK_PATTERNS
+        .iter()
+        .find(|(pat, _)| lowered.contains(*pat))?;
+    let (pattern, reason) = (hit.0.to_string(), hit.1.to_string());
+
+    // 挂 oneshot 等用户决断。
+    let token = uuid::Uuid::new_v4().to_string();
+    let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
+    if let Ok(mut map) = less_computer_approvals().lock() {
+        map.insert(token.clone(), tx);
+    }
+    emit_less_computer(
+        inner,
+        serde_json::json!({
+            "kind": "approval",
+            "token": token,
+            "command": pattern,
+            "reason": reason,
+        }),
     );
-    emit_capsule(inner, CapsuleState::Done, 0.0, elapsed, Some(final_text), None);
-    schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-    Ok(())
+
+    // 等用户点 Approve/Deny；90s 无响应按 Deny 处理并清理注册表项。
+    let approved = match tokio::time::timeout(std::time::Duration::from_secs(90), rx).await {
+        Ok(Ok(v)) => v,
+        _ => {
+            less_computer_approvals()
+                .lock()
+                .ok()
+                .map(|mut m| m.remove(&token));
+            false
+        }
+    };
+    if approved {
+        Some(pattern)
+    } else {
+        None
+    }
 }
 
 /// 把 prefs 里的权限模式字符串映射成枚举；未知值回落到 acceptEdits（放行+护栏的默认）。
@@ -1669,7 +1893,8 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
 
     // Cloud Agent 语音分流：长按升级的会话不走润色/插入，转写交给 Claude 跑任务、结果弹胶囊。
     if inner.state.lock().voice_agent {
-        return run_voice_agent_transcript(inner, current_session_id, raw.text.clone(), elapsed).await;
+        return run_voice_agent_transcript(inner, current_session_id, raw.text.clone(), elapsed)
+            .await;
     }
 
     emit_capsule(inner, CapsuleState::Polishing, 0.0, elapsed, None, None);

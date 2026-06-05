@@ -1,0 +1,526 @@
+// LessComputerPanel.tsx — Less Computer 语音 Agent 浮窗（窗口 label = "less-computer"）。
+//
+// 把「按住专用键说话 → Agent 操控电脑」的交互渲染成聊天结构：
+//   - 用户气泡：语音指令转写（`user` 事件，开启新会话并清空旧内容）。
+//   - 助手气泡：流式回复（`delta` 累积）+ 工具调用 chip（`tool`）。
+//   - 内联审批卡（`approval`）：高风险动作被护栏拦下时弹 Approve / Deny。
+//   - 完成（`completed`）落最终结果 + 成本；出错（`error`）红色样式。
+//
+// 窗口随内容自适应高度（measure content → setSize），不可拖动、置顶、磨砂。
+// 仅 macOS 实际触发（后端只在 macOS 注册 Less Computer 热键并 emit 事件）。
+// 关闭：Esc / ✕ → less_computer_window_dismiss → 后端隐藏窗口。
+
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from 'react';
+import { useTranslation } from 'react-i18next';
+import {
+  isTauri,
+  lessComputerApprove,
+  lessComputerWindowDismiss,
+  lessComputerWindowResize,
+} from '../lib/ipc';
+import type { LessComputerEvent } from '../lib/types';
+import { renderQaMarkdown, renderQaPlainText } from '../lib/qaMarkdown';
+
+type RunStatus = 'idle' | 'working' | 'done' | 'error';
+
+interface ToolChip {
+  kind: 'tool';
+  name: string;
+}
+
+interface ApprovalCard {
+  kind: 'approval';
+  token: string;
+  command: string;
+  reason: string;
+  /** 用户已点过的结果，决定按钮禁用态。undefined = 待处理。 */
+  decision?: 'approved' | 'denied';
+}
+
+/** 助手回复流里穿插的工具 chip / 审批卡，按到达顺序排列。 */
+type Activity = ToolChip | ApprovalCard;
+
+const WINDOW_MIN_HEIGHT = 120;
+const WINDOW_MAX_HEIGHT = 520;
+const TOOLBAR_HEIGHT = 28;
+
+export function LessComputerPanel() {
+  const { t } = useTranslation();
+  const [userText, setUserText] = useState('');
+  const [answer, setAnswer] = useState('');
+  const [activities, setActivities] = useState<Activity[]>([]);
+  const [status, setStatus] = useState<RunStatus>('idle');
+  const [errorMsg, setErrorMsg] = useState('');
+  const [costUsd, setCostUsd] = useState<number | null>(null);
+
+  // ── 后端事件订阅（mount 一次）────────────────────────────────────────
+  useEffect(() => {
+    if (!isTauri) return;
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { listen } = await import('@tauri-apps/api/event');
+        const handle = await listen<LessComputerEvent>(
+          'less-computer:event',
+          event => applyEvent(event.payload),
+        );
+        if (cancelled) handle();
+        else unlisten = handle;
+      } catch (error) {
+        console.error('[LessComputer] listener setup failed', error);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  const applyEvent = (ev: LessComputerEvent) => {
+    switch (ev.kind) {
+      case 'user':
+        // 新会话：清空旧内容，落用户气泡。
+        setUserText(ev.text);
+        setAnswer('');
+        setActivities([]);
+        setErrorMsg('');
+        setCostUsd(null);
+        setStatus('working');
+        break;
+      case 'started':
+        setStatus('working');
+        break;
+      case 'delta':
+        setAnswer(prev => prev + ev.text);
+        break;
+      case 'tool':
+        setActivities(prev => [...prev, { kind: 'tool', name: ev.name }]);
+        break;
+      case 'approval':
+        setActivities(prev => [
+          ...prev,
+          {
+            kind: 'approval',
+            token: ev.token,
+            command: ev.command,
+            reason: ev.reason,
+          },
+        ]);
+        break;
+      case 'completed':
+        if (ev.text) setAnswer(ev.text);
+        setCostUsd(ev.costUsd ?? null);
+        setStatus('done');
+        break;
+      case 'error':
+        setErrorMsg(ev.message);
+        setStatus('error');
+        break;
+    }
+  };
+
+  const onApproval = (token: string, approved: boolean) => {
+    setActivities(prev =>
+      prev.map(a =>
+        a.kind === 'approval' && a.token === token
+          ? { ...a, decision: approved ? 'approved' : 'denied' }
+          : a,
+      ),
+    );
+    void lessComputerApprove(token, approved);
+  };
+
+  const onClose = () => void lessComputerWindowDismiss();
+
+  // ── Esc 关闭 ────────────────────────────────────────────────────────
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        void lessComputerWindowDismiss();
+      }
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, []);
+
+  // ── 内容自适应：measure 内容高 + toolbar → 回传后端 clamp + bottom-anchored 摆放，
+  // 让内容增长向上撑开。超出 max 则窗口内部滚动。
+  const contentRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!isTauri) return;
+    const el = contentRef.current;
+    if (!el) return;
+    const measured = Math.ceil(el.scrollHeight) + TOOLBAR_HEIGHT;
+    const target = Math.min(WINDOW_MAX_HEIGHT, Math.max(WINDOW_MIN_HEIGHT, measured));
+    void lessComputerWindowResize(target);
+  }, [userText, answer, activities, status, errorMsg, costUsd]);
+
+  // 自动滚动到底
+  const scrollRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [answer, activities, status]);
+
+  return (
+    <div className="ol-frost" style={shellStyle}>
+      <Toolbar label={t('lessComputer.closeTooltip')} onClose={onClose} />
+      <div ref={scrollRef} style={scrollStyle}>
+        <div ref={contentRef} style={contentStyle}>
+          {userText && <UserBubble text={userText} label={t('lessComputer.you')} />}
+          {activities.map((a, i) =>
+            a.kind === 'tool' ? (
+              <ToolChipRow key={`t${i}`} name={a.name} t={t} />
+            ) : (
+              <ApprovalRow key={a.token} card={a} onDecide={onApproval} t={t} />
+            ),
+          )}
+          {answer && <AssistantBubble markdown={answer} working={status === 'working'} />}
+          {status === 'working' && !answer && <WorkingRow label={t('lessComputer.working')} />}
+          {status === 'error' && <ErrorRow message={errorMsg || t('lessComputer.error')} />}
+          {status === 'done' && costUsd != null && (
+            <CostRow label={t('lessComputer.cost', { cost: costUsd.toFixed(3) })} />
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── 子组件 ────────────────────────────────────────────────────────────
+
+function Toolbar({ label, onClose }: { label: string; onClose: () => void }) {
+  return (
+    <div style={toolbarStyle}>
+      <div style={{ flex: 1 }} />
+      <button onClick={onClose} title={label} aria-label={label} style={closeBtnStyle}>
+        <svg width="11" height="11" viewBox="0 0 11 11">
+          <path
+            d="M1.5 1.5l8 8M9.5 1.5l-8 8"
+            stroke="currentColor"
+            strokeWidth="1.6"
+            strokeLinecap="round"
+          />
+        </svg>
+      </button>
+    </div>
+  );
+}
+
+function UserBubble({ text, label }: { text: string; label: string }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 3 }}>
+      <span style={roleLabelStyle}>{label}</span>
+      <div style={userBubbleStyle}>{text}</div>
+    </div>
+  );
+}
+
+function AssistantBubble({ markdown, working }: { markdown: string; working: boolean }) {
+  const html = useMemo(() => {
+    try {
+      return renderQaMarkdown(markdown);
+    } catch (error) {
+      console.error('[LessComputer] markdown render failed', error);
+      return renderQaPlainText(String(markdown ?? ''));
+    }
+  }, [markdown]);
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 3 }}>
+      <div
+        className="lc-answer"
+        style={assistantBubbleStyle}
+        // eslint-disable-next-line react/no-danger
+        dangerouslySetInnerHTML={{ __html: html }}
+      />
+      {working && <span style={caretStyle} />}
+    </div>
+  );
+}
+
+function ToolChipRow({
+  name,
+  t,
+}: {
+  name: string;
+  t: ReturnType<typeof useTranslation>['t'];
+}) {
+  return (
+    <div style={{ display: 'flex' }}>
+      <span style={toolChipStyle}>
+        <span aria-hidden style={{ marginRight: 4 }}>
+          {'\u{1F6E0}'}
+        </span>
+        {t('lessComputer.tool', { name })}
+      </span>
+    </div>
+  );
+}
+
+function WorkingRow({ label }: { label: string }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+      <span style={dotStyle} />
+      <span style={{ fontSize: 12, color: 'var(--ol-ink-3)', fontWeight: 500 }}>{label}</span>
+    </div>
+  );
+}
+
+function ApprovalRow({
+  card,
+  onDecide,
+  t,
+}: {
+  card: ApprovalCard;
+  onDecide: (token: string, approved: boolean) => void;
+  t: ReturnType<typeof useTranslation>['t'];
+}) {
+  const decided = card.decision != null;
+  return (
+    <div style={approvalCardStyle}>
+      <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--ol-ink)' }}>
+        {t('lessComputer.approvalTitle')}
+      </div>
+      <code style={approvalCmdStyle}>{card.command}</code>
+      <div style={{ fontSize: 11.5, color: 'var(--ol-ink-3)' }}>{card.reason}</div>
+      {decided ? (
+        <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--ol-ink-3)' }}>
+          {card.decision === 'approved'
+            ? t('lessComputer.approved')
+            : t('lessComputer.denied')}
+        </div>
+      ) : (
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button style={denyBtnStyle} onClick={() => onDecide(card.token, false)}>
+            {t('lessComputer.deny')}
+          </button>
+          <button style={approveBtnStyle} onClick={() => onDecide(card.token, true)}>
+            {t('lessComputer.approve')}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ErrorRow({ message }: { message: string }) {
+  return (
+    <div style={errorRowStyle}>
+      <span style={{ fontSize: 12.5, color: 'var(--ol-err)', lineHeight: 1.5 }}>{message}</span>
+    </div>
+  );
+}
+
+function CostRow({ label }: { label: string }) {
+  return (
+    <div style={{ display: 'flex' }}>
+      <span style={costChipStyle}>{label}</span>
+    </div>
+  );
+}
+
+// ── 样式 ──────────────────────────────────────────────────────────────
+
+const shellStyle: CSSProperties = {
+  width: '100%',
+  height: '100vh',
+  display: 'flex',
+  flexDirection: 'column',
+  borderRadius: 14,
+  overflow: 'hidden',
+  border: '0.5px solid rgba(0, 0, 0, 0.08)',
+  boxShadow: 'var(--ol-shadow-lg), inset 0 1px 0 0 rgba(255, 255, 255, 0.9)',
+  fontFamily: 'var(--ol-font-sans)',
+  color: 'var(--ol-ink)',
+};
+
+const toolbarStyle: CSSProperties = {
+  height: 28,
+  display: 'flex',
+  alignItems: 'center',
+  padding: '0 8px',
+  borderBottom: '0.5px solid rgba(0, 0, 0, 0.06)',
+  flexShrink: 0,
+};
+
+const closeBtnStyle: CSSProperties = {
+  width: 22,
+  height: 22,
+  border: 0,
+  borderRadius: 6,
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  cursor: 'default',
+  padding: 0,
+  background: 'transparent',
+  color: 'var(--ol-ink-3)',
+  transition: 'background 0.16s var(--ol-motion-quick)',
+};
+
+const scrollStyle: CSSProperties = {
+  flex: 1,
+  minHeight: 0,
+  overflow: 'auto',
+};
+
+const contentStyle: CSSProperties = {
+  padding: 14,
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 10,
+};
+
+const roleLabelStyle: CSSProperties = {
+  fontSize: 10.5,
+  color: 'var(--ol-ink-4)',
+  fontWeight: 600,
+};
+
+const userBubbleStyle: CSSProperties = {
+  maxWidth: '85%',
+  padding: '8px 12px',
+  borderRadius: 14,
+  borderBottomRightRadius: 4,
+  background: 'var(--ol-blue)',
+  color: '#fff',
+  fontSize: 13,
+  lineHeight: 1.55,
+  wordBreak: 'break-word',
+};
+
+const assistantBubbleStyle: CSSProperties = {
+  maxWidth: '92%',
+  padding: '8px 12px',
+  borderRadius: 14,
+  borderBottomLeftRadius: 4,
+  background: 'rgba(0,0,0,0.04)',
+  fontSize: 13,
+  lineHeight: 1.6,
+  color: 'var(--ol-ink)',
+  wordBreak: 'break-word',
+  alignSelf: 'flex-start',
+};
+
+const caretStyle: CSSProperties = {
+  display: 'inline-block',
+  width: 6,
+  height: 12,
+  background: 'var(--ol-blue)',
+  marginLeft: 12,
+  animation: 'lc-pulse 0.9s var(--ol-motion-soft) infinite',
+  borderRadius: 1,
+};
+
+const toolChipStyle: CSSProperties = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  fontSize: 11.5,
+  fontWeight: 500,
+  color: 'var(--ol-ink-2)',
+  background: 'rgba(0,0,0,0.045)',
+  border: '0.5px solid rgba(0,0,0,0.06)',
+  borderRadius: 8,
+  padding: '4px 8px',
+};
+
+const costChipStyle: CSSProperties = {
+  fontSize: 11,
+  fontWeight: 500,
+  color: 'var(--ol-ink-4)',
+  fontFamily: 'var(--ol-font-mono)',
+};
+
+const dotStyle: CSSProperties = {
+  width: 8,
+  height: 8,
+  borderRadius: '50%',
+  background: 'var(--ol-blue)',
+  animation: 'lc-pulse 1.2s var(--ol-motion-soft) infinite',
+};
+
+const approvalCardStyle: CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 6,
+  padding: '10px 12px',
+  borderRadius: 12,
+  background: 'rgba(220,38,38,0.05)',
+  border: '0.5px solid rgba(220,38,38,0.20)',
+};
+
+const approvalCmdStyle: CSSProperties = {
+  fontFamily: 'var(--ol-font-mono)',
+  fontSize: 11.5,
+  color: 'var(--ol-ink)',
+  background: 'rgba(0,0,0,0.05)',
+  borderRadius: 6,
+  padding: '5px 8px',
+  wordBreak: 'break-all',
+};
+
+const approveBtnStyle: CSSProperties = {
+  flex: 1,
+  border: 0,
+  borderRadius: 8,
+  padding: '6px 10px',
+  fontSize: 12,
+  fontWeight: 600,
+  cursor: 'default',
+  background: 'var(--ol-blue)',
+  color: '#fff',
+};
+
+const denyBtnStyle: CSSProperties = {
+  flex: 1,
+  borderRadius: 8,
+  padding: '6px 10px',
+  fontSize: 12,
+  fontWeight: 600,
+  cursor: 'default',
+  background: 'transparent',
+  border: '0.5px solid rgba(0,0,0,0.14)',
+  color: 'var(--ol-ink-2)',
+};
+
+const errorRowStyle: CSSProperties = {
+  padding: '8px 12px',
+  borderRadius: 10,
+  background: 'rgba(220,38,38,0.06)',
+  border: '0.5px solid rgba(220,38,38,0.18)',
+};
+
+const globalCss = `
+@keyframes lc-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.35; transform: scale(.94); }
+}
+.lc-answer p        { margin: 0 0 6px; }
+.lc-answer p:last-child { margin-bottom: 0; }
+.lc-answer ul,
+.lc-answer ol       { margin: 0 0 6px; padding-left: 18px; }
+.lc-answer li       { margin: 2px 0; }
+.lc-answer code     { font-family: var(--ol-font-mono); font-size: 12px;
+                      padding: 1px 5px; border-radius: 4px;
+                      background: rgba(0,0,0,0.05); }
+.lc-answer pre      { margin: 0 0 6px; padding: 8px 10px;
+                      border-radius: 8px; background: rgba(0,0,0,0.05);
+                      overflow-x: auto; }
+.lc-answer pre code { padding: 0; background: transparent; }
+.lc-answer a        { color: var(--ol-blue); text-decoration: none; }
+`;
+
+if (typeof document !== 'undefined' && !document.getElementById('less-computer-panel-style')) {
+  const tag = document.createElement('style');
+  tag.id = 'less-computer-panel-style';
+  tag.textContent = globalCss;
+  document.head.appendChild(tag);
+}

@@ -11,6 +11,7 @@ const params = new URLSearchParams(window.location.search);
 const windowKind = params.get("window");
 const isCapsule = windowKind === "capsule";
 const isQa = windowKind === "qa";
+const isLessComputer = windowKind === "less-computer";
 const osQuery = params.get("os") as OS | null;
 
 const root = ReactDOM.createRoot(document.getElementById("root")!);
@@ -18,7 +19,12 @@ const root = ReactDOM.createRoot(document.getElementById("root")!);
 const renderApp = () => {
   root.render(
     <React.StrictMode>
-      <App isCapsule={isCapsule} isQa={isQa} forcedOs={osQuery} />
+      <App
+        isCapsule={isCapsule}
+        isQa={isQa}
+        isLessComputer={isLessComputer}
+        forcedOs={osQuery}
+      />
     </React.StrictMode>,
   );
 };

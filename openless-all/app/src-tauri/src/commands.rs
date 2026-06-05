@@ -1923,6 +1923,24 @@ pub fn qa_window_pin(coord: CoordinatorState<'_>, pinned: bool) {
     coord.qa_window_pin(pinned);
 }
 
+/// 用户点 ✕ / 按 Esc 关 Less Computer 浮窗。
+#[tauri::command]
+pub fn less_computer_window_dismiss(coord: CoordinatorState<'_>) {
+    coord.less_computer_window_dismiss();
+}
+
+/// 前端按内容测高后回传高度，后端 clamp + bottom-anchored 重新摆放浮窗。
+#[tauri::command]
+pub fn less_computer_window_resize(coord: CoordinatorState<'_>, height: f64) {
+    coord.less_computer_window_resize(height);
+}
+
+/// 内联审批卡的 Approve / Deny 回执。token 关联到等待中的拦截动作。
+#[tauri::command]
+pub fn less_computer_approve(coord: CoordinatorState<'_>, token: String, approved: bool) {
+    coord.less_computer_approve(&token, approved);
+}
+
 // ─────────────────────────── 自定义组合键 ───────────────────────────
 
 /// 测试一个组合键是否可以注册（验证格式，不实际注册）。

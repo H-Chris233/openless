@@ -165,6 +165,13 @@ pub fn run() {
                 log::info!("[qa] qa 窗口未在 tauri.conf.json 中声明，前端 agent 会补上");
             }
 
+            // Less Computer 语音 Agent 浮窗（macOS only）。启动时隐藏；coordinator
+            // 在 Less Computer 会话开始时再 show + 定位。非 macOS 上该窗口虽在
+            // tauri.conf.json 声明，但前端不渲染入口、后端不 emit，保持隐藏惰性。
+            if let Some(lc) = app.get_webview_window("less-computer") {
+                let _ = lc.hide();
+            }
+
             // 主窗口磨砂：macOS 用 NSVisualEffectView，Windows 用 Mica。
             // 没这一层的话 transparent: true 让窗口透明 → 背后只是空，不是磨砂。
             //
@@ -416,6 +423,9 @@ pub fn run() {
             commands::set_open_app_hotkey,
             commands::qa_window_dismiss,
             commands::qa_window_pin,
+            commands::less_computer_window_dismiss,
+            commands::less_computer_window_resize,
+            commands::less_computer_approve,
             commands::validate_combo_hotkey,
             commands::set_combo_hotkey,
             commands::validate_provider_credentials,
@@ -1275,6 +1285,111 @@ pub(crate) fn hide_qa_window<R: tauri::Runtime>(app: &AppHandle<R>) {
         let _ = window.hide();
     }
 }
+
+// ───────────────────────── Less Computer 浮窗 ─────────────────────────
+//
+// Less Computer 语音 Agent 的聊天浮窗（窗口 label = "less-computer"）。
+// 仅 macOS：和 coordinator / 前端对 Less Computer 的 gating 一致（Windows/Linux
+// 不注册热键、前端 detectOS 不渲染入口），所以这些窗口操作全部 `#[cfg(macos)]`，
+// 其它平台是 no-op，避免在非目标平台动 NSWindow / 弹一个空浮窗。
+
+/// Less Computer 浮窗宽度（高度由前端按内容自适应，经 `less_computer_window_resize`
+/// 回传，Rust 端按 bottom-anchored 重新摆放，让内容增长向上撑开）。
+#[cfg(target_os = "macos")]
+const LESS_COMPUTER_WINDOW_WIDTH: f64 = 400.0;
+#[cfg(target_os = "macos")]
+const LESS_COMPUTER_WINDOW_MIN_HEIGHT: f64 = 120.0;
+#[cfg(target_os = "macos")]
+const LESS_COMPUTER_WINDOW_MAX_HEIGHT: f64 = 520.0;
+
+/// 把 Less Computer 浮窗按给定高度（clamp 到 [min,max]）摆到屏幕底部居中、
+/// 紧贴胶囊上方。bottom 对齐胶囊顶部，所以高度变化时窗口向上生长。
+#[cfg(target_os = "macos")]
+fn position_less_computer_window<R: tauri::Runtime>(
+    window: &tauri::WebviewWindow<R>,
+    height: f64,
+) -> tauri::Result<()> {
+    let monitor = match window.current_monitor()? {
+        Some(m) => m,
+        None => return Ok(()),
+    };
+    let scale = monitor.scale_factor();
+    let size = monitor.size();
+    let logical_w = size.width as f64 / scale;
+    let logical_h = size.height as f64 / scale;
+    let height = height.clamp(
+        LESS_COMPUTER_WINDOW_MIN_HEIGHT,
+        LESS_COMPUTER_WINDOW_MAX_HEIGHT,
+    );
+    let capsule_height = capsule_height_for_qa();
+    let bottom = logical_h - DOCK_BOTTOM_PADDING_FOR_QA - capsule_height - QA_WINDOW_GAP_TO_CAPSULE;
+    let x = ((logical_w - LESS_COMPUTER_WINDOW_WIDTH) / 2.0).max(0.0);
+    let y = (bottom - height).max(0.0);
+    window.set_size(tauri::LogicalSize::new(LESS_COMPUTER_WINDOW_WIDTH, height))?;
+    window.set_position(LogicalPosition::new(x, y))?;
+    Ok(())
+}
+
+/// 显示 Less Computer 浮窗（不抢前台 app 焦点，与 QA 同手法）。`macos` 专用。
+#[cfg(target_os = "macos")]
+pub(crate) fn show_less_computer_window<R: tauri::Runtime>(app: &AppHandle<R>) {
+    let Some(window) = app.get_webview_window("less-computer") else {
+        log::info!("[less-computer] show 跳过：窗口不存在");
+        return;
+    };
+    if let Err(e) = position_less_computer_window(&window, LESS_COMPUTER_WINDOW_MIN_HEIGHT) {
+        log::warn!("[less-computer] position before show failed: {e}");
+    }
+    let window_clone = window.clone();
+    let _ = app.run_on_main_thread(move || {
+        use objc2::msg_send;
+        use objc2::runtime::AnyObject;
+        match window_clone.ns_window() {
+            Ok(handle) => {
+                let ns = handle as *mut AnyObject;
+                if ns.is_null() {
+                    log::warn!("[less-computer] ns_window null; falling back to window.show()");
+                    let _ = window_clone.show();
+                } else {
+                    unsafe {
+                        let _: () = msg_send![ns, orderFrontRegardless];
+                    }
+                }
+            }
+            Err(e) => {
+                log::warn!("[less-computer] ns_window unavailable: {e}; falling back to show()");
+                let _ = window_clone.show();
+            }
+        }
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn show_less_computer_window<R: tauri::Runtime>(_app: &AppHandle<R>) {}
+
+/// 隐藏 Less Computer 浮窗。供 dismiss 命令 / session 收尾共用。
+#[cfg(target_os = "macos")]
+pub(crate) fn hide_less_computer_window<R: tauri::Runtime>(app: &AppHandle<R>) {
+    if let Some(window) = app.get_webview_window("less-computer") {
+        let _ = window.hide();
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn hide_less_computer_window<R: tauri::Runtime>(_app: &AppHandle<R>) {}
+
+/// 前端按内容测高后回传，Rust 端 clamp + bottom-anchored 重新摆放。`macos` 专用。
+#[cfg(target_os = "macos")]
+pub(crate) fn resize_less_computer_window<R: tauri::Runtime>(app: &AppHandle<R>, height: f64) {
+    if let Some(window) = app.get_webview_window("less-computer") {
+        if let Err(e) = position_less_computer_window(&window, height) {
+            log::warn!("[less-computer] resize failed: {e}");
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn resize_less_computer_window<R: tauri::Runtime>(_app: &AppHandle<R>, _height: f64) {}
 
 /// 抓完选区后把焦点重新交回 QA 浮窗（Windows focus-dance 下半场）。begin_qa_session
 /// 在 capture_selection 跑完时调；非 Windows 平台是 no-op。issue #466。

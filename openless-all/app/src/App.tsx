@@ -17,23 +17,28 @@ import {
   windowMouseHotkeyCode,
 } from './lib/windowHotkeyFallback';
 import { QaPanel } from './pages/QaPanel';
+import { LessComputerPanel } from './pages/LessComputerPanel';
 import { invoke } from '@tauri-apps/api/core';
 import { HotkeySettingsProvider } from './state/HotkeySettingsContext';
 
 interface AppProps {
   isCapsule: boolean;
   isQa: boolean;
+  isLessComputer: boolean;
   forcedOs?: OS | null;
 }
 
 type Gate = 'onboarding' | 'ready';
 
-export function App({ isCapsule, isQa, forcedOs }: AppProps) {
+export function App({ isCapsule, isQa, isLessComputer, forcedOs }: AppProps) {
   if (isCapsule) {
     return <Capsule />;
   }
   if (isQa) {
     return <QaPanel />;
+  }
+  if (isLessComputer) {
+    return <LessComputerPanel />;
   }
 
   const os = forcedOs ?? detectOS();

@@ -401,6 +401,26 @@ export interface QaStatePayload {
   chunk?: string;
 }
 
+/**
+ * Less Computer 语音 Agent 浮窗事件（窗口 label = "less-computer"，事件名
+ * `less-computer:event`）。后端按 `kind` 标记，前端据此把交互渲染成聊天结构。
+ */
+export type LessComputerEvent =
+  /** 新会话：用户气泡（语音指令转写）。重置浮窗内容。 */
+  | { kind: 'user'; text: string }
+  /** Agent 启动，进入运行态。 */
+  | { kind: 'started' }
+  /** 流式回复增量（来自 CodingAgentEvent::Delta）。 */
+  | { kind: 'delta'; text: string }
+  /** 工具调用提示（来自 CodingAgentEvent::ToolUse，如 "Bash"）。 */
+  | { kind: 'tool'; name: string }
+  /** 内联审批卡：高风险动作被护栏拦下，等用户 Approve / Deny。 */
+  | { kind: 'approval'; token: string; command: string; reason: string }
+  /** 运行完成：最终结果 + 成本（美元）。 */
+  | { kind: 'completed'; text: string; costUsd?: number | null }
+  /** 运行出错。 */
+  | { kind: 'error'; message: string };
+
 /** 内置语言列表 — 前端 Settings UI 用，后端只接收原生名字符串拼 prompt。
  *  添加新语言时直接在这里加一项（原生名），无需修改后端。 */
 export const SUPPORTED_LANGUAGES: readonly string[] = [

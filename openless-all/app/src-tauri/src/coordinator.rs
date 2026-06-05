@@ -828,6 +828,25 @@ impl Coordinator {
         log::info!("[coord] QA window pinned={pinned}");
     }
 
+    /// 用户点 ✕ / 按 Esc 关 Less Computer 浮窗：隐藏窗口。
+    pub fn less_computer_window_dismiss(&self) {
+        if let Some(app) = self.inner.app.lock().clone() {
+            crate::hide_less_computer_window(&app);
+        }
+    }
+
+    /// 前端按内容测高后回传，后端 clamp + bottom-anchored 重新摆放 Less Computer 浮窗。
+    pub fn less_computer_window_resize(&self, height: f64) {
+        if let Some(app) = self.inner.app.lock().clone() {
+            crate::resize_less_computer_window(&app, height);
+        }
+    }
+
+    /// 内联审批卡的 Approve / Deny 回执：解析等待中的 token。
+    pub fn less_computer_approve(&self, token: &str, approved: bool) {
+        dictation::resolve_less_computer_approval(token, approved);
+    }
+
     pub fn history(&self) -> &HistoryStore {
         &self.inner.history
     }
