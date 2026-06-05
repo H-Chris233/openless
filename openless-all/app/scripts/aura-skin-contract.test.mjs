@@ -14,9 +14,9 @@ function escapeRegExp(value) {
 function assertUsesClassName(source, className, message) {
   const escapedClassName = escapeRegExp(className);
   const patterns = [
-    new RegExp(`className\\s*=\\s*(?:\\{\\s*)?"[^"]*\\b${escapedClassName}\\b[^"]*"(?:\\s*\\})?`),
-    new RegExp(`className\\s*=\\s*(?:\\{\\s*)?'[^']*\\b${escapedClassName}\\b[^']*'(?:\\s*\\})?`),
-    new RegExp(`className\\s*=\\s*(?:\\{\\s*)?\`[^\`]*\\b${escapedClassName}\\b[^\`]*\`(?:\\s*\\})?`),
+    new RegExp(`className\\s*=\\s*(?:\\{\\s*)?"(?:[^"]*\\s)?${escapedClassName}(?:\\s[^"]*)?"(?:\\s*\\})?`),
+    new RegExp(`className\\s*=\\s*(?:\\{\\s*)?'(?:[^']*\\s)?${escapedClassName}(?:\\s[^']*)?'(?:\\s*\\})?`),
+    new RegExp(`className\\s*=\\s*(?:\\{\\s*)?\`(?:[^\`]*\\s)?${escapedClassName}(?:\\s[^\`]*)?\`(?:\\s*\\})?`),
   ];
 
   assert.ok(patterns.some((pattern) => pattern.test(source)), message);
@@ -25,6 +25,15 @@ function assertUsesClassName(source, className, message) {
 assert.throws(
   () => assertUsesClassName('<div>ol-app-shell-bg</div>', 'ol-app-shell-bg', 'sample must require className usage'),
   /sample must require className usage/,
+);
+assert.throws(
+  () =>
+    assertUsesClassName(
+      '<div className="foo-ol-app-shell-bg-bar" />',
+      'ol-app-shell-bg',
+      'sample must require an exact class token',
+    ),
+  /sample must require an exact class token/,
 );
 assertUsesClassName(
   '<div className="foo ol-app-shell-bg bar" />',
