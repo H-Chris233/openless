@@ -30,10 +30,30 @@ impl TextInserter {
         Self
     }
 
-    /// Windows/Linux 路径：写剪贴板 + 模拟 `paste_shortcut`。
+    /// Linux 路径：仅走 fcitx5 CommitText 直写。无剪贴板 fallback。
+    #[cfg(target_os = "linux")]
+    pub fn insert(
+        &self,
+        text: &str,
+        _restore_clipboard_after_paste: bool,
+        _paste_shortcut: PasteShortcut,
+    ) -> InsertStatus {
+        if text.is_empty() {
+            return InsertStatus::CopiedFallback;
+        }
+        match crate::linux_fcitx::commit_text(text) {
+            Ok(()) => InsertStatus::Inserted,
+            Err(e) => {
+                log::warn!("[insertion] fcitx commit_text failed: {e}");
+                InsertStatus::Failed
+            }
+        }
+    }
+
+    /// Windows 路径：写剪贴板 + 模拟 `paste_shortcut`。
     /// - `restore_clipboard_after_paste`：粘贴后是否恢复用户原剪贴板。
     /// - `paste_shortcut`：模拟按下的粘贴快捷键（如终端可能要 Ctrl+Shift+V）。
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     pub fn insert(
         &self,
         text: &str,
@@ -43,22 +63,6 @@ impl TextInserter {
         if text.is_empty() {
             return InsertStatus::CopiedFallback;
         }
-        // Linux: 始终优先使用 fcitx5 CommitText 直写（支持中文）。
-        // 如果插件未加载，降级到剪贴板拷贝（统一路径，不单独维护 enigo XTest）。
-        #[cfg(target_os = "linux")]
-        {
-            match crate::linux_fcitx::commit_text(text) {
-                Ok(()) => return InsertStatus::Inserted,
-                Err(e) => {
-                    log::warn!("[insertion] fcitx commit_text failed: {e}, fallback to clipboard only");
-                    if copy_to_clipboard(text) {
-                        return InsertStatus::CopiedFallback;
-                    }
-                    return InsertStatus::Failed;
-                }
-            }
-        }
-        #[cfg(not(target_os = "linux"))]
         insert_with_clipboard_restore(text, restore_clipboard_after_paste, paste_shortcut)
     }
 

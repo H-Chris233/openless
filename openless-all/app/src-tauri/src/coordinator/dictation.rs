@@ -187,8 +187,9 @@ async fn run_streaming_polish(
                 Some(e) => (typed_text, Some(format!("typing partially failed: {e}"))),
                 None => (text, None),
             };
-            // 把 final_text 写回剪贴板（默认 on，可关）。一次性路径天然走剪贴板，
-            // 开关默认对齐一次性行为，让 Cmd+V 重复粘贴可用。
+            // 把 final_text 写回剪贴板（默认 on，macOS/Windows 适用）。
+            // Linux：fcitx5 插件已直写文字到目标 app，跳过剪贴板避免破坏用户数据。
+            #[cfg(not(target_os = "linux"))]
             if inner.prefs.get().streaming_insert_save_clipboard {
                 match arboard::Clipboard::new() {
                     Ok(mut cb) => match cb.set_text(final_text.clone()) {

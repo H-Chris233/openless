@@ -37,21 +37,23 @@ export function WindowChrome({
   const consoleRadius = os === 'mac' ? 20 : os === 'win' ? WIN_CONSOLE_RADIUS : 14;
   const titlebarHeight = os === 'mac' ? MAC_TITLEBAR_HEIGHT : os === 'linux' ? LINUX_TITLEBAR_HEIGHT : 0;
 
-  // 三个平台共用半透明玻璃 background + backdropFilter。
-  // macOS: NSVisualEffectView 提供材质；Windows: Tauri apply_mica 提供 Mica；
-  // Linux: decorations:false 后 CSS 磨砂玻璃自成背景。
-  //
-  // 注意：三层渐变的参数与 global.css 中 [data-ol-no-compositing] .ol-winchrome
-  // 的回退 background 同步（只 opacity 从 0.92 提到 0.96）。改这里时请同步更新 CSS。
-  const background = `
+  // macOS/Windows: 半透明玻璃背景 + backdropFilter 磨砂。
+  // Linux WebKitGTK: backdrop-filter 在部分重绘时不可靠（hover/tab 切换失效），
+  // 直接使用不透明白底，免维护 CSS fallback / compositing 检测。
+  const bgLinux = `
+    radial-gradient(120% 80% at 0% 0%, rgba(255,255,255,0.98) 0%, rgba(255,255,255,0) 60%),
+    radial-gradient(100% 70% at 100% 100%, rgba(37,99,235,0.04) 0%, rgba(37,99,235,0) 55%),
+    linear-gradient(180deg, rgba(245,245,247,1) 0%, rgba(232,232,236,1) 100%)
+  `;
+  const bgMacWin = `
     radial-gradient(120% 80% at 0% 0%, rgba(255,255,255,0.55) 0%, rgba(255,255,255,0) 60%),
     radial-gradient(100% 70% at 100% 100%, rgba(37,99,235,0.07) 0%, rgba(37,99,235,0) 55%),
     linear-gradient(180deg, rgba(245,245,247,0.92) 0%, rgba(232,232,236,0.92) 100%)
   `;
+  const background = os === 'linux' ? bgLinux : bgMacWin;
 
   return (
     <div
-      className="ol-winchrome"
       style={{
         '--ol-window-shell-radius': `${shellRadius}px`,
         '--ol-window-console-radius': `${consoleRadius}px`,
@@ -66,11 +68,11 @@ export function WindowChrome({
         flexDirection: 'column',
         border: os === 'win' ? 'none' : os === 'mac' ? 'none' : '0.5px solid rgba(0,0,0,.10)',
         background,
-        backdropFilter: 'blur(var(--ol-glass-blur-strong)) saturate(190%)',
-        WebkitBackdropFilter: 'blur(var(--ol-glass-blur-strong)) saturate(190%)',
-        animation: os === 'win' ? undefined : 'ol-window-enter 0.42s var(--ol-motion-spring) both',
-        transition: 'box-shadow 0.28s var(--ol-motion-soft), border-color 0.28s var(--ol-motion-soft), backdrop-filter 0.28s var(--ol-motion-soft)',
-        willChange: 'opacity, transform, filter',
+        backdropFilter: os === 'linux' ? undefined : 'blur(var(--ol-glass-blur-strong)) saturate(190%)',
+        WebkitBackdropFilter: os === 'linux' ? undefined : 'blur(var(--ol-glass-blur-strong)) saturate(190%)',
+        animation: os === 'win' || os === 'linux' ? undefined : 'ol-window-enter 0.42s var(--ol-motion-spring) both',
+        transition: os === 'linux' ? undefined : 'box-shadow 0.28s var(--ol-motion-soft), border-color 0.28s var(--ol-motion-soft), backdrop-filter 0.28s var(--ol-motion-soft)',
+        willChange: os === 'linux' ? undefined : 'opacity, transform, filter',
       } as CSSProperties}
     >
       {os === 'mac' && (
@@ -152,7 +154,6 @@ function LinuxTitlebar() {
   return (
     <div
       data-tauri-drag-region
-      className="ol-linux-titlebar"
       style={{
         height: LINUX_TITLEBAR_HEIGHT,
         flexShrink: 0,
@@ -160,9 +161,7 @@ function LinuxTitlebar() {
         alignItems: 'center',
         justifyContent: 'space-between',
         padding: '0 6px 0 14px',
-        background: 'rgba(245,245,247,0.85)',
-        backdropFilter: 'blur(12px) saturate(180%)',
-        WebkitBackdropFilter: 'blur(12px) saturate(180%)',
+        background: 'rgba(245,245,247,0.98)',
         borderBottom: '0.5px solid rgba(0,0,0,0.08)',
         color: 'var(--ol-ink-3)',
         fontSize: 13,
