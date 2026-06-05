@@ -99,6 +99,38 @@ impl Drop for CodingAgentHotkeyMonitor {
     }
 }
 
+/// 单个 agent 绑定是否能被 global-hotkey 注册。单修饰键（如 Right ⌘）无法注册成
+/// 全局快捷键 → 视为无效，需要回退到有效组合键。
+fn agent_binding_is_registrable(binding: &ShortcutBinding) -> bool {
+    parse_global_hotkey(binding).is_ok()
+}
+
+/// 把可能无效的面板键 / 快取键换成有效默认组合键（⌘⇧Enter / ⌘⇧J）。
+///
+/// 历史版本或手滑可能把 agent 热键存成单修饰键，导致注册无限失败、按下毫无反应。
+/// 返回 `(panel, quick, changed)`；`changed` 为 true 时调用方应持久化并通知前端。
+pub(crate) fn sanitize_agent_hotkeys(
+    panel: Option<ShortcutBinding>,
+    quick: Option<ShortcutBinding>,
+) -> (Option<ShortcutBinding>, Option<ShortcutBinding>, bool) {
+    let mut changed = false;
+    let panel = match panel {
+        Some(b) if !agent_binding_is_registrable(&b) => {
+            changed = true;
+            crate::types::default_coding_agent_panel_hotkey()
+        }
+        other => other,
+    };
+    let quick = match quick {
+        Some(b) if !agent_binding_is_registrable(&b) => {
+            changed = true;
+            crate::types::default_coding_agent_quick_hotkey()
+        }
+        other => other,
+    };
+    (panel, quick, changed)
+}
+
 fn spawn_forward(
     id: u32,
     rx: Receiver<GlobalHotKeyEvent>,
@@ -182,5 +214,53 @@ mod tests {
         forward_loop(7, event_rx, out_tx, CodingAgentHotkeyEvent::QuickPressed);
         assert_eq!(out_rx.recv().unwrap(), CodingAgentHotkeyEvent::QuickPressed);
         assert!(out_rx.try_recv().is_err());
+    }
+
+    fn bare_right_command() -> ShortcutBinding {
+        ShortcutBinding { primary: "RightCommand".into(), modifiers: vec![] }
+    }
+
+    #[test]
+    fn sanitize_replaces_bare_modifier_panel() {
+        // 复现用户的故障：把面板键存成单修饰键 Right ⌘。
+        let (panel, quick, changed) = sanitize_agent_hotkeys(Some(bare_right_command()), None);
+        assert!(changed, "无效绑定必须触发自愈");
+        assert_eq!(panel, crate::types::default_coding_agent_panel_hotkey());
+        // 修好后必须能被 global-hotkey 真正注册。
+        assert!(parse_global_hotkey(&panel.unwrap()).is_ok());
+        assert_eq!(quick, None, "没配的键保持 None，不应凭空生成");
+    }
+
+    #[test]
+    fn sanitize_replaces_bare_modifier_quick() {
+        let (panel, quick, changed) = sanitize_agent_hotkeys(None, Some(bare_right_command()));
+        assert!(changed);
+        assert_eq!(panel, None);
+        assert_eq!(quick, crate::types::default_coding_agent_quick_hotkey());
+        assert!(parse_global_hotkey(&quick.unwrap()).is_ok());
+    }
+
+    #[test]
+    fn sanitize_keeps_valid_combo_untouched() {
+        let panel = Some(ShortcutBinding {
+            primary: "Enter".into(),
+            modifiers: vec!["cmd".into(), "shift".into()],
+        });
+        let quick = Some(ShortcutBinding {
+            primary: "J".into(),
+            modifiers: vec!["cmd".into(), "shift".into()],
+        });
+        let (p, q, changed) = sanitize_agent_hotkeys(panel.clone(), quick.clone());
+        assert!(!changed, "有效组合键不应被改动");
+        assert_eq!(p, panel);
+        assert_eq!(q, quick);
+    }
+
+    #[test]
+    fn sanitize_none_is_noop() {
+        let (p, q, changed) = sanitize_agent_hotkeys(None, None);
+        assert!(!changed);
+        assert_eq!(p, None);
+        assert_eq!(q, None);
     }
 }

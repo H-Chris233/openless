@@ -1336,28 +1336,16 @@ fn coding_agent_hotkey_supervisor_loop(inner: Arc<Inner>) {
             return;
         }
         let prefs = inner.prefs.get();
-        let mut panel = prefs.coding_agent_panel_hotkey.clone();
-        let mut quick = prefs.coding_agent_quick_hotkey.clone();
 
-        // 自愈：global-hotkey 无法注册「单修饰键」(如 Right ⌘)。历史版本/手滑可能
-        // 存进这种无效绑定，导致热键彻底失效且无任何反馈。检测到就换成有效默认组合键
-        // 并持久化 + 通知前端，保证「按下有反应」。
-        let mut sanitized = false;
-        if let Some(b) = panel.clone() {
-            if crate::shortcut_binding::parse_global_hotkey(&b).is_err() {
-                panel = crate::types::default_coding_agent_panel_hotkey();
-                sanitized = true;
-                log::warn!("[coord] 快速 Agent 面板键无效（需组合键），已重置为默认 ⌘⇧Enter");
-            }
-        }
-        if let Some(b) = quick.clone() {
-            if crate::shortcut_binding::parse_global_hotkey(&b).is_err() {
-                quick = crate::types::default_coding_agent_quick_hotkey();
-                sanitized = true;
-                log::warn!("[coord] 快速 Agent 快取键无效（需组合键），已重置为默认 ⌘⇧J");
-            }
-        }
+        // 自愈：global-hotkey 无法注册「单修饰键」(如 Right ⌘)。历史版本/手滑可能存进
+        // 这种无效绑定，导致热键彻底失效且无任何反馈。检测到就换成有效默认组合键并持久化
+        // + 通知前端，保证「按下有反应」。逻辑见 coding_agent_hotkey::sanitize_agent_hotkeys。
+        let (panel, quick, sanitized) = crate::coding_agent_hotkey::sanitize_agent_hotkeys(
+            prefs.coding_agent_panel_hotkey.clone(),
+            prefs.coding_agent_quick_hotkey.clone(),
+        );
         if sanitized {
+            log::warn!("[coord] 快速 Agent 热键含无效单修饰键，已自愈为有效组合键");
             let mut migrated = prefs.clone();
             migrated.coding_agent_panel_hotkey = panel.clone();
             migrated.coding_agent_quick_hotkey = quick.clone();
