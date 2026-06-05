@@ -554,6 +554,8 @@ export const ko: typeof zhCN = {
       quickHotkeyDesc: '선택한 텍스트 → Claude → 결과를 커서 위치로. 패널 없이 더 빠름.',
       model: '모델',
       modelPlaceholder: '기본: sonnet',
+      modelDefault: '기본(자동 sonnet)',
+      modelHint: 'Haiku = 가장 빠름 · Sonnet = 균형 · Opus = 최강',
     },
     debug: {
       title: '디버그 도구',

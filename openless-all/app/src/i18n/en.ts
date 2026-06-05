@@ -552,6 +552,8 @@ export const en: typeof zhCN = {
       quickHotkeyDesc: 'Take selected text → Claude → result back at the cursor. No panel, faster.',
       model: 'Model',
       modelPlaceholder: 'Default: sonnet',
+      modelDefault: 'Default (auto sonnet)',
+      modelHint: 'Haiku = fastest · Sonnet = balanced · Opus = strongest',
     },
     debug: {
       title: 'Debug tools',

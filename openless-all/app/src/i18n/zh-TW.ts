@@ -552,6 +552,8 @@ export const zhTW: typeof zhCN = {
       quickHotkeyDesc: '取目前選取文字 → Claude → 結果回插游標處。不開面板、更快。',
       model: '模型',
       modelPlaceholder: '預設 sonnet',
+      modelDefault: '預設（自動 sonnet）',
+      modelHint: 'Haiku 最快 · Sonnet 均衡 · Opus 最強',
     },
     debug: {
       title: '除錯工具',

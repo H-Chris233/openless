@@ -550,6 +550,8 @@ export const zhCN = {
       quickHotkeyDesc: '拿当前选中文本 → Claude → 结果回插光标处。不开面板、更快。',
       model: '模型',
       modelPlaceholder: '默认 sonnet',
+      modelDefault: '默认（自动 sonnet）',
+      modelHint: 'Haiku 最快 · Sonnet 均衡 · Opus 最强',
     },
     debug: {
       title: '调试工具',

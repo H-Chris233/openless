@@ -554,6 +554,8 @@ export const ja: typeof zhCN = {
       quickHotkeyDesc: '選択テキストを取得 → Claude → 結果をカーソル位置へ。パネルなし、より高速。',
       model: 'モデル',
       modelPlaceholder: 'デフォルト: sonnet',
+      modelDefault: 'デフォルト（自動 sonnet）',
+      modelHint: 'Haiku = 最速 · Sonnet = バランス · Opus = 最強',
     },
     debug: {
       title: 'デバッグツール',

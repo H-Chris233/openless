@@ -83,18 +83,20 @@ export function CodingAgentSection() {
             </select>
           </SettingRow>
 
-          <SettingRow label={t('settings.codingAgent.model')}>
-            <input
-              type="text"
+          <SettingRow label={t('settings.codingAgent.model')} desc={t('settings.codingAgent.modelHint')}>
+            <select
               value={prefs.codingAgentModel ?? ''}
-              placeholder={t('settings.codingAgent.modelPlaceholder')}
-              spellCheck={false}
               onChange={e => {
-                const v = e.target.value.trim()
+                const v = e.target.value
                 void savePrefs({ ...prefs, codingAgentModel: v === '' ? null : v })
               }}
-              style={inputStyle}
-            />
+              style={{ ...inputStyle, maxWidth: 240, cursor: 'pointer' }}
+            >
+              <option value="">{t('settings.codingAgent.modelDefault')}</option>
+              <option value="haiku">Haiku</option>
+              <option value="sonnet">Sonnet</option>
+              <option value="opus">Opus</option>
+            </select>
           </SettingRow>
 
           <SettingRow label={t('settings.codingConsole.workdir')} desc={t('settings.codingConsole.workdirDesc')}>
