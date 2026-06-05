@@ -33,6 +33,7 @@ export const ja: typeof zhCN = {
   },
   capsule: {
     thinking: 'thinking',
+    using: 'using',
     cancelled: 'キャンセルしました',
     error: 'エラーが発生しました',
     inserted: '{{count}} 文字を入力しました',

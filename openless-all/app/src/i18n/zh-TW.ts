@@ -31,6 +31,7 @@ export const zhTW: typeof zhCN = {
   },
   capsule: {
     thinking: 'thinking',
+    using: 'using',
     cancelled: '已取消',
     error: '出錯了',
     inserted: '已插入 {{count}}',

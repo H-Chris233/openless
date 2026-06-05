@@ -5525,6 +5525,7 @@ fn emit_capsule(
     let app_opt = inner.app.lock().clone();
     let Some(app) = app_opt else { return };
     let translation = inner.translation_modifier_seen.load(Ordering::SeqCst);
+    let operating = inner.state.lock().voice_agent;
     let payload = CapsulePayload {
         state,
         level,
@@ -5532,6 +5533,7 @@ fn emit_capsule(
         message,
         inserted_chars,
         translation,
+        operating,
     };
 
     // visible / translation 是「这一帧 capsule:state event 的 payload」内容 ——

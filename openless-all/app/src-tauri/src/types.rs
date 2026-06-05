@@ -2332,6 +2332,10 @@ pub struct CapsulePayload {
     /// 当前 session 是否处于翻译模式（用户按过 Shift）。前端用它在胶囊顶部
     /// 渲染"正在翻译"标签，让用户立刻知道这次输出会走翻译管线。详见 issue #4。
     pub translation: bool,
+    /// 当前是否是 Less Computer（语音 Agent 操控电脑）会话。前端据此把处理态文案
+    /// 从 "thinking" 换成 "using"——告诉用户 Agent 正在操作电脑而非单纯思考。
+    #[serde(default)]
+    pub operating: bool,
 }
 
 /// Snapshot of credentials read from vault — only what the UI needs to know

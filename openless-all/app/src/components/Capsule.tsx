@@ -147,11 +147,12 @@ interface PillProps {
   level: number;
   insertedChars: number;
   message?: string;
+  operating?: boolean;
   onCancel: () => void;
   onConfirm: () => void;
 }
 
-function Pill({ os, state, level, insertedChars, message, onCancel, onConfirm }: PillProps) {
+function Pill({ os, state, level, insertedChars, message, operating, onCancel, onConfirm }: PillProps) {
   const { t } = useTranslation();
   const metrics = getCapsulePillMetrics(os);
   const processingLayout = getCapsuleMessageLayout(os, 'processing');
@@ -224,7 +225,7 @@ function Pill({ os, state, level, insertedChars, message, onCancel, onConfirm }:
               WebkitLineClamp: processingLayout.lineClamp,
             }}
           >
-            {t('capsule.thinking')}
+            {t(operating ? 'capsule.using' : 'capsule.thinking')}
           </span>
         </div>
       );
@@ -302,6 +303,7 @@ export function Capsule() {
   const [insertedChars, setInsertedChars] = useState<number>(0);
   const [message, setMessage] = useState<string | undefined>();
   const [translation, setTranslation] = useState<boolean>(false);
+  const [operating, setOperating] = useState<boolean>(false);
   // `leaving` 与 `lastVisibleState` 协同实现「退出动画」：
   // - 当 state 从非 idle 变成 idle 时，不立即卸载，而是把 leaving 置为 true 并保留
   //   最后一帧的可见 state（lastVisibleState），让胶囊用 capsule-out 动画收缩淡出。
@@ -335,6 +337,7 @@ export function Capsule() {
         setMessage(p.message ?? undefined);
         if (p.insertedChars != null) setInsertedChars(p.insertedChars);
         setTranslation(p.translation === true);
+        setOperating(p.operating === true);
       });
       if (cancelled) handle();
       else unlisten = handle;
@@ -521,6 +524,7 @@ export function Capsule() {
         level={leaving ? 0 : level}
         insertedChars={insertedChars}
         message={message}
+        operating={operating}
         onCancel={onCancel}
         onConfirm={onConfirm}
       />

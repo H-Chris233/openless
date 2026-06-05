@@ -438,6 +438,8 @@ export interface CapsulePayload {
   insertedChars: number | null;
   /** 当前 session 是否处于翻译模式（用户已按过 Shift）。详见 issue #4。 */
   translation: boolean;
+  /** 当前是否是 Less Computer 会话：处理态文案显示 "using" 而非 "thinking"。 */
+  operating?: boolean;
 }
 
 export interface CredentialsStatus {

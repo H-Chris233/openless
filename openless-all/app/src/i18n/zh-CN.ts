@@ -29,6 +29,7 @@ export const zhCN = {
   },
   capsule: {
     thinking: 'thinking',
+    using: 'using',
     cancelled: '已取消',
     error: '出错了',
     inserted: '已插入 {{count}}',

@@ -31,6 +31,7 @@ export const en: typeof zhCN = {
   },
   capsule: {
     thinking: 'thinking',
+    using: 'using',
     cancelled: 'Cancelled',
     error: 'Something went wrong',
     inserted: 'Inserted {{count}}',
