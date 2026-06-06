@@ -613,6 +613,7 @@ export const ko: typeof zhCN = {
         openrouterFree: 'OpenRouter(무료 모델)',
         alibabaCoding: 'Alibaba Cloud Coding Plan',
         codingPlanX: 'CodingPlanX',
+        minimax: 'MiniMax (M3)',
         custom: '사용자 정의',
         asrVolcengine: 'Volcengine bigasr',
         asrBailian: 'Alibaba Bailian 실시간 ASR',
