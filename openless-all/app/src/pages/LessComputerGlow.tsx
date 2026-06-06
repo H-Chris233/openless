@@ -1,48 +1,87 @@
-// Less Computer 全屏彩虹「跑马灯」描边浮层（独立窗口 window=less-computer-glow）。
-//
-// 思路（参考开源 MacEdgeLight / Apple Edge Light，自写实现）：一个全屏、点击穿透、置顶、
-// 透明的覆盖窗，沿屏幕边缘画一圈「贴边清晰、向内高斯模糊羽化」的流动彩虹辉光。
-//   - 细带 conic-gradient 彩虹环，首尾同色；
-//   - 重 blur() 高斯模糊 → 既把环糊成柔光、又彻底抹平 conic 起始角的断层；
-//   - 容器 overflow:hidden 把外溢的模糊裁在屏幕最外缘 → 边缘清晰、内部模糊（苹果那种感觉）；
-//   - 旋转 = 跑马灯流动，呼吸 = 明暗起伏。
+// Less Computer 全屏彩虹边缘亮条（独立窗口 window=less-computer-glow）。
+// 只画贴边光带，不铺暗场；彩色弧段沿边缘流动，模拟 Apple Intelligence 的粗细变化。
 // 纯视觉：pointer-events:none，后端再 set_ignore_cursor_events(true)。仅 macOS 显示。
 
 const glowCss = `
 @property --lcg-angle { syntax: '<angle>'; initial-value: 0deg; inherits: false; }
 @keyframes lcg-spin    { to { --lcg-angle: 360deg; } }
-@keyframes lcg-breathe { 0%, 100% { opacity: .58; } 50% { opacity: 1; } }
+@keyframes lcg-breathe { 0%, 100% { opacity: .72; } 50% { opacity: .92; } }
+@keyframes lcg-flow    { 0%, 100% { opacity: .44; } 48% { opacity: .74; } }
 
 html, body, #root { background: transparent !important; margin: 0; height: 100%; overflow: hidden; }
 
 /* 全屏裁剪容器：圆角贴合屏幕物理圆角；overflow:hidden 把外溢模糊裁在屏幕边缘。 */
 .lcg-root {
+  --lcg-spectrum: conic-gradient(from calc(var(--lcg-angle) - 74deg),
+    #4e9dff 0deg,
+    #6cc9ff 40deg,
+    #9d82ff 82deg,
+    #e77dff 124deg,
+    #ff7aa8 162deg,
+    #ff9765 198deg,
+    #ffe070 236deg,
+    #bff47a 266deg,
+    #63e8a2 304deg,
+    #63d4ff 334deg,
+    #4e9dff 360deg);
   position: fixed;
   inset: 0;
   pointer-events: none;
   overflow: hidden;
-  border-radius: var(--lcg-radius, 34px);
+  border-radius: var(--lcg-radius, 42px);
 }
-/* 彩虹环：略微跨出屏幕边缘(inset 负) → 满色部分压在最外缘(清晰)，blur 向内羽化(模糊)。
-   细带(padding) + 重 blur = 苹果 Edge Light 的柔光，而不是一条又粗又硬的描边。 */
-.lcg-root::before {
-  content: '';
+
+.lcg-edge,
+.lcg-flow {
   position: absolute;
-  inset: -5px;
-  border-radius: calc(var(--lcg-radius, 34px) + 5px);
-  padding: 9px;
-  background: conic-gradient(from var(--lcg-angle),
-    #ff3b6b, #ff8a3d, #ffe14d, #46e08a, #36c6ff, #9b6bff, #ff3b6b);
   -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
           mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
   -webkit-mask-composite: xor;
           mask-composite: exclude;
-  filter: blur(22px) saturate(1.3);
-  animation: lcg-spin 6s linear infinite, lcg-breathe 4.5s ease-in-out infinite;
+  pointer-events: none;
+  will-change: transform, filter, opacity, --lcg-angle;
+}
+
+/* 贴边主光带：只保留边缘亮条，避免在屏幕中央铺暗场或彩雾。 */
+.lcg-edge {
+  inset: -4px;
+  border-radius: calc(var(--lcg-radius, 42px) + 4px);
+  padding: 12px;
+  background: var(--lcg-spectrum);
+  filter: blur(1.1px) saturate(1.36) brightness(1.08)
+    drop-shadow(0 0 7px rgba(95, 185, 255, .44))
+    drop-shadow(0 0 10px rgba(255, 126, 168, .30));
+  opacity: .84;
+  animation: lcg-spin 7.5s linear infinite, lcg-breathe 4.8s ease-in-out infinite;
+}
+
+/* 彩色粗细流动层：仍然是边缘 ring，不向中间铺开。 */
+.lcg-flow {
+  inset: -7px;
+  border-radius: calc(var(--lcg-radius, 42px) + 7px);
+  padding: 18px;
+  background: conic-gradient(from calc(var(--lcg-angle) + 28deg),
+    rgba(31,140,255,0) 0deg,
+    rgba(91,166,255,.74) 28deg,
+    rgba(167,134,255,.58) 54deg,
+    rgba(240,92,255,0) 82deg,
+    rgba(240,92,255,0) 132deg,
+    rgba(255,138,94,.70) 164deg,
+    rgba(255,220,103,.52) 192deg,
+    rgba(217,255,63,0) 222deg,
+    rgba(217,255,63,0) 266deg,
+    rgba(100,232,164,.68) 294deg,
+    rgba(93,210,255,.56) 326deg,
+    rgba(31,140,255,0) 360deg);
+  filter: blur(4.5px) saturate(1.42) brightness(1.08);
+  opacity: .58;
+  mix-blend-mode: screen;
+  animation: lcg-spin 6.8s linear infinite reverse, lcg-flow 3.8s ease-in-out infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .lcg-root::before { animation: none; opacity: .85; }
+  .lcg-edge,
+  .lcg-flow { animation: none; }
 }
 `;
 
@@ -54,5 +93,10 @@ if (typeof document !== 'undefined' && !document.getElementById('less-computer-g
 }
 
 export function LessComputerGlow() {
-  return <div className="lcg-root" aria-hidden />;
+  return (
+    <div className="lcg-root" aria-hidden>
+      <span className="lcg-flow" />
+      <span className="lcg-edge" />
+    </div>
+  );
 }

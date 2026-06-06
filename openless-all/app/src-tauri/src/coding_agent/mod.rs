@@ -119,7 +119,11 @@ pub fn create_git_snapshot(cwd: &Path) -> Option<String> {
 
 /// 探测 `claude` 版本（`None` 表示未安装或无法运行）。
 pub async fn detect_claude(exe: &str) -> Option<String> {
-    let out = augmented_command(exe).arg("--version").output().await.ok()?;
+    let out = augmented_command(exe)
+        .arg("--version")
+        .output()
+        .await
+        .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -239,7 +243,10 @@ pub async fn run_claude_agent(
         }
     }
 
-    let status = child.wait().await.map_err(|e| CodingAgentError::Io(e.to_string()))?;
+    let status = child
+        .wait()
+        .await
+        .map_err(|e| CodingAgentError::Io(e.to_string()))?;
     if !status.success() && outcome.is_ok() {
         // 进程非 0 退出且我们还没判终局：补一条 Error。
         if !got_terminal {

@@ -13,8 +13,8 @@ use tauri::{AppHandle, Emitter};
 use super::detect::{has_computer_use_mcp, McpServerStatus};
 use super::guard::build_guard_settings_json;
 use super::{
-    claude_mcp_list, create_git_snapshot, detect_claude, run_claude_agent, CodingAgentPermissionMode,
-    CodingAgentRequest,
+    claude_mcp_list, create_git_snapshot, detect_claude, run_claude_agent,
+    CodingAgentPermissionMode, CodingAgentRequest,
 };
 
 /// 当前测试运行的取消标志（一次只跑一个）。
@@ -106,8 +106,10 @@ pub async fn coding_agent_run_test(
 
     // 写护栏 settings 到临时文件。
     let settings_json = build_guard_settings_json(mode.as_cli_arg(), &[]);
-    let settings_path =
-        std::env::temp_dir().join(format!("openless-claude-guard-{}.json", uuid::Uuid::new_v4()));
+    let settings_path = std::env::temp_dir().join(format!(
+        "openless-claude-guard-{}.json",
+        uuid::Uuid::new_v4()
+    ));
     std::fs::write(
         &settings_path,
         serde_json::to_vec_pretty(&settings_json).map_err(|e| e.to_string())?,

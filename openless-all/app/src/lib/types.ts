@@ -418,6 +418,8 @@ export type LessComputerEvent =
   | { kind: 'approval'; token: string; command: string; reason: string }
   /** 运行完成：最终结果 + 成本（美元）。 */
   | { kind: 'completed'; text: string; costUsd?: number | null }
+  /** 用户从胶囊取消正在运行的 Agent。 */
+  | { kind: 'cancelled' }
   /** 运行出错。 */
   | { kind: 'error'; message: string };
 

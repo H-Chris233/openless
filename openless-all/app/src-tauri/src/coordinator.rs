@@ -1,4 +1,7 @@
-#![cfg_attr(target_os = "linux", allow(dead_code, unused_imports, unused_variables))]
+#![cfg_attr(
+    target_os = "linux",
+    allow(dead_code, unused_imports, unused_variables)
+)]
 //! Dictation coordinator.
 //!
 //! Mirrors the Swift `DictationCoordinator` state machine. Single owner of
@@ -1415,7 +1418,10 @@ fn update_coding_agent_hotkey_binding_now(inner: &Arc<Inner>) {
             match HotkeyMonitor::start(modifier_binding, tx) {
                 Ok(monitor) => {
                     *inner.coding_agent_modifier_hotkey.lock() = Some(monitor);
-                    log::info!("[less-computer] modifier hotkey installed ({})", binding.display_label());
+                    log::info!(
+                        "[less-computer] modifier hotkey installed ({})",
+                        binding.display_label()
+                    );
                     let bridge_inner = Arc::clone(inner);
                     std::thread::Builder::new()
                         .name("openless-less-computer-modifier-bridge".into())
@@ -1448,7 +1454,10 @@ fn update_coding_agent_hotkey_binding_now(inner: &Arc<Inner>) {
             match ComboHotkeyMonitor::start(binding_for_main.clone(), tx) {
                 Ok(monitor) => {
                     *inner_clone.coding_agent_combo_hotkey.lock() = Some(monitor);
-                    log::info!("[less-computer] combo hotkey installed ({})", binding_for_main.display_label());
+                    log::info!(
+                        "[less-computer] combo hotkey installed ({})",
+                        binding_for_main.display_label()
+                    );
                     let bridge_inner = Arc::clone(&inner_clone);
                     std::thread::Builder::new()
                         .name("openless-less-computer-combo-bridge".into())
@@ -1481,10 +1490,14 @@ fn less_computer_modifier_bridge_loop(inner: Arc<Inner>, rx: mpsc::Receiver<Hotk
         let inner_cloned = Arc::clone(&inner);
         match evt {
             HotkeyEvent::Pressed => {
-                async_runtime::block_on(async { handle_less_computer_pressed(&inner_cloned).await });
+                async_runtime::block_on(async {
+                    handle_less_computer_pressed(&inner_cloned).await
+                });
             }
             HotkeyEvent::Released => {
-                async_runtime::block_on(async { handle_less_computer_released(&inner_cloned).await });
+                async_runtime::block_on(async {
+                    handle_less_computer_released(&inner_cloned).await
+                });
             }
             HotkeyEvent::Cancelled => cancel_session(&inner_cloned),
             HotkeyEvent::TranslationModifierPressed | HotkeyEvent::QaShortcutPressed => {}
@@ -1500,10 +1513,14 @@ fn less_computer_combo_bridge_loop(inner: Arc<Inner>, rx: mpsc::Receiver<ComboHo
         let inner_cloned = Arc::clone(&inner);
         match evt {
             ComboHotkeyEvent::Pressed => {
-                async_runtime::block_on(async { handle_less_computer_pressed(&inner_cloned).await });
+                async_runtime::block_on(async {
+                    handle_less_computer_pressed(&inner_cloned).await
+                });
             }
             ComboHotkeyEvent::Released => {
-                async_runtime::block_on(async { handle_less_computer_released(&inner_cloned).await });
+                async_runtime::block_on(async {
+                    handle_less_computer_released(&inner_cloned).await
+                });
             }
         }
     }
@@ -1528,7 +1545,10 @@ async fn handle_less_computer_pressed(inner: &Arc<Inner>) {
     }
     let started = {
         let mut state = inner.state.lock();
-        if matches!(state.phase, SessionPhase::Starting | SessionPhase::Listening) {
+        if matches!(
+            state.phase,
+            SessionPhase::Starting | SessionPhase::Listening
+        ) {
             state.voice_agent = true;
             log::info!(
                 "[less-computer] voice session started (session={:?})",
@@ -2886,7 +2906,10 @@ async fn build_local_qwen3(
 /// (messages=[{content:[{audio:...}]}]) 协议，不是 Whisper multipart，需要
 /// 单独 ASR 客户端，留给 V2。
 fn is_whisper_compatible_provider(id: &str) -> bool {
-    matches!(id, "whisper" | "siliconflow" | "zhipu" | "groq" | "openrouter")
+    matches!(
+        id,
+        "whisper" | "siliconflow" | "zhipu" | "groq" | "openrouter"
+    )
 }
 
 /// 该 provider 的请求体编码方式。OpenRouter 的 `/audio/transcriptions` 是
@@ -5448,7 +5471,9 @@ fn show_capsule_window_no_activate<R: tauri::Runtime>(
     let Ok(handle) = window.window_handle() else {
         // #470 诊断 v2：Win32 show 路径最可能的暗点之一。此前静默 return，
         // 无法观测「胶囊完全不显示」是否卡在这里。
-        log::warn!("[capsule] no_activate failed: window_handle() unavailable — Win32 show skipped");
+        log::warn!(
+            "[capsule] no_activate failed: window_handle() unavailable — Win32 show skipped"
+        );
         return false;
     };
     let RawWindowHandle::Win32(raw) = handle.as_raw() else {

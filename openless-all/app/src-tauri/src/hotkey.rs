@@ -1210,9 +1210,7 @@ mod platform {
         _binding: HotkeyBinding,
         _tx: Sender<HotkeyEvent>,
     ) -> Result<Box<dyn HotkeyAdapter>, HotkeyInstallError> {
-        log::info!(
-            "[hotkey] Linux — fcitx5 plugin handles hotkeys"
-        );
+        log::info!("[hotkey] Linux — fcitx5 plugin handles hotkeys");
         Ok(Box::new(PlaceholderAdapter { _tx }))
     }
 

@@ -1,4 +1,7 @@
-#![cfg_attr(target_os = "linux", allow(dead_code, unused_imports, unused_variables))]
+#![cfg_attr(
+    target_os = "linux",
+    allow(dead_code, unused_imports, unused_variables)
+)]
 //! OpenLess Tauri backend.
 //!
 //! Modules mirror the original Swift libraries (one purpose per file):
@@ -873,9 +876,7 @@ fn reset_tcc_service_for_beta_restart(service: &str) {
             log::info!("[updater] reset TCC {service} before beta restart");
         }
         Ok(status) => {
-            log::warn!(
-                "[updater] reset TCC {service} before beta restart exited with {status}"
-            );
+            log::warn!("[updater] reset TCC {service} before beta restart exited with {status}");
         }
         Err(e) => {
             log::warn!("[updater] reset TCC {service} before beta restart failed: {e}");
@@ -1160,6 +1161,53 @@ const QA_WINDOW_GAP_TO_CAPSULE: f64 = 8.0;
 /// 给 macOS Dock 留的下边距（与 capsule 同源）。
 const DOCK_BOTTOM_PADDING_FOR_QA: f64 = 80.0;
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct LogicalMonitorFrame {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+fn logical_monitor_frame(
+    physical_x: i32,
+    physical_y: i32,
+    physical_width: u32,
+    physical_height: u32,
+    scale: f64,
+) -> LogicalMonitorFrame {
+    let scale = scale.max(0.1);
+    LogicalMonitorFrame {
+        x: physical_x as f64 / scale,
+        y: physical_y as f64 / scale,
+        width: physical_width as f64 / scale,
+        height: physical_height as f64 / scale,
+    }
+}
+
+fn bottom_center_position(
+    frame: LogicalMonitorFrame,
+    window_width: f64,
+    window_height: f64,
+    bottom_offset: f64,
+) -> (f64, f64) {
+    let x = frame.x + ((frame.width - window_width) / 2.0).max(0.0);
+    let y = frame.y + (frame.height - bottom_offset - window_height).max(0.0);
+    (x, y)
+}
+
+fn bottom_visual_position(
+    frame: LogicalMonitorFrame,
+    window_width: f64,
+    visual_height: f64,
+    bottom_padding: f64,
+    bottom_inset: f64,
+) -> (f64, f64) {
+    let x = frame.x + ((frame.width - window_width) / 2.0).max(0.0);
+    let y = frame.y + (frame.height - visual_height - bottom_padding - bottom_inset).max(0.0);
+    (x, y)
+}
+
 /// 把 QA 浮窗放到屏幕底部居中、紧贴胶囊上方。tauri 启动期 + show 之前都会调一次，
 /// 防止用户切换显示器后位置错乱。
 fn position_qa_window<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) -> tauri::Result<()> {
@@ -1169,16 +1217,15 @@ fn position_qa_window<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) -> ta
     };
     let scale = monitor.scale_factor();
     let size = monitor.size();
-    let logical_w = size.width as f64 / scale;
-    let logical_h = size.height as f64 / scale;
+    let pos = monitor.position();
+    let frame = logical_monitor_frame(pos.x, pos.y, size.width, size.height, scale);
     let capsule_height = capsule_height_for_qa();
-    let x = ((logical_w - QA_WINDOW_WIDTH) / 2.0).max(0.0);
-    let y = (logical_h
-        - DOCK_BOTTOM_PADDING_FOR_QA
-        - capsule_height
-        - QA_WINDOW_GAP_TO_CAPSULE
-        - QA_WINDOW_HEIGHT)
-        .max(0.0);
+    let (x, y) = bottom_center_position(
+        frame,
+        QA_WINDOW_WIDTH,
+        QA_WINDOW_HEIGHT,
+        DOCK_BOTTOM_PADDING_FOR_QA + capsule_height + QA_WINDOW_GAP_TO_CAPSULE,
+    );
     window.set_size(tauri::LogicalSize::new(QA_WINDOW_WIDTH, QA_WINDOW_HEIGHT))?;
     window.set_position(LogicalPosition::new(x, y))?;
     Ok(())
@@ -1315,16 +1362,19 @@ fn position_less_computer_window<R: tauri::Runtime>(
     };
     let scale = monitor.scale_factor();
     let size = monitor.size();
-    let logical_w = size.width as f64 / scale;
-    let logical_h = size.height as f64 / scale;
+    let pos = monitor.position();
+    let frame = logical_monitor_frame(pos.x, pos.y, size.width, size.height, scale);
     let height = height.clamp(
         LESS_COMPUTER_WINDOW_MIN_HEIGHT,
         LESS_COMPUTER_WINDOW_MAX_HEIGHT,
     );
     let capsule_height = capsule_height_for_qa();
-    let bottom = logical_h - DOCK_BOTTOM_PADDING_FOR_QA - capsule_height - QA_WINDOW_GAP_TO_CAPSULE;
-    let x = ((logical_w - LESS_COMPUTER_WINDOW_WIDTH) / 2.0).max(0.0);
-    let y = (bottom - height).max(0.0);
+    let (x, y) = bottom_center_position(
+        frame,
+        LESS_COMPUTER_WINDOW_WIDTH,
+        height,
+        DOCK_BOTTOM_PADDING_FOR_QA + capsule_height + QA_WINDOW_GAP_TO_CAPSULE,
+    );
     window.set_size(tauri::LogicalSize::new(LESS_COMPUTER_WINDOW_WIDTH, height))?;
     window.set_position(LogicalPosition::new(x, y))?;
     Ok(())
@@ -1465,7 +1515,17 @@ pub(crate) fn resize_less_computer_window<R: tauri::Runtime>(app: &AppHandle<R>,
             let cur_top = pos.y as f64 / scale;
             let cur_h = size.height as f64 / scale;
             let bottom = cur_top + cur_h;
-            let new_y = (bottom - height).max(0.0);
+            let monitor_top = window
+                .current_monitor()
+                .ok()
+                .flatten()
+                .map(|m| {
+                    let p = m.position();
+                    let s = m.size();
+                    logical_monitor_frame(p.x, p.y, s.width, s.height, m.scale_factor()).y
+                })
+                .unwrap_or(f64::NEG_INFINITY);
+            let new_y = (bottom - height).max(monitor_top);
             let _ = window.set_size(tauri::LogicalSize::new(LESS_COMPUTER_WINDOW_WIDTH, height));
             let _ = window.set_position(tauri::LogicalPosition::new(x, new_y));
         }
@@ -1581,7 +1641,10 @@ pub(crate) fn position_capsule_bottom_center<R: tauri::Runtime>(
             let scale = mon.scale;
             let phys_w = (bounds.width * scale).round() as i32;
             let phys_h = (bounds.height * scale).round() as i32;
-            window.set_size(PhysicalSize::new(phys_w.max(1) as u32, phys_h.max(1) as u32))?;
+            window.set_size(PhysicalSize::new(
+                phys_w.max(1) as u32,
+                phys_h.max(1) as u32,
+            ))?;
 
             let mon_w = mon.right - mon.left;
             let x = mon.left + ((mon_w - phys_w) / 2).max(0);
@@ -1611,11 +1674,15 @@ pub(crate) fn position_capsule_bottom_center<R: tauri::Runtime>(
 
     let scale = monitor.scale_factor();
     let size = monitor.size();
-    let logical_w = size.width as f64 / scale;
-    let logical_h = size.height as f64 / scale;
-    let x = ((logical_w - bounds.width) / 2.0).max(0.0);
-    let y = (logical_h - capsule_visual_height(translation_active) - 80.0 - bounds.bottom_inset)
-        .max(0.0);
+    let pos = monitor.position();
+    let frame = logical_monitor_frame(pos.x, pos.y, size.width, size.height, scale);
+    let (x, y) = bottom_visual_position(
+        frame,
+        bounds.width,
+        capsule_visual_height(translation_active),
+        80.0,
+        bounds.bottom_inset,
+    );
     window.set_position(LogicalPosition::new(x, y))?;
     Ok(())
 }
@@ -1673,9 +1740,10 @@ fn capsule_height_for_qa() -> f64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        capsule_height_for_qa, capsule_visual_height, capsule_window_bounds,
+        bottom_center_position, bottom_visual_position, capsule_height_for_qa,
+        capsule_visual_height, capsule_window_bounds, logical_monitor_frame,
         parse_tray_polish_mode_id, rotate_log_if_too_large, tray_polish_mode_menu_entries,
-        tray_style_menu_enabled, LOG_ROTATE_LIMIT_BYTES,
+        tray_style_menu_enabled, LogicalMonitorFrame, LOG_ROTATE_LIMIT_BYTES,
     };
     use crate::types::PolishMode;
     use std::io::Write;
@@ -1777,6 +1845,49 @@ mod tests {
 
         #[cfg(not(target_os = "windows"))]
         assert_eq!(capsule_height_for_qa(), 96.0);
+    }
+
+    #[test]
+    fn logical_monitor_frame_preserves_negative_origin() {
+        let frame = logical_monitor_frame(-2560, 720, 5120, 2880, 2.0);
+
+        assert_eq!(
+            frame,
+            LogicalMonitorFrame {
+                x: -1280.0,
+                y: 360.0,
+                width: 2560.0,
+                height: 1440.0,
+            }
+        );
+    }
+
+    #[test]
+    fn bottom_center_position_keeps_window_on_left_monitor() {
+        let frame = LogicalMonitorFrame {
+            x: -1440.0,
+            y: 0.0,
+            width: 1440.0,
+            height: 900.0,
+        };
+
+        let pos = bottom_center_position(frame, 380.0, 440.0, 184.0);
+
+        assert_eq!(pos, (-910.0, 276.0));
+    }
+
+    #[test]
+    fn bottom_visual_position_keeps_capsule_on_upper_monitor() {
+        let frame = LogicalMonitorFrame {
+            x: 0.0,
+            y: -900.0,
+            width: 1440.0,
+            height: 900.0,
+        };
+
+        let pos = bottom_visual_position(frame, 220.0, 96.0, 80.0, 0.0);
+
+        assert_eq!(pos, (610.0, -176.0));
     }
 
     #[test]

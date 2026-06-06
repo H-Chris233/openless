@@ -170,14 +170,20 @@ mod tests {
     #[test]
     fn permission_mode_maps_to_cli_string() {
         assert_eq!(CodingAgentPermissionMode::Plan.as_cli_arg(), "plan");
-        assert_eq!(CodingAgentPermissionMode::AcceptEdits.as_cli_arg(), "acceptEdits");
+        assert_eq!(
+            CodingAgentPermissionMode::AcceptEdits.as_cli_arg(),
+            "acceptEdits"
+        );
         assert_eq!(
             CodingAgentPermissionMode::BypassPermissions.as_cli_arg(),
             "bypassPermissions"
         );
         let mut req = CodingAgentRequest::new("s", "p");
         req.permission_mode = CodingAgentPermissionMode::Plan;
-        assert_eq!(arg_value(&build_claude_args(&req), "--permission-mode"), Some("plan"));
+        assert_eq!(
+            arg_value(&build_claude_args(&req), "--permission-mode"),
+            Some("plan")
+        );
     }
 
     #[test]
@@ -207,7 +213,10 @@ mod tests {
         assert_eq!(arg_value(&args, "--max-budget-usd"), Some("0.5"));
         assert_eq!(arg_value(&args, "--add-dir"), Some("/tmp/work"));
         assert_eq!(arg_value(&args, "--allowedTools"), Some("Bash(git *),Edit"));
-        assert_eq!(arg_value(&args, "--disallowedTools"), Some("Bash(rm -rf:*)"));
+        assert_eq!(
+            arg_value(&args, "--disallowedTools"),
+            Some("Bash(rm -rf:*)")
+        );
         assert_eq!(arg_value(&args, "--settings"), Some("/tmp/guard.json"));
         assert_eq!(arg_value(&args, "--append-system-prompt"), Some("be terse"));
         assert!(args.contains(&"--no-session-persistence".to_string()));

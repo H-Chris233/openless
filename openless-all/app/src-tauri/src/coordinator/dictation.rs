@@ -1,4 +1,4 @@
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::coordinator_state::request_stop_during_starting_state;
@@ -704,13 +704,21 @@ async fn run_voice_agent_transcript(
             schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
             Err("voice agent failed".to_string())
         }
+        LessComputerOutcome::Cancelled => {
+            log::info!("[coord] Cloud Agent 语音已取消");
+            emit_less_computer(inner, serde_json::json!({ "kind": "cancelled" }));
+            emit_capsule(inner, CapsuleState::Cancelled, 0.0, elapsed, None, None);
+            schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
+            Err("voice agent cancelled".to_string())
+        }
     }
 }
 
-/// 一轮无头 Less Computer 运行的结果（终局二选一）。
+/// 一轮无头 Less Computer 运行的结果。
 enum LessComputerOutcome {
     Done { text: String, cost_usd: Option<f64> },
     Failed { message: String },
+    Cancelled,
 }
 
 /// 跑一轮无头 Claude（「放行 + 护栏」），把 Delta/ToolUse 实时 stream 到聊天浮窗，
@@ -773,14 +781,30 @@ async fn run_less_computer_once(
     req.continue_session = continue_session;
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_for_runner = Arc::clone(&cancel);
     let run = async_runtime::spawn(async move {
-        crate::coding_agent::run_claude_agent("claude", req, tx, cancel).await
+        crate::coding_agent::run_claude_agent("claude", req, tx, cancel_for_runner).await
+    });
+    let cancel_for_watcher = Arc::clone(&cancel);
+    let inner_for_cancel = Arc::clone(inner);
+    let cancel_watcher = async_runtime::spawn(async move {
+        loop {
+            if cancel_for_watcher.load(Ordering::Relaxed) {
+                return;
+            }
+            if inner_for_cancel.state.lock().cancelled {
+                cancel_for_watcher.store(true, Ordering::Relaxed);
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        }
     });
 
     let mut final_text = String::new();
     let mut cost_usd: Option<f64> = None;
     let mut error_msg: Option<String> = None;
+    let mut cancelled = false;
     while let Some(ev) = rx.recv().await {
         use crate::coding_agent::CodingAgentEvent as E;
         match ev {
@@ -800,11 +824,22 @@ async fn run_less_computer_once(
                 cost_usd = c;
             }
             E::Error { message, .. } => error_msg = Some(message),
-            E::Cancelled { .. } => {}
+            E::Cancelled { .. } => cancelled = true,
         }
     }
     let run_result = run.await;
+    cancel.store(true, Ordering::Relaxed);
+    let _ = cancel_watcher.await;
     let _ = std::fs::remove_file(&settings_path);
+
+    if cancelled
+        || matches!(
+            &run_result,
+            Ok(Err(crate::coding_agent::CodingAgentError::Cancelled))
+        )
+    {
+        return LessComputerOutcome::Cancelled;
+    }
 
     let trimmed = final_text.trim().to_string();
     if !trimmed.is_empty() {
@@ -840,6 +875,7 @@ async fn maybe_request_approval(
     let text = match outcome {
         LessComputerOutcome::Done { text, .. } => text.as_str(),
         LessComputerOutcome::Failed { message } => message.as_str(),
+        LessComputerOutcome::Cancelled => return None,
     };
     let lowered = text.to_lowercase();
     // 必须同时出现「拒绝/权限/blocked」语义 + 某个已知高风险模式，才认为是护栏拦截，

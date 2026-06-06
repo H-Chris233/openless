@@ -162,7 +162,9 @@ impl VolcengineStreamingASR {
                 .map_err(|e| VolcengineASRError::ConnectionFailed(e.to_string()))?,
         );
 
-        let (ws, _resp) = connect_async(request).await.map_err(classify_connect_error)?;
+        let (ws, _resp) = connect_async(request)
+            .await
+            .map_err(classify_connect_error)?;
         let (write, read) = ws.split();
 
         let (tx, rx) = oneshot::channel();

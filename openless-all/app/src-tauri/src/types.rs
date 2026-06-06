@@ -2460,7 +2460,10 @@ mod tests {
         .unwrap();
         let binding = prefs.switch_style_hotkey.expect("应保留为 Some");
         assert_eq!(binding.primary, "S");
-        assert_eq!(binding.modifiers, vec!["cmd".to_string(), "shift".to_string()]);
+        assert_eq!(
+            binding.modifiers,
+            vec!["cmd".to_string(), "shift".to_string()]
+        );
     }
 
     #[test]

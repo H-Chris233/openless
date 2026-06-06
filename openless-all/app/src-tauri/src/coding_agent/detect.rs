@@ -8,7 +8,10 @@ pub fn parse_claude_version(stdout: &str) -> Option<String> {
     for raw in stdout.split_whitespace() {
         let token = raw.trim_matches(|c: char| !c.is_ascii_digit() && c != '.');
         let parts: Vec<&str> = token.split('.').collect();
-        if parts.len() == 3 && parts.iter().all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+        if parts.len() == 3
+            && parts
+                .iter()
+                .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
         {
             return Some(token.to_string());
         }
@@ -87,7 +90,10 @@ mod tests {
 
     #[test]
     fn parses_version_from_both_layouts() {
-        assert_eq!(parse_claude_version("2.1.161 (Claude Code)").as_deref(), Some("2.1.161"));
+        assert_eq!(
+            parse_claude_version("2.1.161 (Claude Code)").as_deref(),
+            Some("2.1.161")
+        );
         assert_eq!(
             parse_claude_version("Claude Code version 2.1.161").as_deref(),
             Some("2.1.161")
@@ -109,7 +115,9 @@ cloudflare-observability: https://observability.mcp.cloudflare.com/mcp (HTTP) - 
         assert_eq!(servers[2].name, "cloudflare-observability");
         assert_eq!(servers[2].health, McpHealth::NeedsAuth);
         // URL 里的 "-" 不应把状态切错
-        assert!(servers[2].detail.contains("observability.mcp.cloudflare.com"));
+        assert!(servers[2]
+            .detail
+            .contains("observability.mcp.cloudflare.com"));
     }
 
     #[test]

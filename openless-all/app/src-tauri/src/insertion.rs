@@ -50,7 +50,9 @@ impl TextInserter {
             match crate::linux_fcitx::commit_text(text) {
                 Ok(()) => return InsertStatus::Inserted,
                 Err(e) => {
-                    log::warn!("[insertion] fcitx commit_text failed: {e}, fallback to clipboard only");
+                    log::warn!(
+                        "[insertion] fcitx commit_text failed: {e}, fallback to clipboard only"
+                    );
                     if copy_to_clipboard(text) {
                         return InsertStatus::CopiedFallback;
                     }

@@ -105,6 +105,10 @@ function CircleButton({ variant, enabled, onClick }: CircleButtonProps) {
   return (
     <button
       onClick={enabled ? onClick : undefined}
+      onMouseDown={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      }}
       aria-label={isCancel ? t('common.cancel') : t('settings.shortcuts.confirm')}
       disabled={!enabled}
       style={{
@@ -156,7 +160,8 @@ function Pill({ os, state, level, insertedChars, message, operating, onCancel, o
   const { t } = useTranslation();
   const metrics = getCapsulePillMetrics(os);
   const processingLayout = getCapsuleMessageLayout(os, 'processing');
-  const enabled = state === 'recording';
+  const cancelEnabled = state === 'recording' || state === 'transcribing' || state === 'polishing';
+  const confirmEnabled = state === 'recording';
 
   // "thinking" 扫光速度：进入 transcribing/polishing 的头 2 秒走快速（0.9s/cycle，提示
   // 「流式刚开始」），之后切回慢速（2.4s）作为稳态。切回 idle / done / 其他 state 也复位
@@ -274,11 +279,11 @@ function Pill({ os, state, level, insertedChars, message, operating, onCancel, o
         willChange: 'transform, box-shadow',
       }}
     >
-      <CircleButton variant="cancel" enabled={enabled} onClick={onCancel} />
+      <CircleButton variant="cancel" enabled={cancelEnabled} onClick={onCancel} />
       <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
         {center}
       </div>
-      <CircleButton variant="confirm" enabled={enabled} onClick={onConfirm} />
+      <CircleButton variant="confirm" enabled={confirmEnabled} onClick={onConfirm} />
     </div>
   );
 }

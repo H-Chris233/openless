@@ -27,7 +27,7 @@ import {
 import type { LessComputerEvent } from '../lib/types';
 import { renderQaMarkdown, renderQaPlainText } from '../lib/qaMarkdown';
 
-type RunStatus = 'idle' | 'working' | 'done' | 'error';
+type RunStatus = 'idle' | 'working' | 'done' | 'error' | 'cancelled';
 
 interface ToolChip {
   kind: 'tool';
@@ -148,6 +148,9 @@ export function LessComputerPanel() {
       case 'error':
         setTurns(prev => updateLastTurn(prev, tn => ({ ...tn, errorMsg: ev.message, status: 'error' })));
         break;
+      case 'cancelled':
+        setTurns(prev => updateLastTurn(prev, tn => ({ ...tn, status: 'cancelled' })));
+        break;
     }
   };
 
@@ -238,6 +241,7 @@ function TurnView({
       {turn.answer && <AssistantBubble markdown={turn.answer} working={turn.status === 'working'} />}
       {turn.status === 'working' && !turn.answer && <WorkingRow label={t('lessComputer.working')} />}
       {turn.status === 'error' && <ErrorRow message={turn.errorMsg || t('lessComputer.error')} />}
+      {turn.status === 'cancelled' && <CostRow label={t('common.cancelled')} />}
       {turn.status === 'done' && turn.costUsd != null && (
         <CostRow label={t('lessComputer.cost', { cost: turn.costUsd.toFixed(3) })} />
       )}
@@ -250,7 +254,16 @@ function Toolbar({ label, onClose }: { label: string; onClose: () => void }) {
     // 顶栏作为拖动把手：按住空白处可把整个聊天框拖到屏幕任意位置（resize 会保住拖后的位置）。
     <div data-tauri-drag-region style={{ ...toolbarStyle, cursor: 'grab' }}>
       <div data-tauri-drag-region style={{ flex: 1, alignSelf: 'stretch' }} />
-      <button onClick={onClose} title={label} aria-label={label} style={closeBtnStyle}>
+      <button
+        onClick={onClose}
+        onMouseDown={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+        }}
+        title={label}
+        aria-label={label}
+        style={closeBtnStyle}
+      >
         <svg width="11" height="11" viewBox="0 0 11 11">
           <path
             d="M1.5 1.5l8 8M9.5 1.5l-8 8"
@@ -348,10 +361,18 @@ function ApprovalRow({
         </div>
       ) : (
         <div style={{ display: 'flex', gap: 8 }}>
-          <button style={denyBtnStyle} onClick={() => onDecide(card.token, false)}>
+          <button
+            style={denyBtnStyle}
+            onMouseDown={(event) => event.stopPropagation()}
+            onClick={() => onDecide(card.token, false)}
+          >
             {t('lessComputer.deny')}
           </button>
-          <button style={approveBtnStyle} onClick={() => onDecide(card.token, true)}>
+          <button
+            style={approveBtnStyle}
+            onMouseDown={(event) => event.stopPropagation()}
+            onClick={() => onDecide(card.token, true)}
+          >
             {t('lessComputer.approve')}
           </button>
         </div>
@@ -385,10 +406,12 @@ const shellStyle: CSSProperties = {
   flexDirection: 'column',
   borderRadius: 14,
   overflow: 'hidden',
-  border: '0.5px solid rgba(0, 0, 0, 0.08)',
-  boxShadow: 'var(--ol-shadow-lg), inset 0 1px 0 0 rgba(255, 255, 255, 0.9)',
+  border: '0.5px solid rgba(0, 0, 0, 0.12)',
+  background: 'rgba(246, 247, 250, 0.88)',
+  boxShadow: '0 18px 44px -18px rgba(15,17,22,.28), 0 0 0 0.5px rgba(255,255,255,.7) inset',
   fontFamily: 'var(--ol-font-sans)',
   color: 'var(--ol-ink)',
+  isolation: 'isolate',
 };
 
 const toolbarStyle: CSSProperties = {
@@ -396,7 +419,12 @@ const toolbarStyle: CSSProperties = {
   display: 'flex',
   alignItems: 'center',
   padding: '0 8px',
-  borderBottom: '0.5px solid rgba(0, 0, 0, 0.06)',
+  borderBottom: '0.5px solid rgba(0, 0, 0, 0.08)',
+  background:
+    'linear-gradient(180deg, rgba(255,255,255,0.74), rgba(238,240,245,0.58))',
+  boxShadow: '0 1px 0 rgba(255,255,255,.55) inset',
+  backdropFilter: 'blur(18px) saturate(150%)',
+  WebkitBackdropFilter: 'blur(18px) saturate(150%)',
   flexShrink: 0,
   position: 'relative',
   zIndex: 1,
@@ -556,9 +584,6 @@ const globalCss = `
   0%, 100% { opacity: 1; transform: scale(1); }
   50%      { opacity: 0.35; transform: scale(.94); }
 }
-/* 彩虹跑马灯描边已挪到独立全屏浮层（LessComputerGlow），这里只保留极淡的流动呼吸底色。 */
-@keyframes lc-flow    { 0% { background-position: 0% 50%; } 100% { background-position: 220% 50%; } }
-@keyframes lc-bg-breathe { 0%, 100% { opacity: .35; } 50% { opacity: .65; } }
 /* 内容进场：工具芯片 / 气泡 / 审批卡出现时柔和淡入上滑，而不是直接闪出。 */
 @keyframes lc-enter {
   from { opacity: 0; transform: translateY(6px); }
@@ -567,19 +592,16 @@ const globalCss = `
 .lc-shell { position: relative; }
 .lc-bg {
   position: absolute;
-  inset: 0;
-  border-radius: 14px;
-  background: linear-gradient(115deg,
-    rgba(255,45,120,.12), rgba(255,138,0,.10), rgba(255,212,0,.10),
-    rgba(56,224,138,.10), rgba(0,194,255,.11), rgba(122,92,255,.12), rgba(255,45,120,.12));
-  background-size: 220% 220%;
-  animation: lc-flow 16s linear infinite, lc-bg-breathe 7s ease-in-out infinite;
+  inset: -1px;
+  border-radius: inherit;
+  background:
+    radial-gradient(120% 80% at 18% 0%, rgba(255,255,255,.72), rgba(255,255,255,0) 58%),
+    linear-gradient(180deg, rgba(248,249,252,.78), rgba(235,238,244,.72));
   pointer-events: none;
   z-index: 0;
 }
 .lc-enter { animation: lc-enter 0.30s var(--ol-motion-soft, cubic-bezier(.16,1,.3,1)) both; }
 @media (prefers-reduced-motion: reduce) {
-  .lc-bg { animation: none; opacity: .45; }
   .lc-enter { animation: none; }
 }
 .lc-answer p        { margin: 0 0 6px; }

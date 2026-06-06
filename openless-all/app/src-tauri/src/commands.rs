@@ -550,10 +550,8 @@ async fn resolve_beta_manifest_endpoints() -> Result<Vec<url::Url>, String> {
     let direct = format!(
         "https://github.com/appergb/openless/releases/download/{tag}/latest-{{{{target}}}}-{{{{arch}}}}-beta.json"
     );
-    let mirror_url =
-        url::Url::parse(&mirror).map_err(|e| format!("parse beta mirror url: {e}"))?;
-    let direct_url =
-        url::Url::parse(&direct).map_err(|e| format!("parse beta direct url: {e}"))?;
+    let mirror_url = url::Url::parse(&mirror).map_err(|e| format!("parse beta mirror url: {e}"))?;
+    let direct_url = url::Url::parse(&direct).map_err(|e| format!("parse beta direct url: {e}"))?;
     Ok(vec![mirror_url, direct_url])
 }
 
@@ -1429,7 +1427,8 @@ fn is_valid_local_pack_id(s: &str) -> bool {
     if s.is_empty() || s.len() > 128 {
         return false;
     }
-    s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b'_')
+    s.bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b'_')
 }
 
 // ─────────────────────────── vocab ───────────────────────────
@@ -3216,8 +3215,10 @@ pub async fn marketplace_list(
         let body = resp.text().await.unwrap_or_default();
         return Err(format!("marketplace HTTP {status}: {body}"));
     }
-    let items: Vec<MarketplaceListItem> =
-        resp.json().await.map_err(|e| format!("parse failed: {e}"))?;
+    let items: Vec<MarketplaceListItem> = resp
+        .json()
+        .await
+        .map_err(|e| format!("parse failed: {e}"))?;
     Ok(items)
 }
 
@@ -3544,11 +3545,13 @@ fn get_github_oauth_client_id() -> Result<String, String> {
     if !GITHUB_OAUTH_CLIENT_ID.is_empty() {
         return Ok(GITHUB_OAUTH_CLIENT_ID.to_string());
     }
-    Err("GitHub OAuth 未配置。请去 https://github.com/settings/applications/new 注册一个 OAuth App\
+    Err(
+        "GitHub OAuth 未配置。请去 https://github.com/settings/applications/new 注册一个 OAuth App\
         （必须勾 Enable Device Flow），把 client_id 填到 \
         openless-all/app/src-tauri/src/commands.rs 的 GITHUB_OAUTH_CLIENT_ID 常量，\
         或在启动前设置环境变量 GITHUB_OAUTH_CLIENT_ID=<your_client_id>。"
-        .to_string())
+            .to_string(),
+    )
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -4043,12 +4046,7 @@ mod tests {
             } {
                 return Err(error);
             }
-            if let Some(error) = self
-                .active_asr_provider_sync_error
-                .lock()
-                .unwrap()
-                .clone()
-            {
+            if let Some(error) = self.active_asr_provider_sync_error.lock().unwrap().clone() {
                 return Err(error);
             }
             Ok(())
@@ -4342,7 +4340,10 @@ mod tests {
             .clone()
             .expect("previous settings remain saved");
         assert_eq!(saved.active_asr_provider, previous.active_asr_provider);
-        assert_eq!(saved.microphone_device_name, previous.microphone_device_name);
+        assert_eq!(
+            saved.microphone_device_name,
+            previous.microphone_device_name
+        );
         assert_eq!(
             writer.active_asr_provider_syncs.lock().unwrap().clone(),
             vec!["whisper".to_string()]
@@ -4384,13 +4385,13 @@ mod tests {
             .clone()
             .expect("previous settings remain saved");
         assert_eq!(saved.active_asr_provider, previous.active_asr_provider);
-        assert_eq!(saved.microphone_device_name, previous.microphone_device_name);
+        assert_eq!(
+            saved.microphone_device_name,
+            previous.microphone_device_name
+        );
         assert_eq!(
             writer.active_asr_provider_syncs.lock().unwrap().clone(),
-            vec![
-                "whisper".to_string(),
-                previous.active_asr_provider.clone()
-            ]
+            vec!["whisper".to_string(), previous.active_asr_provider.clone()]
         );
         assert_eq!(*writer.dictation_refreshes.lock().unwrap(), 0);
         assert_eq!(*writer.combo_refreshes.lock().unwrap(), 0);
@@ -4406,8 +4407,7 @@ mod tests {
         let writer = FakeSettingsWriter::default();
         let previous = UserPreferences::default();
         *writer.saved.lock().unwrap() = Some(previous.clone());
-        *writer.write_settings_errors.lock().unwrap() =
-            vec![Some("save failed".to_string()), None];
+        *writer.write_settings_errors.lock().unwrap() = vec![Some("save failed".to_string()), None];
         *writer.active_asr_provider_sync_errors.lock().unwrap() =
             vec![None, Some("rollback failed".to_string())];
         let prefs = UserPreferences {
@@ -4791,13 +4791,17 @@ mod tests {
         // 长度对但含 `/`：dash 位置错或非 hex 字符都不通过
         assert!(!is_valid_session_id("550e8400-e29b-41d4-a716-44665544/000"));
         assert!(!is_valid_session_id("550e8400_e29b_41d4_a716_446655440000")); // 用 _ 代 -
-        // 非 hex 字符
+                                                                               // 非 hex 字符
         assert!(!is_valid_session_id("550e8400-e29b-41d4-a716-44665544000g"));
         // 长度不对（35 / 37）
         assert!(!is_valid_session_id("550e8400-e29b-41d4-a716-44665544000"));
-        assert!(!is_valid_session_id("550e8400-e29b-41d4-a716-4466554400000"));
+        assert!(!is_valid_session_id(
+            "550e8400-e29b-41d4-a716-4466554400000"
+        ));
         // NUL 字节
-        assert!(!is_valid_session_id("550e8400-e29b-41d4-a716-44665544\x00000"));
+        assert!(!is_valid_session_id(
+            "550e8400-e29b-41d4-a716-44665544\x00000"
+        ));
         // 百分号编码与绝对路径
         assert!(!is_valid_session_id("%2e%2e/recordings/x"));
         assert!(!is_valid_session_id("/Users/attacker/secret.wav"));
@@ -4808,7 +4812,9 @@ mod tests {
         assert!(is_valid_local_pack_id("builtin.light"));
         assert!(is_valid_local_pack_id("builtin.structured"));
         assert!(is_valid_local_pack_id("custom.meeting"));
-        assert!(is_valid_local_pack_id("550e8400-e29b-41d4-a716-446655440000"));
+        assert!(is_valid_local_pack_id(
+            "550e8400-e29b-41d4-a716-446655440000"
+        ));
         assert!(is_valid_local_pack_id("my_pack_v2"));
         assert!(is_valid_local_pack_id("Pack-2026.05"));
     }
