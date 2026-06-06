@@ -5,11 +5,10 @@
 // Ported verbatim from design_handoff_openless/variants.jsx::FloatingShell.
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentType } from 'react';
-import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { Icon } from './Icon';
 import { WindowChrome, detectOS, type OS } from './WindowChrome';
-import { AudioCueListener } from './AudioCue';
+import { AudioCueListener } from "./AudioCue";
 import { SettingsModal } from './SettingsModal';
 import { Overview } from '../pages/Overview';
 import { History } from '../pages/History';
@@ -321,18 +320,16 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
           </div>
         </aside>
 
-        {/* Main content — v1.3.1-8 用户希望"sidebar / main panel / caption 三处玻璃统一"。
-            从 var(--ol-surface) 不透明白底 改成半透明白 + backdrop-filter，跟 sidebar
-            一起坐在 WindowChrome 的磨砂底板上，整体一块连续玻璃。 */}
+        {/* Main content — Linux 禁用透明窗口后使用不透明面；其他平台保留玻璃层。 */}
         <div style={{ flex: 1, minWidth: 0, padding: '4px 8px 6px 0', display: 'flex' }}>
           <main
+            className="ol-console-main"
             style={{
               flex: 1, minWidth: 0,
               overflow: 'hidden',
-              // Linux: 不透明白底替代 backdrop-filter 磨砂（WebKitGTK 下不可靠，#553）
-              background: os === 'linux' ? 'rgba(255, 255, 255, 0.95)' : 'rgba(255, 255, 255, 0.62)',
-              backdropFilter: os === 'linux' ? undefined : 'blur(18px) saturate(170%)',
-              WebkitBackdropFilter: os === 'linux' ? undefined : 'blur(18px) saturate(170%)',
+              background: os === 'linux' ? 'var(--ol-surface)' : 'rgba(255, 255, 255, 0.62)',
+              backdropFilter: os === 'linux' ? 'none' : 'blur(18px) saturate(170%)',
+              WebkitBackdropFilter: os === 'linux' ? 'none' : 'blur(18px) saturate(170%)',
               borderRadius: 'var(--ol-window-console-radius)',
               border: '0.5px solid rgba(0,0,0,0.06)',
               boxShadow: '0 1px 0 rgba(255,255,255,0.8) inset, 0 8px 24px -12px rgba(15,17,22,0.10), 0 2px 6px -2px rgba(15,17,22,0.06)',
@@ -383,19 +380,15 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
         </div>
       </div>
 
-      {/* Settings modal — Rendered to document.body via portal
-          to escape the main console's overflow:hidden stacking context,
-          preventing page scrollbars from rendering on top. */}
-      {settingsOpen && createPortal(
+      {/* Settings modal — rendered inside this window */}
+      {settingsOpen &&
         <SettingsModal
           key={settingsInitialSection ?? 'default'}
           os={os}
           initialSettingsSection={settingsInitialSection}
           onClose={() => setSettingsOpen(false)}
-        />,
-        document.body,
-      )}
-      <AudioCueListener />
+        />
+      }
 
       {providerPromptOpen ? (
         <ProviderSetupPrompt
@@ -408,6 +401,7 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
           onOpenSettings={openHotkeyRecordingSettings}
         />
       ) : null}
+      <AudioCueListener />
 
       {/* tab 切换 + provider prompt + footer popover 公用的入场关键帧 */}
       <style>{`
@@ -635,4 +629,3 @@ function HotkeyModeMigrationPrompt({ onLater, onOpenSettings }: { onLater: () =>
     </div>
   );
 }
-

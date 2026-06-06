@@ -7,6 +7,12 @@ html, body, #root {
   overflow: hidden;
 }
 
+html[data-ol-platform="linux"],
+html[data-ol-platform="linux"] body,
+html[data-ol-platform="linux"] #root {
+  background: var(--ol-surface);
+}
+
 body {
   background: transparent;
   user-select: none;
@@ -133,7 +139,7 @@ a { color: inherit; text-decoration: none; }
    是 Tauri 已知的上游限制（issue #2827 / #10064 / #6876）。所以这里**不做
    真实高斯模糊**：宿主元素保留半透明白底，这层 ::before 叠一张细颗粒噪点纹理
    （磨砂质感来源）；内描边高光与柔和阴影由宿主自带的 box-shadow 提供。
-   纯静态 CSS，零运行时 / 动画开销，macOS / Windows / Linux 像素一致。
+   纯静态 CSS，零运行时 / 动画开销。Linux 主动禁用透明窗口后走纯不透明面。
    宿主元素自带 border-radius 即可，::before 噪点层 inherit 圆角；宿主不要再设
    backdrop-filter（死代码）。 */
 .ol-frost {
@@ -162,4 +168,12 @@ a { color: inherit; text-decoration: none; }
   background-size: 100px 100px;
   opacity: 0.32;
   pointer-events: none;
+}
+
+html[data-ol-platform="linux"] .ol-frost {
+  background: var(--ol-surface);
+}
+
+html[data-ol-platform="linux"] .ol-frost::before {
+  content: none;
 }

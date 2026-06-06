@@ -175,4 +175,3 @@ export function App({ isCapsule, isQa, forcedOs }: AppProps) {
     </HotkeySettingsProvider>
   );
 }
-

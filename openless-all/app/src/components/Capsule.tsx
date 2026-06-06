@@ -246,7 +246,7 @@ function Pill({ os, state, level, insertedChars, message, onCancel, onConfirm }:
   const shadowAlpha = 0.20 + ambient * 0.10;
 
   return (
-    // 假毛玻璃：半透明白底 + .ol-frost 噪点纹理 + 内描边高光 + 柔和阴影。
+    // 非 Linux 走假毛玻璃；Linux 禁用透明窗口后由 .ol-frost 平台规则退成不透明面。
     // 不写 backdrop-filter —— webview 模糊不了透明窗口背后的桌面（Tauri 上游限制）。
     <div
       className="ol-frost"
