@@ -72,6 +72,10 @@ const previousPrefs: UserPreferences = {
   audioRecordingMaxEntries: null,
   marketplaceBaseUrl: '',
   marketplaceDevLogin: '',
+  remoteInputEnabled: false,
+  remoteInputPort: 8443,
+  remoteInputPin: '000000',
+  remoteInputDefaultMode: 'toggle',
 };
 
 const nextPrefs: UserPreferences = {

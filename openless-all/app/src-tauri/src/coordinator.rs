@@ -273,6 +273,17 @@ struct Inner {
     /// supervisor 线程，但 integration test 和未来 RunEvent::Exit 钩子需要这条
     /// 显式退出路径。审计 3.1.2。
     shutdown: AtomicBool,
+    // ── 远程输入（局域网手机录音）─────────────────────────────
+    /// true = 当前 begin_session 应跳过本地 cpal，改用手机经 WS 推来的 PCM。
+    /// 由 Coordinator::start_remote_dictation 在 begin_session 前置位。
+    remote_source_active: AtomicBool,
+    /// 远程会话的音频入口：begin_session 把组装好的 AudioConsumer 存这里，
+    /// WS server 收到手机 PCM 时取出 consume_pcm_chunk。等价于本地 cpal 喂 recorder。
+    remote_audio_sink: Mutex<Option<Arc<dyn crate::recorder::AudioConsumer>>>,
+    /// 远程输入 HTTPS+WS 服务句柄。None = 未启动。
+    remote_server: Mutex<Option<crate::remote_server::RemoteServerHandle>>,
+    /// 当前远程输入配对码（6 位数字）。进程内有效，不持久化（每次启动可轮换）。
+    remote_pin: Mutex<Option<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -342,6 +353,10 @@ impl Coordinator {
                     qa_stream_cancelled: Arc::new(AtomicBool::new(false)),
                     local_asr_cache: Arc::new(crate::asr::local::LocalAsrCache::new()),
                     shutdown: AtomicBool::new(false),
+                    remote_source_active: AtomicBool::new(false),
+                    remote_audio_sink: Mutex::new(None),
+                    remote_server: Mutex::new(None),
+                    remote_pin: Mutex::new(None),
                 }),
             }
         }
@@ -406,6 +421,10 @@ impl Coordinator {
                 foundry_local_runtime,
                 sherpa_onnx_runtime,
                 shutdown: AtomicBool::new(false),
+                remote_source_active: AtomicBool::new(false),
+                remote_audio_sink: Mutex::new(None),
+                remote_server: Mutex::new(None),
+                remote_pin: Mutex::new(None),
             }),
         }
     }
@@ -930,6 +949,156 @@ impl Coordinator {
 
     pub fn cancel_dictation(&self) {
         cancel_session(&self.inner);
+    }
+
+    // ───────────────────────── 远程输入（局域网手机录音）─────────────────────────
+    // 把"远程输入"实现为一次普通听写会话，只是音频源换成手机经 WS 推来的 PCM：
+    // 完整复用 begin_session / end_session / cancel_session（一行不改）。本地与远程
+    // 共用 inner.state，天然互斥。详见 dictation::start_recorder_for_starting 的远程分支。
+
+    /// 手机点"开始录音"。本地听写正在进行（phase != Idle）则拒绝并回 "busy"；
+    /// 否则置位 remote 标志后走 begin_session（内部跳过 cpal，把 consumer 存进 sink）。
+    pub async fn start_remote_dictation(&self) -> Result<(), String> {
+        if !matches!(self.inner.state.lock().phase, SessionPhase::Idle) {
+            return Err("busy".into());
+        }
+        self.inner
+            .remote_source_active
+            .store(true, Ordering::SeqCst);
+        let r = begin_session(&self.inner).await;
+        if r.is_err() {
+            self.clear_remote_source();
+        }
+        r
+    }
+
+    /// WS 每收到一帧二进制 PCM 调一次。仅 Starting/Listening 阶段转发给已组装的
+    /// consumer（流式 ASR 的 DeferredAsrBridge 在 attach 前自缓冲，不丢早期音频）。
+    pub fn feed_remote_pcm(&self, pcm: &[u8]) {
+        {
+            let phase = self.inner.state.lock().phase;
+            if phase != SessionPhase::Listening && phase != SessionPhase::Starting {
+                return;
+            }
+        }
+        let sink = self.inner.remote_audio_sink.lock().clone();
+        if let Some(consumer) = sink {
+            consumer.consume_pcm_chunk(pcm);
+        }
+    }
+
+    /// 手机点"停止"。Starting 阶段记 pending_stop（等启动完成自动收尾）；否则走
+    /// end_session（转写→润色→光标落字，与本地一致），随后清 remote 标志。
+    pub async fn stop_remote_dictation(&self) -> Result<(), String> {
+        if self.inner.state.lock().phase == SessionPhase::Starting {
+            request_stop_during_starting(&self.inner, "remote stop");
+            return Ok(());
+        }
+        let r = end_session(&self.inner).await;
+        self.clear_remote_source();
+        r
+    }
+
+    /// 手机断连 / 点取消：丢弃本次，不落字。
+    pub fn cancel_remote_dictation(&self) {
+        cancel_session(&self.inner);
+        self.clear_remote_source();
+    }
+
+    fn clear_remote_source(&self) {
+        self.inner
+            .remote_source_active
+            .store(false, Ordering::SeqCst);
+        *self.inner.remote_audio_sink.lock() = None;
+    }
+
+    /// 当前远程输入运行态（供命令/前端查询）。
+    pub fn remote_input_status(&self) -> crate::remote_server::RemoteInputStatus {
+        let prefs = self.inner.prefs.get();
+        let handle = self.inner.remote_server.lock();
+        let running = handle.is_some();
+        let port = handle
+            .as_ref()
+            .map(|h| h.bound_port)
+            .unwrap_or(prefs.remote_input_port);
+        let pin = self.inner.remote_pin.lock().clone().unwrap_or_default();
+        let urls = if running {
+            crate::remote_server::access_urls(port)
+        } else {
+            Vec::new()
+        };
+        crate::remote_server::RemoteInputStatus {
+            running,
+            port,
+            pin,
+            urls,
+        }
+    }
+
+    /// 重新生成 6 位配对码并重启服务。
+    pub fn regenerate_remote_pin(self: &Arc<Self>) -> String {
+        let pin = crate::remote_server::generate_pin();
+        *self.inner.remote_pin.lock() = Some(pin.clone());
+        self.refresh_remote_server();
+        pin
+    }
+
+    /// 按 prefs 启停 / 重启远程输入服务。在 setup 与 prefs 变更（端口/开关）时调用。
+    pub fn refresh_remote_server(self: &Arc<Self>) {
+        let coord = Arc::clone(self);
+        tauri::async_runtime::spawn(async move {
+            // 先停旧（优雅关停）
+            let old = coord.inner.remote_server.lock().take();
+            if let Some(handle) = old {
+                handle.shutdown().await;
+            }
+            let prefs = coord.inner.prefs.get();
+            let app = coord.inner.app.lock().clone();
+            if !prefs.remote_input_enabled {
+                if let Some(app) = &app {
+                    let _ =
+                        app.emit("remote-input:running", serde_json::json!({"running": false}));
+                }
+                return;
+            }
+            let Some(app) = app else {
+                return;
+            };
+            // PIN：复用进程内的 remote_pin，缺则生成。
+            let pin = {
+                let mut guard = coord.inner.remote_pin.lock();
+                if guard.is_none() {
+                    *guard = Some(crate::remote_server::generate_pin());
+                }
+                guard.clone().unwrap_or_default()
+            };
+            let port = prefs.remote_input_port;
+            match crate::remote_server::start(crate::remote_server::RemoteServerConfig {
+                port,
+                pin: pin.clone(),
+                coordinator: Arc::clone(&coord),
+                app: app.clone(),
+            })
+            .await
+            {
+                Ok(handle) => {
+                    let urls = crate::remote_server::access_urls(port);
+                    *coord.inner.remote_server.lock() = Some(handle);
+                    let _ = app.emit(
+                        "remote-input:running",
+                        serde_json::json!({"running": true, "port": port, "urls": urls, "pin": pin}),
+                    );
+                    log::info!("[remote-input] server started on port {port}");
+                }
+                Err(e) => {
+                    let _ = app.emit(
+                        "remote-input:error",
+                        serde_json::json!({"reason": e, "port": port}),
+                    );
+                    log::error!("[remote-input] server start failed: {e}");
+                }
+            }
+        });
     }
 
     /// 返回当前听写阶段（read-only 快照），供 CLI 入口在 dispatch toggle 时决策。

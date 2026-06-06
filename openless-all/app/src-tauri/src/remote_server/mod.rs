@@ -1,0 +1,439 @@
+//! 远程输入（局域网手机录音）的 HTTPS + WebSocket 服务。
+//!
+//! 手机在同一局域网用浏览器打开 `https://<PC-IP>:<port>`，得到一个录音页
+//! （assets/ 下的 index.html / app.js / style.css，编译期 include_str! 内嵌）。
+//! 手机录音以 16k/单声道/16-bit LE PCM 经 WebSocket 实时推回 PC，由 Coordinator
+//! 当作"手机麦克风"喂进现有「录音→ASR→润色→光标落字」管线（见
+//! `Coordinator::start_remote_dictation`）。
+//!
+//! 关键约束：浏览器 `getUserMedia` 仅在安全上下文可用，所以必须 HTTPS。证书用
+//! rcgen 自签名（SAN 含本机局域网 IP），手机首次访问需手动信任。TLS 走 ring
+//! 后端（与项目 reqwest/tungstenite 一致，避免 aws-lc-sys 的 C 编译依赖）。
+
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use axum::{
+    extract::ws::{Message, WebSocket, WebSocketUpgrade},
+    extract::State,
+    response::{Html, IntoResponse},
+    routing::get,
+    Router,
+};
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use parking_lot::Mutex;
+use serde::Serialize;
+use tauri::{AppHandle, Listener};
+use tokio::net::TcpListener;
+use tokio_rustls::TlsAcceptor;
+
+use crate::coordinator::Coordinator;
+
+mod assets {
+    pub const INDEX_HTML: &str = include_str!("assets/index.html");
+    pub const APP_JS: &str = include_str!("assets/app.js");
+    pub const STYLE_CSS: &str = include_str!("assets/style.css");
+}
+
+const HEADER_HTML: &str = "text/html; charset=utf-8";
+const HEADER_JS: &str = "application/javascript; charset=utf-8";
+const HEADER_CSS: &str = "text/css; charset=utf-8";
+
+/// 同一来源连续输错 PIN 的锁定阈值与时长。
+const PIN_MAX_FAILS: u32 = 5;
+const PIN_LOCK_SECS: u64 = 60;
+
+// ───────────────────────── 对外类型 ─────────────────────────
+
+pub struct RemoteServerConfig {
+    pub port: u16,
+    pub pin: String,
+    pub coordinator: Arc<Coordinator>,
+    pub app: AppHandle,
+}
+
+/// 运行中的服务句柄。drop / shutdown 触发优雅关停。
+pub struct RemoteServerHandle {
+    shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    join: tauri::async_runtime::JoinHandle<()>,
+    pub bound_port: u16,
+    #[allow(dead_code)]
+    pub pin: String,
+}
+
+impl RemoteServerHandle {
+    /// 通知 accept loop 退出并等待其结束。
+    pub async fn shutdown(mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        let _ = self.join.await;
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteInputStatus {
+    pub running: bool,
+    pub port: u16,
+    pub pin: String,
+    pub urls: Vec<String>,
+}
+
+// ───────────────────────── 工具函数 ─────────────────────────
+
+/// 生成 6 位数字配对码。用 uuid v4 的随机字节取模，无需引入 rand。
+pub fn generate_pin() -> String {
+    let b = uuid::Uuid::new_v4().into_bytes();
+    let n = u32::from_le_bytes([b[0], b[1], b[2], b[3]]) % 1_000_000;
+    format!("{n:06}")
+}
+
+fn is_private_lan(ip: &Ipv4Addr) -> bool {
+    let o = ip.octets();
+    !ip.is_loopback()
+        && !ip.is_link_local()
+        && ((o[0] == 192 && o[1] == 168)
+            || o[0] == 10
+            || (o[0] == 172 && (16..=31).contains(&o[1])))
+}
+
+/// 本机所有局域网 IPv4（过滤回环 / link-local / 虚拟网卡的非私网段）。
+pub fn local_lan_ipv4s() -> Vec<Ipv4Addr> {
+    let mut out: Vec<Ipv4Addr> = Vec::new();
+    if let Ok(ifaces) = local_ip_address::list_afinet_netifas() {
+        for (_name, ip) in ifaces {
+            if let IpAddr::V4(v4) = ip {
+                if is_private_lan(&v4) {
+                    out.push(v4);
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// 给前端展示的访问网址列表。
+pub fn access_urls(port: u16) -> Vec<String> {
+    local_lan_ipv4s()
+        .iter()
+        .map(|ip| format!("https://{ip}:{port}"))
+        .collect()
+}
+
+// ───────────────────────── TLS ─────────────────────────
+
+fn build_rustls_config() -> Result<Arc<rustls::ServerConfig>, String> {
+    let mut sans = vec!["localhost".to_string(), "127.0.0.1".to_string()];
+    for ip in local_lan_ipv4s() {
+        sans.push(ip.to_string());
+    }
+    let certified =
+        rcgen::generate_simple_self_signed(sans).map_err(|e| format!("rcgen: {e}"))?;
+    let cert_der = certified.cert.der().clone();
+    let key_der = rustls::pki_types::PrivatePkcs8KeyDer::from(
+        certified.key_pair.serialize_der(),
+    );
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| format!("tls protocol: {e}"))?
+        .with_no_client_auth()
+        .with_single_cert(vec![cert_der], key_der.into())
+        .map_err(|e| format!("tls cert: {e}"))?;
+    Ok(Arc::new(config))
+}
+
+// ───────────────────────── 启动 ─────────────────────────
+
+struct WsState {
+    pin: String,
+    coordinator: Arc<Coordinator>,
+    app: AppHandle,
+    /// 全局 PIN 失败计数 + 锁定截止时刻（简单防爆破；TLS+6 位 PIN 已是主防线）。
+    pin_fails: Mutex<(u32, Option<Instant>)>,
+}
+
+fn build_router(state: Arc<WsState>) -> Router {
+    Router::new()
+        .route("/", get(|| async { Html(assets::INDEX_HTML) }))
+        .route(
+            "/app.js",
+            get(|| async { ([(axum::http::header::CONTENT_TYPE, HEADER_JS)], assets::APP_JS) }),
+        )
+        .route(
+            "/style.css",
+            get(|| async {
+                ([(axum::http::header::CONTENT_TYPE, HEADER_CSS)], assets::STYLE_CSS)
+            }),
+        )
+        .route("/ws", get(ws_upgrade))
+        .with_state(state)
+}
+
+pub async fn start(cfg: RemoteServerConfig) -> Result<RemoteServerHandle, String> {
+    let _ = HEADER_HTML; // index 用 axum Html() 自带 content-type
+    let rustls_config = build_rustls_config()?;
+    let acceptor = TlsAcceptor::from(rustls_config);
+
+    let addr = SocketAddr::from(([0, 0, 0, 0], cfg.port));
+    let listener = TcpListener::bind(addr).await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AddrInUse {
+            "port-in-use".to_string()
+        } else {
+            format!("bind: {e}")
+        }
+    })?;
+    let bound_port = listener.local_addr().map(|a| a.port()).unwrap_or(cfg.port);
+
+    let state = Arc::new(WsState {
+        pin: cfg.pin.clone(),
+        coordinator: cfg.coordinator,
+        app: cfg.app,
+        pin_fails: Mutex::new((0, None)),
+    });
+    let router = build_router(state);
+
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let join = tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = &mut shutdown_rx => {
+                    log::info!("[remote-input] accept loop shutting down");
+                    break;
+                }
+                accepted = listener.accept() => {
+                    let (tcp, _peer) = match accepted {
+                        Ok(x) => x,
+                        Err(e) => {
+                            log::warn!("[remote-input] accept error: {e}");
+                            continue;
+                        }
+                    };
+                    let acceptor = acceptor.clone();
+                    let router = router.clone();
+                    tokio::spawn(async move {
+                        let tls = match acceptor.accept(tcp).await {
+                            Ok(t) => t,
+                            Err(_) => return, // 客户端没装证书 / 握手失败：静默
+                        };
+                        let io = TokioIo::new(tls);
+                        let svc = hyper_util::service::TowerToHyperService::new(router);
+                        let _ = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
+                            .serve_connection_with_upgrades(io, svc)
+                            .await;
+                    });
+                }
+            }
+        }
+    });
+
+    Ok(RemoteServerHandle {
+        shutdown_tx: Some(shutdown_tx),
+        join,
+        bound_port,
+        pin: cfg.pin,
+    })
+}
+
+// ───────────────────────── WebSocket ─────────────────────────
+
+async fn ws_upgrade(
+    State(state): State<Arc<WsState>>,
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_ws(socket, state))
+}
+
+fn send_json<T: Serialize>(value: &T) -> Message {
+    Message::Text(serde_json::to_string(value).unwrap_or_else(|_| "{}".into()))
+}
+
+/// 把后端 capsule 事件 payload 映射成手机端 status / level JSON 文本。
+fn capsule_payload_to_phone(payload: &str) -> Vec<String> {
+    let v: serde_json::Value = match serde_json::from_str(payload) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let state = v.get("state").and_then(|s| s.as_str()).unwrap_or("");
+    let kind = match state {
+        s if s.eq_ignore_ascii_case("recording") => "recording",
+        s if s.eq_ignore_ascii_case("transcribing") => "transcribing",
+        s if s.eq_ignore_ascii_case("polishing") => "polishing",
+        s if s.eq_ignore_ascii_case("done") => "done",
+        s if s.eq_ignore_ascii_case("error") => "error",
+        s if s.eq_ignore_ascii_case("cancelled") => "done",
+        _ => "",
+    };
+    let mut out = Vec::new();
+    if !kind.is_empty() {
+        let inserted = v
+            .get("insertedChars")
+            .or_else(|| v.get("inserted_chars"))
+            .and_then(|n| n.as_u64());
+        let message = v.get("message").and_then(|m| m.as_str());
+        out.push(
+            serde_json::json!({
+                "type": "status",
+                "kind": kind,
+                "insertedChars": inserted,
+                "message": message,
+            })
+            .to_string(),
+        );
+    }
+    if let Some(level) = v.get("level").and_then(|l| l.as_f64()) {
+        if state.eq_ignore_ascii_case("recording") {
+            out.push(serde_json::json!({"type": "level", "value": level}).to_string());
+        }
+    }
+    out
+}
+
+async fn handle_ws(mut socket: WebSocket, state: Arc<WsState>) {
+    // 1) 握手：等第一帧 hello + PIN。
+    let authed = match tokio::time::timeout(Duration::from_secs(15), socket.recv()).await {
+        Ok(Some(Ok(Message::Text(txt)))) => verify_hello(&txt, &state),
+        _ => return, // 超时 / 非文本首帧 / 断开
+    };
+    match authed {
+        AuthResult::Ok => {
+            let _ = socket.send(send_json(&serde_json::json!({"type":"auth","ok":true}))).await;
+        }
+        AuthResult::BadPin => {
+            let _ = socket
+                .send(send_json(&serde_json::json!({"type":"auth","ok":false,"reason":"bad-pin"})))
+                .await;
+            return;
+        }
+        AuthResult::Locked => {
+            let _ = socket
+                .send(send_json(&serde_json::json!({"type":"auth","ok":false,"reason":"locked"})))
+                .await;
+            return;
+        }
+    }
+
+    // 2) 订阅 capsule 事件，转发给手机做状态显示。
+    let (evt_tx, mut evt_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let listener_id = {
+        let tx = evt_tx.clone();
+        state.app.listen("capsule:state", move |event| {
+            for msg in capsule_payload_to_phone(event.payload()) {
+                let _ = tx.send(msg);
+            }
+        })
+    };
+
+    // 3) 主循环：手机上行（控制 / PCM） + 后端状态下行。
+    loop {
+        tokio::select! {
+            incoming = socket.recv() => {
+                match incoming {
+                    Some(Ok(Message::Binary(pcm))) => {
+                        if pcm.len() >= 2 && pcm.len() % 2 == 0 {
+                            state.coordinator.feed_remote_pcm(&pcm);
+                        }
+                    }
+                    Some(Ok(Message::Text(txt))) => {
+                        if !handle_control(&txt, &state, &mut socket).await {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                    _ => {}
+                }
+            }
+            Some(msg) = evt_rx.recv() => {
+                if socket.send(Message::Text(msg)).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+
+    // 4) 收尾：断连即取消未完成的远程会话，避免 ASR 句柄悬挂。
+    state.app.unlisten(listener_id);
+    state.coordinator.cancel_remote_dictation();
+}
+
+/// 返回 false 表示应断开连接。
+async fn handle_control(txt: &str, state: &Arc<WsState>, socket: &mut WebSocket) -> bool {
+    let v: serde_json::Value = match serde_json::from_str(txt) {
+        Ok(v) => v,
+        Err(_) => return true,
+    };
+    match v.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+        "start" => match state.coordinator.start_remote_dictation().await {
+            Ok(()) => {}
+            Err(reason) => {
+                let _ = socket
+                    .send(send_json(&serde_json::json!({"type":"busy","reason":reason})))
+                    .await;
+            }
+        },
+        "stop" => {
+            let _ = state.coordinator.stop_remote_dictation().await;
+        }
+        "cancel" => {
+            state.coordinator.cancel_remote_dictation();
+        }
+        _ => {}
+    }
+    true
+}
+
+enum AuthResult {
+    Ok,
+    BadPin,
+    Locked,
+}
+
+fn verify_hello(txt: &str, state: &Arc<WsState>) -> AuthResult {
+    // 锁定检查
+    {
+        let mut guard = state.pin_fails.lock();
+        if let Some(until) = guard.1 {
+            if Instant::now() < until {
+                return AuthResult::Locked;
+            }
+            // 锁定到期，重置
+            *guard = (0, None);
+        }
+    }
+    let v: serde_json::Value = match serde_json::from_str(txt) {
+        Ok(v) => v,
+        Err(_) => return AuthResult::BadPin,
+    };
+    let ok = v.get("type").and_then(|t| t.as_str()) == Some("hello")
+        && v.get("pin")
+            .and_then(|p| p.as_str())
+            .map(|p| constant_time_eq(p.as_bytes(), state.pin.as_bytes()))
+            .unwrap_or(false);
+    if ok {
+        *state.pin_fails.lock() = (0, None);
+        AuthResult::Ok
+    } else {
+        let mut guard = state.pin_fails.lock();
+        guard.0 += 1;
+        if guard.0 >= PIN_MAX_FAILS {
+            guard.1 = Some(Instant::now() + Duration::from_secs(PIN_LOCK_SECS));
+        }
+        AuthResult::BadPin
+    }
+}
+
+/// 等长常量时间比较，避免 PIN 计时侧信道。
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}

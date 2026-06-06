@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="theme-color" content="#0f1115">
+  <title>OpenLess 远程输入</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div id="app">
+    <!-- ===== 首屏:PIN 配对 ===== -->
+    <section id="screen-pin" class="screen active">
+      <div class="brand">
+        <div class="brand-logo">🎙️</div>
+        <h1 class="brand-title">OpenLess 远程输入</h1>
+        <p class="brand-sub">在手机上录音，实时输入到电脑</p>
+      </div>
+
+      <div class="card">
+        <label class="field-label" for="pin-input">配对码(电脑上显示的 6 位数字)</label>
+        <input
+          id="pin-input"
+          class="pin-input"
+          type="text"
+          inputmode="numeric"
+          autocomplete="off"
+          maxlength="6"
+          pattern="[0-9]*"
+          placeholder="••••••" />
+        <p id="pin-error" class="hint-error" hidden></p>
+        <button id="btn-connect" class="btn btn-primary">连接</button>
+      </div>
+    </section>
+
+    <!-- ===== 录音屏 ===== -->
+    <section id="screen-rec" class="screen">
+      <header class="rec-header">
+        <span class="conn-dot" id="conn-dot" title="已连接"></span>
+        <span class="rec-header-title">OpenLess</span>
+        <div class="mode-switch" id="mode-switch" role="group" aria-label="录音方式">
+          <button class="mode-btn" data-mode="toggle" type="button">点按</button>
+          <button class="mode-btn" data-mode="hold" type="button">按住</button>
+        </div>
+      </header>
+
+      <div class="rec-main">
+        <button id="btn-record" class="record-btn" type="button" aria-label="录音按钮">
+          <span class="record-btn-ring"></span>
+          <span class="record-btn-icon">🎤</span>
+          <span class="record-btn-label" id="record-label">点击开始</span>
+        </button>
+
+        <div class="level-wrap" aria-hidden="true">
+          <div class="level-bar" id="level-bar"></div>
+        </div>
+
+        <div class="status-bar" id="status-bar">
+          <span class="status-text" id="status-text">准备就绪</span>
+        </div>
+      </div>
+
+      <p class="rec-tip" id="rec-tip">点击大按钮开始录音，再次点击结束并识别。</p>
+    </section>
+
+    <!-- ===== 断线屏 ===== -->
+    <section id="screen-offline" class="screen">
+      <div class="card card-center">
+        <div class="offline-icon">📵</div>
+        <h2 class="offline-title">连接已断开</h2>
+        <p class="offline-sub" id="offline-reason">与电脑的连接已中断。</p>
+        <button id="btn-reconnect" class="btn btn-primary">重新连接</button>
+      </div>
+    </section>
+  </div>
+
+  <!-- 证书信任引导(固定底部) -->
+  <footer class="cert-tip">
+    首次访问浏览器会提示“连接不安全”(本地自签名证书)。
+    Android Chrome:点“高级”→“继续前往”;
+    iOS Safari:点“显示详情”→“访问此网站”。
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>

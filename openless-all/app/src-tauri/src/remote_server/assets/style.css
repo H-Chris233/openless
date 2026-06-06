@@ -1,0 +1,367 @@
+/* ===== OpenLess 远程输入 — 移动端深色样式 ===== */
+
+:root {
+  --bg: #0f1115;
+  --bg-soft: #171a21;
+  --card: #1c2029;
+  --card-border: #2a2f3a;
+  --text: #e7eaf0;
+  --text-dim: #9aa3b2;
+  --text-faint: #6b7280;
+  --accent: #4f8cff;
+  --accent-strong: #3b78f0;
+  --danger: #ff5470;
+  --danger-soft: #e0455f;
+  --ok: #34d399;
+  --warn: #fbbf24;
+  --shadow: 0 10px 30px rgba(0, 0, 0, .45);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+* {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+body {
+  background:
+    radial-gradient(120% 80% at 50% -10%, #1a2030 0%, var(--bg) 60%) fixed,
+    var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 16px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  -webkit-user-select: none;
+  overscroll-behavior: none;
+}
+
+#app {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  /* 给底部证书提示留出空间 */
+  padding-bottom: calc(96px + var(--safe-bottom));
+}
+
+/* ===== 屏幕切换 ===== */
+.screen {
+  display: none;
+  flex: 1;
+  flex-direction: column;
+  padding: 24px 20px;
+  animation: fadeIn .25s ease;
+}
+.screen.active {
+  display: flex;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ===== 品牌头 ===== */
+.brand {
+  text-align: center;
+  margin: 28px 0 22px;
+}
+.brand-logo {
+  font-size: 56px;
+  line-height: 1;
+}
+.brand-title {
+  font-size: 22px;
+  font-weight: 700;
+  margin: 14px 0 4px;
+  letter-spacing: .3px;
+}
+.brand-sub {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 14px;
+}
+
+/* ===== 卡片 ===== */
+.card {
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: 18px;
+  padding: 22px 20px;
+  box-shadow: var(--shadow);
+}
+.card-center {
+  text-align: center;
+}
+
+.field-label {
+  display: block;
+  font-size: 13px;
+  color: var(--text-dim);
+  margin-bottom: 10px;
+}
+
+/* ===== PIN 输入 ===== */
+.pin-input {
+  width: 100%;
+  font-size: 30px;
+  letter-spacing: 14px;
+  text-align: center;
+  padding: 16px 12px;
+  color: var(--text);
+  background: var(--bg-soft);
+  border: 2px solid var(--card-border);
+  border-radius: 14px;
+  outline: none;
+  font-variant-numeric: tabular-nums;
+  transition: border-color .15s ease;
+}
+.pin-input::placeholder {
+  color: var(--text-faint);
+  letter-spacing: 14px;
+}
+.pin-input:focus {
+  border-color: var(--accent);
+}
+
+/* ===== 按钮 ===== */
+.btn {
+  -webkit-appearance: none;
+  appearance: none;
+  display: block;
+  width: 100%;
+  margin-top: 16px;
+  padding: 15px 18px;
+  font-size: 17px;
+  font-weight: 600;
+  color: #fff;
+  border: none;
+  border-radius: 14px;
+  cursor: pointer;
+  transition: transform .08s ease, background .15s ease, opacity .15s ease;
+}
+.btn:active { transform: scale(.98); }
+.btn:disabled { opacity: .55; cursor: default; }
+
+.btn-primary {
+  background: linear-gradient(180deg, var(--accent) 0%, var(--accent-strong) 100%);
+  box-shadow: 0 6px 18px rgba(59, 120, 240, .35);
+}
+
+.hint-error {
+  color: var(--danger);
+  font-size: 13px;
+  margin: 12px 2px 0;
+  min-height: 1em;
+}
+
+/* ===== 录音屏头部 ===== */
+.rec-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-bottom: 8px;
+}
+.conn-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--ok);
+  box-shadow: 0 0 0 3px rgba(52, 211, 153, .18);
+  flex: none;
+}
+.rec-header-title {
+  font-weight: 700;
+  font-size: 16px;
+  letter-spacing: .4px;
+}
+.mode-switch {
+  margin-left: auto;
+  display: inline-flex;
+  background: var(--bg-soft);
+  border: 1px solid var(--card-border);
+  border-radius: 12px;
+  padding: 3px;
+  gap: 2px;
+}
+.mode-btn {
+  -webkit-appearance: none;
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 7px 14px;
+  border-radius: 9px;
+  cursor: pointer;
+  transition: background .15s ease, color .15s ease;
+}
+.mode-btn.active {
+  background: var(--accent);
+  color: #fff;
+}
+
+/* ===== 录音主区 ===== */
+.rec-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 26px;
+}
+
+/* 录音大按钮 */
+.record-btn {
+  position: relative;
+  width: 168px;
+  height: 168px;
+  border-radius: 50%;
+  border: none;
+  cursor: pointer;
+  color: #fff;
+  background: radial-gradient(circle at 50% 38%, #2a3550 0%, #1b2136 100%);
+  box-shadow:
+    0 12px 34px rgba(0, 0, 0, .5),
+    inset 0 0 0 2px rgba(255, 255, 255, .04);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  transition: transform .1s ease, box-shadow .2s ease, background .2s ease;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.record-btn:active { transform: scale(.97); }
+
+.record-btn-ring {
+  position: absolute;
+  inset: -6px;
+  border-radius: 50%;
+  border: 2px solid rgba(79, 140, 255, .35);
+  opacity: 0;
+  pointer-events: none;
+}
+.record-btn-icon {
+  font-size: 50px;
+  line-height: 1;
+  transition: transform .15s ease;
+}
+.record-btn-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-dim);
+  letter-spacing: .5px;
+}
+
+/* 录音中:红色 + 呼吸脉冲动画 */
+.record-btn.recording {
+  background: radial-gradient(circle at 50% 38%, #ff6a82 0%, #d63a55 100%);
+  box-shadow: 0 12px 34px rgba(214, 58, 85, .5);
+  animation: breathe 1.6s ease-in-out infinite;
+}
+.record-btn.recording .record-btn-label { color: #fff; }
+.record-btn.recording .record-btn-ring {
+  opacity: 1;
+  animation: pulseRing 1.6s ease-out infinite;
+}
+
+@keyframes breathe {
+  0%, 100% { transform: scale(1); }
+  50%      { transform: scale(1.04); }
+}
+@keyframes pulseRing {
+  0%   { transform: scale(1);   opacity: .7; }
+  70%  { transform: scale(1.28); opacity: 0; }
+  100% { transform: scale(1.28); opacity: 0; }
+}
+
+/* 忙/禁用态 */
+.record-btn.busy {
+  opacity: .6;
+  cursor: default;
+  animation: none;
+}
+
+/* ===== 音量条 ===== */
+.level-wrap {
+  width: 78%;
+  max-width: 320px;
+  height: 8px;
+  border-radius: 99px;
+  background: var(--bg-soft);
+  border: 1px solid var(--card-border);
+  overflow: hidden;
+}
+.level-bar {
+  height: 100%;
+  width: 0%;
+  border-radius: 99px;
+  background: linear-gradient(90deg, var(--ok), var(--accent));
+  transition: width .08s linear;
+}
+
+/* ===== 状态条 ===== */
+.status-bar {
+  min-height: 28px;
+  padding: 8px 18px;
+  border-radius: 99px;
+  background: var(--bg-soft);
+  border: 1px solid var(--card-border);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  text-align: center;
+  max-width: 90%;
+}
+.status-bar.is-error { color: var(--danger); border-color: rgba(255, 84, 112, .4); }
+.status-bar.is-ok    { color: var(--ok);     border-color: rgba(52, 211, 153, .4); }
+.status-bar.is-work  { color: var(--accent); }
+
+/* ===== 提示文字 ===== */
+.rec-tip {
+  text-align: center;
+  color: var(--text-faint);
+  font-size: 13px;
+  margin: 18px 0 0;
+}
+
+/* ===== 断线屏 ===== */
+.offline-icon { font-size: 48px; }
+.offline-title { font-size: 20px; margin: 12px 0 6px; }
+.offline-sub { color: var(--text-dim); font-size: 14px; margin: 0 0 8px; }
+
+/* ===== 底部证书提示(固定) ===== */
+.cert-tip {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 12px 16px calc(12px + var(--safe-bottom));
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-faint);
+  background: rgba(15, 17, 21, .92);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  border-top: 1px solid var(--card-border);
+  text-align: center;
+}
+
+/* 小屏微调 */
+@media (max-height: 640px) {
+  .brand { margin: 14px 0; }
+  .brand-logo { font-size: 44px; }
+  .record-btn { width: 148px; height: 148px; }
+  .record-btn-icon { font-size: 44px; }
+}

@@ -585,20 +585,27 @@ pub(super) async fn begin_session(inner: &Arc<Inner>) -> Result<(), String> {
 
     let active_asr = CredentialsVault::get_active_asr();
 
-    if let Err(message) = ensure_microphone_permission(inner) {
-        log::warn!("[coord] microphone permission gate failed: {message}");
-        emit_capsule(
-            inner,
-            CapsuleState::Error,
-            0.0,
-            0,
-            Some(message.clone()),
-            None,
-        );
-        restore_prepared_windows_ime_session(inner, current_session_id);
-        inner.state.lock().phase = SessionPhase::Idle;
-        schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-        return Err(message);
+    // 远程输入的音频来自手机，电脑不开本地麦克风，跳过电脑麦克风权限闸门
+    // （否则电脑麦克风为 Denied 时会把远程会话也挡住）。
+    if !inner
+        .remote_source_active
+        .load(std::sync::atomic::Ordering::Relaxed)
+    {
+        if let Err(message) = ensure_microphone_permission(inner) {
+            log::warn!("[coord] microphone permission gate failed: {message}");
+            emit_capsule(
+                inner,
+                CapsuleState::Error,
+                0.0,
+                0,
+                Some(message.clone()),
+                None,
+            );
+            restore_prepared_windows_ime_session(inner, current_session_id);
+            inner.state.lock().phase = SessionPhase::Idle;
+            schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
+            return Err(message);
+        }
     }
 
     // 不在这里 emit Recording capsule —— 让 start_recorder_for_starting 在
@@ -916,6 +923,22 @@ pub(super) async fn start_recorder_for_starting(
     active_asr: &str,
     consumer: Arc<dyn crate::recorder::AudioConsumer>,
 ) -> Result<(), String> {
+    // 远程输入：不开本地 cpal，把组装好的 consumer 交给 WS server 喂手机 PCM。
+    // 其余（Starting→Listening、pending_stop、cancel race、end_session 收尾）与本地
+    // 听写完全一致。详见 Coordinator::start_remote_dictation。
+    if inner
+        .remote_source_active
+        .load(std::sync::atomic::Ordering::Relaxed)
+    {
+        *inner.remote_audio_sink.lock() = Some(Arc::clone(&consumer));
+        inner
+            .audio_archive_active
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        emit_capsule(inner, CapsuleState::Recording, 0.0, 0, None, None);
+        log::info!("[coord] remote audio source active (asr={active_asr}, session={session_id})");
+        return Ok(());
+    }
+
     let inner_for_level = Arc::clone(inner);
     // 节流：电平回调本身约 185 Hz（cpal 默认音频块），全部转发到前端会让 CSS
     // transition 互相覆盖、视觉上"被平均"成静止。限制为 ~30 Hz（33ms 最少间隔），

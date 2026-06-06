@@ -228,6 +228,8 @@ pub fn set_settings(
     tray_microphones: State<'_, TrayMicrophoneMenuState>,
     mut prefs: UserPreferences,
 ) -> Result<(), String> {
+    // 捕获旧值用于远程输入服务的 diff（persist 后端口/开关变化时启停/重启）。
+    let remote_prev = coord.prefs().get();
     let packs = coord.style_packs().list().map_err(|e| e.to_string())?;
     sync_style_pack_preferences(&mut prefs, &packs);
     // 广播给所有 webview。issue #205：QaPanel 跑在独立 webview，
@@ -254,6 +256,12 @@ pub fn set_settings(
     // 但函数签名保留 State 入参，以便 Tauri 在调用前注入。
     let _ = tray_microphones;
     let _ = app.emit("prefs:changed", &prefs);
+    // 远程输入：开关 / 端口变化时启停或重启服务（PIN 变化走 regenerate_remote_pin 命令）。
+    if remote_prev.remote_input_enabled != prefs.remote_input_enabled
+        || remote_prev.remote_input_port != prefs.remote_input_port
+    {
+        coord.refresh_remote_server();
+    }
     Ok(())
 }
 
@@ -269,6 +277,28 @@ fn refresh_tray_menu_async(app: &AppHandle) {
 fn emit_prefs_changed(app: &AppHandle, prefs: &UserPreferences) {
     let _ = app.emit("prefs:changed", prefs);
     let _ = app.emit_to("main", "prefs:changed", prefs);
+}
+
+// ─────────────────────────── 远程输入（局域网手机录音）───────────────────────────
+
+#[tauri::command]
+pub fn get_remote_input_status(
+    coord: CoordinatorState<'_>,
+) -> crate::remote_server::RemoteInputStatus {
+    coord.remote_input_status()
+}
+
+#[tauri::command]
+pub fn list_local_ips() -> Vec<String> {
+    crate::remote_server::local_lan_ipv4s()
+        .iter()
+        .map(|ip| ip.to_string())
+        .collect()
+}
+
+#[tauri::command]
+pub fn regenerate_remote_pin(coord: CoordinatorState<'_>) -> String {
+    coord.regenerate_remote_pin()
 }
 
 pub(crate) fn sync_style_pack_prefs_and_persist(

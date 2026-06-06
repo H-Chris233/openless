@@ -3,6 +3,7 @@
 
 import { useTranslation } from 'react-i18next';
 import { RecordingInputSection } from './RecordingInputSection';
+import { RemoteInputSection } from './RemoteInputSection';
 import { ShortcutsSection } from './ShortcutsSection';
 import { LanguageSection } from './LanguageSection';
 import { ProvidersSection } from './ProvidersSection';
@@ -18,6 +19,7 @@ export function GeneralTab() {
   return (
     <>
       <RecordingInputSection />
+      <RemoteInputSection />
       <ShortcutsSection />
       <LanguageSection />
     </>
