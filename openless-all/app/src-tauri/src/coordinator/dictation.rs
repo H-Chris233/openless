@@ -800,6 +800,17 @@ pub(super) async fn begin_session(inner: &Arc<Inner>) -> Result<(), String> {
         let flushed_bytes = bridge.attach(target);
         log::info!("[coord] Bailian ASR connected; flushed {flushed_bytes} deferred audio bytes");
         finish_starting_session(inner, current_session_id).await;
+    } else if is_mimo_provider(&active_asr) {
+        let (api_key, base_url, model) = read_mimo_credentials();
+        let mimo = Arc::new(MimoBatchASR::new(api_key, base_url, model));
+        store_asr_for_session(
+            inner,
+            current_session_id,
+            ActiveAsr::Mimo(Arc::clone(&mimo)),
+        );
+        let consumer: Arc<dyn crate::recorder::AudioConsumer> = mimo;
+        start_recorder_and_enter_listening(inner, current_session_id, &active_asr, consumer)
+            .await?;
     } else if is_whisper_compatible_provider(&active_asr) {
         let (api_key, base_url, model) = read_whisper_credentials();
         // 用户辞書の有効フレーズを Whisper の `prompt` に流し込む。固有名詞や
@@ -1236,6 +1247,46 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                     inner.state.lock().phase = SessionPhase::Idle;
                     schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
                     return Err("whisper global timeout".to_string());
+                }
+            }
+        }
+        ActiveAsr::Mimo(m) => {
+            debug_assert!(uses_global_timeout);
+            let timeout_duration = std::time::Duration::from_secs(COORDINATOR_GLOBAL_TIMEOUT_SECS);
+            match tokio::time::timeout(timeout_duration, m.transcribe()).await {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => {
+                    log::error!("[coord] MiMo ASR transcribe failed: {e}");
+                    emit_capsule(
+                        inner,
+                        CapsuleState::Error,
+                        0.0,
+                        elapsed,
+                        Some(format!("识别失败: {e}")),
+                        None,
+                    );
+                    restore_prepared_windows_ime_session(inner, current_session_id);
+                    inner.state.lock().phase = SessionPhase::Idle;
+                    schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
+                    return Err(e.to_string());
+                }
+                Err(_) => {
+                    log::error!(
+                        "[coord] MiMo ASR 全局超时 {} 秒",
+                        COORDINATOR_GLOBAL_TIMEOUT_SECS
+                    );
+                    emit_capsule(
+                        inner,
+                        CapsuleState::Error,
+                        0.0,
+                        elapsed,
+                        Some("识别超时".to_string()),
+                        None,
+                    );
+                    restore_prepared_windows_ime_session(inner, current_session_id);
+                    inner.state.lock().phase = SessionPhase::Idle;
+                    schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
+                    return Err("mimo global timeout".to_string());
                 }
             }
         }

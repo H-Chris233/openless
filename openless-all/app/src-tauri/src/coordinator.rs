@@ -22,7 +22,7 @@ use crate::asr::local::{
     foundry, sherpa, FoundryLocalRuntime, FoundryLocalWhisperAsr, SherpaOnnxAsr, SherpaOnnxRuntime,
 };
 use crate::asr::{
-    BailianCredentials, BailianRealtimeASR, DictionaryHotword, RawTranscript,
+    BailianCredentials, BailianRealtimeASR, DictionaryHotword, MimoBatchASR, RawTranscript,
     VolcengineCredentials, VolcengineStreamingASR, WhisperBatchASR,
 };
 use crate::combo_hotkey::{ComboHotkeyError, ComboHotkeyEvent, ComboHotkeyMonitor};
@@ -144,6 +144,7 @@ fn show_capsule_window_for_recording<R: tauri::Runtime>(
 enum ActiveAsr {
     Volcengine(Arc<VolcengineStreamingASR>),
     Whisper(Arc<WhisperBatchASR>),
+    Mimo(Arc<MimoBatchASR>),
     Bailian(Arc<BailianRealtimeASR>),
     #[cfg(target_os = "windows")]
     FoundryLocalWhisper(Arc<FoundryLocalWhisperAsr>),
@@ -170,6 +171,7 @@ fn asr_transcribe_uses_global_timeout(asr: &ActiveAsr) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ActiveAsrProviderKind {
     Bailian,
+    Mimo,
     WhisperCompatible,
     Volcengine,
 }
@@ -177,6 +179,8 @@ enum ActiveAsrProviderKind {
 fn active_asr_provider_kind(id: &str) -> ActiveAsrProviderKind {
     if is_bailian_provider(id) {
         ActiveAsrProviderKind::Bailian
+    } else if is_mimo_provider(id) {
+        ActiveAsrProviderKind::Mimo
     } else if is_whisper_compatible_provider(id) {
         ActiveAsrProviderKind::WhisperCompatible
     } else {
@@ -2536,6 +2540,10 @@ fn is_bailian_provider(id: &str) -> bool {
     id == crate::asr::bailian::PROVIDER_ID
 }
 
+fn is_mimo_provider(id: &str) -> bool {
+    id == crate::asr::mimo::PROVIDER_ID
+}
+
 fn apply_chinese_script_preference(text: &str, pref: ChineseScriptPreference) -> String {
     if text.is_empty() {
         return String::new();
@@ -2688,6 +2696,13 @@ async fn build_qa_asr_start(inner: &Arc<Inner>, active_asr: &str) -> Result<QaAs
             asr: Arc::new(BailianRealtimeASR::new(read_bailian_credentials())),
             bridge: Arc::new(DeferredAsrBridge::new()),
         }),
+        ActiveAsrProviderKind::Mimo => {
+            let (api_key, base_url, model) = read_mimo_credentials();
+            let mimo = Arc::new(MimoBatchASR::new(api_key, base_url, model));
+            let active = ActiveAsr::Mimo(Arc::clone(&mimo));
+            let consumer: Arc<dyn crate::recorder::AudioConsumer> = mimo;
+            Ok(QaAsrStart::Ready { active, consumer })
+        }
         ActiveAsrProviderKind::WhisperCompatible => {
             let (api_key, base_url, model) = read_whisper_credentials();
             let whisper_prompt =
@@ -3088,6 +3103,24 @@ fn read_whisper_credentials() -> (String, String, String) {
     (api_key, base_url, model)
 }
 
+fn read_mimo_credentials() -> (String, String, String) {
+    let api_key = CredentialsVault::get(CredentialAccount::AsrApiKey)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let base_url = CredentialsVault::get(CredentialAccount::AsrEndpoint)
+        .ok()
+        .flatten()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| crate::asr::mimo::DEFAULT_ENDPOINT.to_string());
+    let model = CredentialsVault::get(CredentialAccount::AsrModel)
+        .ok()
+        .flatten()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| crate::asr::mimo::DEFAULT_MODEL.to_string());
+    (api_key, base_url, model)
+}
+
 fn read_bailian_credentials() -> BailianCredentials {
     let api_key = CredentialsVault::get(CredentialAccount::AsrApiKey)
         .ok()
@@ -3437,6 +3470,26 @@ async fn end_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
                     );
                     finish_qa_with_error(inner, "识别超时".to_string());
                     return Err("whisper global timeout".to_string());
+                }
+            }
+        }
+        ActiveAsr::Mimo(m) => {
+            debug_assert!(uses_global_timeout);
+            let timeout_duration = std::time::Duration::from_secs(COORDINATOR_GLOBAL_TIMEOUT_SECS);
+            match tokio::time::timeout(timeout_duration, m.transcribe()).await {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => {
+                    log::error!("[coord] QA: MiMo ASR transcribe failed: {e}");
+                    finish_qa_with_error(inner, format!("识别失败: {e}"));
+                    return Err(e.to_string());
+                }
+                Err(_) => {
+                    log::error!(
+                        "[coord] QA: MiMo ASR 全局超时 {} 秒",
+                        COORDINATOR_GLOBAL_TIMEOUT_SECS
+                    );
+                    finish_qa_with_error(inner, "识别超时".to_string());
+                    return Err("mimo global timeout".to_string());
                 }
             }
         }
@@ -4075,6 +4128,9 @@ mod tests {
         assert!(!is_whisper_compatible_provider(
             crate::asr::local::sherpa::PROVIDER_ID
         ));
+        assert!(!is_whisper_compatible_provider(
+            crate::asr::mimo::PROVIDER_ID
+        ));
     }
 
     #[test]
@@ -4117,6 +4173,10 @@ mod tests {
         assert_eq!(
             active_asr_provider_kind("whisper"),
             ActiveAsrProviderKind::WhisperCompatible
+        );
+        assert_eq!(
+            active_asr_provider_kind(crate::asr::mimo::PROVIDER_ID),
+            ActiveAsrProviderKind::Mimo
         );
         assert_eq!(
             active_asr_provider_kind("volcengine"),
