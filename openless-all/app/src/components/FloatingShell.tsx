@@ -8,6 +8,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentTy
 import { useTranslation } from 'react-i18next';
 import { Icon } from './Icon';
 import { WindowChrome, detectOS, type OS } from './WindowChrome';
+import { AudioCueListener } from "./AudioCue";
 import { SettingsModal } from './SettingsModal';
 import { Overview } from '../pages/Overview';
 import { History } from '../pages/History';
@@ -400,6 +401,7 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
           onOpenSettings={openHotkeyRecordingSettings}
         />
       ) : null}
+      <AudioCueListener />
 
       {/* tab 切换 + provider prompt + footer popover 公用的入场关键帧 */}
       <style>{`
