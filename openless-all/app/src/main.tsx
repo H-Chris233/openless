@@ -1,6 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { App } from "./App";
+import { detectOS } from "./components/WindowChrome";
 import i18n from "./i18n"; // 副作用：触发 i18next init
 import { applyAppTheme, readAppTheme } from "./lib/appTheme";
 import "./styles/tokens.css";
@@ -13,6 +14,8 @@ const windowKind = params.get("window");
 const isCapsule = windowKind === "capsule";
 const isQa = windowKind === "qa";
 const osQuery = params.get("os") as OS | null;
+const os = osQuery ?? detectOS();
+document.documentElement.dataset.olPlatform = os;
 
 applyAppTheme(readAppTheme());
 
@@ -21,7 +24,7 @@ const root = ReactDOM.createRoot(document.getElementById("root")!);
 const renderApp = () => {
   root.render(
     <React.StrictMode>
-      <App isCapsule={isCapsule} isQa={isQa} forcedOs={osQuery} />
+      <App isCapsule={isCapsule} isQa={isQa} forcedOs={os} />
     </React.StrictMode>,
   );
 };

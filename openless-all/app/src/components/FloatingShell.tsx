@@ -286,9 +286,7 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
           </div>
         </aside>
 
-        {/* Main content — v1.3.1-8 用户希望"sidebar / main panel / caption 三处玻璃统一"。
-            从 var(--ol-surface) 不透明白底 改成半透明白 + backdrop-filter，跟 sidebar
-            一起坐在 WindowChrome 的磨砂底板上，整体一块连续玻璃。 */}
+        {/* Main content — Linux 禁用透明窗口后使用不透明面；其他平台保留玻璃层。 */}
         <div style={{ flex: 1, minWidth: 0, padding: '4px 8px 6px 0', display: 'flex' }}>
           <main
             className="ol-console-main ol-aura-panel ol-aura-console-main"
@@ -690,4 +688,3 @@ function HotkeyModeMigrationPrompt({ onLater, onOpenSettings }: { onLater: () =>
     </div>
   );
 }
-

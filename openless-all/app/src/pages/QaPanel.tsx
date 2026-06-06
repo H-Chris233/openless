@@ -611,9 +611,8 @@ function truncate(text: string, max: number): string {
 
 // ── 样式 ──────────────────────────────────────────────────────────────
 
-// 假毛玻璃外壳：玻璃质感（体渐变 + 高光扫面 + 噪点颗粒）全部由 .ol-frost 提供；
-// 这里只管布局 + 内描边高光 + 柔和阴影。webview 模糊不了透明窗口背后的桌面
-// （Tauri 上游限制），所以不写 background / backdrop-filter。
+// 非 Linux 走 .ol-frost 假毛玻璃；Linux 禁用透明窗口后退成不透明面。
+// 这里只管布局 + 内描边高光 + 柔和阴影，所以不写 background / backdrop-filter。
 const shellStyle: CSSProperties = {
   width: '100%',
   height: '100vh',

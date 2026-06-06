@@ -17,7 +17,6 @@ import {
   windowMouseHotkeyCode,
 } from './lib/windowHotkeyFallback';
 import { QaPanel } from './pages/QaPanel';
-import { invoke } from '@tauri-apps/api/core';
 import { HotkeySettingsProvider } from './state/HotkeySettingsContext';
 import { APP_THEME_KEY, applyAppTheme, readAppTheme } from './lib/appTheme';
 
@@ -180,18 +179,6 @@ export function App({ isCapsule, isQa, forcedOs }: AppProps) {
     };
   }, [os]);
 
-  // Linux: 检测 WEBKIT_DISABLE_COMPOSITING_MODE → 触发磨砂 fallback（#570, #553）
-  useEffect(() => {
-    if (!isTauri) return;
-    invoke<boolean>('is_no_compositing_mode').then((val) => {
-      if (val) {
-        document.documentElement.dataset.olNoCompositing = 'true';
-      }
-    }).catch((err) => {
-      console.warn('[startup] is_no_compositing_mode failed', err);
-    });
-  }, []);
-
   return (
     <HotkeySettingsProvider>
       {gate === 'onboarding' ? <Onboarding onComplete={() => setGate('ready')} /> : <FloatingShell os={os} />}
@@ -199,4 +186,3 @@ export function App({ isCapsule, isQa, forcedOs }: AppProps) {
     </HotkeySettingsProvider>
   );
 }
-

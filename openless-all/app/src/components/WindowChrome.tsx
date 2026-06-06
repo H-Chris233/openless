@@ -37,7 +37,7 @@ export function WindowChrome({
   const consoleRadius = os === 'mac' ? 20 : os === 'win' ? WIN_CONSOLE_RADIUS : 14;
   const titlebarHeight = os === 'mac' ? MAC_TITLEBAR_HEIGHT : os === 'linux' ? LINUX_TITLEBAR_HEIGHT : 0;
 
-  // 三个平台共用半透明玻璃 background + backdropFilter。
+  // macOS / Windows 共用半透明玻璃 background + backdropFilter。
   // macOS: NSVisualEffectView 提供材质；Windows: Tauri apply_mica 提供 Mica；
   // Linux: decorations:false 后 CSS 磨砂玻璃自成背景。
   //
