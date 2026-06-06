@@ -132,7 +132,8 @@ const ASR_DEFAULT_RESOURCE_ID = 'volc.seedasr.sauc.duration';
 // `/audio/transcriptions`（`coordinator.rs::is_whisper_compatible_provider`）。
 // 新增兼容厂商：
 //   1. 在这里加一项 `{ id, nameKey, baseUrl, model }`；
-//   2. `coordinator.rs::is_whisper_compatible_provider` 加同名 id；
+//   2. 若走 Whisper 协议，`coordinator.rs::is_whisper_compatible_provider` 加同名 id；
+//      若是专有协议，新增独立 ASR client 与 provider kind；
 //   3. 在 i18n 的 `settings.providers.presets.<nameKey>` 加文案。
 // `AsrPresetId` 定义在 settings/shared.tsx，LocalModelSection / ProvidersSection 共用同一份。
 const ASR_PRESETS: ReadonlyArray<{ id: AsrPresetId; nameKey: string; baseUrl: string; model: string }> = [
@@ -145,6 +146,9 @@ const ASR_PRESETS: ReadonlyArray<{ id: AsrPresetId; nameKey: string; baseUrl: st
   // OpenRouter 的 /audio/transcriptions 走 application/json + base64（issue #582），
   // 后端 coordinator.rs::whisper_request_format 对该 id 切换到 OpenRouterJson 编码。
   { id: 'openrouter',   nameKey: 'asrOpenrouter',   baseUrl: 'https://openrouter.ai/api/v1',                   model: 'openai/whisper-large-v3-turbo' },
+  // 小米 MiMo ASR 按官方文档走 /chat/completions + input_audio，不是
+  // Whisper /audio/transcriptions；后端由 asr/mimo.rs 专用 client 处理。
+  { id: 'xiaomi-mimo-asr', nameKey: 'asrXiaomiMimo', baseUrl: 'https://api.xiaomimimo.com/v1',                  model: 'mimo-v2.5-asr'               },
   { id: 'foundry-local-whisper', nameKey: 'asrFoundryLocalWhisper', baseUrl: '',                              model: ''                              },
   // 本地引擎（Foundry / sherpa-onnx / Qwen3）：无 baseUrl/model 配置，
   // 模型在「高级 → 本地模型」里下载与切换。

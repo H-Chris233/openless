@@ -617,6 +617,7 @@ export const zhCN = {
         asrGroq: 'Groq Whisper-large-v3',
         asrWhisper: 'OpenAI Whisper（兼容）',
         asrOpenrouter: 'OpenRouter Whisper',
+        asrXiaomiMimo: '小米 MiMo ASR',
         asrSherpaOnnxLocal: '本地 sherpa-onnx（实验性）',
         asrFoundryLocalWhisper: '本地 Whisper（Foundry Local）',
         asrLocalQwen3: '本地 Qwen3-ASR',

@@ -180,6 +180,7 @@ export type AsrPresetId =
     | "groq"
     | "whisper"
     | "openrouter"
+    | "xiaomi-mimo-asr"
     | "foundry-local-whisper"
     | "sherpa-onnx-local"
     | "local-qwen3"
