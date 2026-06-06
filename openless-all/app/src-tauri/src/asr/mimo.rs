@@ -335,6 +335,7 @@ mod tests {
                     Err(err) => panic!("accept MiMo ASR test request failed: {err}"),
                 }
             };
+            stream.set_nonblocking(false).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
@@ -387,6 +388,7 @@ mod tests {
                         Err(err) => panic!("accept MiMo ASR chunk request failed: {err}"),
                     }
                 };
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
