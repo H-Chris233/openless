@@ -117,6 +117,18 @@ const LLM_PRESETS = [
     modelPlaceholder: 'gpt-5-mini',
   },
   {
+    // MiniMax 国内开放平台（minimaxi.com），OpenAI 兼容 /v1/chat/completions。
+    // M3 默认开启 thinking，可通过 `thinking.type = disabled` 关闭。
+    // provider_id 在后端 polish.rs::openai_compatible_thinking_control 命中
+    // "minimax" → MiniMaxThinking 分支，关闭时下发 disabled、开启时发 adaptive。
+    // 走"自定义"preset 接入时由 base_url 含 "minimax" 兜底识别,见 polish.rs。
+    // 文档: https://platform.minimaxi.com/docs/api-reference/text-chat-openai#thinking-控制
+    id: 'minimax',
+    nameKey: 'minimax',
+    baseUrl: 'https://api.minimaxi.com/v1',
+    modelPlaceholder: 'MiniMax-M3',
+  },
+  {
     id: 'custom',
     nameKey: 'custom',
     baseUrl: '',

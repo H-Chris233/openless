@@ -613,6 +613,7 @@ export const ja: typeof zhCN = {
         openrouterFree: 'OpenRouter（無料モデル）',
         alibabaCoding: 'Alibaba Cloud Coding Plan',
         codingPlanX: 'CodingPlanX',
+        minimax: 'MiniMax（M3）',
         custom: 'カスタム',
         asrVolcengine: 'Volcengine bigasr',
         asrBailian: 'Alibaba Bailian リアルタイム ASR',

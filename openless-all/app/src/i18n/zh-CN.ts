@@ -609,6 +609,7 @@ export const zhCN = {
         openrouterFree: 'OpenRouter（免费模型）',
         alibabaCoding: '阿里云 Coding Plan',
         codingPlanX: 'CodingPlanX',
+        minimax: 'MiniMax（M3）',
         custom: '自定义',
         asrVolcengine: '火山引擎 bigasr',
         asrBailian: '阿里云百炼实时 ASR',

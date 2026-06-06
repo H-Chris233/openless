@@ -611,6 +611,7 @@ export const zhTW: typeof zhCN = {
         openrouterFree: 'OpenRouter（免費模型）',
         alibabaCoding: '阿里雲 Coding Plan',
         codingPlanX: 'CodingPlanX',
+        minimax: 'MiniMax（M3）',
         custom: '自定義',
         asrVolcengine: '火山引擎 bigasr',
         asrBailian: '阿里雲百煉即時 ASR',
