@@ -1207,6 +1207,34 @@ fn bottom_visual_position(
     (x, y)
 }
 
+/// 把窗口左上角 `(x, y)`（同 area 同坐标系，physical px）夹到给定矩形内，
+/// **保证整窗（含自身 w×h）落在 area 内可见**。area 为工作区时即可避开任务栏。
+///
+/// 纯函数，无 Win32 依赖，便于单测多显示器 / 负原点 / 异常 DPI 输入。issue #470：
+/// 此前 Windows 分支只夹上边（`y.max(mon.top)`），左/右/下未夹，多屏负坐标下胶囊
+/// 可能被算到屏外却无任何观测。这里四边都夹。
+///
+/// area 比窗口还小时（`area_right - w < area_left`），`max_x` 退化为 `area_left`，
+/// `clamp` 把左上角收回 area 左上角，保证至少左上角可见、不溢出为负超界。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn clamp_to_monitor(
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    area_left: i32,
+    area_top: i32,
+    area_right: i32,
+    area_bottom: i32,
+) -> (i32, i32) {
+    // 右/下边界 = area 右下角减去窗口自身尺寸，确保整窗可见。
+    let max_x = (area_right - w).max(area_left);
+    let max_y = (area_bottom - h).max(area_top);
+    let clamped_x = x.clamp(area_left, max_x);
+    let clamped_y = y.clamp(area_top, max_y);
+    (clamped_x, clamped_y)
+}
+
 /// 把 QA 浮窗放到屏幕底部居中、紧贴胶囊上方。tauri 启动期 + show 之前都会调一次，
 /// 防止用户切换显示器后位置错乱。
 fn position_qa_window<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) -> tauri::Result<()> {
@@ -1232,8 +1260,20 @@ fn position_qa_window<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) -> ta
 
 /// 显示 QA 窗口并发一条状态事件（前端订阅 `qa:state`）。
 /// `content_kind` 是不透明字符串（"loading" / "answer" / "idle" 等），
-/// 让前端 React 视图自行决定渲染哪一种。**不**抢前台 app 焦点（保证 Cmd+C
-/// fallback 仍能从原 app 拿到选区）。
+/// 让前端 React 视图自行决定渲染哪一种。
+///
+/// ## 跨端焦点契约（#164 / #466，三端**有意**不同，勿盲目对齐）
+/// - **macOS**：`orderFrontRegardless` —— 窗口可见但不成为 key window，frontmost
+///   始终是用户原 app，AX / Cmd+C fallback 能直接读到选区。**全程不抢焦点**。
+/// - **Windows**：`show_qa_window_no_activate` 实际是 `show()` + `set_focus()`，
+///   出现的那一帧会短暂抢前台。这是 #466 对 #164 的**有意取舍**：WebView2 子窗口有
+///   独立 focus 模型，不主动抓焦点则 QA webview 收不到键盘事件 → ESC 到不了 React
+///   监听、X 按钮 first-click 被 OS 当激活点击吃掉。代价由 `coordinator/qa.rs` 的
+///   focus-dance 补偿：抓选区前用 `qa_focus_target` 把焦点临时还给用户原 app，
+///   `simulate_copy` 跑完再 `refocus_qa_window` 收回。**移除 set_focus 会同时回归
+///   #164 的反面（ESC/X 失效），别删。** 详见 `show_qa_window_no_activate` 内注释。
+/// - **Linux**：`window.show()`。qa 窗口静态配置 `focus: false`（tauri.conf.json），
+///   Tauri 将其建成非激活窗口，因此 show() **不抢焦点**，与 macOS 契约一致。
 pub(crate) fn show_qa_window<R: tauri::Runtime>(app: &AppHandle<R>, content_kind: &str) {
     let Some(window) = app.get_webview_window("qa") else {
         log::info!("[qa] show 跳过：qa 窗口不存在 (content_kind={content_kind})");
@@ -1286,6 +1326,8 @@ pub(crate) fn show_qa_window<R: tauri::Runtime>(app: &AppHandle<R>, content_kind
             log::warn!("[qa] show fallback failed: {e}");
         }
     }
+    // Linux：qa 窗口静态配置 focus:false → Tauri 建成非激活窗口，window.show() 不抢
+    // 焦点，与 macOS「不抢焦点」契约一致（无需 Windows 那套 set_focus + focus-dance）。
     #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
     if let Err(e) = window.show() {
         log::warn!("[qa] show failed: {e}");
@@ -1582,6 +1624,12 @@ pub(crate) struct ForegroundMonitor {
     pub(crate) top: i32,
     pub(crate) right: i32,
     pub(crate) bottom: i32,
+    /// 工作区矩形（physical px，去掉任务栏）。多端一致：胶囊优先夹到工作区内，
+    /// 避免压住任务栏。取不到时回退为整屏矩形。issue #470。
+    pub(crate) work_left: i32,
+    pub(crate) work_top: i32,
+    pub(crate) work_right: i32,
+    pub(crate) work_bottom: i32,
     /// 该显示器的有效 DPI 缩放（1.0 = 96dpi）。
     pub(crate) scale: f64,
 }
@@ -1619,6 +1667,10 @@ pub(crate) fn foreground_window_monitor() -> Option<ForegroundMonitor> {
             top: mi.rcMonitor.top,
             right: mi.rcMonitor.right,
             bottom: mi.rcMonitor.bottom,
+            work_left: mi.rcWork.left,
+            work_top: mi.rcWork.top,
+            work_right: mi.rcWork.right,
+            work_bottom: mi.rcWork.bottom,
             scale: (dpi_x as f64 / 96.0).max(0.1),
         })
     }
@@ -1651,15 +1703,24 @@ pub(crate) fn position_capsule_bottom_center<R: tauri::Runtime>(
             let offset_from_bottom =
                 (capsule_visual_height(translation_active) + 80.0 + bounds.bottom_inset) * scale;
             let y = ((mon.bottom as f64) - offset_from_bottom).round() as i32;
-            let clamped_y = y.max(mon.top);
-            // #470 诊断 v2：当前只夹了上边（.max(mon.top)），未夹下/左/右。多显示器、
-            // 负坐标或异常 DPI 下胶囊可能被算到屏幕外却无任何观测。记录显示器几何与
-            // 最终落点，用于证伪/证实「胶囊定位到屏幕外」(C 子嫌疑)。
+
+            // #470：四边都夹到「工作区」内（去掉任务栏），保证整窗可见。GetMonitorInfoW
+            // 取不到 rcWork 时（理论上不会，rcWork 总随 rcMonitor 一同填）退回整屏矩形。
+            let (work_l, work_t, work_r, work_b) =
+                if mon.work_right > mon.work_left && mon.work_bottom > mon.work_top {
+                    (mon.work_left, mon.work_top, mon.work_right, mon.work_bottom)
+                } else {
+                    (mon.left, mon.top, mon.right, mon.bottom)
+                };
+            let (clamped_x, clamped_y) =
+                clamp_to_monitor(x, y, phys_w, phys_h, work_l, work_t, work_r, work_b);
             log::debug!(
-                "[capsule] win position: mon=({},{})..({},{}) scale={:.2} size=({}x{}) -> x={} y={} clamped_y={}",
-                mon.left, mon.top, mon.right, mon.bottom, scale, phys_w, phys_h, x, y, clamped_y
+                "[capsule] win position: mon=({},{})..({},{}) work=({},{})..({},{}) scale={:.2} size=({}x{}) -> raw=({},{}) clamped=({},{})",
+                mon.left, mon.top, mon.right, mon.bottom,
+                work_l, work_t, work_r, work_b,
+                scale, phys_w, phys_h, x, y, clamped_x, clamped_y
             );
-            window.set_position(PhysicalPosition::new(x, clamped_y))?;
+            window.set_position(PhysicalPosition::new(clamped_x, clamped_y))?;
             return Ok(());
         }
         // 仅当 Win32 取不到前台显示器时，落回下面的 current_monitor 逻辑。
@@ -1740,7 +1801,7 @@ fn capsule_height_for_qa() -> f64 {
 mod tests {
     use super::{
         bottom_center_position, bottom_visual_position, capsule_height_for_qa,
-        capsule_visual_height, capsule_window_bounds, logical_monitor_frame,
+        capsule_visual_height, capsule_window_bounds, clamp_to_monitor, logical_monitor_frame,
         parse_tray_polish_mode_id, rotate_log_if_too_large, tray_polish_mode_menu_entries,
         tray_style_menu_enabled, LogicalMonitorFrame, LOG_ROTATE_LIMIT_BYTES,
     };
@@ -1887,6 +1948,54 @@ mod tests {
         let pos = bottom_visual_position(frame, 220.0, 96.0, 80.0, 0.0);
 
         assert_eq!(pos, (610.0, -176.0));
+    }
+
+    // ---- #470: capsule 四边 clamp（纯函数，合成多显示器 / 负原点 / 1.5x DPI 输入）----
+
+    #[test]
+    fn clamp_to_monitor_leaves_on_screen_position_untouched() {
+        // 1080p 主屏正中偏下，整窗本就可见 → 原样返回。
+        let (x, y) = clamp_to_monitor(800, 900, 264, 126, 0, 0, 1920, 1040);
+        assert_eq!((x, y), (800, 900));
+    }
+
+    #[test]
+    fn clamp_to_monitor_pulls_back_off_screen_right_and_bottom() {
+        // x/y 算到了屏幕右下外侧 → 收回到「右下角减去窗口尺寸」，整窗仍可见。
+        let (x, y) = clamp_to_monitor(2000, 1200, 264, 126, 0, 0, 1920, 1040);
+        assert_eq!((x, y), (1920 - 264, 1040 - 126));
+        // 整窗右/下边界都落在 area 内。
+        assert!(x + 264 <= 1920);
+        assert!(y + 126 <= 1040);
+    }
+
+    #[test]
+    fn clamp_to_monitor_pushes_into_negative_origin_left_monitor() {
+        // 副屏在主屏左侧（负 X 原点），落点算到了副屏左外侧 → 夹回 area_left。
+        // 1.5x DPI 下尺寸偏大，但 area 仍宽于窗口，左上角夹到 (-2560, top)。
+        let (x, y) = clamp_to_monitor(-3000, -100, 294, 138, -2560, 0, 0, 1440);
+        assert_eq!(x, -2560);
+        assert_eq!(y, 0);
+        // 右/下仍在 area 内。
+        assert!(x >= -2560 && x + 294 <= 0);
+        assert!(y >= 0 && y + 138 <= 1440);
+    }
+
+    #[test]
+    fn clamp_to_monitor_respects_work_area_above_taskbar() {
+        // 工作区底部 = 1040（任务栏占了 1040..1080）。落点本在任务栏区域（y=1030），
+        // 应被夹到「工作区底 - 窗口高」之上，胶囊整窗不压任务栏。
+        let (_x, y) = clamp_to_monitor(800, 1030, 264, 126, 0, 0, 1920, 1040);
+        assert_eq!(y, 1040 - 126);
+        assert!(y + 126 <= 1040);
+    }
+
+    #[test]
+    fn clamp_to_monitor_degrades_gracefully_when_window_wider_than_area() {
+        // 病态输入：area 比窗口还窄（罕见，但要保证不 panic、不溢出为负超界）。
+        // max_x 钳到 area_left，clamp 把左上角收回 area_left。
+        let (x, y) = clamp_to_monitor(500, 500, 800, 600, 0, 0, 400, 300);
+        assert_eq!((x, y), (0, 0));
     }
 
     #[test]
