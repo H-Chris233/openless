@@ -520,6 +520,59 @@ fn resolve_gemini_base_url_rejects_private_endpoint() {
     assert!(resolve_gemini_base_url(Some("http://api.example.com/v1beta".into())).is_err());
 }
 
+// ── issue #609 F-01 孪生 gap：运行期听写路径的 ASR endpoint 也过 SSRF 校验（fail-closed）──
+
+#[test]
+fn guard_asr_http_endpoint_passes_public_https() {
+    // 公网 https / 默认官方 endpoint：原样返回。
+    assert_eq!(
+        guard_asr_http_endpoint("https://api.openai.com/v1".into(), "FALLBACK"),
+        "https://api.openai.com/v1"
+    );
+    assert_eq!(
+        guard_asr_http_endpoint(crate::asr::mimo::DEFAULT_ENDPOINT.into(), "FALLBACK"),
+        crate::asr::mimo::DEFAULT_ENDPOINT
+    );
+}
+
+#[test]
+fn guard_asr_http_endpoint_passes_localhost_http() {
+    // 本地 Whisper 服务：localhost / 127.0.0.1 http 放行。
+    assert_eq!(
+        guard_asr_http_endpoint("http://localhost:9000/v1".into(), "FALLBACK"),
+        "http://localhost:9000/v1"
+    );
+    assert_eq!(
+        guard_asr_http_endpoint("http://127.0.0.1:9000/v1".into(), "FALLBACK"),
+        "http://127.0.0.1:9000/v1"
+    );
+}
+
+#[test]
+fn guard_asr_http_endpoint_rejects_private_and_metadata_falls_back() {
+    // 私网 / 元数据 / 非 https 外网：fail-closed 回退到安全默认值，不把带 Key 的请求指向被拒地址。
+    assert_eq!(
+        guard_asr_http_endpoint("http://192.168.1.1/v1".into(), "FALLBACK"),
+        "FALLBACK"
+    );
+    assert_eq!(
+        guard_asr_http_endpoint("http://169.254.169.254/v1".into(), "FALLBACK"),
+        "FALLBACK"
+    );
+    assert_eq!(
+        guard_asr_http_endpoint("http://api.example.com/v1".into(), "FALLBACK"),
+        "FALLBACK"
+    );
+    // Whisper 无官方默认：回退空串 → transcription_url 解析失败、请求不发出。
+    assert_eq!(guard_asr_http_endpoint("http://10.0.0.5/v1".into(), ""), "");
+}
+
+#[test]
+fn guard_asr_http_endpoint_empty_is_unchanged() {
+    // 空 endpoint（未配置）原样透传，交由下游处理，不误报。
+    assert_eq!(guard_asr_http_endpoint(String::new(), "FALLBACK"), "");
+}
+
 #[test]
 fn deferred_asr_bridge_flushes_startup_audio_before_live_chunks() {
     #[derive(Default)]

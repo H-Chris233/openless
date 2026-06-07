@@ -436,6 +436,27 @@ pub(crate) async fn polish_and_translate_or_passthrough(
     }
 }
 
+/// issue #609 F-01 孪生 gap：ASR 自定义 endpoint 也带 API Key 发请求，运行期听写路径
+/// （非「测试连接」按钮）此前完全绕过 SSRF 校验。对 http/https 的 Whisper 兼容 / Mimo
+/// endpoint 做与 LLM 路径一致的字面 host/IP 校验；命中内网/元数据等地址时 **fail-closed**
+/// —— 返回提供的安全回退值（Whisper 用空串 → `transcription_url` 解析失败、请求不发出；
+/// Mimo 用官方 DEFAULT_ENDPOINT），绝不把带 Key 的请求指向被拒地址。
+/// 注：Bailian 走 `wss://`，scheme 与本校验器不兼容，属已知残留（见下方 read_bailian_credentials）。
+pub(crate) fn guard_asr_http_endpoint(base_url: String, safe_fallback: &str) -> String {
+    if base_url.trim().is_empty() {
+        return base_url;
+    }
+    match validate_llm_endpoint(&base_url) {
+        Ok(()) => base_url,
+        Err(e) => {
+            log::error!(
+                "[asr] 自定义 ASR endpoint 被 SSRF 校验拒绝，回退到安全默认值（防凭据外泄）: {e}"
+            );
+            safe_fallback.to_string()
+        }
+    }
+}
+
 pub(crate) fn read_whisper_credentials() -> (String, String, String) {
     let api_key = CredentialsVault::get(CredentialAccount::AsrApiKey)
         .ok()
@@ -445,6 +466,8 @@ pub(crate) fn read_whisper_credentials() -> (String, String, String) {
         .ok()
         .flatten()
         .unwrap_or_default();
+    // Whisper 无官方默认 endpoint：被拒时回退空串，使 transcription_url 解析失败、请求不发出。
+    let base_url = guard_asr_http_endpoint(base_url, "");
     let model = CredentialsVault::get(CredentialAccount::AsrModel)
         .ok()
         .flatten()
@@ -463,6 +486,8 @@ pub(crate) fn read_mimo_credentials() -> (String, String, String) {
         .flatten()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| crate::asr::mimo::DEFAULT_ENDPOINT.to_string());
+    // 被拒时回退到 Mimo 官方 DEFAULT_ENDPOINT（合法 https），不把带 Key 的请求指向内网。
+    let base_url = guard_asr_http_endpoint(base_url, crate::asr::mimo::DEFAULT_ENDPOINT);
     let model = CredentialsVault::get(CredentialAccount::AsrModel)
         .ok()
         .flatten()
@@ -471,6 +496,9 @@ pub(crate) fn read_mimo_credentials() -> (String, String, String) {
     (api_key, base_url, model)
 }
 
+/// 已知残留（issue #609 F-01 孪生 gap）：Bailian 自定义 endpoint 走 `wss://`，scheme 与
+/// `validate_llm_endpoint`（仅 http/https）不兼容，无法直接复用。需要单独的 ws/wss 感知
+/// SSRF 校验器，超本次收口范围，留作后续跟进。
 pub(crate) fn read_bailian_credentials() -> BailianCredentials {
     let api_key = CredentialsVault::get(CredentialAccount::AsrApiKey)
         .ok()
