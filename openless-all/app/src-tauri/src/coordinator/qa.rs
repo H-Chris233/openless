@@ -139,3 +139,24 @@ pub(super) fn close_qa_panel(inner: &Arc<Inner>) {
     emit_capsule(inner, CapsuleState::Idle, 0.0, 0, None, None);
     log::info!("[coord] QA panel closed, history cleared");
 }
+
+#[cfg(test)]
+mod tests {
+    // issue #609 F-05：给零覆盖的纯逻辑补单测。QaSessionState::default() 的初始不变量
+    // 是 open/close panel、begin/end session 一系列状态机的起点，任何字段默认值漂移
+    // （如 panel_visible 默认 true、messages 非空）都会让 QA 流程行为错乱。
+    use super::{QaPhase, QaSessionState};
+
+    #[test]
+    fn qa_session_state_default_starts_idle_and_clean() {
+        let st = QaSessionState::default();
+        assert_eq!(st.phase, QaPhase::Idle);
+        assert!(!st.cancelled);
+        assert!(st.selection.is_none());
+        assert!(st.front_app.is_none());
+        assert!(st.qa_focus_target.is_none());
+        assert!(!st.pinned, "新建会话不应处于 pinned");
+        assert!(!st.panel_visible, "浮窗默认不可见，等用户 toggle");
+        assert!(st.messages.is_empty(), "新建会话历史必须为空");
+    }
+}
