@@ -104,6 +104,10 @@ function CircleButton({ variant, enabled, onClick }: CircleButtonProps) {
   return (
     <button
       onClick={enabled ? onClick : undefined}
+      onMouseDown={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      }}
       aria-label={isCancel ? t('common.cancel') : t('settings.shortcuts.confirm')}
       disabled={!enabled}
       style={{
@@ -146,15 +150,17 @@ interface PillProps {
   level: number;
   insertedChars: number;
   message?: string;
+  operating?: boolean;
   onCancel: () => void;
   onConfirm: () => void;
 }
 
-function Pill({ os, state, level, insertedChars, message, onCancel, onConfirm }: PillProps) {
+function Pill({ os, state, level, insertedChars, message, operating, onCancel, onConfirm }: PillProps) {
   const { t } = useTranslation();
   const metrics = getCapsulePillMetrics(os);
   const processingLayout = getCapsuleMessageLayout(os, 'processing');
-  const enabled = state === 'recording';
+  const cancelEnabled = state === 'recording' || state === 'transcribing' || state === 'polishing';
+  const confirmEnabled = state === 'recording';
 
   // "thinking" 扫光速度：进入 transcribing/polishing 的头 2 秒走快速（0.9s/cycle，提示
   // 「流式刚开始」），之后切回慢速（2.4s）作为稳态。切回 idle / done / 其他 state 也复位
@@ -223,7 +229,7 @@ function Pill({ os, state, level, insertedChars, message, onCancel, onConfirm }:
               WebkitLineClamp: processingLayout.lineClamp,
             }}
           >
-            {t('capsule.thinking')}
+            {t(operating ? 'capsule.using' : 'capsule.thinking')}
           </span>
         </div>
       );
@@ -272,11 +278,11 @@ function Pill({ os, state, level, insertedChars, message, onCancel, onConfirm }:
         willChange: 'transform, box-shadow',
       }}
     >
-      <CircleButton variant="cancel" enabled={enabled} onClick={onCancel} />
+      <CircleButton variant="cancel" enabled={cancelEnabled} onClick={onCancel} />
       <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
         {center}
       </div>
-      <CircleButton variant="confirm" enabled={enabled} onClick={onConfirm} />
+      <CircleButton variant="confirm" enabled={confirmEnabled} onClick={onConfirm} />
     </div>
   );
 }
@@ -301,6 +307,7 @@ export function Capsule() {
   const [insertedChars, setInsertedChars] = useState<number>(0);
   const [message, setMessage] = useState<string | undefined>();
   const [translation, setTranslation] = useState<boolean>(false);
+  const [operating, setOperating] = useState<boolean>(false);
   // `leaving` 与 `lastVisibleState` 协同实现「退出动画」：
   // - 当 state 从非 idle 变成 idle 时，不立即卸载，而是把 leaving 置为 true 并保留
   //   最后一帧的可见 state（lastVisibleState），让胶囊用 capsule-out 动画收缩淡出。
@@ -330,6 +337,7 @@ export function Capsule() {
         setMessage(p.message ?? undefined);
         if (p.insertedChars != null) setInsertedChars(p.insertedChars);
         setTranslation(p.translation === true);
+        setOperating(p.operating === true);
       });
       if (cancelled) handle();
       else unlisten = handle;
@@ -466,6 +474,7 @@ export function Capsule() {
         level={leaving ? 0 : level}
         insertedChars={insertedChars}
         message={message}
+        operating={operating}
         onCancel={onCancel}
         onConfirm={onConfirm}
       />

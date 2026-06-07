@@ -117,6 +117,13 @@ export type QaHotkeyBinding = ShortcutBinding;
 /** 自定义录音组合键绑定。当 hotkey.trigger == 'custom' 时使用。 */
 export type ComboBinding = ShortcutBinding;
 
+export type CodingAgentProviderId = "claude-code-cli" | "opencode-cli";
+export type CodingAgentPermissionMode =
+  | "plan"
+  | "default"
+  | "acceptEdits"
+  | "bypassPermissions";
+
 /** 模拟粘贴时按下的快捷键。仅 Windows/Linux 生效；macOS 走 AX 直写。
  *  - ctrlV       : 标准粘贴（默认；大多数编辑器、浏览器、IDE）
  *  - ctrlShiftV  : kitty / alacritty / wezterm / gnome-terminal / foot 等终端
@@ -259,6 +266,22 @@ export interface UserPreferences {
   switchStyleHotkey: ShortcutBinding | null;
   /** 打开 OpenLess 主窗口的全局快捷键。null = 用户已停用（issue #576）。 */
   openAppHotkey: ShortcutBinding | null;
+  /** Less Computer：是否启用。默认关闭。 */
+  codingAgentEnabled: boolean;
+  /** Agent 后端：claude-code-cli（默认）/ opencode-cli。 */
+  codingAgentProvider: CodingAgentProviderId;
+  /** Agent 模型，null = 运行时取便宜默认（sonnet）。 */
+  codingAgentModel: string | null;
+  /** 权限模式：plan/default/acceptEdits/bypassPermissions。 */
+  codingAgentPermissionMode: CodingAgentPermissionMode;
+  /** Agent 工作目录，null = 临时目录。 */
+  codingAgentWorkdir: string | null;
+  /** Less Computer 按住说话快捷键。null = 停用；目前仅 macOS 显示/生效。 */
+  codingAgentVoiceHotkey: ShortcutBinding | null;
+  /** 热键 1：语音 Agent 面板键。null = 停用。 */
+  codingAgentPanelHotkey: ShortcutBinding | null;
+  /** 热键 2：快取用键（选中→Claude→回插）。null = 未配置。 */
+  codingAgentQuickHotkey: ShortcutBinding | null;
   /** 本地 Qwen3-ASR 当前激活的模型 id。仅在 activeAsrProvider === 'local-qwen3' 时有意义。 */
   localAsrActiveModel: string;
   /** 本地模型下载源镜像（'huggingface' / 'hf-mirror'）。 */
@@ -378,6 +401,28 @@ export interface QaStatePayload {
   chunk?: string;
 }
 
+/**
+ * Less Computer 语音 Agent 浮窗事件（窗口 label = "less-computer"，事件名
+ * `less-computer:event`）。后端按 `kind` 标记，前端据此把交互渲染成聊天结构。
+ */
+export type LessComputerEvent =
+  /** 一轮用户气泡（语音指令转写）。fresh=true 表示新会话（清空历史）；否则追加为后续轮次。 */
+  | { kind: 'user'; text: string; fresh?: boolean }
+  /** Agent 启动，进入运行态。 */
+  | { kind: 'started' }
+  /** 流式回复增量（来自 CodingAgentEvent::Delta）。 */
+  | { kind: 'delta'; text: string }
+  /** 工具调用提示（来自 CodingAgentEvent::ToolUse，如 "Bash"）。 */
+  | { kind: 'tool'; name: string }
+  /** 内联审批卡：高风险动作被护栏拦下，等用户 Approve / Deny。 */
+  | { kind: 'approval'; token: string; command: string; reason: string }
+  /** 运行完成：最终结果 + 成本（美元）。 */
+  | { kind: 'completed'; text: string; costUsd?: number | null }
+  /** 用户从胶囊取消正在运行的 Agent。 */
+  | { kind: 'cancelled' }
+  /** 运行出错。 */
+  | { kind: 'error'; message: string };
+
 /** 内置语言列表 — 前端 Settings UI 用，后端只接收原生名字符串拼 prompt。
  *  添加新语言时直接在这里加一项（原生名），无需修改后端。 */
 export const SUPPORTED_LANGUAGES: readonly string[] = [
@@ -415,6 +460,8 @@ export interface CapsulePayload {
   insertedChars: number | null;
   /** 当前 session 是否处于翻译模式（用户已按过 Shift）。详见 issue #4。 */
   translation: boolean;
+  /** 当前是否是 Less Computer 会话：处理态文案显示 "using" 而非 "thinking"。 */
+  operating?: boolean;
 }
 
 export interface CredentialsStatus {

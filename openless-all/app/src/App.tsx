@@ -17,23 +17,33 @@ import {
   windowMouseHotkeyCode,
 } from './lib/windowHotkeyFallback';
 import { QaPanel } from './pages/QaPanel';
+import { LessComputerPanel } from './pages/LessComputerPanel';
+import { LessComputerGlow } from './pages/LessComputerGlow';
 import { HotkeySettingsProvider } from './state/HotkeySettingsContext';
 import { APP_THEME_KEY, applyAppTheme, readAppTheme } from './lib/appTheme';
 
 interface AppProps {
   isCapsule: boolean;
   isQa: boolean;
+  isLessComputer: boolean;
+  isLessComputerGlow: boolean;
   forcedOs?: OS | null;
 }
 
 type Gate = 'onboarding' | 'ready';
 
-export function App({ isCapsule, isQa, forcedOs }: AppProps) {
+export function App({ isCapsule, isQa, isLessComputer, isLessComputerGlow, forcedOs }: AppProps) {
   if (isCapsule) {
     return <Capsule />;
   }
   if (isQa) {
     return <QaPanel />;
+  }
+  if (isLessComputer) {
+    return <LessComputerPanel />;
+  }
+  if (isLessComputerGlow) {
+    return <LessComputerGlow />;
   }
 
   const os = forcedOs ?? detectOS();

@@ -228,7 +228,17 @@ where
 }
 
 fn update_shared_binding(shared: &Shared, binding: HotkeyBinding) {
-    *shared.binding.write() = binding;
+    {
+        let mut current = shared.binding.write();
+        if *current == binding {
+            // 绑定未变化（如 supervisor 每 5s 周期性重新应用同一绑定）：不要碰 held latch。
+            // 否则会在长按期间把「已按住」清成 false，松手时 `!is_active && was_held` 不成立、
+            // 不再发 Released —— hold 模式（Less Computer 按住说话）录音停不下来、要再按一次。
+            // 复现：长按 >5s 跨过一次 supervisor 轮询即触发。
+            return;
+        }
+        *current = binding;
+    }
     shared
         .trigger_held
         .store(false, std::sync::atomic::Ordering::SeqCst);
@@ -1200,9 +1210,7 @@ mod platform {
         _binding: HotkeyBinding,
         _tx: Sender<HotkeyEvent>,
     ) -> Result<Box<dyn HotkeyAdapter>, HotkeyInstallError> {
-        log::info!(
-            "[hotkey] Linux — fcitx5 plugin handles hotkeys"
-        );
+        log::info!("[hotkey] Linux — fcitx5 plugin handles hotkeys");
         Ok(Box::new(PlaceholderAdapter { _tx }))
     }
 

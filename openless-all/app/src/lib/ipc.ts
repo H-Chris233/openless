@@ -15,6 +15,7 @@ import type {
     HotkeyStatus,
     MicrophoneDevice,
     PermissionStatus,
+    CodingAgentPermissionMode,
     PolishMode,
     QaHotkeyBinding,
     ShortcutBinding,
@@ -100,6 +101,14 @@ let mockSettings: UserPreferences = {
         modifiers: defaultAppShortcutModifiers(),
     },
     openAppHotkey: { primary: "O", modifiers: defaultAppShortcutModifiers() },
+    codingAgentEnabled: false,
+    codingAgentProvider: "claude-code-cli",
+    codingAgentModel: null,
+    codingAgentPermissionMode: "acceptEdits",
+    codingAgentWorkdir: null,
+    codingAgentVoiceHotkey: { primary: "LeftControl", modifiers: [] },
+    codingAgentPanelHotkey: { primary: "Enter", modifiers: ["cmd", "shift"] },
+    codingAgentQuickHotkey: null,
     localAsrActiveModel: "qwen3-asr-0.6b",
     localAsrMirror: "huggingface",
     localAsrKeepLoadedSecs: 300,
@@ -1073,6 +1082,33 @@ export function qaWindowPin(pinned: boolean): Promise<void> {
     return invokeOrMock("qa_window_pin", { pinned }, () => undefined)
 }
 
+// ── Less Computer 浮窗 ────────────────────────────────────────────────
+/** 用户点 ✕ / 按 Esc 关闭 Less Computer 浮窗（隐藏窗口）。 */
+export function lessComputerWindowDismiss(): Promise<void> {
+    return invokeOrMock("less_computer_window_dismiss", undefined, () => undefined)
+}
+
+/** 内联审批卡的 Approve / Deny 回执。token 关联到等待中的拦截动作。 */
+export function lessComputerApprove(
+    token: string,
+    approved: boolean,
+): Promise<void> {
+    return invokeOrMock(
+        "less_computer_approve",
+        { token, approved },
+        () => undefined,
+    )
+}
+
+/** 前端按内容测高后回传，后端 clamp + bottom-anchored 重新摆放浮窗。 */
+export function lessComputerWindowResize(height: number): Promise<void> {
+    return invokeOrMock(
+        "less_computer_window_resize",
+        { height },
+        () => undefined,
+    )
+}
+
 // ── Combo Hotkey (自定义录音组合键) ───────────────────────────────────
 export function validateComboHotkey(binding: ComboBinding): Promise<void> {
     return invokeOrMock("validate_combo_hotkey", { binding }, () => undefined)
@@ -1151,6 +1187,75 @@ export async function exportErrorLog(
 }
 
 export { isTauri }
+
+// ── Coding Agent / Claude 控制台 ───────────────────────────────────────
+export type { CodingAgentPermissionMode }
+
+export type McpHealth = "connected" | "failed" | "needs_auth" | "unknown"
+
+export interface McpServerStatus {
+    name: string
+    detail: string
+    health: McpHealth
+}
+
+export interface ClaudeDetection {
+    installed: boolean
+    version: string | null
+    exe: string
+    mcpServers: McpServerStatus[]
+    hasComputerUse: boolean
+}
+
+/** 无头 Claude 运行事件，由后端 `coding-agent:test` 流式推送（tag 为 `kind`）。 */
+export type CodingAgentEvent =
+    | { kind: "started"; session_id: string }
+    | { kind: "delta"; session_id: string; text: string }
+    | { kind: "tool_use"; session_id: string; name: string }
+    | {
+          kind: "completed"
+          session_id: string
+          text: string
+          cost_usd: number | null
+          duration_ms: number | null
+      }
+    | { kind: "cancelled"; session_id: string }
+    | { kind: "error"; session_id: string; message: string }
+
+export function codingAgentDetect(exe?: string): Promise<ClaudeDetection> {
+    return invokeOrMock(
+        "coding_agent_detect",
+        { exe },
+        () => ({
+            installed: false,
+            version: null,
+            exe: exe || "claude",
+            mcpServers: [],
+            hasComputerUse: false,
+        }),
+    )
+}
+
+export interface CodingAgentRunTestArgs {
+    prompt: string
+    exe?: string
+    permissionMode?: CodingAgentPermissionMode
+    workdir?: string
+    model?: string
+    maxBudgetUsd?: number
+}
+
+export function codingAgentRunTest(args: CodingAgentRunTestArgs): Promise<void> {
+    return invokeOrMock("coding_agent_run_test", { ...args }, () => undefined)
+}
+
+export function codingAgentCancelTest(): Promise<void> {
+    return invokeOrMock("coding_agent_cancel_test", undefined, () => undefined)
+}
+
+export function codingAgentCommandRisk(command: string): Promise<string | null> {
+    return invokeOrMock("coding_agent_command_risk", { command }, () => null)
+}
 
 // ── Marketplace (Phase A) ─────────────────────────────────────────────
 // 5 个 IPC wrapper —— marketplace-backend HTTP 通过 Rust IPC 转发。Mock fallback

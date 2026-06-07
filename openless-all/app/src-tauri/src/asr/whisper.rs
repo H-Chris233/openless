@@ -260,9 +260,8 @@ fn extract_confident_text(json: &serde_json::Value) -> String {
             .and_then(|v| v.as_f64())
             .unwrap_or(1.0);
 
-        let is_hallucination = (no_speech > 0.6 && avg_logprob < -0.5)
-            || compression > 2.4
-            || avg_logprob < -1.0;
+        let is_hallucination =
+            (no_speech > 0.6 && avg_logprob < -0.5) || compression > 2.4 || avg_logprob < -1.0;
         if is_hallucination {
             log::warn!(
                 "[whisper] 丢弃疑似幻听段落: no_speech={:.2} avg_logprob={:.2} compression={:.2} text={:?}",

@@ -11,7 +11,10 @@ import { PermissionsSection } from './PermissionsSection';
 import { DataStorageSection } from './DataStorageSection';
 import { LocalModelSection } from './LocalModelSection';
 import { DebugToolsSection } from './DebugToolsSection';
+import { CodingAgentSection } from './CodingAgentSection';
+import { ClaudeConsoleSection } from './ClaudeConsoleSection';
 import { BetaChannelSection } from './BetaChannelSection';
+import { detectOS } from '../../components/WindowChrome';
 
 // 通用：录音与输入 · 快捷键 · 语言。
 export function GeneralTab() {
@@ -68,10 +71,13 @@ export function PrivacyTab() {
 
 // 高级：本地模型 · 调试工具 · 加入 Beta 渠道（固定在最下面）。
 export function AdvancedTab() {
+  const os = detectOS();
   return (
     <>
       <LocalModelSection />
       <DebugToolsSection />
+      {os !== 'win' && <CodingAgentSection />}
+      {os !== 'win' && <ClaudeConsoleSection />}
       <BetaChannelSection />
     </>
   );

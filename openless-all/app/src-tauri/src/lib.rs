@@ -1,4 +1,7 @@
-#![cfg_attr(target_os = "linux", allow(dead_code, unused_imports, unused_variables))]
+#![cfg_attr(
+    target_os = "linux",
+    allow(dead_code, unused_imports, unused_variables)
+)]
 //! OpenLess Tauri backend.
 //!
 //! Modules mirror the original Swift libraries (one purpose per file):
@@ -14,6 +17,7 @@
 mod asr;
 mod audio_mute;
 mod cli;
+mod coding_agent;
 mod combo_hotkey;
 mod commands;
 mod coordinator;
@@ -162,6 +166,13 @@ pub fn run() {
                 let _ = qa.hide();
             } else {
                 log::info!("[qa] qa 窗口未在 tauri.conf.json 中声明，前端 agent 会补上");
+            }
+
+            // Less Computer 语音 Agent 浮窗（macOS only）。启动时隐藏；coordinator
+            // 在 Less Computer 会话开始时再 show + 定位。非 macOS 上该窗口虽在
+            // tauri.conf.json 声明，但前端不渲染入口、后端不 emit，保持隐藏惰性。
+            if let Some(lc) = app.get_webview_window("less-computer") {
+                let _ = lc.hide();
             }
 
             // 主窗口磨砂：macOS 用 NSVisualEffectView，Windows 用 Mica。
@@ -377,6 +388,10 @@ pub fn run() {
             commands::start_dictation,
             commands::stop_dictation,
             commands::cancel_dictation,
+            coding_agent::commands::coding_agent_detect,
+            coding_agent::commands::coding_agent_run_test,
+            coding_agent::commands::coding_agent_cancel_test,
+            coding_agent::commands::coding_agent_command_risk,
             commands::handle_window_hotkey_event,
             #[cfg(debug_assertions)]
             commands::inject_hotkey_click_for_dev,
@@ -411,6 +426,9 @@ pub fn run() {
             commands::set_open_app_hotkey,
             commands::qa_window_dismiss,
             commands::qa_window_pin,
+            commands::less_computer_window_dismiss,
+            commands::less_computer_window_resize,
+            commands::less_computer_approve,
             commands::validate_combo_hotkey,
             commands::set_combo_hotkey,
             commands::validate_provider_credentials,
@@ -480,6 +498,8 @@ pub fn run() {
                 let coordinator = app.state::<Arc<coordinator::Coordinator>>();
                 // 同步启动 QA hotkey listener。和 dictation hotkey 平行，互不抢状态。
                 coordinator.start_qa_hotkey_listener();
+                // 启动「快速 Agent」双热键监听（功能默认关闭，启用后才注册）。
+                coordinator.start_coding_agent_hotkey_listener();
                 // 启动自定义组合键监听器。当 trigger == Custom 时替代 modifier-only 监听器。
                 coordinator.start_combo_hotkey_listener();
                 coordinator.start_translation_hotkey_listener();
@@ -501,6 +521,7 @@ pub fn run() {
                 let coordinator = app.state::<Arc<coordinator::Coordinator>>();
                 coordinator.stop_hotkey_listener();
                 coordinator.stop_qa_hotkey_listener();
+                coordinator.stop_coding_agent_hotkey_listener();
                 coordinator.stop_combo_hotkey_listener();
                 coordinator.stop_translation_hotkey_listener();
                 coordinator.stop_switch_style_hotkey_listener();
@@ -854,9 +875,7 @@ fn reset_tcc_service_for_beta_restart(service: &str) {
             log::info!("[updater] reset TCC {service} before beta restart");
         }
         Ok(status) => {
-            log::warn!(
-                "[updater] reset TCC {service} before beta restart exited with {status}"
-            );
+            log::warn!("[updater] reset TCC {service} before beta restart exited with {status}");
         }
         Err(e) => {
             log::warn!("[updater] reset TCC {service} before beta restart failed: {e}");
@@ -1141,6 +1160,53 @@ const QA_WINDOW_GAP_TO_CAPSULE: f64 = 8.0;
 /// 给 macOS Dock 留的下边距（与 capsule 同源）。
 const DOCK_BOTTOM_PADDING_FOR_QA: f64 = 80.0;
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct LogicalMonitorFrame {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+fn logical_monitor_frame(
+    physical_x: i32,
+    physical_y: i32,
+    physical_width: u32,
+    physical_height: u32,
+    scale: f64,
+) -> LogicalMonitorFrame {
+    let scale = scale.max(0.1);
+    LogicalMonitorFrame {
+        x: physical_x as f64 / scale,
+        y: physical_y as f64 / scale,
+        width: physical_width as f64 / scale,
+        height: physical_height as f64 / scale,
+    }
+}
+
+fn bottom_center_position(
+    frame: LogicalMonitorFrame,
+    window_width: f64,
+    window_height: f64,
+    bottom_offset: f64,
+) -> (f64, f64) {
+    let x = frame.x + ((frame.width - window_width) / 2.0).max(0.0);
+    let y = frame.y + (frame.height - bottom_offset - window_height).max(0.0);
+    (x, y)
+}
+
+fn bottom_visual_position(
+    frame: LogicalMonitorFrame,
+    window_width: f64,
+    visual_height: f64,
+    bottom_padding: f64,
+    bottom_inset: f64,
+) -> (f64, f64) {
+    let x = frame.x + ((frame.width - window_width) / 2.0).max(0.0);
+    let y = frame.y + (frame.height - visual_height - bottom_padding - bottom_inset).max(0.0);
+    (x, y)
+}
+
 /// 把 QA 浮窗放到屏幕底部居中、紧贴胶囊上方。tauri 启动期 + show 之前都会调一次，
 /// 防止用户切换显示器后位置错乱。
 fn position_qa_window<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) -> tauri::Result<()> {
@@ -1150,16 +1216,15 @@ fn position_qa_window<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) -> ta
     };
     let scale = monitor.scale_factor();
     let size = monitor.size();
-    let logical_w = size.width as f64 / scale;
-    let logical_h = size.height as f64 / scale;
+    let pos = monitor.position();
+    let frame = logical_monitor_frame(pos.x, pos.y, size.width, size.height, scale);
     let capsule_height = capsule_height_for_qa();
-    let x = ((logical_w - QA_WINDOW_WIDTH) / 2.0).max(0.0);
-    let y = (logical_h
-        - DOCK_BOTTOM_PADDING_FOR_QA
-        - capsule_height
-        - QA_WINDOW_GAP_TO_CAPSULE
-        - QA_WINDOW_HEIGHT)
-        .max(0.0);
+    let (x, y) = bottom_center_position(
+        frame,
+        QA_WINDOW_WIDTH,
+        QA_WINDOW_HEIGHT,
+        DOCK_BOTTOM_PADDING_FOR_QA + capsule_height + QA_WINDOW_GAP_TO_CAPSULE,
+    );
     window.set_size(tauri::LogicalSize::new(QA_WINDOW_WIDTH, QA_WINDOW_HEIGHT))?;
     window.set_position(LogicalPosition::new(x, y))?;
     Ok(())
@@ -1267,6 +1332,214 @@ pub(crate) fn hide_qa_window<R: tauri::Runtime>(app: &AppHandle<R>) {
     }
 }
 
+// ───────────────────────── Less Computer 浮窗 ─────────────────────────
+//
+// Less Computer 语音 Agent 的聊天浮窗（窗口 label = "less-computer"）。
+// 仅 macOS：和 coordinator / 前端对 Less Computer 的 gating 一致（Windows/Linux
+// 不注册热键、前端 detectOS 不渲染入口），所以这些窗口操作全部 `#[cfg(macos)]`，
+// 其它平台是 no-op，避免在非目标平台动 NSWindow / 弹一个空浮窗。
+
+/// Less Computer 浮窗宽度（高度由前端按内容自适应，经 `less_computer_window_resize`
+/// 回传，Rust 端按 bottom-anchored 重新摆放，让内容增长向上撑开）。
+#[cfg(target_os = "macos")]
+const LESS_COMPUTER_WINDOW_WIDTH: f64 = 400.0;
+#[cfg(target_os = "macos")]
+const LESS_COMPUTER_WINDOW_MIN_HEIGHT: f64 = 120.0;
+#[cfg(target_os = "macos")]
+const LESS_COMPUTER_WINDOW_MAX_HEIGHT: f64 = 520.0;
+
+/// 把 Less Computer 浮窗按给定高度（clamp 到 [min,max]）摆到屏幕底部居中、
+/// 紧贴胶囊上方。bottom 对齐胶囊顶部，所以高度变化时窗口向上生长。
+#[cfg(target_os = "macos")]
+fn position_less_computer_window<R: tauri::Runtime>(
+    window: &tauri::WebviewWindow<R>,
+    height: f64,
+) -> tauri::Result<()> {
+    let monitor = match window.current_monitor()? {
+        Some(m) => m,
+        None => return Ok(()),
+    };
+    let scale = monitor.scale_factor();
+    let size = monitor.size();
+    let pos = monitor.position();
+    let frame = logical_monitor_frame(pos.x, pos.y, size.width, size.height, scale);
+    let height = height.clamp(
+        LESS_COMPUTER_WINDOW_MIN_HEIGHT,
+        LESS_COMPUTER_WINDOW_MAX_HEIGHT,
+    );
+    let capsule_height = capsule_height_for_qa();
+    let (x, y) = bottom_center_position(
+        frame,
+        LESS_COMPUTER_WINDOW_WIDTH,
+        height,
+        DOCK_BOTTOM_PADDING_FOR_QA + capsule_height + QA_WINDOW_GAP_TO_CAPSULE,
+    );
+    window.set_size(tauri::LogicalSize::new(LESS_COMPUTER_WINDOW_WIDTH, height))?;
+    window.set_position(LogicalPosition::new(x, y))?;
+    Ok(())
+}
+
+/// 显示 Less Computer 浮窗（不抢前台 app 焦点，与 QA 同手法）。`macos` 专用。
+#[cfg(target_os = "macos")]
+pub(crate) fn show_less_computer_window<R: tauri::Runtime>(app: &AppHandle<R>) {
+    let Some(window) = app.get_webview_window("less-computer") else {
+        log::info!("[less-computer] show 跳过：窗口不存在");
+        return;
+    };
+    if let Err(e) = position_less_computer_window(&window, LESS_COMPUTER_WINDOW_MIN_HEIGHT) {
+        log::warn!("[less-computer] position before show failed: {e}");
+    }
+    let window_clone = window.clone();
+    let _ = app.run_on_main_thread(move || {
+        use objc2::msg_send;
+        use objc2::runtime::AnyObject;
+        match window_clone.ns_window() {
+            Ok(handle) => {
+                let ns = handle as *mut AnyObject;
+                if ns.is_null() {
+                    log::warn!("[less-computer] ns_window null; falling back to window.show()");
+                    let _ = window_clone.show();
+                } else {
+                    unsafe {
+                        let _: () = msg_send![ns, orderFrontRegardless];
+                    }
+                }
+            }
+            Err(e) => {
+                log::warn!("[less-computer] ns_window unavailable: {e}; falling back to show()");
+                let _ = window_clone.show();
+            }
+        }
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn show_less_computer_window<R: tauri::Runtime>(_app: &AppHandle<R>) {}
+
+/// 隐藏 Less Computer 浮窗。供 dismiss 命令 / session 收尾共用。
+#[cfg(target_os = "macos")]
+pub(crate) fn hide_less_computer_window<R: tauri::Runtime>(app: &AppHandle<R>) {
+    if let Some(window) = app.get_webview_window("less-computer") {
+        let _ = window.hide();
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn hide_less_computer_window<R: tauri::Runtime>(_app: &AppHandle<R>) {}
+
+/// 显示全屏彩虹描边浮层：盖满当前显示器、点击穿透、置顶。Agent 工作时点亮整屏边缘。
+#[cfg(target_os = "macos")]
+pub(crate) fn show_less_computer_glow<R: tauri::Runtime>(app: &AppHandle<R>) {
+    let Some(window) = app.get_webview_window("less-computer-glow") else {
+        return;
+    };
+    // 盖满当前（否则主）显示器，含菜单栏/Dock 区域。关键：用「逻辑坐标」(物理/缩放) ——
+    // Retina 上 monitor.size() 是物理像素(2x)，直接 set_size 会把窗口铺成两倍、错位、不贴边。
+    let monitor = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| app.primary_monitor().ok().flatten());
+    if let Some(monitor) = monitor {
+        let scale = monitor.scale_factor();
+        let size = monitor.size();
+        let pos = monitor.position();
+        let _ = window.set_position(tauri::LogicalPosition::new(
+            pos.x as f64 / scale,
+            pos.y as f64 / scale,
+        ));
+        let _ = window.set_size(tauri::LogicalSize::new(
+            size.width as f64 / scale,
+            size.height as f64 / scale,
+        ));
+    }
+    // 点击穿透：纯视觉浮层，绝不拦截鼠标。
+    let _ = window.set_ignore_cursor_events(true);
+    let window_clone = window.clone();
+    let _ = app.run_on_main_thread(move || {
+        use objc2::msg_send;
+        use objc2::runtime::AnyObject;
+        match window_clone.ns_window() {
+            Ok(handle) => {
+                let ns = handle as *mut AnyObject;
+                if ns.is_null() {
+                    let _ = window_clone.show();
+                } else {
+                    unsafe {
+                        // 抬到菜单栏(24)/Dock 之上，让描边能真正贴到屏幕最外缘（含顶部菜单栏区域）。
+                        let _: () = msg_send![ns, setLevel: 25i64];
+                        // 所有 Space 都显示、不参与窗口循环、全屏 app 上也叠加。
+                        let _: () = msg_send![ns, setCollectionBehavior: 273u64];
+                        let _: () = msg_send![ns, setIgnoresMouseEvents: true];
+                        let _: () = msg_send![ns, orderFrontRegardless];
+                    }
+                }
+            }
+            Err(_) => {
+                let _ = window_clone.show();
+            }
+        }
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn show_less_computer_glow<R: tauri::Runtime>(_app: &AppHandle<R>) {}
+
+/// 隐藏全屏彩虹描边浮层。
+#[cfg(target_os = "macos")]
+pub(crate) fn hide_less_computer_glow<R: tauri::Runtime>(app: &AppHandle<R>) {
+    if let Some(window) = app.get_webview_window("less-computer-glow") {
+        let _ = window.hide();
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn hide_less_computer_glow<R: tauri::Runtime>(_app: &AppHandle<R>) {}
+
+/// 前端按内容测高后回传。以「当前窗口底边」为锚向上生长——只改高度、保住用户拖动后的位置，
+/// 不再重新居中（否则一改内容就把拖走的框拉回屏幕底部中间）。`macos` 专用。
+#[cfg(target_os = "macos")]
+pub(crate) fn resize_less_computer_window<R: tauri::Runtime>(app: &AppHandle<R>, height: f64) {
+    let Some(window) = app.get_webview_window("less-computer") else {
+        return;
+    };
+    let height = height.clamp(
+        LESS_COMPUTER_WINDOW_MIN_HEIGHT,
+        LESS_COMPUTER_WINDOW_MAX_HEIGHT,
+    );
+    let scale = window.scale_factor().unwrap_or(1.0);
+    match (window.outer_position(), window.outer_size()) {
+        (Ok(pos), Ok(size)) => {
+            let x = pos.x as f64 / scale;
+            let cur_top = pos.y as f64 / scale;
+            let cur_h = size.height as f64 / scale;
+            let bottom = cur_top + cur_h;
+            let monitor_top = window
+                .current_monitor()
+                .ok()
+                .flatten()
+                .map(|m| {
+                    let p = m.position();
+                    let s = m.size();
+                    logical_monitor_frame(p.x, p.y, s.width, s.height, m.scale_factor()).y
+                })
+                .unwrap_or(f64::NEG_INFINITY);
+            let new_y = (bottom - height).max(monitor_top);
+            let _ = window.set_size(tauri::LogicalSize::new(LESS_COMPUTER_WINDOW_WIDTH, height));
+            let _ = window.set_position(tauri::LogicalPosition::new(x, new_y));
+        }
+        // 拿不到当前位置（极少见）→ 退回首屏居中摆放。
+        _ => {
+            if let Err(e) = position_less_computer_window(&window, height) {
+                log::warn!("[less-computer] resize fallback failed: {e}");
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn resize_less_computer_window<R: tauri::Runtime>(_app: &AppHandle<R>, _height: f64) {}
+
 /// 抓完选区后把焦点重新交回 QA 浮窗（Windows focus-dance 下半场）。begin_qa_session
 /// 在 capture_selection 跑完时调；非 Windows 平台是 no-op。issue #466。
 #[cfg(target_os = "windows")]
@@ -1367,7 +1640,10 @@ pub(crate) fn position_capsule_bottom_center<R: tauri::Runtime>(
             let scale = mon.scale;
             let phys_w = (bounds.width * scale).round() as i32;
             let phys_h = (bounds.height * scale).round() as i32;
-            window.set_size(PhysicalSize::new(phys_w.max(1) as u32, phys_h.max(1) as u32))?;
+            window.set_size(PhysicalSize::new(
+                phys_w.max(1) as u32,
+                phys_h.max(1) as u32,
+            ))?;
 
             let mon_w = mon.right - mon.left;
             let x = mon.left + ((mon_w - phys_w) / 2).max(0);
@@ -1397,11 +1673,15 @@ pub(crate) fn position_capsule_bottom_center<R: tauri::Runtime>(
 
     let scale = monitor.scale_factor();
     let size = monitor.size();
-    let logical_w = size.width as f64 / scale;
-    let logical_h = size.height as f64 / scale;
-    let x = ((logical_w - bounds.width) / 2.0).max(0.0);
-    let y = (logical_h - capsule_visual_height(translation_active) - 80.0 - bounds.bottom_inset)
-        .max(0.0);
+    let pos = monitor.position();
+    let frame = logical_monitor_frame(pos.x, pos.y, size.width, size.height, scale);
+    let (x, y) = bottom_visual_position(
+        frame,
+        bounds.width,
+        capsule_visual_height(translation_active),
+        80.0,
+        bounds.bottom_inset,
+    );
     window.set_position(LogicalPosition::new(x, y))?;
     Ok(())
 }
@@ -1459,9 +1739,10 @@ fn capsule_height_for_qa() -> f64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        capsule_height_for_qa, capsule_visual_height, capsule_window_bounds,
+        bottom_center_position, bottom_visual_position, capsule_height_for_qa,
+        capsule_visual_height, capsule_window_bounds, logical_monitor_frame,
         parse_tray_polish_mode_id, rotate_log_if_too_large, tray_polish_mode_menu_entries,
-        tray_style_menu_enabled, LOG_ROTATE_LIMIT_BYTES,
+        tray_style_menu_enabled, LogicalMonitorFrame, LOG_ROTATE_LIMIT_BYTES,
     };
     use crate::types::PolishMode;
     use std::io::Write;
@@ -1563,6 +1844,49 @@ mod tests {
 
         #[cfg(not(target_os = "windows"))]
         assert_eq!(capsule_height_for_qa(), 96.0);
+    }
+
+    #[test]
+    fn logical_monitor_frame_preserves_negative_origin() {
+        let frame = logical_monitor_frame(-2560, 720, 5120, 2880, 2.0);
+
+        assert_eq!(
+            frame,
+            LogicalMonitorFrame {
+                x: -1280.0,
+                y: 360.0,
+                width: 2560.0,
+                height: 1440.0,
+            }
+        );
+    }
+
+    #[test]
+    fn bottom_center_position_keeps_window_on_left_monitor() {
+        let frame = LogicalMonitorFrame {
+            x: -1440.0,
+            y: 0.0,
+            width: 1440.0,
+            height: 900.0,
+        };
+
+        let pos = bottom_center_position(frame, 380.0, 440.0, 184.0);
+
+        assert_eq!(pos, (-910.0, 276.0));
+    }
+
+    #[test]
+    fn bottom_visual_position_keeps_capsule_on_upper_monitor() {
+        let frame = LogicalMonitorFrame {
+            x: 0.0,
+            y: -900.0,
+            width: 1440.0,
+            height: 900.0,
+        };
+
+        let pos = bottom_visual_position(frame, 220.0, 96.0, 80.0, 0.0);
+
+        assert_eq!(pos, (610.0, -176.0));
     }
 
     #[test]

@@ -86,6 +86,7 @@ trait SettingsWriter {
     fn refresh_translation_hotkey(&self);
     fn refresh_switch_style_hotkey(&self);
     fn refresh_open_app_hotkey(&self);
+    fn refresh_coding_agent_hotkey(&self);
 }
 
 impl SettingsWriter for Coordinator {
@@ -123,6 +124,10 @@ impl SettingsWriter for Coordinator {
 
     fn refresh_open_app_hotkey(&self) {
         self.update_open_app_hotkey_binding();
+    }
+
+    fn refresh_coding_agent_hotkey(&self) {
+        self.update_coding_agent_hotkey_binding();
     }
 }
 
@@ -162,6 +167,10 @@ impl<T: SettingsWriter + ?Sized> SettingsWriter for Arc<T> {
     fn refresh_open_app_hotkey(&self) {
         (**self).refresh_open_app_hotkey();
     }
+
+    fn refresh_coding_agent_hotkey(&self) {
+        (**self).refresh_coding_agent_hotkey();
+    }
 }
 
 fn persist_settings<T: SettingsWriter>(
@@ -178,6 +187,8 @@ fn persist_settings<T: SettingsWriter>(
     let translation_changed = previous.translation_hotkey != prefs.translation_hotkey;
     let switch_style_changed = previous.switch_style_hotkey != prefs.switch_style_hotkey;
     let open_app_changed = previous.open_app_hotkey != prefs.open_app_hotkey;
+    let coding_agent_changed = previous.coding_agent_enabled != prefs.coding_agent_enabled
+        || previous.coding_agent_voice_hotkey != prefs.coding_agent_voice_hotkey;
     let active_asr_provider_changed = previous.active_asr_provider != prefs.active_asr_provider;
     let active_asr_provider = prefs.active_asr_provider.clone();
     if active_asr_provider_changed {
@@ -217,6 +228,9 @@ fn persist_settings<T: SettingsWriter>(
     }
     if open_app_changed {
         coord.refresh_open_app_hotkey();
+    }
+    if coding_agent_changed {
+        coord.refresh_coding_agent_hotkey();
     }
     Ok(())
 }
@@ -536,10 +550,8 @@ async fn resolve_beta_manifest_endpoints() -> Result<Vec<url::Url>, String> {
     let direct = format!(
         "https://github.com/appergb/openless/releases/download/{tag}/latest-{{{{target}}}}-{{{{arch}}}}-beta.json"
     );
-    let mirror_url =
-        url::Url::parse(&mirror).map_err(|e| format!("parse beta mirror url: {e}"))?;
-    let direct_url =
-        url::Url::parse(&direct).map_err(|e| format!("parse beta direct url: {e}"))?;
+    let mirror_url = url::Url::parse(&mirror).map_err(|e| format!("parse beta mirror url: {e}"))?;
+    let direct_url = url::Url::parse(&direct).map_err(|e| format!("parse beta direct url: {e}"))?;
     Ok(vec![mirror_url, direct_url])
 }
 
@@ -1445,7 +1457,8 @@ fn is_valid_local_pack_id(s: &str) -> bool {
     if s.is_empty() || s.len() > 128 {
         return false;
     }
-    s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b'_')
+    s.bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b'_')
 }
 
 // ─────────────────────────── vocab ───────────────────────────
@@ -1939,6 +1952,24 @@ pub fn qa_window_pin(coord: CoordinatorState<'_>, pinned: bool) {
     coord.qa_window_pin(pinned);
 }
 
+/// 用户点 ✕ / 按 Esc 关 Less Computer 浮窗。
+#[tauri::command]
+pub fn less_computer_window_dismiss(coord: CoordinatorState<'_>) {
+    coord.less_computer_window_dismiss();
+}
+
+/// 前端按内容测高后回传高度，后端 clamp + bottom-anchored 重新摆放浮窗。
+#[tauri::command]
+pub fn less_computer_window_resize(coord: CoordinatorState<'_>, height: f64) {
+    coord.less_computer_window_resize(height);
+}
+
+/// 内联审批卡的 Approve / Deny 回执。token 关联到等待中的拦截动作。
+#[tauri::command]
+pub fn less_computer_approve(coord: CoordinatorState<'_>, token: String, approved: bool) {
+    coord.less_computer_approve(&token, approved);
+}
+
 // ─────────────────────────── 自定义组合键 ───────────────────────────
 
 /// 测试一个组合键是否可以注册（验证格式，不实际注册）。
@@ -2157,9 +2188,13 @@ fn reject_hotkey_collisions(prefs: &UserPreferences) -> Result<(), String> {
     // 停用（None）的 action 快捷键不参与任何冲突检测。
     let switch_style = prefs.switch_style_hotkey.as_ref();
     let open_app = prefs.open_app_hotkey.as_ref();
+    let less_computer = prefs.coding_agent_voice_hotkey.as_ref();
     if let Some(qa_hotkey) = prefs.qa_hotkey.as_ref() {
         reject_dictation_qa_hotkey_overlap(&prefs.dictation_hotkey, qa_hotkey)?;
         reject_qa_translation_hotkey_overlap(qa_hotkey, &prefs.translation_hotkey)?;
+        if let Some(less_computer) = less_computer {
+            reject_qa_less_computer_hotkey_overlap(qa_hotkey, less_computer)?;
+        }
         if let Some(switch_style) = switch_style {
             reject_qa_switch_style_hotkey_overlap(qa_hotkey, switch_style)?;
         }
@@ -2171,13 +2206,23 @@ fn reject_hotkey_collisions(prefs: &UserPreferences) -> Result<(), String> {
         &prefs.dictation_hotkey,
         &prefs.translation_hotkey,
     )?;
+    if let Some(less_computer) = less_computer {
+        reject_dictation_less_computer_hotkey_overlap(&prefs.dictation_hotkey, less_computer)?;
+        reject_translation_less_computer_hotkey_overlap(&prefs.translation_hotkey, less_computer)?;
+    }
     if let Some(switch_style) = switch_style {
         reject_dictation_switch_style_hotkey_overlap(&prefs.dictation_hotkey, switch_style)?;
         reject_translation_switch_style_hotkey_overlap(&prefs.translation_hotkey, switch_style)?;
+        if let Some(less_computer) = less_computer {
+            reject_less_computer_switch_style_hotkey_overlap(less_computer, switch_style)?;
+        }
     }
     if let Some(open_app) = open_app {
         reject_dictation_open_app_hotkey_overlap(&prefs.dictation_hotkey, open_app)?;
         reject_translation_open_app_hotkey_overlap(&prefs.translation_hotkey, open_app)?;
+        if let Some(less_computer) = less_computer {
+            reject_less_computer_open_app_hotkey_overlap(less_computer, open_app)?;
+        }
     }
     if let (Some(switch_style), Some(open_app)) = (switch_style, open_app) {
         reject_switch_style_open_app_hotkey_overlap(switch_style, open_app)?;
@@ -2210,6 +2255,17 @@ fn reject_dictation_open_app_hotkey_overlap(
     reject_hotkey_overlap(dictation, open_app, "打开应用快捷键不能和听写快捷键相同")
 }
 
+fn reject_dictation_less_computer_hotkey_overlap(
+    dictation: &ShortcutBinding,
+    less_computer: &ShortcutBinding,
+) -> Result<(), String> {
+    reject_hotkey_overlap(
+        dictation,
+        less_computer,
+        "Less Computer 快捷键不能和听写快捷键相同",
+    )
+}
+
 fn reject_qa_translation_hotkey_overlap(
     qa: &ShortcutBinding,
     translation: &ShortcutBinding,
@@ -2231,6 +2287,17 @@ fn reject_qa_open_app_hotkey_overlap(
     reject_hotkey_overlap(qa, open_app, "打开应用快捷键不能和 QA 快捷键相同")
 }
 
+fn reject_qa_less_computer_hotkey_overlap(
+    qa: &ShortcutBinding,
+    less_computer: &ShortcutBinding,
+) -> Result<(), String> {
+    reject_hotkey_overlap(
+        qa,
+        less_computer,
+        "Less Computer 快捷键不能和 QA 快捷键相同",
+    )
+}
+
 fn reject_translation_switch_style_hotkey_overlap(
     translation: &ShortcutBinding,
     switch_style: &ShortcutBinding,
@@ -2249,6 +2316,17 @@ fn reject_translation_open_app_hotkey_overlap(
     reject_hotkey_overlap(translation, open_app, "打开应用快捷键不能和翻译快捷键相同")
 }
 
+fn reject_translation_less_computer_hotkey_overlap(
+    translation: &ShortcutBinding,
+    less_computer: &ShortcutBinding,
+) -> Result<(), String> {
+    reject_hotkey_overlap(
+        translation,
+        less_computer,
+        "Less Computer 快捷键不能和翻译快捷键相同",
+    )
+}
+
 fn reject_switch_style_open_app_hotkey_overlap(
     switch_style: &ShortcutBinding,
     open_app: &ShortcutBinding,
@@ -2257,6 +2335,28 @@ fn reject_switch_style_open_app_hotkey_overlap(
         switch_style,
         open_app,
         "打开应用快捷键不能和切换风格快捷键相同",
+    )
+}
+
+fn reject_less_computer_switch_style_hotkey_overlap(
+    less_computer: &ShortcutBinding,
+    switch_style: &ShortcutBinding,
+) -> Result<(), String> {
+    reject_hotkey_overlap(
+        less_computer,
+        switch_style,
+        "Less Computer 快捷键不能和切换风格快捷键相同",
+    )
+}
+
+fn reject_less_computer_open_app_hotkey_overlap(
+    less_computer: &ShortcutBinding,
+    open_app: &ShortcutBinding,
+) -> Result<(), String> {
+    reject_hotkey_overlap(
+        less_computer,
+        open_app,
+        "Less Computer 快捷键不能和打开应用快捷键相同",
     )
 }
 
@@ -3145,8 +3245,10 @@ pub async fn marketplace_list(
         let body = resp.text().await.unwrap_or_default();
         return Err(format!("marketplace HTTP {status}: {body}"));
     }
-    let items: Vec<MarketplaceListItem> =
-        resp.json().await.map_err(|e| format!("parse failed: {e}"))?;
+    let items: Vec<MarketplaceListItem> = resp
+        .json()
+        .await
+        .map_err(|e| format!("parse failed: {e}"))?;
     Ok(items)
 }
 
@@ -3473,11 +3575,13 @@ fn get_github_oauth_client_id() -> Result<String, String> {
     if !GITHUB_OAUTH_CLIENT_ID.is_empty() {
         return Ok(GITHUB_OAUTH_CLIENT_ID.to_string());
     }
-    Err("GitHub OAuth 未配置。请去 https://github.com/settings/applications/new 注册一个 OAuth App\
+    Err(
+        "GitHub OAuth 未配置。请去 https://github.com/settings/applications/new 注册一个 OAuth App\
         （必须勾 Enable Device Flow），把 client_id 填到 \
         openless-all/app/src-tauri/src/commands.rs 的 GITHUB_OAUTH_CLIENT_ID 常量，\
         或在启动前设置环境变量 GITHUB_OAUTH_CLIENT_ID=<your_client_id>。"
-        .to_string())
+            .to_string(),
+    )
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -3629,6 +3733,7 @@ mod tests {
         translation_refreshes: Mutex<u32>,
         switch_style_refreshes: Mutex<u32>,
         open_app_refreshes: Mutex<u32>,
+        coding_agent_refreshes: Mutex<u32>,
     }
 
     fn snapshot() -> CredentialsSnapshot {
@@ -3965,12 +4070,7 @@ mod tests {
             } {
                 return Err(error);
             }
-            if let Some(error) = self
-                .active_asr_provider_sync_error
-                .lock()
-                .unwrap()
-                .clone()
-            {
+            if let Some(error) = self.active_asr_provider_sync_error.lock().unwrap().clone() {
                 return Err(error);
             }
             Ok(())
@@ -3998,6 +4098,10 @@ mod tests {
 
         fn refresh_open_app_hotkey(&self) {
             *self.open_app_refreshes.lock().unwrap() += 1;
+        }
+
+        fn refresh_coding_agent_hotkey(&self) {
+            *self.coding_agent_refreshes.lock().unwrap() += 1;
         }
     }
 
@@ -4136,6 +4240,10 @@ mod tests {
                 primary: "O".to_string(),
                 modifiers: vec!["ctrl".to_string(), "alt".to_string()],
             }),
+            coding_agent_voice_hotkey: Some(ShortcutBinding {
+                primary: "RightControl".to_string(),
+                modifiers: vec![],
+            }),
             hotkey: HotkeyBinding {
                 trigger: HotkeyTrigger::Custom,
                 mode: HotkeyMode::Hold,
@@ -4165,6 +4273,27 @@ mod tests {
         assert_eq!(*writer.translation_refreshes.lock().unwrap(), 1);
         assert_eq!(*writer.switch_style_refreshes.lock().unwrap(), 1);
         assert_eq!(*writer.open_app_refreshes.lock().unwrap(), 1);
+        assert_eq!(*writer.coding_agent_refreshes.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn persist_settings_rejects_less_computer_dictation_overlap() {
+        let writer = FakeSettingsWriter::default();
+        let binding = ShortcutBinding {
+            primary: "LeftControl".into(),
+            modifiers: vec![],
+        };
+        let prefs = UserPreferences {
+            dictation_hotkey: binding.clone(),
+            coding_agent_voice_hotkey: Some(binding),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            persist_settings(&writer, prefs),
+            Err("Less Computer 快捷键不能和听写快捷键相同".into())
+        );
+        assert!(writer.saved.lock().unwrap().is_none());
     }
 
     #[test]
@@ -4204,6 +4333,7 @@ mod tests {
         assert_eq!(*writer.translation_refreshes.lock().unwrap(), 0);
         assert_eq!(*writer.switch_style_refreshes.lock().unwrap(), 0);
         assert_eq!(*writer.open_app_refreshes.lock().unwrap(), 0);
+        assert_eq!(*writer.coding_agent_refreshes.lock().unwrap(), 0);
     }
 
     #[test]
@@ -4234,7 +4364,10 @@ mod tests {
             .clone()
             .expect("previous settings remain saved");
         assert_eq!(saved.active_asr_provider, previous.active_asr_provider);
-        assert_eq!(saved.microphone_device_name, previous.microphone_device_name);
+        assert_eq!(
+            saved.microphone_device_name,
+            previous.microphone_device_name
+        );
         assert_eq!(
             writer.active_asr_provider_syncs.lock().unwrap().clone(),
             vec!["whisper".to_string()]
@@ -4245,6 +4378,7 @@ mod tests {
         assert_eq!(*writer.translation_refreshes.lock().unwrap(), 0);
         assert_eq!(*writer.switch_style_refreshes.lock().unwrap(), 0);
         assert_eq!(*writer.open_app_refreshes.lock().unwrap(), 0);
+        assert_eq!(*writer.coding_agent_refreshes.lock().unwrap(), 0);
     }
 
     #[test]
@@ -4275,13 +4409,13 @@ mod tests {
             .clone()
             .expect("previous settings remain saved");
         assert_eq!(saved.active_asr_provider, previous.active_asr_provider);
-        assert_eq!(saved.microphone_device_name, previous.microphone_device_name);
+        assert_eq!(
+            saved.microphone_device_name,
+            previous.microphone_device_name
+        );
         assert_eq!(
             writer.active_asr_provider_syncs.lock().unwrap().clone(),
-            vec![
-                "whisper".to_string(),
-                previous.active_asr_provider.clone()
-            ]
+            vec!["whisper".to_string(), previous.active_asr_provider.clone()]
         );
         assert_eq!(*writer.dictation_refreshes.lock().unwrap(), 0);
         assert_eq!(*writer.combo_refreshes.lock().unwrap(), 0);
@@ -4289,6 +4423,7 @@ mod tests {
         assert_eq!(*writer.translation_refreshes.lock().unwrap(), 0);
         assert_eq!(*writer.switch_style_refreshes.lock().unwrap(), 0);
         assert_eq!(*writer.open_app_refreshes.lock().unwrap(), 0);
+        assert_eq!(*writer.coding_agent_refreshes.lock().unwrap(), 0);
     }
 
     #[test]
@@ -4296,8 +4431,7 @@ mod tests {
         let writer = FakeSettingsWriter::default();
         let previous = UserPreferences::default();
         *writer.saved.lock().unwrap() = Some(previous.clone());
-        *writer.write_settings_errors.lock().unwrap() =
-            vec![Some("save failed".to_string()), None];
+        *writer.write_settings_errors.lock().unwrap() = vec![Some("save failed".to_string()), None];
         *writer.active_asr_provider_sync_errors.lock().unwrap() =
             vec![None, Some("rollback failed".to_string())];
         let prefs = UserPreferences {
@@ -4332,6 +4466,7 @@ mod tests {
         assert_eq!(*writer.translation_refreshes.lock().unwrap(), 0);
         assert_eq!(*writer.switch_style_refreshes.lock().unwrap(), 0);
         assert_eq!(*writer.open_app_refreshes.lock().unwrap(), 0);
+        assert_eq!(*writer.coding_agent_refreshes.lock().unwrap(), 0);
     }
 
     #[test]
@@ -4680,13 +4815,17 @@ mod tests {
         // 长度对但含 `/`：dash 位置错或非 hex 字符都不通过
         assert!(!is_valid_session_id("550e8400-e29b-41d4-a716-44665544/000"));
         assert!(!is_valid_session_id("550e8400_e29b_41d4_a716_446655440000")); // 用 _ 代 -
-        // 非 hex 字符
+                                                                               // 非 hex 字符
         assert!(!is_valid_session_id("550e8400-e29b-41d4-a716-44665544000g"));
         // 长度不对（35 / 37）
         assert!(!is_valid_session_id("550e8400-e29b-41d4-a716-44665544000"));
-        assert!(!is_valid_session_id("550e8400-e29b-41d4-a716-4466554400000"));
+        assert!(!is_valid_session_id(
+            "550e8400-e29b-41d4-a716-4466554400000"
+        ));
         // NUL 字节
-        assert!(!is_valid_session_id("550e8400-e29b-41d4-a716-44665544\x00000"));
+        assert!(!is_valid_session_id(
+            "550e8400-e29b-41d4-a716-44665544\x00000"
+        ));
         // 百分号编码与绝对路径
         assert!(!is_valid_session_id("%2e%2e/recordings/x"));
         assert!(!is_valid_session_id("/Users/attacker/secret.wav"));
@@ -4697,7 +4836,9 @@ mod tests {
         assert!(is_valid_local_pack_id("builtin.light"));
         assert!(is_valid_local_pack_id("builtin.structured"));
         assert!(is_valid_local_pack_id("custom.meeting"));
-        assert!(is_valid_local_pack_id("550e8400-e29b-41d4-a716-446655440000"));
+        assert!(is_valid_local_pack_id(
+            "550e8400-e29b-41d4-a716-446655440000"
+        ));
         assert!(is_valid_local_pack_id("my_pack_v2"));
         assert!(is_valid_local_pack_id("Pack-2026.05"));
     }
