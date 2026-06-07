@@ -16,6 +16,7 @@ import { ko } from './ko';
 import { zhCN } from './zh-CN';
 import { zhTW } from './zh-TW';
 import type { UserPreferences } from '../lib/types';
+import { setRemoteLocale } from '../lib/ipc';
 
 export const SUPPORTED_LOCALES = ['zh-CN', 'zh-TW', 'en', 'ja', 'ko'] as const;
 export type SupportedLocale = (typeof SUPPORTED_LOCALES)[number];
@@ -88,8 +89,17 @@ export async function setLocalePreference(
     window.localStorage.setItem(LOCALE_STORAGE_KEY, pref);
   }
   await i18n.changeLanguage(resolved);
+  syncRemoteLocale(resolved);
   return resolved;
 }
+
+// 远程输入 H5 录音页跟随 PC 界面语言：把已解析的 locale 推给后端（后端只存内存
+// 镜像，H5 请求首页时据此渲染）。非 Tauri（浏览器 dev）环境走 mock no-op，失败静默。
+function syncRemoteLocale(resolved: SupportedLocale): void {
+  void setRemoteLocale(resolved).catch(() => {});
+}
+// 启动时同步一次当前语言，覆盖“开机即自动开启远程服务”的场景。
+syncRemoteLocale(i18n.language as SupportedLocale);
 
 export const FOLLOW_SYSTEM = FOLLOW_SYSTEM_VALUE;
 

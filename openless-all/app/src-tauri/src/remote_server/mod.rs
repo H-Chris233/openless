@@ -24,7 +24,7 @@ use axum::{
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use parking_lot::Mutex;
 use serde::Serialize;
-use tauri::{AppHandle, Listener};
+use tauri::{AppHandle, Listener, Manager};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 
@@ -34,6 +34,7 @@ mod assets {
     pub const INDEX_HTML: &str = include_str!("assets/index.html");
     pub const APP_JS: &str = include_str!("assets/app.js");
     pub const STYLE_CSS: &str = include_str!("assets/style.css");
+    pub const ICON_PNG: &[u8] = include_bytes!("assets/icon.png");
 }
 
 const HEADER_HTML: &str = "text/html; charset=utf-8";
@@ -90,6 +91,39 @@ pub fn generate_pin() -> String {
     format!("{n:06}")
 }
 
+fn pin_path(app: &AppHandle) -> Option<std::path::PathBuf> {
+    app.path()
+        .app_config_dir()
+        .ok()
+        .map(|d| d.join("remote-input-pin.txt"))
+}
+
+/// 读持久化的配对码；没有 / 无效则新生成并写盘。让配对码跨重启稳定 —— 否则每次启动
+/// 都重新随机一个，用户得反复回来找新码（"配对码错误"的根因）。
+pub fn load_or_create_pin(app: &AppHandle) -> String {
+    if let Some(p) = pin_path(app) {
+        if let Ok(s) = std::fs::read_to_string(&p) {
+            let s = s.trim();
+            if s.len() == 6 && s.bytes().all(|b| b.is_ascii_digit()) {
+                return s.to_string();
+            }
+        }
+    }
+    let pin = generate_pin();
+    save_pin(app, &pin);
+    pin
+}
+
+/// 写配对码到磁盘（用户点"重置配对码"时覆盖）。
+pub fn save_pin(app: &AppHandle, pin: &str) {
+    if let Some(p) = pin_path(app) {
+        if let Some(dir) = p.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(&p, pin);
+    }
+}
+
 fn is_private_lan(ip: &Ipv4Addr) -> bool {
     let o = ip.octets();
     !ip.is_loopback()
@@ -126,23 +160,86 @@ pub fn access_urls(port: u16) -> Vec<String> {
 
 // ───────────────────────── TLS ─────────────────────────
 
-fn build_rustls_config() -> Result<Arc<rustls::ServerConfig>, String> {
-    let mut sans = vec!["localhost".to_string(), "127.0.0.1".to_string()];
-    for ip in local_lan_ipv4s() {
-        sans.push(ip.to_string());
+/// 自签名证书：持久化到磁盘并跨重启复用。否则每次启动证书都变 —— 手机（尤其 iOS
+/// Safari）上一次信任过的证书立刻失效，wss 握手静默挂起，表现为"连接中"卡死。仅当
+/// 磁盘无证书 / 解析失败 / 当前局域网 IP 不在已存 SAN 列表里（换了网络）时才重新生成。
+/// 返回 (证书 DER 原始字节, 私钥)。
+fn load_or_generate_cert(
+    dir: Option<&std::path::Path>,
+    sans: &[String],
+) -> Result<(Vec<u8>, rustls::pki_types::PrivateKeyDer<'static>), String> {
+    use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+    // 文件名带 schema 版本：证书结构变更（v4 改回非 CA 服务器证书）时旧文件自动失效、重新生成。
+    const CERT_FILE: &str = "remote-cert-v4.der";
+    const KEY_FILE: &str = "remote-key-v4.der";
+    const SANS_FILE: &str = "remote-cert-sans-v4.txt";
+    if let Some(dir) = dir {
+        if let (Ok(cert), Ok(key), Ok(saved)) = (
+            std::fs::read(dir.join(CERT_FILE)),
+            std::fs::read(dir.join(KEY_FILE)),
+            std::fs::read_to_string(dir.join(SANS_FILE)),
+        ) {
+            let saved_set: std::collections::HashSet<&str> = saved.lines().collect();
+            // 当前需要的 SAN 都在已存证书里 → 复用，证书保持稳定（手机信任一次长期有效）。
+            if sans.iter().all(|s| saved_set.contains(s.as_str())) {
+                log::info!("[remote-input] reusing persisted self-signed server cert");
+                return Ok((cert, PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key))));
+            }
+        }
     }
-    let certified =
-        rcgen::generate_simple_self_signed(sans).map_err(|e| format!("rcgen: {e}"))?;
-    let cert_der = certified.cert.der().clone();
-    let key_der = rustls::pki_types::PrivatePkcs8KeyDer::from(
-        certified.key_pair.serialize_der(),
-    );
+    // 生成自签名 CA 证书：iOS Safari / Android Chrome 的 wss 都不复用浏览器页面级的
+    // “继续访问”例外，必须把证书装进系统并信任 —— 而系统的信任开关只对 CA 证书出现。
+    // 所以做成自签名 CA（SAN 含本机各局域网 IP），用户在手机装一次并信任后 wss 才稳定。
+    let (cert_der, key_der) = {
+        use rcgen::{
+            CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, KeyPair,
+            KeyUsagePurpose,
+        };
+        let mut params =
+            CertificateParams::new(sans.to_vec()).map_err(|e| format!("rcgen params: {e}"))?;
+        // 关键：做成普通服务器证书（非 CA，rcgen 默认即 NoCa）。iOS Safari 用页面级
+        // “访问此网站”即可信任、无需安装证书 —— 这正是之前一直能用的方式。把证书做成 CA
+        // 反而会让 iOS 拒绝页面级例外（CA 不能直接当服务器证书），导致一直超时。
+        let mut dn = DistinguishedName::new();
+        dn.push(DnType::CommonName, "OpenLess Remote Input");
+        dn.push(DnType::OrganizationName, "OpenLess");
+        params.distinguished_name = dn;
+        params.key_usages.push(KeyUsagePurpose::DigitalSignature);
+        params
+            .extended_key_usages
+            .push(ExtendedKeyUsagePurpose::ServerAuth);
+        let key_pair = KeyPair::generate().map_err(|e| format!("rcgen keypair: {e}"))?;
+        let cert = params
+            .self_signed(&key_pair)
+            .map_err(|e| format!("rcgen self_signed: {e}"))?;
+        (cert.der().as_ref().to_vec(), key_pair.serialize_der())
+    };
+    if let Some(dir) = dir {
+        let _ = std::fs::create_dir_all(dir);
+        let _ = std::fs::write(dir.join(CERT_FILE), &cert_der);
+        let _ = std::fs::write(dir.join(KEY_FILE), &key_der);
+        let _ = std::fs::write(dir.join(SANS_FILE), sans.join("\n"));
+        log::info!("[remote-input] generated new self-signed server cert (SAN={sans:?})");
+    }
+    Ok((
+        cert_der,
+        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_der)),
+    ))
+}
+
+fn build_server_config(
+    cert_der: Vec<u8>,
+    key_der: rustls::pki_types::PrivateKeyDer<'static>,
+) -> Result<Arc<rustls::ServerConfig>, String> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let config = rustls::ServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .map_err(|e| format!("tls protocol: {e}"))?
         .with_no_client_auth()
-        .with_single_cert(vec![cert_der], key_der.into())
+        .with_single_cert(
+            vec![rustls::pki_types::CertificateDer::from(cert_der)],
+            key_der,
+        )
         .map_err(|e| format!("tls cert: {e}"))?;
     Ok(Arc::new(config))
 }
@@ -155,11 +252,13 @@ struct WsState {
     app: AppHandle,
     /// 全局 PIN 失败计数 + 锁定截止时刻（简单防爆破；TLS+6 位 PIN 已是主防线）。
     pin_fails: Mutex<(u32, Option<Instant>)>,
+    /// 自签名证书的 DER 原始字节，供 /cert.cer 下载给手机安装信任。
+    cert_der: Vec<u8>,
 }
 
 fn build_router(state: Arc<WsState>) -> Router {
     Router::new()
-        .route("/", get(|| async { Html(assets::INDEX_HTML) }))
+        .route("/", get(index_handler))
         .route(
             "/app.js",
             get(|| async { ([(axum::http::header::CONTENT_TYPE, HEADER_JS)], assets::APP_JS) }),
@@ -170,13 +269,89 @@ fn build_router(state: Arc<WsState>) -> Router {
                 ([(axum::http::header::CONTENT_TYPE, HEADER_CSS)], assets::STYLE_CSS)
             }),
         )
+        .route(
+            "/icon.png",
+            get(|| async {
+                ([(axum::http::header::CONTENT_TYPE, "image/png")], assets::ICON_PNG)
+            }),
+        )
+        // 证书下载：手机在浏览器打开它即可下载并安装信任（iOS Safari 的 wss 不复用
+        // 页面级证书例外，需在系统里完全信任后 wss 才稳定）。
+        .route(
+            "/cert.cer",
+            get(|State(state): State<Arc<WsState>>| async move {
+                (
+                    [(axum::http::header::CONTENT_TYPE, "application/x-x509-ca-cert")],
+                    state.cert_der.clone(),
+                )
+            }),
+        )
+        .route("/cert.mobileconfig", get(mobileconfig_handler))
         .route("/ws", get(ws_upgrade))
         .with_state(state)
 }
 
+/// 首页：按 PC 端当前界面语言把 `__OL_LANG__` 占位替换成实际 locale，
+/// H5 据此（window.__OL_LANG__ / <html lang>）选择显示语言。
+async fn index_handler(State(state): State<Arc<WsState>>) -> impl IntoResponse {
+    let lang = state.coordinator.remote_locale();
+    Html(assets::INDEX_HTML.replace("%%OL_LANG%%", &lang))
+}
+
+/// 极简标准 base64：构造 .mobileconfig 时把证书 DER 编码进 XML，避免引入额外依赖。
+fn base64_encode(data: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = *chunk.get(1).unwrap_or(&0);
+        let b2 = *chunk.get(2).unwrap_or(&0);
+        out.push(T[(b0 >> 2) as usize] as char);
+        out.push(T[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            T[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[(b2 & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// iOS 配置描述文件：把证书包成 .mobileconfig。Safari 点击后凭 content-type
+/// (application/x-apple-aspen-config) 直接进入“安装描述文件”流程，比裸 .cer 顺滑、
+/// 也不会把当前页面导航走。安装后仍需到「设置→通用→关于本机→证书信任设置」打开完全信任。
+async fn mobileconfig_handler(State(state): State<Arc<WsState>>) -> impl IntoResponse {
+    let b64 = base64_encode(&state.cert_der);
+    let xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>PayloadContent</key><array><dict><key>PayloadCertificateFileName</key><string>openless.cer</string><key>PayloadContent</key><data>{b64}</data><key>PayloadType</key><string>com.apple.security.root</string><key>PayloadIdentifier</key><string>com.openless.remote-input.cert</string><key>PayloadUUID</key><string>A1B2C3D4-0001-4000-8000-000000000001</string><key>PayloadVersion</key><integer>1</integer><key>PayloadDisplayName</key><string>OpenLess Remote Input Certificate</string></dict></array><key>PayloadDisplayName</key><string>OpenLess Remote Input</string><key>PayloadIdentifier</key><string>com.openless.remote-input</string><key>PayloadType</key><string>Configuration</string><key>PayloadUUID</key><string>A1B2C3D4-0002-4000-8000-000000000002</string><key>PayloadVersion</key><integer>1</integer></dict></plist>"#,
+        b64 = b64
+    );
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/x-apple-aspen-config",
+        )],
+        xml,
+    )
+}
+
 pub async fn start(cfg: RemoteServerConfig) -> Result<RemoteServerHandle, String> {
     let _ = HEADER_HTML; // index 用 axum Html() 自带 content-type
-    let rustls_config = build_rustls_config()?;
+    let mut sans = vec!["localhost".to_string(), "127.0.0.1".to_string()];
+    for ip in local_lan_ipv4s() {
+        sans.push(ip.to_string());
+    }
+    // 证书目录用 app 配置目录（跨重启稳定）；拿不到则退回内存生成（不持久化）。
+    let cert_dir = cfg.app.path().app_config_dir().ok();
+    let (cert_der, key_der) = load_or_generate_cert(cert_dir.as_deref(), &sans)?;
+    let rustls_config = build_server_config(cert_der.clone(), key_der)?;
     let acceptor = TlsAcceptor::from(rustls_config);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], cfg.port));
@@ -194,6 +369,7 @@ pub async fn start(cfg: RemoteServerConfig) -> Result<RemoteServerHandle, String
         coordinator: cfg.coordinator,
         app: cfg.app,
         pin_fails: Mutex::new((0, None)),
+        cert_der,
     });
     let router = build_router(state);
 
@@ -206,19 +382,25 @@ pub async fn start(cfg: RemoteServerConfig) -> Result<RemoteServerHandle, String
                     break;
                 }
                 accepted = listener.accept() => {
-                    let (tcp, _peer) = match accepted {
+                    let (tcp, peer) = match accepted {
                         Ok(x) => x,
                         Err(e) => {
                             log::warn!("[remote-input] accept error: {e}");
                             continue;
                         }
                     };
+                    // 最底层诊断：每个到达本机 8443 的 TCP 连接都记下来源 IP。手机一连就能
+                    // 看到它到底有没有真的到这台电脑、来自哪个网段（排查"是不是连到别的设备"）。
+                    log::info!("[remote-input] 收到 TCP 连接，来自 {peer}");
                     let acceptor = acceptor.clone();
                     let router = router.clone();
                     tokio::spawn(async move {
                         let tls = match acceptor.accept(tcp).await {
                             Ok(t) => t,
-                            Err(_) => return, // 客户端没装证书 / 握手失败：静默
+                            Err(e) => {
+                                log::warn!("[remote-input] 来自 {peer} 的 TLS 握手失败（证书没被接受）：{e}");
+                                return;
+                            }
                         };
                         let io = TokioIo::new(tls);
                         let svc = hyper_util::service::TowerToHyperService::new(router);
@@ -245,6 +427,9 @@ async fn ws_upgrade(
     State(state): State<Arc<WsState>>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
+    // 能走到这里说明 wss 的 TLS 握手已成功（证书被手机接受）。排查"连不上"时看有没有
+    // 这行：没有 = 卡在 TLS/证书（握手就失败）；有 = 握手 OK，问题在认证/后续逻辑。
+    log::info!("[remote-input] WS 已升级：手机已通过 wss 接入（TLS/证书 OK）");
     ws.on_upgrade(move |socket| handle_ws(socket, state))
 }
 
@@ -301,15 +486,18 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<WsState>) {
     };
     match authed {
         AuthResult::Ok => {
+            log::info!("[remote-input] 配对成功，进入录音会话");
             let _ = socket.send(send_json(&serde_json::json!({"type":"auth","ok":true}))).await;
         }
         AuthResult::BadPin => {
+            log::warn!("[remote-input] 配对码错误，已拒绝");
             let _ = socket
                 .send(send_json(&serde_json::json!({"type":"auth","ok":false,"reason":"bad-pin"})))
                 .await;
             return;
         }
         AuthResult::Locked => {
+            log::warn!("[remote-input] 配对已锁定（连续错误过多），已拒绝");
             let _ = socket
                 .send(send_json(&serde_json::json!({"type":"auth","ok":false,"reason":"locked"})))
                 .await;
@@ -321,7 +509,11 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<WsState>) {
     let (evt_tx, mut evt_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let listener_id = {
         let tx = evt_tx.clone();
-        state.app.listen("capsule:state", move |event| {
+        // 必须用 listen_any:capsule 状态是通过 emit_to("capsule", …) 定向发给胶囊
+        // 窗口的,普通 app.listen(target=App) 收不到定向事件 —— 那样手机永远收不到
+        // done/polishing 等状态,会一直卡在前端本地设的"识别中"。listen_any 接收
+        // 所有 target 的事件,把胶囊状态如实转发给手机。
+        state.app.listen_any("capsule:state", move |event| {
             for msg in capsule_payload_to_phone(event.payload()) {
                 let _ = tx.send(msg);
             }
@@ -356,6 +548,7 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<WsState>) {
     }
 
     // 4) 收尾：断连即取消未完成的远程会话，避免 ASR 句柄悬挂。
+    log::info!("[remote-input] WS 连接已关闭");
     state.app.unlisten(listener_id);
     state.coordinator.cancel_remote_dictation();
 }
@@ -367,15 +560,20 @@ async fn handle_control(txt: &str, state: &Arc<WsState>, socket: &mut WebSocket)
         Err(_) => return true,
     };
     match v.get("type").and_then(|t| t.as_str()).unwrap_or("") {
-        "start" => match state.coordinator.start_remote_dictation().await {
-            Ok(()) => {}
-            Err(reason) => {
-                let _ = socket
-                    .send(send_json(&serde_json::json!({"type":"busy","reason":reason})))
-                    .await;
+        "start" => {
+            log::info!("[remote-input] 收到「开始录音」");
+            match state.coordinator.start_remote_dictation().await {
+                Ok(()) => {}
+                Err(reason) => {
+                    log::warn!("[remote-input] 开始录音被拒：{reason}");
+                    let _ = socket
+                        .send(send_json(&serde_json::json!({"type":"busy","reason":reason})))
+                        .await;
+                }
             }
-        },
+        }
         "stop" => {
+            log::info!("[remote-input] 收到「结束录音」");
             let _ = state.coordinator.stop_remote_dictation().await;
         }
         "cancel" => {

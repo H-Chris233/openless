@@ -342,6 +342,7 @@ pub fn run() {
             commands::get_remote_input_status,
             commands::list_local_ips,
             commands::regenerate_remote_pin,
+            commands::set_remote_locale,
             commands::get_update_channel,
             commands::set_update_channel,
             commands::fetch_latest_beta_release,

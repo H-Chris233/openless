@@ -284,6 +284,9 @@ struct Inner {
     remote_server: Mutex<Option<crate::remote_server::RemoteServerHandle>>,
     /// 当前远程输入配对码（6 位数字）。进程内有效，不持久化（每次启动可轮换）。
     remote_pin: Mutex<Option<String>>,
+    /// PC 端当前界面语言（BCP-47，如 "zh-CN"）。前端切换语言时经命令同步，
+    /// H5 录音页据此渲染对应语言。进程内镜像，不持久化（前端会在启动/切换时重新下发）。
+    remote_locale: Mutex<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -357,6 +360,7 @@ impl Coordinator {
                     remote_audio_sink: Mutex::new(None),
                     remote_server: Mutex::new(None),
                     remote_pin: Mutex::new(None),
+                    remote_locale: Mutex::new(String::from("zh-CN")),
                 }),
             }
         }
@@ -425,6 +429,7 @@ impl Coordinator {
                 remote_audio_sink: Mutex::new(None),
                 remote_server: Mutex::new(None),
                 remote_pin: Mutex::new(None),
+                remote_locale: Mutex::new(String::from("zh-CN")),
             }),
         }
     }
@@ -1039,8 +1044,26 @@ impl Coordinator {
     pub fn regenerate_remote_pin(self: &Arc<Self>) -> String {
         let pin = crate::remote_server::generate_pin();
         *self.inner.remote_pin.lock() = Some(pin.clone());
+        // 写盘持久化，否则下次启动会读回旧的持久化码、把这次重置覆盖掉。
+        if let Some(app) = self.inner.app.lock().clone() {
+            crate::remote_server::save_pin(&app, &pin);
+        }
         self.refresh_remote_server();
         pin
+    }
+
+    /// 同步 PC 端界面语言（前端切换语言时调用）。H5 录音页据此选择显示语言。
+    /// 仅接受受支持的白名单值，非法输入忽略（值会注入到 H5 的 lang，需防注入）。
+    pub fn set_remote_locale(&self, locale: String) {
+        const SUPPORTED: [&str; 5] = ["zh-CN", "zh-TW", "en", "ja", "ko"];
+        if SUPPORTED.contains(&locale.as_str()) {
+            *self.inner.remote_locale.lock() = locale;
+        }
+    }
+
+    /// 当前 PC 端界面语言（供 H5 首页注入 lang）。
+    pub fn remote_locale(&self) -> String {
+        self.inner.remote_locale.lock().clone()
     }
 
     /// 按 prefs 启停 / 重启远程输入服务。在 setup 与 prefs 变更（端口/开关）时调用。
@@ -1064,14 +1087,16 @@ impl Coordinator {
             let Some(app) = app else {
                 return;
             };
-            // PIN：复用进程内的 remote_pin，缺则生成。
+            // PIN：进程内 remote_pin 缺失时从磁盘读持久化的（没有才新生成并写盘）——
+            // 否则每次重启配对码都变，用户得反复找新码（这正是"配对码错误"的根因）。
             let pin = {
                 let mut guard = coord.inner.remote_pin.lock();
                 if guard.is_none() {
-                    *guard = Some(crate::remote_server::generate_pin());
+                    *guard = Some(crate::remote_server::load_or_create_pin(&app));
                 }
                 guard.clone().unwrap_or_default()
             };
+            log::info!("[remote-input] 当前配对码 = {pin}（在手机上输入这个）");
             let port = prefs.remote_input_port;
             match crate::remote_server::start(crate::remote_server::RemoteServerConfig {
                 port,

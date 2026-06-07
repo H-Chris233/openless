@@ -553,6 +553,11 @@ export function regenerateRemotePin(): Promise<string> {
     return invokeOrMock("regenerate_remote_pin", undefined, () => "123456")
 }
 
+/** 把 PC 端界面语言同步给远程输入服务，H5 录音页据此显示对应语言。 */
+export function setRemoteLocale(locale: string): Promise<void> {
+    return invokeOrMock("set_remote_locale", { locale }, () => undefined)
+}
+
 // ── Release channel (Beta opt-in) ──────────────────────────────────────
 // 渠道偏好与 fetch_latest_beta_release 实际效果只在 Tauri runtime 内有意义；
 // 浏览器开发模式下走 mock，避免设置页因 invoke 抛错而白屏。

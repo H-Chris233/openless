@@ -301,6 +301,12 @@ pub fn regenerate_remote_pin(coord: CoordinatorState<'_>) -> String {
     coord.regenerate_remote_pin()
 }
 
+/// 同步 PC 端界面语言到远程输入服务，H5 录音页据此显示对应语言。
+#[tauri::command]
+pub fn set_remote_locale(coord: CoordinatorState<'_>, locale: String) {
+    coord.set_remote_locale(locale);
+}
+
 pub(crate) fn sync_style_pack_prefs_and_persist(
     coord: &Coordinator,
     app: &AppHandle,

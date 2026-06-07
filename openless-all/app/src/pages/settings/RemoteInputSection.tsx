@@ -11,6 +11,7 @@ import { SettingRow, Toggle, inputStyle } from './shared';
 import {
   getRemoteInputStatus,
   regenerateRemotePin,
+  setRemoteLocale,
   isTauri,
   type RemoteInputStatus,
 } from '../../lib/ipc';
@@ -37,7 +38,7 @@ async function copyText(text: string): Promise<void> {
 }
 
 export function RemoteInputSection() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const { prefs, updatePrefs } = useHotkeySettings();
   const [status, setStatus] = useState<RemoteInputStatus | null>(null);
   const [errorPort, setErrorPort] = useState<number | null>(null);
@@ -50,6 +51,8 @@ export function RemoteInputSection() {
         .then((s) => alive && setStatus(s))
         .catch(() => {});
     refresh();
+    // 进设置页时把当前界面语言同步给远程服务，确保 H5 录音页语言与 PC 一致。
+    void setRemoteLocale(i18n.language).catch(() => {});
     if (!isTauri) return;
     const unsubs: Array<() => void> = [];
     import('@tauri-apps/api/event').then(({ listen }) => {

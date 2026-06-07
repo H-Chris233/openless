@@ -1,20 +1,48 @@
-/* ===== OpenLess 远程输入 — 移动端深色样式 ===== */
+/* ===== OpenLess 远程输入 — 移动端样式 =====
+ * 配色 / 圆角 / 阴影 / 字体对齐 PC 端 design tokens(src/styles/tokens.css):
+ * 黑 + 白 + 电光蓝,浅色 glassy 风格(与桌面端保持一致)。
+ */
 
 :root {
-  --bg: #0f1115;
-  --bg-soft: #171a21;
-  --card: #1c2029;
-  --card-border: #2a2f3a;
-  --text: #e7eaf0;
-  --text-dim: #9aa3b2;
-  --text-faint: #6b7280;
-  --accent: #4f8cff;
-  --accent-strong: #3b78f0;
-  --danger: #ff5470;
-  --danger-soft: #e0455f;
-  --ok: #34d399;
-  --warn: #fbbf24;
-  --shadow: 0 10px 30px rgba(0, 0, 0, .45);
+  /* 中性色 */
+  --bg: #f7f7f8;
+  --surface: #ffffff;
+  --surface-2: #fafafa;
+  --line: rgba(0, 0, 0, 0.08);
+  --line-strong: rgba(0, 0, 0, 0.14);
+
+  /* 墨色文字 */
+  --ink: #0a0a0b;
+  --ink-2: #2a2a2d;
+  --ink-3: rgba(10, 10, 11, 0.62);
+  --ink-4: rgba(10, 10, 11, 0.42);
+
+  /* 蓝色强调 */
+  --blue: #2563eb;
+  --blue-hover: #1d4ed8;
+  --blue-soft: #eff4ff;
+  --blue-ring: rgba(37, 99, 235, 0.22);
+
+  /* 状态色 */
+  --ok: #16a34a;
+  --ok-soft: #ecfdf5;
+  --warn: #d97706;
+  --danger: #dc2626;
+
+  /* 阴影 */
+  --shadow-sm: 0 1px 2px rgba(15, 17, 22, 0.04), 0 0 0 0.5px rgba(0, 0, 0, 0.04);
+  --shadow-md: 0 1px 2px rgba(15, 17, 22, 0.05), 0 6px 24px -12px rgba(15, 17, 22, 0.10), 0 0 0 0.5px rgba(0, 0, 0, 0.04);
+  --shadow-lg: 0 20px 60px -20px rgba(15, 17, 22, 0.18), 0 8px 32px -16px rgba(15, 17, 22, 0.10), 0 0 0 0.5px rgba(0, 0, 0, 0.06);
+
+  /* 圆角 */
+  --r-lg: 14px;
+  --r-xl: 18px;
+  --r-2xl: 22px;
+  --r-pill: 999px;
+
+  /* 字体 */
+  --font-sans: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", Roboto, Helvetica, Arial, sans-serif;
+
   --safe-bottom: env(safe-area-inset-bottom, 0px);
 }
 
@@ -31,14 +59,15 @@ html, body {
 
 body {
   background:
-    radial-gradient(120% 80% at 50% -10%, #1a2030 0%, var(--bg) 60%) fixed,
+    radial-gradient(120% 80% at 50% -10%, #eef2fb 0%, var(--bg) 55%) fixed,
     var(--bg);
-  color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
-    "Hiragino Sans GB", "Microsoft YaHei", Roboto, Helvetica, Arial, sans-serif;
+  color: var(--ink);
+  font-family: var(--font-sans);
   font-size: 16px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: 'cv11', 'ss01', 'ss03';
   user-select: none;
   -webkit-user-select: none;
   overscroll-behavior: none;
@@ -48,8 +77,7 @@ body {
   min-height: 100%;
   display: flex;
   flex-direction: column;
-  /* 给底部证书提示留出空间 */
-  padding-bottom: calc(96px + var(--safe-bottom));
+  padding-bottom: calc(24px + var(--safe-bottom));
 }
 
 /* ===== 屏幕切换 ===== */
@@ -74,29 +102,33 @@ body {
   text-align: center;
   margin: 28px 0 22px;
 }
-.brand-logo {
-  font-size: 56px;
-  line-height: 1;
+.brand-logo-img {
+  width: 72px;
+  height: 72px;
+  border-radius: var(--r-xl);
+  object-fit: cover;
+  box-shadow: var(--shadow-lg);
 }
 .brand-title {
   font-size: 22px;
   font-weight: 700;
-  margin: 14px 0 4px;
-  letter-spacing: .3px;
+  margin: 16px 0 4px;
+  letter-spacing: .2px;
+  color: var(--ink);
 }
 .brand-sub {
   margin: 0;
-  color: var(--text-dim);
+  color: var(--ink-3);
   font-size: 14px;
 }
 
 /* ===== 卡片 ===== */
 .card {
-  background: var(--card);
-  border: 1px solid var(--card-border);
-  border-radius: 18px;
+  background: var(--surface);
+  border: 0.5px solid var(--line);
+  border-radius: var(--r-2xl);
   padding: 22px 20px;
-  box-shadow: var(--shadow);
+  box-shadow: var(--shadow-lg);
 }
 .card-center {
   text-align: center;
@@ -105,7 +137,7 @@ body {
 .field-label {
   display: block;
   font-size: 13px;
-  color: var(--text-dim);
+  color: var(--ink-3);
   margin-bottom: 10px;
 }
 
@@ -116,20 +148,21 @@ body {
   letter-spacing: 14px;
   text-align: center;
   padding: 16px 12px;
-  color: var(--text);
-  background: var(--bg-soft);
-  border: 2px solid var(--card-border);
-  border-radius: 14px;
+  color: var(--ink);
+  background: var(--surface-2);
+  border: 1.5px solid var(--line-strong);
+  border-radius: var(--r-lg);
   outline: none;
   font-variant-numeric: tabular-nums;
-  transition: border-color .15s ease;
+  transition: border-color .15s ease, box-shadow .15s ease;
 }
 .pin-input::placeholder {
-  color: var(--text-faint);
+  color: var(--ink-4);
   letter-spacing: 14px;
 }
 .pin-input:focus {
-  border-color: var(--accent);
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px var(--blue-ring);
 }
 
 /* ===== 按钮 ===== */
@@ -144,17 +177,18 @@ body {
   font-weight: 600;
   color: #fff;
   border: none;
-  border-radius: 14px;
+  border-radius: var(--r-lg);
   cursor: pointer;
   transition: transform .08s ease, background .15s ease, opacity .15s ease;
 }
 .btn:active { transform: scale(.98); }
-.btn:disabled { opacity: .55; cursor: default; }
+.btn:disabled { opacity: .5; cursor: default; }
 
 .btn-primary {
-  background: linear-gradient(180deg, var(--accent) 0%, var(--accent-strong) 100%);
-  box-shadow: 0 6px 18px rgba(59, 120, 240, .35);
+  background: var(--blue);
+  box-shadow: 0 6px 18px -6px var(--blue-ring);
 }
+.btn-primary:active { background: var(--blue-hover); }
 
 .hint-error {
   color: var(--danger);
@@ -163,6 +197,55 @@ body {
   min-height: 1em;
 }
 
+/* ===== 连接帮助(配对屏) ===== */
+.help {
+  margin-top: 18px;
+  padding: 16px 16px 18px;
+  border-radius: var(--r-xl);
+  background: var(--surface-2);
+  border: 0.5px solid var(--line);
+}
+.help-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--ink-2);
+  margin-bottom: 10px;
+}
+.help-step {
+  font-size: 12.5px;
+  color: var(--ink-3);
+  line-height: 1.65;
+  margin: 0 0 9px;
+}
+.help-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+}
+.help-link {
+  display: inline-block;
+  padding: 9px 16px;
+  border-radius: var(--r-md);
+  border: none;
+  background: var(--blue);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  font-family: inherit;
+  text-decoration: none;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+}
+.help-link:active { background: var(--blue-hover); }
+.help-link-ghost {
+  background: var(--surface);
+  color: var(--blue);
+  border: 1px solid var(--blue);
+}
+.help-link-ghost:active { background: var(--blue-soft); }
+
 /* ===== 录音屏头部 ===== */
 .rec-header {
   display: flex;
@@ -170,24 +253,24 @@ body {
   gap: 10px;
   padding-bottom: 8px;
 }
-.conn-dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: var(--ok);
-  box-shadow: 0 0 0 3px rgba(52, 211, 153, .18);
+.app-icon {
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
   flex: none;
+  box-shadow: var(--shadow-sm);
 }
 .rec-header-title {
   font-weight: 700;
   font-size: 16px;
-  letter-spacing: .4px;
+  letter-spacing: .2px;
+  color: var(--ink);
 }
 .mode-switch {
   margin-left: auto;
   display: inline-flex;
-  background: var(--bg-soft);
-  border: 1px solid var(--card-border);
+  background: var(--surface-2);
+  border: 0.5px solid var(--line);
   border-radius: 12px;
   padding: 3px;
   gap: 2px;
@@ -197,7 +280,7 @@ body {
   appearance: none;
   border: none;
   background: transparent;
-  color: var(--text-dim);
+  color: var(--ink-3);
   font-size: 13px;
   font-weight: 600;
   padding: 7px 14px;
@@ -206,7 +289,7 @@ body {
   transition: background .15s ease, color .15s ease;
 }
 .mode-btn.active {
-  background: var(--accent);
+  background: var(--blue);
   color: #fff;
 }
 
@@ -220,7 +303,7 @@ body {
   gap: 26px;
 }
 
-/* 录音大按钮 */
+/* 录音大按钮 —— 默认蓝色实心(对齐 PC 主操作蓝),录音中转红 */
 .record-btn {
   position: relative;
   width: 168px;
@@ -229,10 +312,10 @@ body {
   border: none;
   cursor: pointer;
   color: #fff;
-  background: radial-gradient(circle at 50% 38%, #2a3550 0%, #1b2136 100%);
+  background: linear-gradient(180deg, #3b82f6 0%, #2563eb 100%);
   box-shadow:
-    0 12px 34px rgba(0, 0, 0, .5),
-    inset 0 0 0 2px rgba(255, 255, 255, .04);
+    0 16px 36px -10px rgba(37, 99, 235, .5),
+    inset 0 1px 0 rgba(255, 255, 255, .25);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -248,7 +331,7 @@ body {
   position: absolute;
   inset: -6px;
   border-radius: 50%;
-  border: 2px solid rgba(79, 140, 255, .35);
+  border: 2px solid rgba(37, 99, 235, .35);
   opacity: 0;
   pointer-events: none;
 }
@@ -260,19 +343,20 @@ body {
 .record-btn-label {
   font-size: 14px;
   font-weight: 600;
-  color: var(--text-dim);
-  letter-spacing: .5px;
+  color: rgba(255, 255, 255, .92);
+  letter-spacing: .3px;
 }
 
 /* 录音中:红色 + 呼吸脉冲动画 */
 .record-btn.recording {
-  background: radial-gradient(circle at 50% 38%, #ff6a82 0%, #d63a55 100%);
-  box-shadow: 0 12px 34px rgba(214, 58, 85, .5);
+  background: linear-gradient(180deg, #f87171 0%, #dc2626 100%);
+  box-shadow: 0 16px 36px -10px rgba(220, 38, 38, .5);
   animation: breathe 1.6s ease-in-out infinite;
 }
 .record-btn.recording .record-btn-label { color: #fff; }
 .record-btn.recording .record-btn-ring {
   opacity: 1;
+  border-color: rgba(220, 38, 38, .4);
   animation: pulseRing 1.6s ease-out infinite;
 }
 
@@ -288,7 +372,7 @@ body {
 
 /* 忙/禁用态 */
 .record-btn.busy {
-  opacity: .6;
+  opacity: .5;
   cursor: default;
   animation: none;
 }
@@ -298,16 +382,22 @@ body {
   width: 78%;
   max-width: 320px;
   height: 8px;
-  border-radius: 99px;
-  background: var(--bg-soft);
-  border: 1px solid var(--card-border);
+  border-radius: var(--r-pill);
+  background: #e9ebf0;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, .07);
   overflow: hidden;
+  /* 平时淡化成一个浅凹槽;录音时才高亮(下方规则),避免像一根无意义的白条 */
+  opacity: .45;
+  transition: opacity .2s ease;
+}
+.record-btn.recording ~ .level-wrap {
+  opacity: 1;
 }
 .level-bar {
   height: 100%;
   width: 0%;
-  border-radius: 99px;
-  background: linear-gradient(90deg, var(--ok), var(--accent));
+  border-radius: var(--r-pill);
+  background: linear-gradient(90deg, var(--ok), var(--blue));
   transition: width .08s linear;
 }
 
@@ -315,31 +405,32 @@ body {
 .status-bar {
   min-height: 28px;
   padding: 8px 18px;
-  border-radius: 99px;
-  background: var(--bg-soft);
-  border: 1px solid var(--card-border);
+  border-radius: var(--r-pill);
+  background: var(--surface);
+  border: 0.5px solid var(--line);
+  box-shadow: var(--shadow-sm);
   font-size: 15px;
   font-weight: 600;
-  color: var(--text);
+  color: var(--ink);
   text-align: center;
   max-width: 90%;
 }
-.status-bar.is-error { color: var(--danger); border-color: rgba(255, 84, 112, .4); }
-.status-bar.is-ok    { color: var(--ok);     border-color: rgba(52, 211, 153, .4); }
-.status-bar.is-work  { color: var(--accent); }
+.status-bar.is-error { color: var(--danger); border-color: rgba(220, 38, 38, .35); }
+.status-bar.is-ok    { color: var(--ok);     border-color: rgba(22, 163, 74, .35); }
+.status-bar.is-work  { color: var(--blue);   border-color: var(--blue-ring); }
 
 /* ===== 提示文字 ===== */
 .rec-tip {
   text-align: center;
-  color: var(--text-faint);
+  color: var(--ink-4);
   font-size: 13px;
   margin: 18px 0 0;
 }
 
 /* ===== 断线屏 ===== */
 .offline-icon { font-size: 48px; }
-.offline-title { font-size: 20px; margin: 12px 0 6px; }
-.offline-sub { color: var(--text-dim); font-size: 14px; margin: 0 0 8px; }
+.offline-title { font-size: 20px; margin: 12px 0 6px; color: var(--ink); }
+.offline-sub { color: var(--ink-3); font-size: 14px; margin: 0 0 8px; }
 
 /* ===== 底部证书提示(固定) ===== */
 .cert-tip {
@@ -350,18 +441,18 @@ body {
   padding: 12px 16px calc(12px + var(--safe-bottom));
   font-size: 12px;
   line-height: 1.5;
-  color: var(--text-faint);
-  background: rgba(15, 17, 21, .92);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
-  border-top: 1px solid var(--card-border);
+  color: var(--ink-4);
+  background: rgba(255, 255, 255, .85);
+  backdrop-filter: blur(12px) saturate(160%);
+  -webkit-backdrop-filter: blur(12px) saturate(160%);
+  border-top: 0.5px solid var(--line);
   text-align: center;
 }
 
 /* 小屏微调 */
 @media (max-height: 640px) {
   .brand { margin: 14px 0; }
-  .brand-logo { font-size: 44px; }
+  .brand-logo-img { width: 56px; height: 56px; }
   .record-btn { width: 148px; height: 148px; }
   .record-btn-icon { font-size: 44px; }
 }

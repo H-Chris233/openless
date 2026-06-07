@@ -1,25 +1,26 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="%%OL_LANG%%">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="theme-color" content="#0f1115">
-  <title>OpenLess 远程输入</title>
+  <title>OpenLess</title>
   <link rel="stylesheet" href="/style.css">
+  <script>window.__OL_LANG__ = "%%OL_LANG%%";</script>
 </head>
 <body>
   <div id="app">
     <!-- ===== 首屏:PIN 配对 ===== -->
     <section id="screen-pin" class="screen active">
       <div class="brand">
-        <div class="brand-logo">🎙️</div>
-        <h1 class="brand-title">OpenLess 远程输入</h1>
-        <p class="brand-sub">在手机上录音，实时输入到电脑</p>
+        <img class="brand-logo-img" src="/icon.png" alt="OpenLess" />
+        <h1 class="brand-title" data-i18n="brandTitle">OpenLess 远程输入</h1>
+        <p class="brand-sub" data-i18n="brandSub">在手机上录音，实时输入到电脑</p>
       </div>
 
       <div class="card">
-        <label class="field-label" for="pin-input">配对码(电脑上显示的 6 位数字)</label>
+        <label class="field-label" for="pin-input" data-i18n="pinFieldLabel">配对码(电脑上显示的 6 位数字)</label>
         <input
           id="pin-input"
           class="pin-input"
@@ -30,18 +31,29 @@
           pattern="[0-9]*"
           placeholder="••••••" />
         <p id="pin-error" class="hint-error" hidden></p>
-        <button id="btn-connect" class="btn btn-primary">连接</button>
+        <button id="btn-connect" class="btn btn-primary" data-i18n="btnConnect">连接</button>
+      </div>
+
+      <!-- 连接帮助：证书信任引导（手机上直接照做） -->
+      <div class="help">
+        <div class="help-title" data-i18n="helpTitle">连不上？多半是手机没信任证书</div>
+        <p class="help-step" data-i18n="helpAndroid">① 安卓 / 一般情况：用浏览器无痕模式打开本页，出现“不安全”警告时选“继续前往”，再输入配对码连接。</p>
+        <p class="help-step" data-i18n="helpIos">② iOS Safari 必须装证书：点下方按钮下载并安装描述文件，然后到「设置 → 通用 → 关于本机 → 证书信任设置」里打开它的“完全信任”，再回来连接。</p>
+        <div class="help-actions">
+          <a class="help-link" href="/cert.cer" data-i18n="helpDownloadCert">⬇ 下载并安装证书</a>
+          <button type="button" class="help-link help-link-ghost" id="copy-cert-link" data-i18n="helpCopyLink">⧉ 复制链接</button>
+        </div>
       </div>
     </section>
 
     <!-- ===== 录音屏 ===== -->
     <section id="screen-rec" class="screen">
       <header class="rec-header">
-        <span class="conn-dot" id="conn-dot" title="已连接"></span>
+        <img class="app-icon" id="app-icon" src="/icon.png" alt="OpenLess" />
         <span class="rec-header-title">OpenLess</span>
         <div class="mode-switch" id="mode-switch" role="group" aria-label="录音方式">
-          <button class="mode-btn" data-mode="toggle" type="button">点按</button>
-          <button class="mode-btn" data-mode="hold" type="button">按住</button>
+          <button class="mode-btn" data-mode="toggle" type="button" data-i18n="modeToggle">点按</button>
+          <button class="mode-btn" data-mode="hold" type="button" data-i18n="modeHold">按住</button>
         </div>
       </header>
 
@@ -68,19 +80,12 @@
     <section id="screen-offline" class="screen">
       <div class="card card-center">
         <div class="offline-icon">📵</div>
-        <h2 class="offline-title">连接已断开</h2>
+        <h2 class="offline-title" data-i18n="offlineTitle">连接已断开</h2>
         <p class="offline-sub" id="offline-reason">与电脑的连接已中断。</p>
-        <button id="btn-reconnect" class="btn btn-primary">重新连接</button>
+        <button id="btn-reconnect" class="btn btn-primary" data-i18n="btnReconnect">重新连接</button>
       </div>
     </section>
   </div>
-
-  <!-- 证书信任引导(固定底部) -->
-  <footer class="cert-tip">
-    首次访问浏览器会提示“连接不安全”(本地自签名证书)。
-    Android Chrome:点“高级”→“继续前往”;
-    iOS Safari:点“显示详情”→“访问此网站”。
-  </footer>
 
   <script src="/app.js"></script>
 </body>
