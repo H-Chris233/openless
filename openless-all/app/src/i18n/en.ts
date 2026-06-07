@@ -63,6 +63,7 @@ export const en: typeof zhCN = {
     error: 'Failed. Try again.',
     closeTooltip: 'Close',
     approvalTitle: 'Run blocked command?',
+    approvalRerunWarning: 'Note: approving re-runs on an already-modified workspace and may have side effects on non-idempotent operations.',
     approve: 'Approve',
     deny: 'Deny',
     approved: 'Approved',

@@ -65,6 +65,7 @@ export const ko: typeof zhCN = {
     error: '실패했습니다. 다시 시도하세요.',
     closeTooltip: '닫기',
     approvalTitle: '차단된 명령을 실행할까요?',
+    approvalRerunWarning: '주의: 승인하면 이미 수정된 작업 공간에서 다시 실행되어 멱등하지 않은 작업에 부작용이 생길 수 있습니다.',
     approve: '허용',
     deny: '거부',
     approved: '허용됨',

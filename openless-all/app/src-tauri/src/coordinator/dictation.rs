@@ -621,7 +621,17 @@ async fn run_voice_agent_transcript(
         }
     }
 
-    let mode = coding_agent_mode_from_pref(&prefs.coding_agent_permission_mode);
+    // 钳制：语音 → shell 这条全自动路径禁止 bypassPermissions 绕过护栏（无人审、动手即生效）。
+    // 即便用户在偏好里设了 bypass，这里也降级为 acceptEdits（仍带 deny 护栏）。
+    let mode = match coding_agent_mode_from_pref(&prefs.coding_agent_permission_mode) {
+        crate::coding_agent::CodingAgentPermissionMode::BypassPermissions => {
+            log::warn!(
+                "[less-computer] 语音 Agent 路径禁止 bypassPermissions，已降级为 acceptEdits（保留护栏）"
+            );
+            crate::coding_agent::CodingAgentPermissionMode::AcceptEdits
+        }
+        other => other,
+    };
     let model = prefs
         .coding_agent_model
         .clone()
@@ -734,8 +744,22 @@ async fn run_less_computer_once(
     continue_session: bool,
 ) -> LessComputerOutcome {
     // 护栏 deny：默认全量；审批放行的模式从 deny 中剔除。
+    // 审批 UI 只回传命中的单个高风险子串，但同一风险有等价写法（如 --force / -f）。
+    // 按「风险等价组」整组放行：只放行被点那一个会让等价写法仍卡在 deny（deny 优先级高于
+    // allow）→ 命令仍被拦。见 guard::risk_equivalent_patterns。
     let mut deny = crate::coding_agent::guard::default_deny_rules();
-    let allow_rules: Vec<String> = extra_allow_patterns
+    let approved_patterns: Vec<String> = extra_allow_patterns
+        .iter()
+        .flat_map(|p| {
+            let group = crate::coding_agent::guard::risk_equivalent_patterns(p);
+            if group.is_empty() {
+                vec![p.clone()]
+            } else {
+                group.into_iter().map(|s| s.to_string()).collect()
+            }
+        })
+        .collect();
+    let allow_rules: Vec<String> = approved_patterns
         .iter()
         .map(|p| format!("Bash({p}:*)"))
         .collect();
@@ -749,18 +773,32 @@ async fn run_less_computer_once(
         "openless-less-computer-guard-{}.json",
         uuid::Uuid::new_v4()
     ));
-    if let Err(e) = std::fs::write(
-        &settings_path,
-        serde_json::to_vec_pretty(&settings_json).unwrap_or_default(),
-    ) {
+    // fail-closed：序列化或写入失败时立即中止，绝不在「无护栏」下把无效路径交给
+    // `claude -p --settings`（找不到文件 = 完全裸跑）。宁可不跑也不裸跑。
+    let settings_bytes = match serde_json::to_vec_pretty(&settings_json) {
+        Ok(b) => b,
+        Err(e) => {
+            log::warn!("[less-computer] 序列化护栏配置失败: {e}");
+            return LessComputerOutcome::Failed {
+                message: "护栏配置写入失败，已中止（拒绝在无护栏下执行）".into(),
+            };
+        }
+    };
+    if let Err(e) = std::fs::write(&settings_path, settings_bytes) {
         log::warn!("[less-computer] 写护栏配置失败: {e}");
+        return LessComputerOutcome::Failed {
+            message: "护栏配置写入失败，已中止（拒绝在无护栏下执行）".into(),
+        };
     }
 
     let mut req = crate::coding_agent::CodingAgentRequest::new("less-computer", prompt.to_string());
     req.cwd = cwd.map(|p| p.to_path_buf());
     req.model = model.map(|m| m.to_string());
     req.permission_mode = mode;
+    // 写护栏成功后才设置：写失败已在上面 fail-closed 返回，不会带无效路径裸跑。
     req.settings_json_path = Some(settings_path.clone());
+    // 去掉 WebFetch：无出站白名单时它是 prompt 注入 SSRF 面（诱导拉取内网/元数据端点）。
+    // 保留 WebSearch（走搜索引擎，不直接抓任意 URL）。
     req.allowed_tools = vec![
         "Bash".into(),
         "Read".into(),
@@ -768,7 +806,6 @@ async fn run_less_computer_once(
         "Write".into(),
         "Glob".into(),
         "Grep".into(),
-        "WebFetch".into(),
         "WebSearch".into(),
     ];
     req.allowed_tools.extend(allow_rules);

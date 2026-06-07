@@ -63,6 +63,7 @@ export const zhTW: typeof zhCN = {
     error: '失敗，請重試。',
     closeTooltip: '關閉',
     approvalTitle: '執行被攔截的指令？',
+    approvalRerunWarning: '注意：批准後將在已被修改的工作區上重新執行，可能對不可重入操作產生副作用',
     approve: '允許',
     deny: '拒絕',
     approved: '已允許',

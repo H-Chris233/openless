@@ -61,6 +61,7 @@ export const zhCN = {
     error: '失败，请重试。',
     closeTooltip: '关闭',
     approvalTitle: '执行被拦截的命令？',
+    approvalRerunWarning: '注意：批准后将在已被修改的工作区上重新运行，可能对不可重入操作产生副作用',
     approve: '允许',
     deny: '拒绝',
     approved: '已允许',

@@ -1585,8 +1585,13 @@ async fn handle_less_computer_released(inner: &Arc<Inner>) {
             }
         }
         SessionPhase::Starting => {
-            // 握手中松手：排队；真正收尾在 begin 续流的 end_session → run_voice_agent_transcript 熄灭。
+            // 握手中松手：排队；正常路径真正收尾在 begin 续流的 end_session → run_voice_agent_transcript 熄灭。
             request_stop_during_starting(inner, "less-computer release edge");
+            // 但若初始化失败永远到不了 Listening（不会进 run_voice_agent_transcript），
+            // 描边会永久卡屏 → 这里兜底熄灭。Listening 分支已有熄灭逻辑，故只在 Starting 加。
+            if let Some(app) = inner.app.lock().clone() {
+                crate::hide_less_computer_glow(&app);
+            }
         }
         _ => {}
     }

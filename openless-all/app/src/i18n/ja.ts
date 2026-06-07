@@ -65,6 +65,7 @@ export const ja: typeof zhCN = {
     error: '失敗しました。再試行してください。',
     closeTooltip: '閉じる',
     approvalTitle: 'ブロックされたコマンドを実行？',
+    approvalRerunWarning: '注意：承認すると、すでに変更されたワークスペース上で再実行され、冪等でない操作に副作用が生じる可能性があります。',
     approve: '許可',
     deny: '拒否',
     approved: '許可済み',

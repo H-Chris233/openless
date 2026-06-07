@@ -40,7 +40,31 @@ pub fn is_high_risk_command(command: &str) -> Option<&'static str> {
         .map(|(_, reason)| *reason)
 }
 
+/// 同一风险的等价命令子串分组：approve 其中之一即整组放行（从 deny 移除 + 加入 allow）。
+///
+/// 审批 UI 只回传命中的单个 `HIGH_RISK_PATTERNS` 子串（如 "git push --force"），但同一风险
+/// 往往有多个等价写法（"git push -f"）。若只放行被点的那一个，等价写法仍在 deny（deny 优先
+/// 级高于 allow）→ 命令仍被拦，用户误以为已批准。返回整组让调用方按组放行。
+/// 命中返回整组；未命中返回空（调用方回落到 pattern 自身）。
+pub fn risk_equivalent_patterns(pattern: &str) -> Vec<&'static str> {
+    const GROUPS: &[&[&str]] = &[
+        &["git push --force", "git push -f"],
+        &["rm -rf", "rm -fr"],
+        // 其余按需补充；默认返回自身
+    ];
+    for g in GROUPS {
+        if g.contains(&pattern) {
+            return g.to_vec();
+        }
+    }
+    Vec::new()
+}
+
 /// CLI `--settings` 默认的 `permissions.deny` 规则（Claude Code 工具说明符语法）。
+///
+/// 注意：管道执行远程脚本（`| sh`）、fork 炸弹（`:(){`）、`> /dev/sd` 等无法用命令前缀
+/// 说明符（`Bash(<prefix>:*)`）表达——它们出现在命令中段或依赖 shell 语法——仍由
+/// `defaultMode = acceptEdits` + 运行级 [`is_high_risk_command`] 探测兜底。
 pub fn default_deny_rules() -> Vec<String> {
     vec![
         "Bash(rm -rf:*)".into(),
@@ -54,8 +78,29 @@ pub fn default_deny_rules() -> Vec<String> {
         "Bash(dd:*)".into(),
         "Bash(shutdown:*)".into(),
         "Bash(reboot:*)".into(),
+        // 权限/所有权/持久化/系统级命令（补齐 HIGH_RISK_PATTERNS 覆盖面 + macOS 持久化面）。
+        "Bash(chmod:*)".into(),
+        "Bash(chown:*)".into(),
+        "Bash(crontab:*)".into(),
+        "Bash(osascript:*)".into(),
+        "Bash(launchctl:*)".into(),
+        "Bash(kextload:*)".into(),
+        "Bash(nvram:*)".into(),
         "Edit(.env)".into(),
         "Edit(.git/**)".into(),
+        // macOS 持久化面：开机自启 plist + 登录 shell 配置（写入即可持久驻留/提权）。
+        "Edit(**/Library/LaunchAgents/**)".into(),
+        "Write(**/Library/LaunchAgents/**)".into(),
+        "Edit(**/Library/LaunchDaemons/**)".into(),
+        "Write(**/Library/LaunchDaemons/**)".into(),
+        "Edit(**/.zshrc)".into(),
+        "Write(**/.zshrc)".into(),
+        "Edit(**/.zprofile)".into(),
+        "Write(**/.zprofile)".into(),
+        "Edit(**/.bash_profile)".into(),
+        "Write(**/.bash_profile)".into(),
+        "Edit(**/.bashrc)".into(),
+        "Write(**/.bashrc)".into(),
     ]
 }
 
@@ -113,5 +158,56 @@ mod tests {
         let v = build_guard_settings_json("acceptEdits", &extra);
         let deny = v["permissions"]["deny"].as_array().unwrap();
         assert!(deny.iter().any(|d| d == "Bash(npm publish:*)"));
+    }
+
+    #[test]
+    fn default_deny_covers_perms_and_macos_persistence() {
+        let deny = default_deny_rules();
+        // 新增的权限/系统级命令。
+        for rule in [
+            "Bash(chmod:*)",
+            "Bash(chown:*)",
+            "Bash(crontab:*)",
+            "Bash(osascript:*)",
+            "Bash(launchctl:*)",
+            "Bash(kextload:*)",
+            "Bash(nvram:*)",
+        ] {
+            assert!(deny.iter().any(|d| d == rule), "缺少 deny: {rule}");
+        }
+        // macOS 持久化面。
+        for rule in [
+            "Edit(**/Library/LaunchAgents/**)",
+            "Write(**/Library/LaunchAgents/**)",
+            "Edit(**/Library/LaunchDaemons/**)",
+            "Write(**/Library/LaunchDaemons/**)",
+            "Edit(**/.zshrc)",
+            "Write(**/.zshrc)",
+            "Edit(**/.zprofile)",
+            "Edit(**/.bash_profile)",
+            "Edit(**/.bashrc)",
+        ] {
+            assert!(deny.iter().any(|d| d == rule), "缺少 deny: {rule}");
+        }
+    }
+
+    #[test]
+    fn risk_equivalent_force_push_releases_whole_group() {
+        // approve "--force" 应同时放行 "-f" 等价写法。
+        let group = risk_equivalent_patterns("git push --force");
+        assert!(group.contains(&"git push --force"));
+        assert!(group.contains(&"git push -f"));
+        // 反向也成立：approve "-f" 同样放行 "--force"。
+        let group2 = risk_equivalent_patterns("git push -f");
+        assert!(group2.contains(&"git push --force"));
+    }
+
+    #[test]
+    fn risk_equivalent_rm_group_and_unknown_returns_empty() {
+        let rm = risk_equivalent_patterns("rm -rf");
+        assert!(rm.contains(&"rm -rf"));
+        assert!(rm.contains(&"rm -fr"));
+        // 不在任何分组里 → 返回空，调用方回落到 pattern 自身。
+        assert!(risk_equivalent_patterns("sudo ").is_empty());
     }
 }

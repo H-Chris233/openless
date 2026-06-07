@@ -18,6 +18,7 @@ import {
   type CSSProperties,
 } from 'react';
 import { useTranslation } from 'react-i18next';
+import DOMPurify from 'dompurify';
 import {
   isTauri,
   lessComputerApprove,
@@ -288,12 +289,16 @@ function UserBubble({ text, label }: { text: string; label: string }) {
 
 function AssistantBubble({ markdown, working }: { markdown: string; working: boolean }) {
   const html = useMemo(() => {
+    let rendered: string;
     try {
-      return renderQaMarkdown(markdown);
+      rendered = renderQaMarkdown(markdown);
     } catch (error) {
       console.error('[LessComputer] markdown render failed', error);
-      return renderQaPlainText(String(markdown ?? ''));
+      rendered = renderQaPlainText(String(markdown ?? ''));
     }
+    // 兜底再消毒：qaMarkdown 已转义 raw HTML token，这里 DOMPurify 多一道防线，
+    // 即便上游渲染逻辑回归也不会把恶意标记注入 DOM。
+    return DOMPurify.sanitize(rendered, { ADD_ATTR: ['target', 'rel'] });
   }, [markdown]);
   return (
     <div className="lc-enter" style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 3 }}>
@@ -353,6 +358,11 @@ function ApprovalRow({
       </div>
       <code style={approvalCmdStyle}>{card.command}</code>
       <div style={{ fontSize: 11.5, color: 'var(--ol-ink-3)' }}>{card.reason}</div>
+      {!decided && (
+        <div style={approvalRerunWarningStyle}>
+          {t('lessComputer.approvalRerunWarning')}
+        </div>
+      )}
       {decided ? (
         <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--ol-ink-3)' }}>
           {card.decision === 'approved'
@@ -546,6 +556,16 @@ const approvalCmdStyle: CSSProperties = {
   borderRadius: 6,
   padding: '5px 8px',
   wordBreak: 'break-all',
+};
+
+const approvalRerunWarningStyle: CSSProperties = {
+  fontSize: 11,
+  lineHeight: 1.45,
+  color: 'rgb(180,83,9)',
+  background: 'rgba(245,158,11,0.10)',
+  border: '0.5px solid rgba(245,158,11,0.25)',
+  borderRadius: 6,
+  padding: '5px 8px',
 };
 
 const approveBtnStyle: CSSProperties = {
