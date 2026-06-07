@@ -1,7 +1,7 @@
 #![cfg_attr(target_os = "linux", allow(dead_code, unused_variables))]
 //! Tauri command surface — every IPC entry the React UI invokes lives here.
 //!
-//! issue: 历史上整个 IPC 表（89 个 `#[tauri::command]` + 跨域 helper）挤在单个
+//! issue: 历史上整个 IPC 表（127 个 `#[tauri::command]` + 跨域 helper）挤在单个
 //! 4800 行的 `commands.rs` 里。按单一职责拆成 `commands/` 下的域模块（settings /
 //! credentials / providers / history / …），每个文件聚焦一个领域。对外路径保持不变：
 //! 本模块用 `pub use <domain>::*` glob 重导出每个子模块，`commands::<name>` 仍然解析，
