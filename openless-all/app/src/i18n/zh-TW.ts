@@ -843,6 +843,10 @@ export const zhTW: typeof zhCN = {
       releaseNotes: '發佈日誌',
     },
     personalize: {
+      theme: '主題',
+      themeDesc: '切換應用外觀的淺色與深色版本。',
+      themeLight: '淺色',
+      themeDark: '深色',
       font: '字體大小',
       fontDesc: '整體縮放界面字號，立即生效。',
       fontSmall: '小',

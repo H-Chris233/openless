@@ -39,13 +39,11 @@ export function WindowChrome({
 
   // macOS / Windows 共用半透明玻璃 background + backdropFilter。
   // macOS: NSVisualEffectView 提供材质；Windows: Tauri apply_mica 提供 Mica；
-  // Linux: 透明窗口 / WebKitGTK 合成层不稳定，走不透明 surface。
-  const background = `
-    radial-gradient(120% 80% at 0% 0%, rgba(255,255,255,0.55) 0%, rgba(255,255,255,0) 60%),
-    radial-gradient(100% 70% at 100% 100%, rgba(37,99,235,0.07) 0%, rgba(37,99,235,0) 55%),
-    linear-gradient(180deg, rgba(245,245,247,0.92) 0%, rgba(232,232,236,0.92) 100%)
-  `;
-  const useSolidSurface = os === 'linux';
+  // Linux: decorations:false 后 CSS 磨砂玻璃自成背景。
+  //
+  // 注意：三层渐变的参数与 global.css 中 [data-ol-no-compositing] .ol-winchrome
+  // 的回退 background 同步（只 opacity 从 0.92 提到 0.96）。改这里时请同步更新 CSS。
+  const background = 'var(--ol-window-bg)';
 
   return (
     <div
@@ -62,10 +60,10 @@ export function WindowChrome({
         overflow: 'hidden',
         display: 'flex',
         flexDirection: 'column',
-        border: os === 'win' ? 'none' : os === 'mac' ? 'none' : '0.5px solid rgba(0,0,0,.10)',
-        background: useSolidSurface ? 'var(--ol-surface)' : background,
-        backdropFilter: useSolidSurface ? 'none' : 'blur(var(--ol-glass-blur-strong)) saturate(190%)',
-        WebkitBackdropFilter: useSolidSurface ? 'none' : 'blur(var(--ol-glass-blur-strong)) saturate(190%)',
+        border: os === 'win' ? 'none' : os === 'mac' ? 'none' : '0.5px solid var(--ol-window-border)',
+        background,
+        backdropFilter: 'blur(var(--ol-glass-blur-strong)) saturate(190%)',
+        WebkitBackdropFilter: 'blur(var(--ol-glass-blur-strong)) saturate(190%)',
         animation: os === 'win' ? undefined : 'ol-window-enter 0.42s var(--ol-motion-spring) both',
         transition: 'box-shadow 0.28s var(--ol-motion-soft), border-color 0.28s var(--ol-motion-soft), backdrop-filter 0.28s var(--ol-motion-soft)',
         willChange: 'opacity, transform, filter',
@@ -158,10 +156,10 @@ function LinuxTitlebar() {
         alignItems: 'center',
         justifyContent: 'space-between',
         padding: '0 6px 0 14px',
-        background: 'var(--ol-surface)',
-        backdropFilter: 'none',
-        WebkitBackdropFilter: 'none',
-        borderBottom: '0.5px solid rgba(0,0,0,0.08)',
+        background: 'var(--ol-linux-titlebar-bg)',
+        backdropFilter: 'blur(12px) saturate(180%)',
+        WebkitBackdropFilter: 'blur(12px) saturate(180%)',
+        borderBottom: '0.5px solid var(--ol-linux-titlebar-border)',
         color: 'var(--ol-ink-3)',
         fontSize: 13,
         fontWeight: 500,

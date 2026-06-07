@@ -9,6 +9,7 @@ import { Icon } from '../../components/Icon';
 import { Row } from '../../components/ui/Row';
 import { openExternal } from '../../lib/ipc';
 import { APP_VERSION_LABEL } from '../../lib/appVersion';
+import { readAppTheme, setAppTheme, type AppThemeId } from '../../lib/appTheme';
 import { readFontScale, setFontScale, type FontScaleId } from '../../lib/fontScale';
 import { Card } from '../_atoms';
 import { SectionTitle } from './shared';
@@ -54,6 +55,7 @@ export function AboutSection() {
       {/* ─── 个性化（字体大小）—— 原 personalize tab 并入此处 ──────────── */}
       <Card>
         <SectionTitle>{t('modal.sections.personalize')}</SectionTitle>
+        <ThemeRow />
         <FontSizeRow />
       </Card>
 
@@ -95,6 +97,51 @@ export function AboutSection() {
   );
 }
 
+function ThemeRow() {
+  const { t } = useTranslation();
+  const [theme, setThemeState] = useState<AppThemeId>(() => readAppTheme());
+  const themeOptions: Array<[AppThemeId, string]> = [
+    ['light', t('modal.personalize.themeLight')],
+    ['dark', t('modal.personalize.themeDark')],
+  ];
+
+  return (
+    <Row label={t('modal.personalize.theme')} desc={t('modal.personalize.themeDesc')}>
+      <div style={{ display: 'flex', gap: 4, padding: 2, background: 'var(--ol-segmented-bg)', borderRadius: 10 }}>
+        {themeOptions.map(([id, label]) => {
+          const selected = theme === id;
+          return (
+            <button
+              key={id}
+              onClick={() => {
+                setThemeState(id);
+                setAppTheme(id);
+              }}
+              style={{
+                minWidth: 74,
+                height: 30,
+                border: 0,
+                borderRadius: 8,
+                background: selected ? 'var(--ol-segmented-active-bg)' : 'transparent',
+                color: selected ? 'var(--ol-ink)' : 'var(--ol-ink-3)',
+                fontFamily: 'inherit',
+                fontSize: 12,
+                fontWeight: selected ? 600 : 500,
+                cursor: 'default',
+                boxShadow: selected ? 'var(--ol-segmented-active-shadow)' : 'none',
+                transition: 'background 0.16s var(--ol-motion-quick), color 0.16s var(--ol-motion-quick), box-shadow 0.18s var(--ol-motion-soft)',
+                padding: '0 12px',
+              }}
+            >
+              {label}
+            </button>
+          );
+        })}
+      </div>
+    </Row>
+  );
+}
+
 // 字体大小 —— 整体缩放界面字号，立即生效（fontScale.ts 走 html.style.zoom）。
 function FontSizeRow() {
   const { t } = useTranslation();
@@ -109,8 +156,8 @@ function FontSizeRow() {
     ['large', t('modal.personalize.fontLarge')],
   ];
   return (
-    <Row label={t('modal.personalize.font')}>
-      <div style={{ display: 'flex', gap: 4, padding: 2, background: 'rgba(0,0,0,0.04)', borderRadius: 8 }}>
+    <Row label={t('modal.personalize.font')} desc={t('modal.personalize.fontDesc')}>
+      <div style={{ display: 'flex', gap: 4, padding: 2, background: 'var(--ol-segmented-bg)', borderRadius: 10 }}>
         {fontOptions.map(([id, label]) => {
           const selected = fontScale === id;
           return (
@@ -121,14 +168,14 @@ function FontSizeRow() {
                 minWidth: 64,
                 height: 28,
                 border: 0,
-                borderRadius: 6,
-                background: selected ? '#fff' : 'transparent',
+                borderRadius: 8,
+                background: selected ? 'var(--ol-segmented-active-bg)' : 'transparent',
                 color: selected ? 'var(--ol-ink)' : 'var(--ol-ink-3)',
                 fontFamily: 'inherit',
                 fontSize: 12,
                 fontWeight: selected ? 600 : 500,
                 cursor: 'default',
-                boxShadow: selected ? '0 1px 2px rgba(0,0,0,.06), 0 0 0 0.5px rgba(0,0,0,.06)' : 'none',
+                boxShadow: selected ? 'var(--ol-segmented-active-shadow)' : 'none',
                 transition: 'background 0.16s var(--ol-motion-quick), color 0.16s var(--ol-motion-quick), box-shadow 0.18s var(--ol-motion-soft)',
                 padding: '0 12px',
               }}
@@ -145,7 +192,7 @@ function FontSizeRow() {
 const btnGhost: CSSProperties = {
   padding: '5px 10px', fontSize: 12, borderRadius: 6,
   border: '0.5px solid var(--ol-line-strong)',
-  background: '#fff', color: 'var(--ol-ink-2)',
+  background: 'var(--ol-control-solid)', color: 'var(--ol-ink-2)',
   cursor: 'default', fontFamily: 'inherit',
   transition: 'background 0.16s var(--ol-motion-quick), border-color 0.16s var(--ol-motion-quick)',
 };

@@ -845,6 +845,10 @@ export const ja: typeof zhCN = {
       releaseNotes: 'リリースノート',
     },
     personalize: {
+      theme: 'テーマ',
+      themeDesc: 'アプリ外観をライトとダークで切り替えます。',
+      themeLight: 'ライト',
+      themeDark: 'ダーク',
       font: 'フォントサイズ',
       fontDesc: 'UI のフォントサイズを全体的にスケール。即時反映。',
       fontSmall: '小',

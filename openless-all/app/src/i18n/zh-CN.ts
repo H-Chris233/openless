@@ -841,6 +841,10 @@ export const zhCN = {
       releaseNotes: '发布日志',
     },
     personalize: {
+      theme: '主题',
+      themeDesc: '切换应用外观的浅色与深色版本。',
+      themeLight: '浅色',
+      themeDark: '深色',
       font: '字体大小',
       fontDesc: '整体缩放界面字号，立即生效。',
       fontSmall: '小',

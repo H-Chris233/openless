@@ -843,6 +843,10 @@ export const en: typeof zhCN = {
       releaseNotes: 'Release notes',
     },
     personalize: {
+      theme: 'Theme',
+      themeDesc: 'Switch the app shell between light and dark appearance.',
+      themeLight: 'Light',
+      themeDark: 'Dark',
       font: 'Font size',
       fontDesc: 'Scale the entire UI font size — applies instantly.',
       fontSmall: 'Small',
