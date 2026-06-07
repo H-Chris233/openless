@@ -6,11 +6,13 @@ function assertMatch(source, pattern, name) {
   }
 }
 
+// show_capsule_window_no_activate 已随 capsule/IME 窗口插入管线拆到
+// coordinator/ime_insertion.rs（SRP 拆分），契约函数本身未改。
 const coordinatorRs = (
-  await readFile(new URL('../src-tauri/src/coordinator.rs', import.meta.url), 'utf-8')
+  await readFile(new URL('../src-tauri/src/coordinator/ime_insertion.rs', import.meta.url), 'utf-8')
 ).replace(/\r\n/g, '\n');
 const functionMatch = coordinatorRs.match(
-  /#\[cfg\(target_os = "macos"\)\]\s*fn show_capsule_window_no_activate[\s\S]*?\n}\n\n#\[cfg\(target_os = "linux"\)\]/,
+  /#\[cfg\(target_os = "macos"\)\]\s*(?:pub\(crate\) )?fn show_capsule_window_no_activate[\s\S]*?\n}\n\n#\[cfg\(target_os = "linux"\)\]/,
 );
 
 if (!functionMatch) {
