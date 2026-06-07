@@ -478,6 +478,48 @@ fn validate_llm_endpoint_rejects_non_https_public() {
     assert!(validate_llm_endpoint("http://api.example.com/v1").is_err());
 }
 
+// ── issue #609 M-02：F-01 绕过变体（依赖 url crate 的 WHATWG host 归一化）──
+
+#[test]
+fn validate_llm_endpoint_normalizes_obfuscated_loopback_to_local() {
+    // url crate 把十六进制/十进制点分与整数形式归一化为 127.0.0.1 = 本地白名单 → 接受。
+    validate_llm_endpoint("http://0x7f.0.0.1/v1").expect("0x7f.0.0.1 规范化为 127.0.0.1，本地放行");
+    validate_llm_endpoint("http://2130706433/v1").expect("2130706433 规范化为 127.0.0.1，本地放行");
+}
+
+#[test]
+fn validate_llm_endpoint_rejects_userinfo_private_host() {
+    // userinfo（user@）不参与 host 判定，host 取 192.168.1.1 → 私网拒绝，
+    // 不会被 userinfo 骗过。
+    assert!(
+        validate_llm_endpoint("https://user@192.168.1.1/v1").is_err(),
+        "userinfo 不应让私网 host 绕过 SSRF 校验"
+    );
+}
+
+#[test]
+fn validate_llm_endpoint_rejects_unspecified_ipv4() {
+    // 0.0.0.0 unspecified → 拒绝（http 也先被 https 强制挡下，双保险）。
+    assert!(validate_llm_endpoint("http://0.0.0.0/v1").is_err());
+    assert!(validate_llm_endpoint("https://0.0.0.0/v1").is_err());
+}
+
+// ── issue #609 H-01：Gemini base_url 也过 SSRF 校验 ──
+
+#[test]
+fn resolve_gemini_base_url_default_passes() {
+    let url = resolve_gemini_base_url(None).expect("默认 Gemini endpoint 必须通过");
+    assert_eq!(url, "https://generativelanguage.googleapis.com/v1beta");
+}
+
+#[test]
+fn resolve_gemini_base_url_rejects_private_endpoint() {
+    // 用户把 Gemini endpoint 改成私网/元数据 → 必须拒绝，防止带 Key 请求被指向内网。
+    assert!(resolve_gemini_base_url(Some("http://192.168.1.1/v1beta".into())).is_err());
+    assert!(resolve_gemini_base_url(Some("http://169.254.169.254/v1beta".into())).is_err());
+    assert!(resolve_gemini_base_url(Some("http://api.example.com/v1beta".into())).is_err());
+}
+
 #[test]
 fn deferred_asr_bridge_flushes_startup_audio_before_live_chunks() {
     #[derive(Default)]

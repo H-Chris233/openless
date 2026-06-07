@@ -595,14 +595,27 @@ pub(crate) fn read_gemini_credentials() -> anyhow::Result<(String, String, Strin
     let model = CredentialsVault::get(CredentialAccount::ArkModelId)?
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "gemini-2.5-flash".to_string());
-    let base_url = CredentialsVault::get(CredentialAccount::ArkEndpoint)?
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "https://generativelanguage.googleapis.com/v1beta".to_string());
+    let base_url =
+        CredentialsVault::get(CredentialAccount::ArkEndpoint)?.filter(|s| !s.trim().is_empty());
     if api_key.trim().is_empty() {
         anyhow::bail!("API Key 为空");
     }
-    let base_url = base_url.trim_end_matches('/').to_string();
+    let base_url = resolve_gemini_base_url(base_url)?;
     Ok((api_key, model, base_url))
+}
+
+/// 归一化并校验 Gemini base_url（纯函数，便于单测）。
+///
+/// issue #609 H-01：Gemini 的 base_url 同样是 attacker-controlled（用户可在凭据库改
+/// `ArkEndpoint`），必须和 ark/OpenAI 路径一样过 SSRF 配置校验，否则带 API Key 的请求
+/// 可被指向内网/元数据服务。
+pub(crate) fn resolve_gemini_base_url(endpoint: Option<String>) -> anyhow::Result<String> {
+    let base_url = endpoint
+        .unwrap_or_else(|| "https://generativelanguage.googleapis.com/v1beta".to_string())
+        .trim_end_matches('/')
+        .to_string();
+    validate_llm_endpoint(&base_url)?;
+    Ok(base_url)
 }
 
 pub(crate) fn build_active_llm_provider(
@@ -684,7 +697,14 @@ pub(crate) fn validate_llm_endpoint(raw: &str) -> anyhow::Result<()> {
     }
 
     let scheme = url.scheme();
-    let is_local_host = matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1" | "[::1]");
+    // `url::Host` 对 IPv6 字面量保留方括号（`host_str()` 返回 `[::1]`、`[fc00::1]`）。
+    // 先剥一次方括号得到裸 IP 形式，后面 is_local_host 判定与 IpAddr 解析都用它。
+    let bare_host = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host.as_str());
+
+    let is_local_host = matches!(bare_host, "localhost" | "127.0.0.1" | "::1");
 
     // 本地回环（localhost / 127.0.0.1 / ::1）是显式白名单：放行 http，并跳过后续
     // loopback IP 段拒绝（否则 127.0.0.1 会被 is_loopback 命中）。本地自建 LLM
@@ -699,19 +719,8 @@ pub(crate) fn validate_llm_endpoint(raw: &str) -> anyhow::Result<()> {
     }
 
     // host 能解析成字面 IP 才走 IP 段校验；纯主机名交给 https 强制 + 元数据黑名单。
-    let ip = match host.parse::<IpAddr>() {
-        Ok(ip) => ip,
-        Err(_) => {
-            // url::Host 对 `[::1]` 这类带方括号的会去括号，这里再兜底处理裸括号场景。
-            match host
-                .trim_start_matches('[')
-                .trim_end_matches(']')
-                .parse::<IpAddr>()
-            {
-                Ok(ip) => ip,
-                Err(_) => return Ok(()),
-            }
-        }
+    let Ok(ip) = bare_host.parse::<IpAddr>() else {
+        return Ok(());
     };
 
     let rejected = match ip {

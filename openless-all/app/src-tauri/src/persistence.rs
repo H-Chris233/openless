@@ -51,6 +51,12 @@ const KEYRING_CREDENTIALS_CHUNK_PREFIX: &str = "credentials.v1.chunk.";
 /// issue #609 F-03：history.json HMAC 完整性密钥的 keyring account。和凭据共用
 /// `CredentialsVault::SERVICE_NAME`，但走独立 account，不掺进 chunked CredsRoot。
 const KEYRING_HISTORY_HMAC_ACCOUNT: &str = "history.hmac_key.v1";
+/// issue #609 C-01：「已启用 HMAC」标志的 keyring account（值固定为 "1"）。
+/// 一旦置位，sidecar 缺失就判定为攻击者删除（而非 legacy），fail-safe 拒绝。
+/// 没有这个标志，攻击者只需删掉 `history.json.hmac` 就能把任意篡改历史伪装成
+/// legacy 文件骗过 HMAC 校验。标志放 keyring（而非文件）正是因为它本身要抗删除。
+const KEYRING_HISTORY_HMAC_ENROLLED_ACCOUNT: &str = "history.hmac_enrolled.v1";
+const KEYRING_HISTORY_HMAC_ENROLLED_VALUE: &str = "1";
 /// HMAC 密钥长度（字节）。
 const HISTORY_HMAC_KEY_LEN: usize = 32;
 /// history HMAC sidecar 文件后缀：`history.json.hmac`。
@@ -440,6 +446,31 @@ fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// 与 `atomic_write` 相同，但（unix）在 rename **之前**把 tmp 文件设 0o600。
+///
+/// issue #609 M-01：原先「rename 后再 chmod」之间存在一段世界可读窗口（tmp 按
+/// umask 创建，目标文件 rename 后到收紧权限前可被同机其他用户读到）。在 rename
+/// 前对 tmp chmod，保证目标文件一出现就已是 0o600，无暴露窗口。仅用于 history.json
+/// 与其 sidecar（含明文/完整性数据），其余配置走普通 `atomic_write`。
+fn atomic_write_private(path: &Path, contents: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        ensure_dir(parent)?;
+    }
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let tmp_path = path.with_file_name(format!("{file_name}.tmp-{}", Uuid::new_v4().simple()));
+    fs::write(&tmp_path, contents)
+        .with_context(|| format!("write tmp failed: {}", tmp_path.display()))?;
+    restrict_file_permissions_best_effort(&tmp_path);
+    if let Err(err) = fs::rename(&tmp_path, path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(err).with_context(|| format!("rename failed: {}", path.display()));
+    }
+    Ok(())
+}
+
 fn read_or_default<T: for<'de> Deserialize<'de> + Default>(path: &Path) -> Result<T> {
     if !path.exists() {
         return Ok(T::default());
@@ -779,13 +810,17 @@ static HISTORY_HMAC_KEY: OnceLock<Option<Vec<u8>>> = OnceLock::new();
 /// 首次用时从 keyring 读 32 字节 hex；不存在则用 OS CSPRNG 生成并写回 keyring。
 /// keyring 不可用（如 Linux 无 secret service）→ 返回 None，调用方据此**退化为不
 /// 校验**（保持可用，但不提供完整性保证）；用 `OnceLock` 把这个状态固化到进程。
+///
+/// issue #609 M-03：keyring 不可用时只能放弃完整性校验，这里 `log::warn!` 一次。
+/// **后续可做**：keyring 缺失时把 HMAC 密钥落到一个 0o600 文件里兜底（当前留作
+/// future work，因为文件密钥与明文 history 同目录，威胁模型收益有限）。
 fn history_hmac_key() -> Option<Vec<u8>> {
     HISTORY_HMAC_KEY
         .get_or_init(|| match load_or_create_history_hmac_key() {
             Ok(key) => Some(key),
             Err(e) => {
                 log::warn!(
-                    "[history] HMAC 密钥不可用，本次运行跳过完整性校验（仍按内容读写）：{e}"
+                    "[history] 完整性校验未激活（keyring 不可用），本次运行跳过 HMAC 校验（仍按内容读写）：{e}"
                 );
                 None
             }
@@ -813,10 +848,58 @@ fn load_or_create_history_hmac_key() -> Result<Vec<u8>> {
     Ok(key)
 }
 
+/// issue #609 C-01：「是否已启用 HMAC」标志的抽象，便于单测注入内存实现。
+///
+/// 标志存 keyring（不是文件），因为它本身要抗删除：sidecar 是文件、易删，
+/// 一旦攻击者删掉 sidecar，靠这个 keyring 标志判定「本应有 sidecar 却没了」=
+/// 篡改，而不是误当 legacy 接受。
+trait HmacEnrollment {
+    /// 标志已置位（曾经写过 sidecar）。keyring 不可读时返回 false（退化）。
+    fn is_enrolled(&self) -> bool;
+    /// 置位标志（幂等）。keyring 不可写时静默忽略（best-effort）。
+    fn set_enrolled(&self);
+}
+
+/// 生产实现：标志落 keyring。读不到/写不了都按「未启用」处理（与 M-03 的退化一致）。
+struct KeyringEnrollment;
+
+impl HmacEnrollment for KeyringEnrollment {
+    fn is_enrolled(&self) -> bool {
+        let _guard = credentials_lock().lock();
+        match get_keyring_password(KEYRING_HISTORY_HMAC_ENROLLED_ACCOUNT) {
+            Ok(Some(v)) => v == KEYRING_HISTORY_HMAC_ENROLLED_VALUE,
+            Ok(None) => false,
+            Err(e) => {
+                log::warn!("[history] 读取 HMAC enrolled 标志失败，按未启用处理：{e}");
+                false
+            }
+        }
+    }
+
+    fn set_enrolled(&self) {
+        let _guard = credentials_lock().lock();
+        // 已置位则不重复写，避免 macOS Keychain 反复弹 ACL 授权。
+        if let Ok(Some(v)) = get_keyring_password(KEYRING_HISTORY_HMAC_ENROLLED_ACCOUNT) {
+            if v == KEYRING_HISTORY_HMAC_ENROLLED_VALUE {
+                return;
+            }
+        }
+        match keyring_entry_for(KEYRING_HISTORY_HMAC_ENROLLED_ACCOUNT).and_then(|e| {
+            e.set_password(KEYRING_HISTORY_HMAC_ENROLLED_VALUE)
+                .map_err(Into::into)
+        }) {
+            Ok(()) => {}
+            Err(e) => log::warn!("[history] 置位 HMAC enrolled 标志失败：{e}"),
+        }
+    }
+}
+
 fn encode_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
-        s.push_str(&format!("{b:02x}"));
+        // write! 到 String 不会失败；直接吞掉 Result 即可。
+        let _ = write!(s, "{b:02x}");
     }
     s
 }
@@ -851,16 +934,15 @@ fn history_hmac_sidecar_path(history_path: &Path) -> PathBuf {
 }
 
 /// 常量时间比较两段 hex HMAC，避免计时侧信道。两者都是定长 hex，长度不等直接 false。
+/// issue #609 H-02：用 `subtle::ConstantTimeEq` 而非手写 XOR 循环，避免编译器把
+/// 短路优化引回去（手写循环不保证不被向量化/提前退出）。
 fn hmac_hex_eq(a: &str, b: &str) -> bool {
+    use subtle::ConstantTimeEq;
     let (a, b) = (a.trim().as_bytes(), b.trim().as_bytes());
     if a.len() != b.len() {
         return false;
     }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
+    a.ct_eq(b).into()
 }
 
 fn load_keyring_credentials() -> Result<Option<CredsRoot>> {
@@ -1264,16 +1346,27 @@ impl HistoryStore {
     /// - 文件不存在 / 为空 → 空历史（正常首次启动）。
     /// - sidecar 存在且 HMAC 不匹配 → **判定被投毒/损坏，fail-safe 返回空历史**并
     ///   log::warn，绝不把被篡改的历史喂给下游 LLM（对话感知 polish）。
-    /// - sidecar 缺失但 history 非空 → legacy 文件：接受当前内容并**立即补写 sidecar**
-    ///   完成迁移，让此后写入都带完整性标记。
+    /// - sidecar 缺失但**标志未置位** → 真正的 legacy 文件：接受当前内容、补写 sidecar、
+    ///   置位 enrolled 标志完成迁移（issue #609 C-01）。
+    /// - sidecar 缺失但**标志已置位** → 攻击者删了 sidecar 想伪装 legacy：fail-safe 返回空。
     fn read_locked(&self) -> Result<Vec<DictationSession>> {
-        read_history_with_key(&self.path, history_hmac_key().as_deref())
+        read_history_with_key(
+            &self.path,
+            history_hmac_key().as_deref(),
+            &KeyringEnrollment,
+        )
     }
 
-    /// issue #609 F-03/F-04：写 history 后算 HMAC 写 sidecar；unix 下把两文件都设 0o600。
+    /// issue #609 F-03/F-04/C-01：写 history 后算 HMAC 写 sidecar；unix 下把两文件都设
+    /// 0o600；首次写顺带置位 enrolled 标志。
     fn write_locked(&self, sessions: &[DictationSession]) -> Result<()> {
         let json = serde_json::to_vec_pretty(sessions).context("encode history failed")?;
-        write_history_with_key(&self.path, &json, history_hmac_key().as_deref())
+        write_history_with_key(
+            &self.path,
+            &json,
+            history_hmac_key().as_deref(),
+            &KeyringEnrollment,
+        )
     }
 }
 
@@ -1281,14 +1374,20 @@ impl HistoryStore {
 ///
 /// `key == None`：无密钥，退化为不校验，按内容直接读（与历史行为一致）。
 /// 详细语义见 `HistoryStore::read_locked` 的文档。
-fn read_history_with_key(path: &Path, key: Option<&[u8]>) -> Result<Vec<DictationSession>> {
+fn read_history_with_key(
+    path: &Path,
+    key: Option<&[u8]>,
+    enrollment: &dyn HmacEnrollment,
+) -> Result<Vec<DictationSession>> {
     let Some(key) = key else {
         return read_or_default::<Vec<DictationSession>>(path);
     };
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let bytes = fs::read(path).with_context(|| format!("read failed: {}", path.display()))?;
+    // TOCTOU 收口（rust）：不先 exists() 再 read()，直接 read()，NotFound 当空历史。
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e).with_context(|| format!("read failed: {}", path.display())),
+    };
     if bytes.is_empty() {
         return Ok(Vec::new());
     }
@@ -1308,10 +1407,25 @@ fn read_history_with_key(path: &Path, key: Option<&[u8]>) -> Result<Vec<Dictatio
                 .with_context(|| format!("decode failed: {}", path.display()))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // legacy：老用户的 history.json 没有 .hmac → 接受并补写 sidecar 迁移。
-            log::info!("[history] 未发现 HMAC sidecar，视为 legacy 文件，接受并补写完整性标记");
+            // issue #609 C-01：sidecar 缺失要分两种情况。
+            if enrollment.is_enrolled() {
+                // 标志已置位：本应有 sidecar 却没了 → 攻击者删 sidecar 想伪装 legacy
+                // 绕过 HMAC。fail-safe：返回空历史，绝不接受、绝不补签。
+                log::warn!(
+                    "[history] HMAC 已启用但 sidecar 缺失（疑似被删除以绕过完整性校验），fail-safe 返回空历史：{}",
+                    path.display()
+                );
+                return Ok(Vec::new());
+            }
+            // 真正的 legacy：老用户的 history.json 从没带过 .hmac → 接受、补写 sidecar、
+            // 置位 enrolled 标志完成迁移。此后再缺 sidecar 就会落到上面的 fail-safe。
+            log::info!(
+                "[history] 未发现 HMAC sidecar 且未启用，视为 legacy 文件，接受并补写完整性标记"
+            );
             if let Err(err) = write_hmac_sidecar(&sidecar, &expected) {
                 log::warn!("[history] 迁移补写 HMAC sidecar 失败：{err}");
+            } else {
+                enrollment.set_enrolled();
             }
             serde_json::from_slice::<Vec<DictationSession>>(&bytes)
                 .with_context(|| format!("decode failed: {}", path.display()))
@@ -1323,28 +1437,34 @@ fn read_history_with_key(path: &Path, key: Option<&[u8]>) -> Result<Vec<Dictatio
 }
 
 /// 写 history JSON、收紧权限、按 `key` 写 HMAC sidecar（纯函数，便于单测）。
-fn write_history_with_key(path: &Path, json: &[u8], key: Option<&[u8]>) -> Result<()> {
-    atomic_write(path, json)?;
-    // F-04：history.json 是明文存储，at-rest 防护靠 OS 文件系统权限——unix 收紧到
-    // 仅属主可读写（0o600）。Windows 走用户目录默认 ACL（%APPDATA% 已是 per-user）。
-    restrict_file_permissions_best_effort(path);
+///
+/// issue #609 C-01：成功写出 sidecar 后**幂等置位 enrolled 标志**——这样此后任何
+/// sidecar 缺失都会被读路径判定为篡改，而不是误当 legacy 接受。
+fn write_history_with_key(
+    path: &Path,
+    json: &[u8],
+    key: Option<&[u8]>,
+    enrollment: &dyn HmacEnrollment,
+) -> Result<()> {
+    // M-01：history.json 明文存储，at-rest 防护靠 OS 文件系统权限——unix 在 rename
+    // **之前**就把 tmp 文件设 0o600，消除「rename 后再 chmod」之间的世界可读窗口。
+    atomic_write_private(path, json)?;
     if let Some(key) = key {
         let sidecar = history_hmac_sidecar_path(path);
         let mac = compute_history_hmac(key, json);
-        if let Err(e) = write_hmac_sidecar(&sidecar, &mac) {
-            // sidecar 写失败不阻断主写入（数据已落盘），但记一笔——下次读会被当
-            // legacy 迁移或（若 sidecar 部分写入损坏）触发 fail-safe。
-            log::warn!("[history] 写 HMAC sidecar 失败：{e}");
+        match write_hmac_sidecar(&sidecar, &mac) {
+            Ok(()) => enrollment.set_enrolled(),
+            // sidecar 写失败不阻断主写入（数据已落盘），但记一笔——也不置位标志，
+            // 让下次读仍能走 legacy 迁移补写，而不是误判篡改。
+            Err(e) => log::warn!("[history] 写 HMAC sidecar 失败：{e}"),
         }
     }
     Ok(())
 }
 
-/// 写 HMAC sidecar 文件并（unix）设 0o600。
+/// 写 HMAC sidecar 文件并（unix）在 rename 前设 0o600（M-01：无 umask 暴露窗口）。
 fn write_hmac_sidecar(sidecar: &Path, hmac_hex: &str) -> Result<()> {
-    atomic_write(sidecar, hmac_hex.as_bytes())?;
-    restrict_file_permissions_best_effort(sidecar);
-    Ok(())
+    atomic_write_private(sidecar, hmac_hex.as_bytes())
 }
 
 /// issue #609 F-04：unix 下把文件权限收紧到 0o600（仅属主可读写）。
@@ -2632,11 +2752,39 @@ mod tests {
         chunk_json_payload, compute_history_hmac, decode_hex, encode_hex,
         history_hmac_sidecar_path, hmac_hex_eq, list_vocab_presets, read_history_with_key,
         read_preferences, save_vocab_presets, sync_style_pack_preferences,
-        validate_correction_rule_syntax, write_history_with_key, KEYRING_CHUNK_MAX_UTF16_UNITS,
+        validate_correction_rule_syntax, write_history_with_key, HmacEnrollment,
+        KEYRING_CHUNK_MAX_UTF16_UNITS,
     };
     use crate::types::{builtin_style_packs, CustomStylePrompts, VocabPreset, VocabPresetStore};
+    use std::cell::Cell;
     use std::fs;
     use std::path::PathBuf;
+
+    /// 内存版 enrolled 标志，单测注入，不打真 keyring。
+    #[derive(Default)]
+    struct MemEnrollment {
+        enrolled: Cell<bool>,
+    }
+
+    impl MemEnrollment {
+        fn new() -> Self {
+            Self::default()
+        }
+        fn enrolled() -> Self {
+            let m = Self::default();
+            m.enrolled.set(true);
+            m
+        }
+    }
+
+    impl HmacEnrollment for MemEnrollment {
+        fn is_enrolled(&self) -> bool {
+            self.enrolled.get()
+        }
+        fn set_enrolled(&self) {
+            self.enrolled.set(true);
+        }
+    }
 
     fn history_test_dir() -> PathBuf {
         let dir =
@@ -2685,10 +2833,12 @@ mod tests {
         let dir = history_test_dir();
         let path = dir.join("history.json");
         let key = [7u8; 32];
-        write_history_with_key(&path, SAMPLE_HISTORY_JSON.as_bytes(), Some(&key)).unwrap();
-        // sidecar 应存在。
+        let enr = MemEnrollment::new();
+        write_history_with_key(&path, SAMPLE_HISTORY_JSON.as_bytes(), Some(&key), &enr).unwrap();
+        // sidecar 应存在，且写入后置位 enrolled 标志。
         assert!(history_hmac_sidecar_path(&path).exists());
-        let sessions = read_history_with_key(&path, Some(&key)).unwrap();
+        assert!(enr.is_enrolled(), "首次写 sidecar 后必须置位 enrolled 标志");
+        let sessions = read_history_with_key(&path, Some(&key), &enr).unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, "s1");
     }
@@ -2698,11 +2848,12 @@ mod tests {
         let dir = history_test_dir();
         let path = dir.join("history.json");
         let key = [9u8; 32];
-        write_history_with_key(&path, SAMPLE_HISTORY_JSON.as_bytes(), Some(&key)).unwrap();
+        let enr = MemEnrollment::new();
+        write_history_with_key(&path, SAMPLE_HISTORY_JSON.as_bytes(), Some(&key), &enr).unwrap();
         // 攻击者篡改 history.json，但 sidecar 仍是旧 HMAC → 校验失败。
         let tampered = SAMPLE_HISTORY_JSON.replace("你好。", "被注入的内容");
         fs::write(&path, tampered.as_bytes()).unwrap();
-        let sessions = read_history_with_key(&path, Some(&key)).unwrap();
+        let sessions = read_history_with_key(&path, Some(&key), &enr).unwrap();
         assert!(
             sessions.is_empty(),
             "篡改后必须 fail-safe 返回空历史，不喂下游"
@@ -2714,20 +2865,65 @@ mod tests {
         let dir = history_test_dir();
         let path = dir.join("history.json");
         let key = [3u8; 32];
-        // 老用户：只有 history.json，没有 .hmac。
+        // 老用户：只有 history.json，没有 .hmac，且 enrolled 标志未置位。
         fs::write(&path, SAMPLE_HISTORY_JSON.as_bytes()).unwrap();
         let sidecar = history_hmac_sidecar_path(&path);
         assert!(!sidecar.exists());
-        // 首次读：接受并补写 sidecar。
-        let sessions = read_history_with_key(&path, Some(&key)).unwrap();
+        let enr = MemEnrollment::new();
+        // 首次读：接受并补写 sidecar，置位标志。
+        let sessions = read_history_with_key(&path, Some(&key), &enr).unwrap();
         assert_eq!(sessions.len(), 1);
         assert!(
             sidecar.exists(),
             "legacy 读取后必须补写 HMAC sidecar 完成迁移"
         );
+        assert!(
+            enr.is_enrolled(),
+            "legacy 迁移后必须置位 enrolled 标志（C-01）"
+        );
         // 迁移后再读，HMAC 已匹配，仍正常返回。
-        let again = read_history_with_key(&path, Some(&key)).unwrap();
+        let again = read_history_with_key(&path, Some(&key), &enr).unwrap();
         assert_eq!(again.len(), 1);
+    }
+
+    /// issue #609 C-01 核心回归：enrolled 已置位后攻击者删 sidecar 想伪装 legacy，
+    /// 必须 fail-safe 返回空（不再误当 legacy 接受+补签）。
+    #[test]
+    fn history_enrolled_then_sidecar_deleted_fails_safe_not_legacy() {
+        let dir = history_test_dir();
+        let path = dir.join("history.json");
+        let key = [5u8; 32];
+        let enr = MemEnrollment::new();
+        // 正常写入：sidecar 生成，标志置位。
+        write_history_with_key(&path, SAMPLE_HISTORY_JSON.as_bytes(), Some(&key), &enr).unwrap();
+        let sidecar = history_hmac_sidecar_path(&path);
+        assert!(sidecar.exists());
+        assert!(enr.is_enrolled());
+        // 攻击者篡改 history.json 并删除 sidecar，企图把篡改内容伪装成 legacy。
+        let tampered = SAMPLE_HISTORY_JSON.replace("你好。", "被注入的内容");
+        fs::write(&path, tampered.as_bytes()).unwrap();
+        fs::remove_file(&sidecar).unwrap();
+        let sessions = read_history_with_key(&path, Some(&key), &enr).unwrap();
+        assert!(
+            sessions.is_empty(),
+            "enrolled 后 sidecar 缺失必须判定篡改、fail-safe 返回空，不接受、不补签"
+        );
+        // 关键：不得偷偷补回 sidecar（不补签）。
+        assert!(!sidecar.exists(), "fail-safe 路径不得为攻击者补写 sidecar");
+    }
+
+    /// enrolled 已置位、sidecar 缺失但 history 也未篡改 —— 仍按篡改处理（fail-safe）。
+    /// 因为读路径无法区分「无害删除」与「篡改后删除」，一律保守。
+    #[test]
+    fn history_enrolled_sidecar_missing_is_failsafe_even_if_content_intact() {
+        let dir = history_test_dir();
+        let path = dir.join("history.json");
+        let key = [6u8; 32];
+        let enr = MemEnrollment::enrolled();
+        // history 内容合法，但 sidecar 从未写入（已 enrolled）。
+        fs::write(&path, SAMPLE_HISTORY_JSON.as_bytes()).unwrap();
+        let sessions = read_history_with_key(&path, Some(&key), &enr).unwrap();
+        assert!(sessions.is_empty(), "enrolled + 无 sidecar → fail-safe");
     }
 
     #[test]
@@ -2736,7 +2932,7 @@ mod tests {
         let path = dir.join("history.json");
         fs::write(&path, SAMPLE_HISTORY_JSON.as_bytes()).unwrap();
         // key=None：退化为不校验，按内容读。
-        let sessions = read_history_with_key(&path, None).unwrap();
+        let sessions = read_history_with_key(&path, None, &MemEnrollment::new()).unwrap();
         assert_eq!(sessions.len(), 1);
     }
 
@@ -2747,7 +2943,13 @@ mod tests {
         let dir = history_test_dir();
         let path = dir.join("history.json");
         let key = [1u8; 32];
-        write_history_with_key(&path, SAMPLE_HISTORY_JSON.as_bytes(), Some(&key)).unwrap();
+        write_history_with_key(
+            &path,
+            SAMPLE_HISTORY_JSON.as_bytes(),
+            Some(&key),
+            &MemEnrollment::new(),
+        )
+        .unwrap();
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "history.json 应为 0o600");
         let sidecar_mode = fs::metadata(history_hmac_sidecar_path(&path))
