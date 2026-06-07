@@ -213,10 +213,10 @@ export function SettingsModal({ os: _os, onClose, initialSettingsSection }: Sett
       </div>
       <style>{`
         .ol-aura-settings {
-          background: var(--ol-surface);
+          background: var(--ol-panel-bg);
           border-radius: var(--ol-shell-radius);
           border: 1px solid var(--ol-panel-border);
-          box-shadow: var(--ol-aura-shadow);
+          box-shadow: var(--ol-panel-shadow);
         }
         .ol-aura-settings-rail {
           padding: 20px 14px;
@@ -226,13 +226,13 @@ export function SettingsModal({ os: _os, onClose, initialSettingsSection }: Sett
         }
         .ol-aura-settings-pill {
           background: var(--ol-sidebar-pill-bg);
-          border-radius: 14px;
+          border-radius: 12px;
           border: 1px solid var(--ol-sidebar-pill-border);
-          box-shadow: var(--ol-aura-shadow-soft);
+          box-shadow: none;
         }
         .ol-aura-settings-nav-btn {
           padding: 7px 10px;
-          border-radius: 8px;
+          border-radius: 12px;
           border: 0;
           background: transparent;
           font-family: inherit;

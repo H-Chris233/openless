@@ -385,16 +385,16 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
           gap: 10px;
           padding: 6px 10px 16px;
           margin-bottom: 6px;
-          border-radius: 18px;
+          border-radius: 0;
           background: var(--ol-sidebar-brand-bg);
           border: 1px solid var(--ol-sidebar-brand-border);
-          box-shadow: var(--ol-aura-shadow-soft);
+          box-shadow: none;
         }
         .ol-aura-sidebar-brand-mark {
           width: 26px;
           height: 26px;
           border-radius: 8px;
-          box-shadow: 0 10px 24px -16px rgba(47, 109, 246, 0.45);
+          box-shadow: none;
         }
         .ol-aura-sidebar-brand-title {
           font-size: 14px;
@@ -410,13 +410,13 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
         }
         .ol-aura-sidebar-pill {
           background: var(--ol-sidebar-pill-bg);
-          border-radius: 14px;
+          border-radius: 12px;
           border: 1px solid var(--ol-sidebar-pill-border);
-          box-shadow: var(--ol-aura-shadow-soft);
+          box-shadow: none;
         }
         .ol-aura-sidebar-nav-btn {
           padding: 8px 12px;
-          border-radius: 14px;
+          border-radius: 12px;
           border: 0;
           background: transparent;
           font-family: inherit;
@@ -447,7 +447,7 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
           background: var(--ol-sidebar-version-bg);
           border: 1px solid var(--ol-sidebar-version-border);
           border-radius: var(--ol-pill-radius);
-          box-shadow: var(--ol-aura-shadow-soft);
+          box-shadow: none;
         }
         .ol-aura-beta-tag {
           display: inline-block;
@@ -462,14 +462,14 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
         }
         .ol-aura-sidebar-settings {
           padding: 10px 12px;
-          border-radius: 16px;
+          border-radius: 12px;
           border: 1px solid var(--ol-sidebar-settings-border);
           background: var(--ol-sidebar-settings-bg);
           box-shadow: none;
         }
         .ol-aura-sidebar-settings.ol-nav-btn-active {
           background: var(--ol-sidebar-settings-active-bg);
-          box-shadow: var(--ol-aura-shadow-soft);
+          box-shadow: none;
         }
         .ol-aura-console-main {
           border-radius: var(--ol-panel-radius);
