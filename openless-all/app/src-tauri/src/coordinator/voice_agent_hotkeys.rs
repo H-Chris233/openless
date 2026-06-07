@@ -110,54 +110,68 @@ pub(crate) fn less_computer_modifier_binding(
     })
 }
 
-pub(crate) fn less_computer_modifier_bridge_loop(
+/// Less Computer bridge 循环把不同来源的事件枚举（修饰键 `HotkeyEvent` /
+/// combo `ComboHotkeyEvent`）归一成的语义边沿。
+enum LessComputerEdge {
+    Pressed,
+    Released,
+    Cancelled,
+    /// 与 Less Computer 无关的事件（如 translation/qa），忽略。
+    Ignore,
+}
+
+/// 修饰键与 combo 两个 bridge 循环体逐字相同，只是事件枚举类型不同。抽出泛型
+/// 循环，调用方传入把各自事件映射到 `LessComputerEdge` 的闭包。`block_on(handle_*)`
+/// 调用语义保持不变。
+fn less_computer_bridge_loop<E>(
     inner: Arc<Inner>,
-    rx: mpsc::Receiver<HotkeyEvent>,
+    rx: mpsc::Receiver<E>,
+    to_edge: impl Fn(&E) -> LessComputerEdge,
 ) {
     while let Ok(evt) = rx.recv() {
         if inner.shortcut_recording_active.load(Ordering::SeqCst) {
             continue;
         }
         let inner_cloned = Arc::clone(&inner);
-        match evt {
-            HotkeyEvent::Pressed => {
+        match to_edge(&evt) {
+            LessComputerEdge::Pressed => {
                 async_runtime::block_on(async {
                     handle_less_computer_pressed(&inner_cloned).await
                 });
             }
-            HotkeyEvent::Released => {
+            LessComputerEdge::Released => {
                 async_runtime::block_on(async {
                     handle_less_computer_released(&inner_cloned).await
                 });
             }
-            HotkeyEvent::Cancelled => cancel_session(&inner_cloned),
-            HotkeyEvent::TranslationModifierPressed | HotkeyEvent::QaShortcutPressed => {}
+            LessComputerEdge::Cancelled => cancel_session(&inner_cloned),
+            LessComputerEdge::Ignore => {}
         }
     }
+}
+
+pub(crate) fn less_computer_modifier_bridge_loop(
+    inner: Arc<Inner>,
+    rx: mpsc::Receiver<HotkeyEvent>,
+) {
+    less_computer_bridge_loop(inner, rx, |evt| match evt {
+        HotkeyEvent::Pressed => LessComputerEdge::Pressed,
+        HotkeyEvent::Released => LessComputerEdge::Released,
+        HotkeyEvent::Cancelled => LessComputerEdge::Cancelled,
+        HotkeyEvent::TranslationModifierPressed | HotkeyEvent::QaShortcutPressed => {
+            LessComputerEdge::Ignore
+        }
+    });
 }
 
 pub(crate) fn less_computer_combo_bridge_loop(
     inner: Arc<Inner>,
     rx: mpsc::Receiver<ComboHotkeyEvent>,
 ) {
-    while let Ok(evt) = rx.recv() {
-        if inner.shortcut_recording_active.load(Ordering::SeqCst) {
-            continue;
-        }
-        let inner_cloned = Arc::clone(&inner);
-        match evt {
-            ComboHotkeyEvent::Pressed => {
-                async_runtime::block_on(async {
-                    handle_less_computer_pressed(&inner_cloned).await
-                });
-            }
-            ComboHotkeyEvent::Released => {
-                async_runtime::block_on(async {
-                    handle_less_computer_released(&inner_cloned).await
-                });
-            }
-        }
-    }
+    less_computer_bridge_loop(inner, rx, |evt| match evt {
+        ComboHotkeyEvent::Pressed => LessComputerEdge::Pressed,
+        ComboHotkeyEvent::Released => LessComputerEdge::Released,
+    });
 }
 
 pub(crate) async fn handle_less_computer_pressed(inner: &Arc<Inner>) {
