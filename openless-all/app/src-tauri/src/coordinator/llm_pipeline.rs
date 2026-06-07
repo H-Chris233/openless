@@ -644,8 +644,117 @@ pub(crate) fn resolve_ark_endpoint_with_policy(
     if api_key.trim().is_empty() && endpoint.is_none() {
         anyhow::bail!("API Key 为空");
     }
-    Ok(endpoint
-        .unwrap_or_else(|| "https://ark.cn-beijing.volces.com/api/v3/chat/completions".to_string()))
+    let resolved = endpoint
+        .unwrap_or_else(|| "https://ark.cn-beijing.volces.com/api/v3/chat/completions".to_string());
+    // issue #609 F-01（SSRF）：用户自定义 endpoint 是 attacker-controlled，直接拿来发
+    // 带 API Key 的请求等于把凭据指哪打哪。这里对 host/IP 段 + scheme 做配置时校验，
+    // 默认官方 endpoint 也过一遍（它本就合法）。注意这只防住"配置即字面内网地址"，
+    // **DNS 重绑定**（主机名解析后落到内网 IP）属已知残留，超本 PR 范围。
+    validate_llm_endpoint(&resolved)?;
+    Ok(resolved)
+}
+
+/// issue #609 F-01：对 LLM endpoint 做 SSRF 配置校验。
+///
+/// 规则：
+/// - scheme 必须 `https`，除非 host 是 localhost / `127.0.0.1` / `::1`（本地允许 http）。
+/// - host 若是字面 IP：拒绝 loopback / RFC1918 私网 / link-local(169.254、fe80) /
+///   unspecified / CGNAT 100.64.0.0/10(RFC6598) / IPv6 ULA `fc00::/7` /
+///   IPv4-mapped 的等价私网。
+/// - 拒绝已知元数据主机名子串（`metadata.google.internal`、`169.254.169.254`）。
+///
+/// **已知残留**：本函数只在配置时校验字面 host/IP，无法防住 DNS 重绑定
+/// （主机名解析后再落到内网 IP）。完整防护需在每次请求前解析 + 校验解析结果，
+/// 不在本 PR 范围。
+pub(crate) fn validate_llm_endpoint(raw: &str) -> anyhow::Result<()> {
+    use std::net::IpAddr;
+
+    let url =
+        url::Url::parse(raw).map_err(|e| anyhow::anyhow!("LLM endpoint 不是合法 URL：{e}"))?;
+
+    let host = url
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("LLM endpoint 缺少主机名"))?
+        .to_ascii_lowercase();
+
+    // 已知云元数据主机名/地址子串：无条件拒绝。
+    const METADATA_HOSTS: [&str; 2] = ["metadata.google.internal", "169.254.169.254"];
+    if METADATA_HOSTS.iter().any(|m| host.contains(m)) {
+        anyhow::bail!("LLM endpoint 指向云元数据服务，已拒绝：{host}");
+    }
+
+    let scheme = url.scheme();
+    let is_local_host = matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1" | "[::1]");
+
+    // 本地回环（localhost / 127.0.0.1 / ::1）是显式白名单：放行 http，并跳过后续
+    // loopback IP 段拒绝（否则 127.0.0.1 会被 is_loopback 命中）。本地自建 LLM
+    // 服务（如 ollama / LM Studio）就走这条。
+    if is_local_host {
+        return Ok(());
+    }
+
+    // 非本地 host 一律强制 https。
+    if scheme != "https" {
+        anyhow::bail!("LLM endpoint 必须使用 https（仅 localhost 允许 http）：{raw}");
+    }
+
+    // host 能解析成字面 IP 才走 IP 段校验；纯主机名交给 https 强制 + 元数据黑名单。
+    let ip = match host.parse::<IpAddr>() {
+        Ok(ip) => ip,
+        Err(_) => {
+            // url::Host 对 `[::1]` 这类带方括号的会去括号，这里再兜底处理裸括号场景。
+            match host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<IpAddr>()
+            {
+                Ok(ip) => ip,
+                Err(_) => return Ok(()),
+            }
+        }
+    };
+
+    let rejected = match ip {
+        IpAddr::V4(v4) => ip_v4_is_internal(v4),
+        IpAddr::V6(v6) => ip_v6_is_internal(v6),
+    };
+    if rejected {
+        anyhow::bail!("LLM endpoint 指向内网/保留地址，已拒绝（防 SSRF）：{ip}");
+    }
+
+    // IPv4-mapped IPv6（::ffff:a.b.c.d）拆出内层 v4 再判一次，堵等价私网绕过。
+    if let IpAddr::V6(v6) = ip {
+        if let Some(mapped) = v6.to_ipv4_mapped() {
+            if ip_v4_is_internal(mapped) {
+                anyhow::bail!("LLM endpoint 指向 IPv4-mapped 内网地址，已拒绝（防 SSRF）：{ip}");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// 判 IPv4 是否落在内网/保留段。
+fn ip_v4_is_internal(ip: std::net::Ipv4Addr) -> bool {
+    // CGNAT 100.64.0.0/10（RFC6598）—— std 没有现成判定，手算。
+    let octets = ip.octets();
+    let is_cgnat = octets[0] == 100 && (64..=127).contains(&octets[1]);
+    ip.is_loopback()
+        || ip.is_private()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || ip.is_broadcast()
+        || is_cgnat
+}
+
+/// 判 IPv6 是否落在内网/保留段。
+fn ip_v6_is_internal(ip: std::net::Ipv6Addr) -> bool {
+    let segs = ip.segments();
+    // ULA fc00::/7：首字节高 7 位 == 0b1111110。
+    let is_ula = (segs[0] & 0xfe00) == 0xfc00;
+    // link-local fe80::/10。
+    let is_link_local = (segs[0] & 0xffc0) == 0xfe80;
+    ip.is_loopback() || ip.is_unspecified() || is_ula || is_link_local
 }
 
 pub(crate) fn enabled_phrases(inner: &Arc<Inner>) -> Vec<String> {

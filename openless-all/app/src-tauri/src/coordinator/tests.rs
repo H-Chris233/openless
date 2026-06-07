@@ -403,6 +403,81 @@ fn resolve_ark_endpoint_allows_blank_key_with_custom_endpoint() {
     assert_eq!(endpoint, "https://example.com/v1/chat/completions");
 }
 
+// ───────── issue #609 F-01：SSRF endpoint 校验 ─────────
+
+#[test]
+fn validate_llm_endpoint_accepts_default_volces_https() {
+    validate_llm_endpoint("https://ark.cn-beijing.volces.com/api/v3/chat/completions")
+        .expect("default endpoint must pass");
+}
+
+#[test]
+fn validate_llm_endpoint_accepts_public_hostname() {
+    validate_llm_endpoint("https://api.example.com/v1/chat/completions")
+        .expect("public https hostname must pass");
+}
+
+#[test]
+fn validate_llm_endpoint_accepts_localhost_http() {
+    validate_llm_endpoint("http://localhost:8080/v1").expect("localhost http allowed");
+    validate_llm_endpoint("http://127.0.0.1:8080/v1").expect("127.0.0.1 http allowed");
+}
+
+#[test]
+fn validate_llm_endpoint_rejects_metadata_host() {
+    assert!(validate_llm_endpoint("http://metadata.google.internal/computeMetadata/v1").is_err());
+    assert!(
+        validate_llm_endpoint("http://169.254.169.254/latest/meta-data/iam/").is_err(),
+        "AWS/GCP metadata IP must be rejected"
+    );
+}
+
+#[test]
+fn validate_llm_endpoint_rejects_link_local_ipv4() {
+    assert!(validate_llm_endpoint("https://169.254.10.5/v1").is_err());
+}
+
+#[test]
+fn validate_llm_endpoint_rejects_rfc1918_private() {
+    assert!(validate_llm_endpoint("http://10.0.0.5/v1").is_err());
+    assert!(validate_llm_endpoint("http://192.168.1.1/v1").is_err());
+    assert!(validate_llm_endpoint("http://172.16.0.1/v1").is_err());
+}
+
+#[test]
+fn validate_llm_endpoint_rejects_cgnat() {
+    // RFC6598 100.64.0.0/10。
+    assert!(validate_llm_endpoint("https://100.64.0.1/v1").is_err());
+    assert!(validate_llm_endpoint("https://100.127.255.254/v1").is_err());
+    // 100.128.x 不在段内，应放行（公网）。
+    validate_llm_endpoint("https://100.128.0.1/v1").expect("100.128/9 is public");
+}
+
+#[test]
+fn validate_llm_endpoint_allows_ipv6_loopback() {
+    // `::1` 与 localhost / 127.0.0.1 同属本地白名单，http 放行。
+    validate_llm_endpoint("http://[::1]:8080/v1").expect("::1 loopback allowed");
+}
+
+#[test]
+fn validate_llm_endpoint_rejects_ipv6_ula_and_link_local() {
+    assert!(validate_llm_endpoint("https://[fc00::1]/v1").is_err());
+    assert!(validate_llm_endpoint("https://[fd12:3456::1]/v1").is_err());
+    assert!(validate_llm_endpoint("https://[fe80::1]/v1").is_err());
+}
+
+#[test]
+fn validate_llm_endpoint_rejects_ipv4_mapped_private() {
+    // ::ffff:10.0.0.1 等价 RFC1918，必须拒绝。
+    assert!(validate_llm_endpoint("https://[::ffff:10.0.0.1]/v1").is_err());
+}
+
+#[test]
+fn validate_llm_endpoint_rejects_non_https_public() {
+    // 外网主机走 http → 拒绝（仅 localhost 放行 http）。
+    assert!(validate_llm_endpoint("http://api.example.com/v1").is_err());
+}
+
 #[test]
 fn deferred_asr_bridge_flushes_startup_audio_before_live_chunks() {
     #[derive(Default)]
