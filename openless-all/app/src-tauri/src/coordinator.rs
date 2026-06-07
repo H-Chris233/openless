@@ -64,6 +64,7 @@ use crate::windows_ime_session::{PreparedWindowsImeSession, WindowsImeSessionCon
 mod asr_setup;
 mod capsule;
 mod dictation;
+mod dictation_streaming;
 mod hotkey_supervisors;
 mod ime_insertion;
 mod llm_pipeline;
@@ -76,6 +77,7 @@ mod voice_agent_hotkeys;
 // 引用继续通过父模块解析（拆分前的 `use super::*` 契约）。
 pub(crate) use asr_setup::*;
 pub(crate) use capsule::*;
+pub(crate) use dictation_streaming::*;
 pub(crate) use hotkey_supervisors::*;
 pub(crate) use ime_insertion::*;
 pub(crate) use llm_pipeline::*;
