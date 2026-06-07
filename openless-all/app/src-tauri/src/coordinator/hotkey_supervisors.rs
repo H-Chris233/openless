@@ -593,28 +593,33 @@ pub(crate) fn switch_to_previous_style(inner: &Arc<Inner>) {
     }
 }
 
-pub(crate) fn take_combo_hotkey_on_main_thread(inner: &Arc<Inner>) {
+/// 在主线程上 `.take()` 一个 combo 监听槽。
+///
+/// 这三类 combo 热键（combo / translation / coding-agent）的「拿 app → 有则
+/// `run_on_main_thread` 里 take，无则直接 take」marshaling 语义逐字相同，只是 take
+/// 的字段不同（issue #118：监听器必须在主线程释放）。`slot` 闭包按 `&Arc<Inner>`
+/// 取回对应字段，消除三处复制。`action_hotkey` 类已用 `action_hotkey_slot` 单独泛化。
+pub(crate) fn take_combo_monitor_on_main_thread(
+    inner: &Arc<Inner>,
+    slot: impl Fn(&Arc<Inner>) -> &Mutex<Option<ComboHotkeyMonitor>> + Send + 'static,
+) {
     let app = inner.app.lock().clone();
     if let Some(app) = app {
         let inner = Arc::clone(inner);
         let _ = app.run_on_main_thread(move || {
-            inner.combo_hotkey.lock().take();
+            slot(&inner).lock().take();
         });
     } else {
-        inner.combo_hotkey.lock().take();
+        slot(inner).lock().take();
     }
 }
 
+pub(crate) fn take_combo_hotkey_on_main_thread(inner: &Arc<Inner>) {
+    take_combo_monitor_on_main_thread(inner, |inner| &inner.combo_hotkey);
+}
+
 pub(crate) fn take_translation_hotkey_on_main_thread(inner: &Arc<Inner>) {
-    let app = inner.app.lock().clone();
-    if let Some(app) = app {
-        let inner = Arc::clone(inner);
-        let _ = app.run_on_main_thread(move || {
-            inner.translation_hotkey.lock().take();
-        });
-    } else {
-        inner.translation_hotkey.lock().take();
-    }
+    take_combo_monitor_on_main_thread(inner, |inner| &inner.translation_hotkey);
 }
 
 pub(crate) fn take_action_hotkey_on_main_thread(inner: &Arc<Inner>, kind: ActionHotkeyKind) {

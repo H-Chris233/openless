@@ -237,15 +237,7 @@ pub(crate) fn take_coding_agent_hotkeys_on_main_thread(inner: &Arc<Inner>) {
 }
 
 pub(crate) fn take_coding_agent_combo_hotkey_on_main_thread(inner: &Arc<Inner>) {
-    let app = inner.app.lock().clone();
-    if let Some(app) = app {
-        let inner = Arc::clone(inner);
-        let _ = app.run_on_main_thread(move || {
-            inner.coding_agent_combo_hotkey.lock().take();
-        });
-    } else {
-        inner.coding_agent_combo_hotkey.lock().take();
-    }
+    take_combo_monitor_on_main_thread(inner, |inner| &inner.coding_agent_combo_hotkey);
 }
 
 /// 快取用：抓当前选中文本 → Claude 润色 → 回插（替换选区）。全程胶囊反馈。
