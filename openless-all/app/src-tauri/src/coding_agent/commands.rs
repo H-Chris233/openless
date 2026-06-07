@@ -135,7 +135,7 @@ pub async fn coding_agent_run_test(
         "Write".into(),
         "Glob".into(),
         "Grep".into(),
-        "WebFetch".into(),
+        // 去掉 WebFetch：控制台 prompt 同样可被注入诱导 SSRF（与语音路径保持一致）。
         "WebSearch".into(),
     ];
 

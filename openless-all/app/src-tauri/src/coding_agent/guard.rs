@@ -17,6 +17,7 @@ pub const HIGH_RISK_PATTERNS: &[(&str, &str)] = &[
     ("git push -f", "强制推送会覆盖远端历史"),
     ("git reset --hard", "硬重置会丢弃未提交改动"),
     ("git clean -fd", "强制清理未跟踪文件"),
+    ("git clean -f -d", "强制清理未跟踪文件"),
     ("mkfs", "格式化文件系统"),
     ("dd if=", "裸盘写入"),
     (":(){", "fork 炸弹"),
@@ -50,6 +51,7 @@ pub fn risk_equivalent_patterns(pattern: &str) -> Vec<&'static str> {
     const GROUPS: &[&[&str]] = &[
         &["git push --force", "git push -f"],
         &["rm -rf", "rm -fr"],
+        &["git clean -fd", "git clean -f -d"],
         // 其余按需补充；默认返回自身
     ];
     for g in GROUPS {
@@ -74,6 +76,7 @@ pub fn default_deny_rules() -> Vec<String> {
         "Bash(git push -f:*)".into(),
         "Bash(git reset --hard:*)".into(),
         "Bash(git clean -fd:*)".into(),
+        "Bash(git clean -f -d:*)".into(),
         "Bash(mkfs:*)".into(),
         "Bash(dd:*)".into(),
         "Bash(shutdown:*)".into(),
@@ -89,18 +92,20 @@ pub fn default_deny_rules() -> Vec<String> {
         "Edit(.env)".into(),
         "Edit(.git/**)".into(),
         // macOS 持久化面：开机自启 plist + 登录 shell 配置（写入即可持久驻留/提权）。
-        "Edit(**/Library/LaunchAgents/**)".into(),
-        "Write(**/Library/LaunchAgents/**)".into(),
-        "Edit(**/Library/LaunchDaemons/**)".into(),
-        "Write(**/Library/LaunchDaemons/**)".into(),
-        "Edit(**/.zshrc)".into(),
-        "Write(**/.zshrc)".into(),
-        "Edit(**/.zprofile)".into(),
-        "Write(**/.zprofile)".into(),
-        "Edit(**/.bash_profile)".into(),
-        "Write(**/.bash_profile)".into(),
-        "Edit(**/.bashrc)".into(),
-        "Write(**/.bashrc)".into(),
+        // 用 `~/` 家目录前缀（Claude Code settings 官方写法，如 `Read(~/.zshrc)`）：
+        // 文件路径规则里 bare `**/.zshrc` 是相对 agent **工作目录**匹配，命中不到工作目录
+        // 之外的真正 `~/.zshrc` → 护栏失效。LaunchDaemons 是系统路径（写入需 root，已被
+        // `Bash(sudo:*)` 拦），这里只覆盖用户态 LaunchAgents + 登录 shell 配置。
+        "Edit(~/Library/LaunchAgents/**)".into(),
+        "Write(~/Library/LaunchAgents/**)".into(),
+        "Edit(~/.zshrc)".into(),
+        "Write(~/.zshrc)".into(),
+        "Edit(~/.zprofile)".into(),
+        "Write(~/.zprofile)".into(),
+        "Edit(~/.bash_profile)".into(),
+        "Write(~/.bash_profile)".into(),
+        "Edit(~/.bashrc)".into(),
+        "Write(~/.bashrc)".into(),
     ]
 }
 
@@ -175,17 +180,18 @@ mod tests {
         ] {
             assert!(deny.iter().any(|d| d == rule), "缺少 deny: {rule}");
         }
-        // macOS 持久化面。
+        // macOS 持久化面（`~/` 家目录前缀，全 Edit/Write 变体）。
         for rule in [
-            "Edit(**/Library/LaunchAgents/**)",
-            "Write(**/Library/LaunchAgents/**)",
-            "Edit(**/Library/LaunchDaemons/**)",
-            "Write(**/Library/LaunchDaemons/**)",
-            "Edit(**/.zshrc)",
-            "Write(**/.zshrc)",
-            "Edit(**/.zprofile)",
-            "Edit(**/.bash_profile)",
-            "Edit(**/.bashrc)",
+            "Edit(~/Library/LaunchAgents/**)",
+            "Write(~/Library/LaunchAgents/**)",
+            "Edit(~/.zshrc)",
+            "Write(~/.zshrc)",
+            "Edit(~/.zprofile)",
+            "Write(~/.zprofile)",
+            "Edit(~/.bash_profile)",
+            "Write(~/.bash_profile)",
+            "Edit(~/.bashrc)",
+            "Write(~/.bashrc)",
         ] {
             assert!(deny.iter().any(|d| d == rule), "缺少 deny: {rule}");
         }
@@ -207,6 +213,10 @@ mod tests {
         let rm = risk_equivalent_patterns("rm -rf");
         assert!(rm.contains(&"rm -rf"));
         assert!(rm.contains(&"rm -fr"));
+        // approve "git clean -fd" 应同时放行 "git clean -f -d" 等价写法。
+        let clean = risk_equivalent_patterns("git clean -fd");
+        assert!(clean.contains(&"git clean -fd"));
+        assert!(clean.contains(&"git clean -f -d"));
         // 不在任何分组里 → 返回空，调用方回落到 pattern 自身。
         assert!(risk_equivalent_patterns("sudo ").is_empty());
     }
