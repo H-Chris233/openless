@@ -515,6 +515,9 @@ pub(crate) fn show_capsule_window_no_activate<R: tauri::Runtime>(
             }
         }
     }
+    // 走到这里 hwnd 必为 Some：上面循环要么在 Win32 分支 break（hwnd 已赋值），
+    // 要么提前 return false。此 else 仅是 HANDLE_RETRY_ATTEMPTS == 0（循环体一次都不跑）
+    // 时的防御性兜底，当前常量为 5 时不可达，保留以防后续把次数改 0。
     let Some(hwnd) = hwnd else {
         return false;
     };

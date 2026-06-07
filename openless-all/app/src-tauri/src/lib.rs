@@ -1228,8 +1228,9 @@ fn clamp_to_monitor(
     area_bottom: i32,
 ) -> (i32, i32) {
     // 右/下边界 = area 右下角减去窗口自身尺寸，确保整窗可见。
-    let max_x = (area_right - w).max(area_left);
-    let max_y = (area_bottom - h).max(area_top);
+    // 用 saturating_sub 防 area_right/area_bottom 为极小（含 i32::MIN 近邻）时减法溢出。
+    let max_x = area_right.saturating_sub(w).max(area_left);
+    let max_y = area_bottom.saturating_sub(h).max(area_top);
     let clamped_x = x.clamp(area_left, max_x);
     let clamped_y = y.clamp(area_top, max_y);
     (clamped_x, clamped_y)
@@ -1967,6 +1968,15 @@ mod tests {
         // 整窗右/下边界都落在 area 内。
         assert!(x + 264 <= 1920);
         assert!(y + 126 <= 1040);
+    }
+
+    #[test]
+    fn clamp_to_monitor_pulls_back_when_right_edge_overflows_inside_area() {
+        // 左上角 x=1800 本在 area 内，但 x+w=2064 越过右边界 1920 →
+        // 应被左移到「右边界 - 窗口宽」，整窗右缘恰好贴住 area_right。
+        let (x, _y) = clamp_to_monitor(1800, 900, 264, 126, 0, 0, 1920, 1040);
+        assert_eq!(x, 1920 - 264);
+        assert!(x + 264 <= 1920);
     }
 
     #[test]
