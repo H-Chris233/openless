@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Icon } from '../components/Icon';
+import { formatDuration as formatDurationShared, formatTime } from '../lib/format';
 import { formatComboLabel } from '../lib/hotkey';
 import { getCredentials, listHistory } from '../lib/ipc';
 import type { CredentialsStatus, DictationSession, PolishMode } from '../lib/types';
@@ -361,21 +362,9 @@ function RecentRow({ session, modeLabel }: { session: DictationSession; modeLabe
   );
 }
 
-function formatTime(iso: string): string {
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return iso;
-  const now = new Date();
-  const sameDay = d.toDateString() === now.toDateString();
-  const pad = (n: number) => String(n).padStart(2, '0');
-  if (sameDay) return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
-  return `${d.getMonth() + 1}/${d.getDate()}`;
-}
-
+// Overview 用 M:SS 时钟格式展示时长（与 History 的「分钟」i18n 文案不同）。
 function formatDuration(ms: number, t: ReturnType<typeof useTranslation>['t']): string {
-  if (ms <= 0) return '—';
-  const sec = ms / 1000;
-  if (sec < 60) return t('common.durationSeconds', { value: sec.toFixed(1) });
-  return `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, '0')}`;
+  return formatDurationShared(ms, t, { minutesAsClock: true });
 }
 
 function weekDayLabels(names: string[]): string[] {
