@@ -65,6 +65,7 @@ mod asr_setup;
 mod capsule;
 mod dictation;
 mod dictation_streaming;
+mod dictation_voice_agent;
 mod hotkey_supervisors;
 mod ime_insertion;
 mod llm_pipeline;
@@ -78,6 +79,7 @@ mod voice_agent_hotkeys;
 pub(crate) use asr_setup::*;
 pub(crate) use capsule::*;
 pub(crate) use dictation_streaming::*;
+pub(crate) use dictation_voice_agent::*;
 pub(crate) use hotkey_supervisors::*;
 pub(crate) use ime_insertion::*;
 pub(crate) use llm_pipeline::*;
@@ -817,7 +819,7 @@ impl Coordinator {
 
     /// 内联审批卡的 Approve / Deny 回执：解析等待中的 token。
     pub fn less_computer_approve(&self, token: &str, approved: bool) {
-        dictation::resolve_less_computer_approval(token, approved);
+        dictation_voice_agent::resolve_less_computer_approval(token, approved);
     }
 
     pub fn history(&self) -> &HistoryStore {
