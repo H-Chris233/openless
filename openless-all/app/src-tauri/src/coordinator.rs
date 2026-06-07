@@ -302,6 +302,9 @@ struct Inner {
     /// PC 端当前界面语言（BCP-47，如 "zh-CN"）。前端切换语言时经命令同步，
     /// H5 录音页据此渲染对应语言。进程内镜像，不持久化（前端会在启动/切换时重新下发）。
     remote_locale: Mutex<String>,
+    /// 远程「仅回传」开关：true = 手机端关掉了「电脑落字」，本次远程听写不插入到电脑光标,
+    /// 只把最终文字回传给手机（见 dictation 落字处 + remote:result）。默认 false（照常落字）。
+    remote_no_insert: AtomicBool,
     /// Less Computer 连续对话：true=浮窗里已有进行中的会话，下一轮 `claude --continue` 续上下文；
     /// 关闭浮窗（dismiss）复位为 false，下次说话开新会话。
     less_computer_conversation: AtomicBool,
@@ -382,6 +385,7 @@ impl Coordinator {
                     remote_server: Mutex::new(None),
                     remote_pin: Mutex::new(None),
                     remote_locale: Mutex::new(String::from("zh-CN")),
+                    remote_no_insert: AtomicBool::new(false),
                     less_computer_conversation: AtomicBool::new(false),
                 }),
             }
@@ -455,6 +459,7 @@ impl Coordinator {
                 remote_server: Mutex::new(None),
                 remote_pin: Mutex::new(None),
                 remote_locale: Mutex::new(String::from("zh-CN")),
+                remote_no_insert: AtomicBool::new(false),
                 less_computer_conversation: AtomicBool::new(false),
             }),
         }
@@ -1031,6 +1036,13 @@ impl Coordinator {
 
     /// 手机点"开始录音"。本地听写正在进行（phase != Idle）则拒绝并回 "busy"；
     /// 否则置位 remote 标志后走 begin_session（内部跳过 cpal，把 consumer 存进 sink）。
+    /// 设置远程「仅回传」开关（手机端「电脑落字」开关的反值）。true = 不落字、只回传。
+    pub fn set_remote_no_insert(&self, no_insert: bool) {
+        self.inner
+            .remote_no_insert
+            .store(no_insert, Ordering::SeqCst);
+    }
+
     pub async fn start_remote_dictation(&self) -> Result<(), String> {
         if !matches!(self.inner.state.lock().phase, SessionPhase::Idle) {
             return Err("busy".into());

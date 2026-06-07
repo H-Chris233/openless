@@ -21,6 +21,7 @@
       btnConnect: '连接',
       btnConnecting: '连接中…',
       modeToggle: '点按',
+      insertLabel: '电脑落字',
       modeHold: '按住',
       offlineTitle: '连接已断开',
       offlineSub: '与电脑的连接已中断。',
@@ -60,6 +61,8 @@
       helpDownloadCert: '⬇ 下载并安装证书',
       helpCopyLink: '⧉ 复制链接',
       helpCopied: '已复制 ✓',
+      copy: '复制',
+      copied: '已复制 ✓',
     },
     'zh-TW': {
       title: 'OpenLess 遠端輸入',
@@ -69,6 +72,7 @@
       btnConnect: '連線',
       btnConnecting: '連線中…',
       modeToggle: '點按',
+      insertLabel: '電腦落字',
       modeHold: '按住',
       offlineTitle: '連線已中斷',
       offlineSub: '與電腦的連線已中斷。',
@@ -108,6 +112,8 @@
       helpDownloadCert: '⬇ 下載並安裝憑證',
       helpCopyLink: '⧉ 複製連結',
       helpCopied: '已複製 ✓',
+      copy: '複製',
+      copied: '已複製 ✓',
     },
     en: {
       title: 'OpenLess Remote Input',
@@ -117,6 +123,7 @@
       btnConnect: 'Connect',
       btnConnecting: 'Connecting…',
       modeToggle: 'Tap',
+      insertLabel: 'Type on PC',
       modeHold: 'Hold',
       offlineTitle: 'Disconnected',
       offlineSub: 'The connection to your computer was lost.',
@@ -156,6 +163,8 @@
       helpDownloadCert: '⬇ Download & install cert',
       helpCopyLink: '⧉ Copy link',
       helpCopied: 'Copied ✓',
+      copy: 'Copy',
+      copied: 'Copied ✓',
     },
     ja: {
       title: 'OpenLess リモート入力',
@@ -165,6 +174,7 @@
       btnConnect: '接続',
       btnConnecting: '接続中…',
       modeToggle: 'タップ',
+      insertLabel: 'PCに入力',
       modeHold: '長押し',
       offlineTitle: '接続が切断されました',
       offlineSub: 'パソコンとの接続が切断されました。',
@@ -204,6 +214,8 @@
       helpDownloadCert: '⬇ 証明書をインストール',
       helpCopyLink: '⧉ リンクをコピー',
       helpCopied: 'コピーしました ✓',
+      copy: 'コピー',
+      copied: 'コピー済み ✓',
     },
     ko: {
       title: 'OpenLess 원격 입력',
@@ -213,6 +225,7 @@
       btnConnect: '연결',
       btnConnecting: '연결 중…',
       modeToggle: '탭',
+      insertLabel: 'PC에 입력',
       modeHold: '길게 누르기',
       offlineTitle: '연결이 끊겼습니다',
       offlineSub: '컴퓨터와의 연결이 끊겼습니다.',
@@ -252,6 +265,8 @@
       helpDownloadCert: '⬇ 인증서 설치',
       helpCopyLink: '⧉ 링크 복사',
       helpCopied: '복사됨 ✓',
+      copy: '복사',
+      copied: '복사됨 ✓',
     },
   };
 
@@ -293,6 +308,7 @@
   var TARGET_SR = 16000;            // 目标采样率,必须与 PC 端一致
   var MODE_KEY = 'ol_remote_mode';  // localStorage 键:录音方式
   var PIN_KEY = 'ol_remote_pin';    // localStorage 键:上次成功的配对码
+  var INSERT_KEY = 'ol_remote_insert'; // localStorage 键:电脑落字开关(默认开)
   var MIC_PREP_TIMEOUT_MS = 10000;  // 麦克风准备超时:超过则判失败让用户重试,避免无限卡"准备中"
 
   // ---------- DOM ----------
@@ -309,9 +325,15 @@
   var recordLabel = $('record-label');
   var statusBar = $('status-bar');
   var statusText = $('status-text');
+  var statusIcon = $('status-icon');
+  var statusDots = $('status-dots');
+  var resultWrap = $('result-wrap');
+  var resultText = $('result-text');
+  var resultCopy = $('result-copy');
   var levelBar = $('level-bar');
   var recTip = $('rec-tip');
   var modeSwitch = $('mode-switch');
+  var insertSwitch = $('insert-switch');
 
   var btnReconnect = $('btn-reconnect');
   var offlineReason = $('offline-reason');
@@ -364,6 +386,28 @@
   // ============================================================
   // 模式(toggle / hold)
   // ============================================================
+  // ============================================================
+  // 电脑落字开关(关闭=只把文字回传手机、不落到电脑光标)
+  // ============================================================
+  function readInsert() {
+    try { return localStorage.getItem(INSERT_KEY) !== '0'; } catch (e) { return true; }
+  }
+  function writeInsert(v) {
+    try { localStorage.setItem(INSERT_KEY, v ? '1' : '0'); } catch (e) {}
+  }
+  // 把当前开关值发给电脑(仅已连接时生效):进录音屏时同步一次,之后每次切换即时下发。
+  function sendInsertConfig() {
+    wsSendJSON({ type: 'set_insert', value: insertSwitch ? insertSwitch.checked : true });
+  }
+  function initInsertSwitch() {
+    if (!insertSwitch) return;
+    insertSwitch.checked = readInsert();
+    insertSwitch.addEventListener('change', function () {
+      writeInsert(insertSwitch.checked);
+      sendInsertConfig();
+    });
+  }
+
   function readMode() {
     var m = null;
     try { m = localStorage.getItem(MODE_KEY); } catch (e) {}
@@ -406,6 +450,9 @@
   // ============================================================
   function setStatus(text, kind) {
     statusText.textContent = text;
+    // 每次切状态先清掉图标/三点动效,由调用方(applyStatusKind)按需重新点亮。
+    if (statusIcon) statusIcon.hidden = true;
+    if (statusDots) statusDots.hidden = true;
     statusBar.classList.remove('is-error', 'is-ok', 'is-work');
     if (kind === 'error') statusBar.classList.add('is-error');
     else if (kind === 'ok') statusBar.classList.add('is-ok');
@@ -415,6 +462,28 @@
     if (typeof v !== 'number' || isNaN(v)) return;
     v = Math.max(0, Math.min(1, v));
     levelBar.style.width = (v * 100).toFixed(1) + '%';
+  }
+
+  // 去掉状态文案开头的 emoji 图标(如 '🎤 录音中' → '录音中'),改用 DOM 图标/动效呈现。
+  function stripLeadingIcon(s) {
+    return String(s).replace(/^\S+\s+/, '');
+  }
+
+  // PC 端落字完成后回传的最终文字,显示在状态区下方;开始新一次录音时清空。
+  function showResult(text) {
+    if (!resultWrap) return;
+    if (!text) { clearResult(); return; }
+    resultText.textContent = text;
+    resultWrap.hidden = false;
+  }
+  function clearResult() {
+    if (!resultWrap) return;
+    resultWrap.hidden = true;
+    resultText.textContent = '';
+    if (resultCopy) {
+      resultCopy.classList.remove('copied');
+      resultCopy.textContent = L.copy || '复制';
+    }
   }
 
   // done 后过几秒自动回到"准备就绪",方便直接开始下一次,而不是一直停在结果上。
@@ -562,23 +631,30 @@
           if (!recording) setStatus(L.ready, null);
         }, 1500);
         break;
+
+      case 'result':
+        // 电脑落字完成后回传的最终文字,显示给手机用户看本次识别结果。
+        showResult(msg.text);
+        break;
     }
   }
 
   function applyStatusKind(msg) {
     switch (msg.kind) {
       case 'recording':
-        setStatus(L.statusRecording, 'work');
+        setStatus(stripLeadingIcon(L.statusRecording), 'work');
         break;
       case 'transcribing':
-        setStatus(L.statusTranscribing, 'work');
+        setStatus(stripLeadingIcon(L.statusTranscribing), 'work');
+        if (statusDots) statusDots.hidden = false; // 识别中:三点加载动效
         break;
       case 'polishing':
-        setStatus(L.statusPolishing, 'work');
+        setStatus(L.statusPolishing, 'work'); // 润色保留 ✨
         break;
       case 'done':
         var n = (typeof msg.insertedChars === 'number') ? msg.insertedChars : 0;
-        setStatus(fmt(L.statusDone, { n: n }), 'ok');
+        setStatus(stripLeadingIcon(fmt(L.statusDone, { n: n })), 'ok');
+        if (statusIcon) { statusIcon.src = '/done.png'; statusIcon.hidden = false; } // 完成:对勾图
         setLevel(0);
         scheduleReady();
         break;
@@ -603,6 +679,7 @@
     updateRecordBtnUI();
     setStatus(L.ready, null);
     setLevel(0);
+    sendInsertConfig(); // 进录音屏时把「电脑落字」开关同步给电脑
   }
 
   // ============================================================
@@ -682,6 +759,28 @@
         navigator.clipboard.writeText(url).then(ok, function () { fallbackCopyText(url, ok); });
       } else {
         fallbackCopyText(url, ok);
+      }
+    });
+  }
+
+  // 结果文字「一键复制」：优先 navigator.clipboard(需安全上下文,本页是 HTTPS),
+  // 失败或旧浏览器回退 execCommand(兼容性高,见 fallbackCopyText)。
+  if (resultCopy) {
+    resultCopy.addEventListener('click', function () {
+      var text = resultText.textContent || '';
+      if (!text) return;
+      var done = function () {
+        resultCopy.classList.add('copied');
+        resultCopy.textContent = L.copied || '已复制 ✓';
+        setTimeout(function () {
+          resultCopy.classList.remove('copied');
+          resultCopy.textContent = L.copy || '复制';
+        }, 1500);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, function () { fallbackCopyText(text, done); });
+      } else {
+        fallbackCopyText(text, done);
       }
     });
   }
@@ -768,6 +867,7 @@
     recording = true;
     updateRecordBtnUI();
     setStatus(L.preparingMic, 'work');
+    clearResult(); // 清掉上一次的识别结果,避免新录音时还显示旧文字
 
     withTimeout(ensureAudio(), MIC_PREP_TIMEOUT_MS, 'TIMEOUT')
       .then(function () {
@@ -777,7 +877,7 @@
           return;
         }
         wsSendJSON({ type: 'start' });
-        setStatus(L.statusRecording, 'work');
+        setStatus(stripLeadingIcon(L.statusRecording), 'work');
       })
       .catch(function (err) {
         recording = false;
@@ -797,7 +897,8 @@
     updateRecordBtnUI();
     teardownAudioCapture();
     wsSendJSON({ type: 'stop' });
-    setStatus(L.statusTranscribing, 'work');
+    setStatus(stripLeadingIcon(L.statusTranscribing), 'work');
+    if (statusDots) statusDots.hidden = false;
     setLevel(0);
   }
 
@@ -1160,6 +1261,7 @@
 
     applyStaticI18n();
     syncModeUI();
+    initInsertSwitch();
     showScreen('pin');
     showPinError('');
     // 上次成功的配对码 → 自动填充并重连,刷新/重开页面免再输一次

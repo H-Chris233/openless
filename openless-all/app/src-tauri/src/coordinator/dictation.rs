@@ -2133,12 +2133,17 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
     };
     // 流式插入 opt-in 路径：开关打开 + 非翻译 + 非 Raw 模式 → 进入流式分支。
     // 任何不满足都走原一次性 polish_or_passthrough 路径，行为跟历史完全一致。
-    let streaming_eligible = streaming_insert_eligible(
-        prefs.streaming_insert,
-        translation_active,
-        mode,
-        raw_uses_llm,
-    );
+    // 远程「仅回传」模式：手机端关掉了「电脑落字」开关 —— 禁用流式插入(否则会边润色边把字
+    // 落到电脑),改走一次性路径,最后在插入处统一跳过,只把文字回传给手机。
+    let remote_no_insert = inner.remote_source_active.load(Ordering::SeqCst)
+        && inner.remote_no_insert.load(Ordering::SeqCst);
+    let streaming_eligible = !remote_no_insert
+        && streaming_insert_eligible(
+            prefs.streaming_insert,
+            translation_active,
+            mode,
+            raw_uses_llm,
+        );
     log::info!(
         "[coord] polish dispatch: translation={translation_active} mode={mode:?} streaming_eligible={streaming_eligible}"
     );
@@ -2247,7 +2252,14 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
     let allow_non_tsf_insertion_fallback = prefs.allow_non_tsf_insertion_fallback;
     let paste_shortcut = prefs.paste_shortcut;
     // 流式路径下，字符已经通过 Unicode keystroke 落到光标处，跳过 inserter.insert。
-    let status = if already_streamed {
+    let status = if remote_no_insert {
+        // 仅回传模式:不碰光标/剪贴板,电脑端无感;文字稍后经 remote:result 发给手机。
+        log::info!(
+            "[coord] remote no-insert: skip insertion, relay {} chars to phone only",
+            polished.chars().count()
+        );
+        InsertStatus::Inserted
+    } else if already_streamed {
         log::info!(
             "[coord] insertion skipped: {} chars already streamed via unicode_keystroke (polish_error={:?})",
             polished.chars().count(),
@@ -2373,6 +2385,14 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         done_message,
         Some(inserted_chars),
     );
+
+    // 远程会话：把最终文字回传给手机 H5。PC 胶囊只显示字数,但手机端用户看不到电脑
+    // 屏幕,需要直接看到这次落下的文字内容（remote_server 转发为 type=result）。
+    if inner.remote_source_active.load(Ordering::SeqCst) {
+        if let Some(app) = inner.app.lock().clone() {
+            let _ = app.emit("remote:result", polished.clone());
+        }
+    }
 
     {
         let mut state = inner.state.lock();

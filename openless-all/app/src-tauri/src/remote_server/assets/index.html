@@ -34,8 +34,8 @@
         <button id="btn-connect" class="btn btn-primary" data-i18n="btnConnect">连接</button>
       </div>
 
-      <!-- 连接帮助：证书信任引导（手机上直接照做） -->
-      <div class="help">
+      <!-- 连接帮助：证书信任引导（手机上直接照做）。暂时隐藏（用户要求），需要时去掉 hidden 即可恢复。 -->
+      <div class="help" hidden>
         <div class="help-title" data-i18n="helpTitle">连不上？多半是手机没信任证书</div>
         <p class="help-step" data-i18n="helpAndroid">① 安卓 / 一般情况：用浏览器无痕模式打开本页，出现“不安全”警告时选“继续前往”，再输入配对码连接。</p>
         <p class="help-step" data-i18n="helpIos">② iOS Safari 必须装证书：点下方按钮下载并安装描述文件，然后到「设置 → 通用 → 关于本机 → 证书信任设置」里打开它的“完全信任”，再回来连接。</p>
@@ -60,7 +60,7 @@
       <div class="rec-main">
         <button id="btn-record" class="record-btn" type="button" aria-label="录音按钮">
           <span class="record-btn-ring"></span>
-          <span class="record-btn-icon">🎤</span>
+          <img class="record-btn-icon" src="/mic.png" alt="" />
           <span class="record-btn-label" id="record-label">点击开始</span>
         </button>
 
@@ -69,11 +69,26 @@
         </div>
 
         <div class="status-bar" id="status-bar">
+          <img class="status-icon" id="status-icon" alt="" hidden />
+          <span class="dots" id="status-dots" aria-hidden="true" hidden><i></i><i></i><i></i></span>
           <span class="status-text" id="status-text">准备就绪</span>
+        </div>
+
+        <!-- 电脑落字完成后回传的最终文字,让手机端直接看到这次识别/输入的结果 -->
+        <div class="result-wrap" id="result-wrap" hidden>
+          <div class="result-text" id="result-text"></div>
+          <button class="result-copy" id="result-copy" type="button" data-i18n="copy">复制</button>
         </div>
       </div>
 
       <p class="rec-tip" id="rec-tip">点击大按钮开始录音，再次点击结束并识别。</p>
+
+      <!-- 电脑落字开关：关掉则这次只把文字回传到手机,不落到电脑光标 -->
+      <label class="insert-toggle">
+        <span class="insert-toggle-text" data-i18n="insertLabel">电脑落字</span>
+        <input type="checkbox" id="insert-switch" class="insert-switch" checked />
+        <span class="insert-track" aria-hidden="true"></span>
+      </label>
     </section>
 
     <!-- ===== 断线屏 ===== -->

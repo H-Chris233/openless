@@ -35,6 +35,8 @@ mod assets {
     pub const APP_JS: &str = include_str!("assets/app.js");
     pub const STYLE_CSS: &str = include_str!("assets/style.css");
     pub const ICON_PNG: &[u8] = include_bytes!("assets/icon.png");
+    pub const MIC_PNG: &[u8] = include_bytes!("assets/mic.png");
+    pub const DONE_PNG: &[u8] = include_bytes!("assets/done.png");
 }
 
 const HEADER_HTML: &str = "text/html; charset=utf-8";
@@ -273,6 +275,18 @@ fn build_router(state: Arc<WsState>) -> Router {
             "/icon.png",
             get(|| async {
                 ([(axum::http::header::CONTENT_TYPE, "image/png")], assets::ICON_PNG)
+            }),
+        )
+        .route(
+            "/mic.png",
+            get(|| async {
+                ([(axum::http::header::CONTENT_TYPE, "image/png")], assets::MIC_PNG)
+            }),
+        )
+        .route(
+            "/done.png",
+            get(|| async {
+                ([(axum::http::header::CONTENT_TYPE, "image/png")], assets::DONE_PNG)
             }),
         )
         // 证书下载：手机在浏览器打开它即可下载并安装信任（iOS Safari 的 wss 不复用
@@ -520,6 +534,18 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<WsState>) {
         })
     };
 
+    // 听写完成后 PC 端把最终文字 emit 到 "remote:result"。手机用户看不到电脑屏幕,
+    // 所以把这次落下的完整文字转发过去,H5 在状态区下方显示(type=result)。
+    let result_listener_id = {
+        let tx = evt_tx.clone();
+        state.app.listen_any("remote:result", move |event| {
+            // emit 的是 String,payload 是带引号的 JSON 字符串,反序列化回纯文本。
+            if let Ok(text) = serde_json::from_str::<String>(event.payload()) {
+                let _ = tx.send(serde_json::json!({ "type": "result", "text": text }).to_string());
+            }
+        })
+    };
+
     // 3) 主循环：手机上行（控制 / PCM） + 后端状态下行。
     loop {
         tokio::select! {
@@ -550,6 +576,7 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<WsState>) {
     // 4) 收尾：断连即取消未完成的远程会话，避免 ASR 句柄悬挂。
     log::info!("[remote-input] WS 连接已关闭");
     state.app.unlisten(listener_id);
+    state.app.unlisten(result_listener_id);
     state.coordinator.cancel_remote_dictation();
 }
 
@@ -578,6 +605,12 @@ async fn handle_control(txt: &str, state: &Arc<WsState>, socket: &mut WebSocket)
         }
         "cancel" => {
             state.coordinator.cancel_remote_dictation();
+        }
+        "set_insert" => {
+            // 手机端「电脑落字」开关：value=true 表示要落字。no_insert = !value。
+            let insert = v.get("value").and_then(|b| b.as_bool()).unwrap_or(true);
+            state.coordinator.set_remote_no_insert(!insert);
+            log::info!("[remote-input] 电脑落字开关 = {insert}");
         }
         _ => {}
     }

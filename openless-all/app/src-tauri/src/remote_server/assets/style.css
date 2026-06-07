@@ -51,6 +51,10 @@
   -webkit-tap-highlight-color: transparent;
 }
 
+/* 关键:很多元素用 hidden 属性控制显隐,但元素自带 display(flex/inline-flex)会覆盖浏览器
+   默认的 [hidden]{display:none},导致空框照常显示。这条强制 hidden 优先(结果框/三点/图标都靠它)。 */
+[hidden] { display: none !important; }
+
 html, body {
   margin: 0;
   padding: 0;
@@ -336,7 +340,9 @@ body {
   pointer-events: none;
 }
 .record-btn-icon {
-  font-size: 50px;
+  width: 60px;
+  height: 60px;
+  object-fit: contain;
   line-height: 1;
   transition: transform .15s ease;
 }
@@ -419,12 +425,134 @@ body {
 .status-bar.is-ok    { color: var(--ok);     border-color: rgba(22, 163, 74, .35); }
 .status-bar.is-work  { color: var(--blue);   border-color: var(--blue-ring); }
 
+/* 状态图标(如完成对勾) */
+.status-icon {
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
+  vertical-align: -3px;
+  margin-right: 3px;
+}
+
+/* 识别中三点加载动效(替代旋转 emoji) */
+.dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-right: 5px;
+  vertical-align: middle;
+  color: var(--blue);
+}
+.dots i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  display: inline-block;
+  animation: dotPulse 1.2s infinite ease-in-out both;
+}
+.dots i:nth-child(1) { animation-delay: -.32s; }
+.dots i:nth-child(2) { animation-delay: -.16s; }
+@keyframes dotPulse {
+  0%, 80%, 100% { transform: scale(.5); opacity: .35; }
+  40%           { transform: scale(1);  opacity: 1; }
+}
+
+/* ===== 识别结果文字(电脑回传) ===== */
+.result-wrap {
+  max-width: 90%;
+  margin-top: 2px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  animation: fadeIn .25s ease;
+}
+.result-text {
+  padding: 12px 16px;
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  border: 0.5px solid var(--line);
+  box-shadow: var(--shadow-sm);
+  font-size: 15px;
+  line-height: 1.55;
+  color: var(--ink);
+  text-align: left;
+  white-space: pre-wrap;
+  word-break: break-word;
+  /* 结果文字允许选中复制(其余 UI 默认禁选) */
+  user-select: text;
+  -webkit-user-select: text;
+}
+.result-copy {
+  align-self: flex-end;
+  -webkit-appearance: none;
+  appearance: none;
+  border: 1px solid var(--blue);
+  background: var(--blue-soft);
+  color: var(--blue);
+  font-size: 13px;
+  font-weight: 600;
+  font-family: inherit;
+  padding: 8px 18px;
+  border-radius: var(--r-lg);
+  cursor: pointer;
+  transition: background .15s ease, color .15s ease;
+}
+.result-copy:active { background: var(--blue); color: #fff; }
+.result-copy.copied { background: var(--ok-soft); border-color: var(--ok); color: var(--ok); }
+
 /* ===== 提示文字 ===== */
 .rec-tip {
   text-align: center;
   color: var(--ink-4);
   font-size: 13px;
   margin: 18px 0 0;
+}
+
+/* ===== 电脑落字开关 ===== */
+.insert-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin: 14px 0 0;
+  font-size: 13px;
+  color: var(--ink-3);
+  cursor: pointer;
+}
+.insert-switch {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+.insert-track {
+  position: relative;
+  width: 42px;
+  height: 24px;
+  border-radius: 999px;
+  background: var(--line-strong);
+  transition: background .2s ease;
+  flex: none;
+}
+.insert-track::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .25);
+  transition: transform .2s ease;
+}
+.insert-switch:checked ~ .insert-track {
+  background: var(--blue);
+}
+.insert-switch:checked ~ .insert-track::after {
+  transform: translateX(18px);
 }
 
 /* ===== 断线屏 ===== */
@@ -454,5 +582,5 @@ body {
   .brand { margin: 14px 0; }
   .brand-logo-img { width: 56px; height: 56px; }
   .record-btn { width: 148px; height: 148px; }
-  .record-btn-icon { font-size: 44px; }
+  .record-btn-icon { width: 52px; height: 52px; }
 }
