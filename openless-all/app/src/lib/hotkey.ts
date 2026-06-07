@@ -22,6 +22,10 @@ export function defaultOpenAppShortcut(): ShortcutBinding {
   return { primary: 'O', modifiers: defaultAppShortcutModifiers() };
 }
 
+export function defaultLessComputerShortcut(): ShortcutBinding {
+  return { primary: 'LeftControl', modifiers: [] };
+}
+
 export function getHotkeyTriggerLabel(trigger: HotkeyTrigger | null | undefined): string {
   if (!trigger) return i18n.t('hotkey.fallback');
   if (trigger === 'custom') return i18n.t('hotkey.triggers.custom');

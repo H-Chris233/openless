@@ -54,7 +54,7 @@ ferrous-opencc = "0.4"
 global-hotkey = "0.6"
 cpal = "0.15"
 enigo = "0.2"
-arboard = "3"
+arboard = { version = "3", features = ["wayland-data-control"] }
 rcgen = "^0.13"
 local-ip-address = "^0.6"
 rustls = { version = "^0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }

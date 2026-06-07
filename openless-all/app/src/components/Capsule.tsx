@@ -6,9 +6,8 @@ import {
   getCapsuleMessageLayout,
   getCapsulePillMetrics,
 } from '../lib/capsuleLayout';
-import { getSettings, invokeOrMock, isTauri } from '../lib/ipc';
-import { playRecordStartCue, primeAudioCue, stopAudioCue } from '../lib/audioCue';
-import type { CapsulePayload, CapsuleState, UserPreferences } from '../lib/types';
+import { invokeOrMock, isTauri } from '../lib/ipc';
+import type { CapsulePayload, CapsuleState } from '../lib/types';
 
 interface AudioBarsProps {
   level: number;
@@ -105,6 +104,10 @@ function CircleButton({ variant, enabled, onClick }: CircleButtonProps) {
   return (
     <button
       onClick={enabled ? onClick : undefined}
+      onMouseDown={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      }}
       aria-label={isCancel ? t('common.cancel') : t('settings.shortcuts.confirm')}
       disabled={!enabled}
       style={{
@@ -147,15 +150,17 @@ interface PillProps {
   level: number;
   insertedChars: number;
   message?: string;
+  operating?: boolean;
   onCancel: () => void;
   onConfirm: () => void;
 }
 
-function Pill({ os, state, level, insertedChars, message, onCancel, onConfirm }: PillProps) {
+function Pill({ os, state, level, insertedChars, message, operating, onCancel, onConfirm }: PillProps) {
   const { t } = useTranslation();
   const metrics = getCapsulePillMetrics(os);
   const processingLayout = getCapsuleMessageLayout(os, 'processing');
-  const enabled = state === 'recording';
+  const cancelEnabled = state === 'recording' || state === 'transcribing' || state === 'polishing';
+  const confirmEnabled = state === 'recording';
 
   // "thinking" 扫光速度：进入 transcribing/polishing 的头 2 秒走快速（0.9s/cycle，提示
   // 「流式刚开始」），之后切回慢速（2.4s）作为稳态。切回 idle / done / 其他 state 也复位
@@ -224,7 +229,7 @@ function Pill({ os, state, level, insertedChars, message, onCancel, onConfirm }:
               WebkitLineClamp: processingLayout.lineClamp,
             }}
           >
-            {t('capsule.thinking')}
+            {t(operating ? 'capsule.using' : 'capsule.thinking')}
           </span>
         </div>
       );
@@ -247,7 +252,7 @@ function Pill({ os, state, level, insertedChars, message, onCancel, onConfirm }:
   const shadowAlpha = 0.20 + ambient * 0.10;
 
   return (
-    // 假毛玻璃：半透明白底 + .ol-frost 噪点纹理 + 内描边高光 + 柔和阴影。
+    // 非 Linux 走假毛玻璃；Linux 禁用透明窗口后由 .ol-frost 平台规则退成不透明面。
     // 不写 backdrop-filter —— webview 模糊不了透明窗口背后的桌面（Tauri 上游限制）。
     <div
       className="ol-frost"
@@ -273,11 +278,11 @@ function Pill({ os, state, level, insertedChars, message, onCancel, onConfirm }:
         willChange: 'transform, box-shadow',
       }}
     >
-      <CircleButton variant="cancel" enabled={enabled} onClick={onCancel} />
+      <CircleButton variant="cancel" enabled={cancelEnabled} onClick={onCancel} />
       <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
         {center}
       </div>
-      <CircleButton variant="confirm" enabled={enabled} onClick={onConfirm} />
+      <CircleButton variant="confirm" enabled={confirmEnabled} onClick={onConfirm} />
     </div>
   );
 }
@@ -302,6 +307,7 @@ export function Capsule() {
   const [insertedChars, setInsertedChars] = useState<number>(0);
   const [message, setMessage] = useState<string | undefined>();
   const [translation, setTranslation] = useState<boolean>(false);
+  const [operating, setOperating] = useState<boolean>(false);
   // `leaving` 与 `lastVisibleState` 协同实现「退出动画」：
   // - 当 state 从非 idle 变成 idle 时，不立即卸载，而是把 leaving 置为 true 并保留
   //   最后一帧的可见 state（lastVisibleState），让胶囊用 capsule-out 动画收缩淡出。
@@ -311,10 +317,6 @@ export function Capsule() {
   const [lastVisibleState, setLastVisibleState] = useState<CapsuleState>(INITIAL_VISIBLE_STATE);
   // Windows 端 host 在翻译模式从 84 长到 118；macOS / Linux 上 capsuleLayout 已固定 42 忽略此参数。
   const hostMetrics = getCapsuleHostMetrics(os, translation);
-  // 录音提示音：是否开启（默认 true，老配置缺字段也按开启）+ 上一帧 capsule 状态，
-  // 用于检测「进入 recording」这条边沿。用 ref 而非 state：提示音是副作用，不该触发重渲染。
-  const audioCueEnabledRef = useRef<boolean>(true);
-  const prevStateRef = useRef<CapsuleState>(INITIAL_VISIBLE_STATE);
 
   useEffect(() => {
     if (!isTauri) return;
@@ -335,6 +337,7 @@ export function Capsule() {
         setMessage(p.message ?? undefined);
         if (p.insertedChars != null) setInsertedChars(p.insertedChars);
         setTranslation(p.translation === true);
+        setOperating(p.operating === true);
       });
       if (cancelled) handle();
       else unlisten = handle;
@@ -344,56 +347,6 @@ export function Capsule() {
       if (unlisten) unlisten();
     };
   }, []);
-
-  // 读取「录音提示音」开关并跟随设置实时更新：capsule 窗口不在 HotkeySettingsProvider 下，
-  // 所以这里自己拉一次 getSettings()，再订阅 prefs:changed 保持同步。缺字段按默认开启。
-  useEffect(() => {
-    if (!isTauri) return;
-    let cancelled = false;
-    let unlisten: (() => void) | undefined;
-    (async () => {
-      try {
-        const prefs = await getSettings();
-        if (!cancelled) audioCueEnabledRef.current = prefs.audioCueOnRecord !== false;
-      } catch (err) {
-        console.warn('[capsule] read audioCueOnRecord failed; default on', err);
-      }
-      const { listen } = await import('@tauri-apps/api/event');
-      const handle = await listen<UserPreferences>('prefs:changed', event => {
-        const next = event.payload;
-        if (next) audioCueEnabledRef.current = next.audioCueOnRecord !== false;
-      });
-      if (cancelled) handle();
-      else unlisten = handle;
-    })().catch(err => {
-      // import / listen 早期失败（Tauri IPC 尚未就绪）不能变成 unhandled rejection。
-      console.warn('[capsule] audio-cue prefs listener init failed', err);
-    });
-    return () => {
-      cancelled = true;
-      if (unlisten) unlisten();
-    };
-  }, []);
-
-  // 预热 AudioContext：胶囊挂载时就 resume，让录音开始时提示音能同步播放，
-  // 避免 suspended→resume 的异步竞态在「快速录音」时整段丢音（提示音偶尔消失的根因）。
-  useEffect(() => {
-    if (!isTauri) return;
-    primeAudioCue();
-  }, []);
-
-  // 提示音触发：检测 capsule 状态进入 recording 的边沿就播放（提醒「已开始录音」）；
-  // 离开 recording 则停掉，避免连按热键时残留尾音。独立于 showCapsule —— 胶囊隐藏也会响。
-  useEffect(() => {
-    const prev = prevStateRef.current;
-    prevStateRef.current = state;
-    if (!isTauri) return;
-    if (state === 'recording' && prev !== 'recording') {
-      if (audioCueEnabledRef.current) playRecordStartCue();
-    } else if (state !== 'recording' && prev === 'recording') {
-      stopAudioCue();
-    }
-  }, [state]);
 
   // 退出动画调度：在 state 真正进入 idle 时，先用 capsule-out 播放 EXIT_ANIM_MS，再卸载。
   // 设计要点：
@@ -521,6 +474,7 @@ export function Capsule() {
         level={leaving ? 0 : level}
         insertedChars={insertedChars}
         message={message}
+        operating={operating}
         onCancel={onCancel}
         onConfirm={onConfirm}
       />

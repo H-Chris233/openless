@@ -24,7 +24,9 @@ int openless_common_controls_v6_manifest_dependency_anchor = 0;
     cc::Build::new()
         .file(&source_path)
         .compile("openless_common_controls_v6_manifest_dependency");
-    println!("cargo:rustc-link-arg=/INCLUDE:openless_common_controls_v6_manifest_dependency_anchor");
+    println!(
+        "cargo:rustc-link-arg=/INCLUDE:openless_common_controls_v6_manifest_dependency_anchor"
+    );
 }
 
 /// 编译 vendored Open-Less/qwen-asr 的 C 源（仅 macOS）。

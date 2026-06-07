@@ -130,7 +130,7 @@ export function Toggle({
                 height: 20,
                 borderRadius: 999,
                 border: 0,
-                background: on ? "var(--ol-blue)" : "rgba(0,0,0,0.15)",
+                background: on ? "var(--ol-blue)" : "var(--ol-toggle-off-bg)",
                 boxShadow: "inset 0 1px 2px rgba(0,0,0,0.06)",
                 cursor: "default",
                 transition: "background 0.16s var(--ol-motion-quick)",
@@ -144,7 +144,7 @@ export function Toggle({
                     width: 16,
                     height: 16,
                     borderRadius: 999,
-                    background: "#fff",
+                    background: "var(--ol-toggle-knob)",
                     boxShadow:
                         "0 1px 2px rgba(0,0,0,.25), 0 0 0 0.5px rgba(0,0,0,.04)",
                     transition: "left .16s var(--ol-motion-spring)",
@@ -163,7 +163,7 @@ export const inputStyle: CSSProperties = {
     fontSize: 12.5,
     fontFamily: "inherit",
     outline: "none",
-    background: "var(--ol-surface-2)",
+    background: "var(--ol-control-elevated)",
     width: "100%",
     maxWidth: 360,
     transition:
@@ -180,6 +180,7 @@ export type AsrPresetId =
     | "groq"
     | "whisper"
     | "openrouter"
+    | "xiaomi-mimo-asr"
     | "foundry-local-whisper"
     | "sherpa-onnx-local"
     | "local-qwen3"

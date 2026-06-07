@@ -550,6 +550,16 @@ jobs:
             openless-all/app/src-tauri/target/release/bundle/latest-windows-x86_64*.json
           if-no-files-found: error
 
+      - name: Upload fcitx5 plugin artifact (standalone)
+        if: matrix.platform == 'ubuntu-22.04'
+        uses: actions/upload-artifact@v4
+        with:
+          name: openless-fcitx5-plugin-linux-x64
+          path: |
+            ${{ github.workspace }}/openless-all/scripts/linux-fcitx5-plugin/build/libopenless.so
+            ${{ github.workspace }}/openless-all/scripts/linux-fcitx5-plugin/build/openless.conf
+          if-no-files-found: error
+
       - name: Upload Linux artifacts
         if: matrix.platform == 'ubuntu-22.04'
         uses: actions/upload-artifact@v4
@@ -637,6 +647,9 @@ jobs:
             openless-all/app/src-tauri/target/release/bundle/appimage/*.AppImage
             openless-all/app/src-tauri/target/release/bundle/appimage/*.AppImage.sig
             openless-all/app/src-tauri/target/release/bundle/latest-*.json
+            # fcitx5 插件独立下载：供 AppImage 用户或手动安装
+            openless-all/scripts/linux-fcitx5-plugin/build/libopenless.so
+            openless-all/scripts/linux-fcitx5-plugin/build/openless.conf
 
   # ── 正式版发布后，自动更新 Homebrew cask ──
   # 为什么放进这条流水线，而不是单独的 `release: published` 工作流：softprops 用默认

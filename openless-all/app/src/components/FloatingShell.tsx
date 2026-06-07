@@ -8,6 +8,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentTy
 import { useTranslation } from 'react-i18next';
 import { Icon } from './Icon';
 import { WindowChrome, detectOS, type OS } from './WindowChrome';
+import { AudioCueListener } from "./AudioCue";
 import { SettingsModal } from './SettingsModal';
 import { Overview } from '../pages/Overview';
 import { History } from '../pages/History';
@@ -180,7 +181,10 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
   };
 
   return (
-    <div style={{ flex: 1, position: 'relative', display: 'flex', flexDirection: 'column', minHeight: 0, paddingTop: os === 'mac' ? 28 : 0 }}>
+    <div
+      className="ol-app-shell-bg"
+      style={{ flex: 1, position: 'relative', display: 'flex', flexDirection: 'column', minHeight: 0, paddingTop: os === 'mac' ? 28 : 0 }}
+    >
 
       {/* Main shell — flush with the frosted backplate (no separate float). */}
       <div
@@ -195,22 +199,26 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
 
         {/* Sidebar — 透明地坐在外层磨砂底板上，让 LOGO/导航/快捷键/BETA/footer 共用同一片磨砂玻璃 */}
         <aside
+          className="ol-aura-sidebar"
           style={{
-            width: 188,
+            width: 196,
             flexShrink: 0,
-            display: 'flex', flexDirection: 'column',
-            background: 'transparent',
-            padding: '10px 10px 12px',
+            display: 'flex',
+            flexDirection: 'column',
           }}>
 
           {/* brand */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '2px 8px 12px' }}>
+          <div className="ol-aura-sidebar-brand">
             <img
+              className="ol-aura-sidebar-brand-mark"
               src="AppIcon.png"
               alt="OpenLess"
-              style={{ width: 22, height: 22, borderRadius: 5, boxShadow: '0 1px 2px rgba(0,0,0,.1), 0 0 0 0.5px rgba(0,0,0,.06)' }} />
+            />
 
-            <div style={{ fontSize: 13.5, fontWeight: 600, letterSpacing: '-0.01em', color: 'var(--ol-ink)' }}>OpenLess</div>
+            <div>
+              <div className="ol-aura-sidebar-brand-title">OpenLess</div>
+              <div className="ol-aura-sidebar-brand-kicker">VOICE CONSOLE</div>
+            </div>
           </div>
 
           {/* nav — 滑动指示器：active pill 是 absolute 元素，currentTab 改变时 top/height
@@ -219,6 +227,7 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
           <nav style={{ position: 'relative', display: 'flex', flexDirection: 'column', gap: 1 }}>
             {pillRect && (
               <div
+                className="ol-aura-sidebar-pill"
                 aria-hidden
                 style={{
                   position: 'absolute',
@@ -226,9 +235,6 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
                   right: 0,
                   top: pillRect.top,
                   height: pillRect.height,
-                  background: 'var(--ol-surface)',
-                  borderRadius: 8,
-                  boxShadow: '0 1px 2px rgba(0,0,0,.05), 0 0 0 0.5px rgba(0,0,0,.06)',
                   transition: 'top 0.36s var(--ol-motion-spring), height 0.36s var(--ol-motion-spring)',
                   pointerEvents: 'none',
                   zIndex: 0,
@@ -242,18 +248,9 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
                   key={n.id}
                   ref={el => { navItemRefs.current[i] = el; }}
                   onClick={() => setCurrentTab(n.id)}
-                  className={active ? 'ol-nav-btn ol-nav-btn-active' : 'ol-nav-btn'}
+                  className={active ? 'ol-nav-btn ol-nav-btn-active ol-aura-sidebar-nav-btn' : 'ol-nav-btn ol-aura-sidebar-nav-btn'}
                   style={{
                     display: 'flex', alignItems: 'center', gap: 10,
-                    padding: '7px 10px',
-                    borderRadius: 8, border: 0,
-                    background: 'transparent',
-                    fontFamily: 'inherit', fontSize: 13,
-                    cursor: 'default',
-                    transition: 'color 0.16s var(--ol-motion-quick), background 0.16s var(--ol-motion-quick)',
-                    textAlign: 'left',
-                    position: 'relative',
-                    zIndex: 1,
                   }}>
 
                   <Icon name={n.icon} size={14} />
@@ -268,31 +265,10 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
           {/* 底部两行：上行 = 版本 chip（含 BETA 标），下行 = 设置按钮。
               单行布局在窄 sidebar 下会把「设置」挤成两行竖字 + 版本糊一起；
               翻回两行同时把顺序反过来：设置真正落到最底，版本在它上面。 */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, paddingTop: 10 }}>
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 8,
-                flexWrap: 'wrap',
-                padding: '0 10px',
-                fontFamily: 'var(--ol-font-sans)',
-                fontSize: 11,
-                color: 'var(--ol-ink-4)',
-              }}
-            >
+          <div className="ol-aura-sidebar-footer">
+            <div className="ol-aura-sidebar-version">
               {IS_BETA_BUILD && (
-                <span style={{
-                  display: 'inline-block',
-                  padding: '2px 8px',
-                  fontSize: 10,
-                  fontWeight: 600,
-                  letterSpacing: '0.04em',
-                  textTransform: 'uppercase',
-                  color: 'var(--ol-blue)',
-                  background: 'rgba(37,99,235,0.10)',
-                  borderRadius: 999,
-                }}>{t('shell.betaTag')}</span>
+                <span className="ol-aura-beta-tag">{t('shell.betaTag')}</span>
               )}
 
               <span>{t('shell.footer.version', { version: APP_VERSION_LABEL })}</span>
@@ -300,17 +276,9 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
 
             <button
               onClick={() => openSettings()}
-              className={settingsOpen ? 'ol-nav-btn ol-nav-btn-active' : 'ol-nav-btn'}
+              className={settingsOpen ? 'ol-nav-btn ol-nav-btn-active ol-aura-sidebar-settings' : 'ol-nav-btn ol-aura-sidebar-settings'}
               style={{
                 display: 'flex', alignItems: 'center', gap: 10,
-                padding: '7px 10px',
-                borderRadius: 8, border: 0,
-                background: settingsOpen ? 'var(--ol-surface)' : 'transparent',
-                boxShadow: settingsOpen ? '0 1px 2px rgba(0,0,0,.05), 0 0 0 0.5px rgba(0,0,0,.06)' : 'none',
-                fontFamily: 'inherit', fontSize: 13,
-                cursor: 'default',
-                transition: 'color 0.16s var(--ol-motion-quick), background 0.16s var(--ol-motion-quick)',
-                textAlign: 'left',
               }}
             >
               <Icon name="settings" size={14} />
@@ -319,21 +287,13 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
           </div>
         </aside>
 
-        {/* Main content — v1.3.1-8 用户希望"sidebar / main panel / caption 三处玻璃统一"。
-            从 var(--ol-surface) 不透明白底 改成半透明白 + backdrop-filter，跟 sidebar
-            一起坐在 WindowChrome 的磨砂底板上，整体一块连续玻璃。 */}
+        {/* Main content — Linux 禁用透明窗口后使用不透明面；其他平台保留玻璃层。 */}
         <div style={{ flex: 1, minWidth: 0, padding: '4px 8px 6px 0', display: 'flex' }}>
           <main
-            className="ol-console-main"
+            className="ol-console-main ol-aura-panel ol-aura-console-main"
             style={{
               flex: 1, minWidth: 0,
               overflow: 'hidden',
-              background: 'rgba(255, 255, 255, 0.62)',
-              backdropFilter: 'blur(18px) saturate(170%)',
-              WebkitBackdropFilter: 'blur(18px) saturate(170%)',
-              borderRadius: 'var(--ol-window-console-radius)',
-              border: '0.5px solid rgba(0,0,0,0.06)',
-              boxShadow: '0 1px 0 rgba(255,255,255,0.8) inset, 0 8px 24px -12px rgba(15,17,22,0.10), 0 2px 6px -2px rgba(15,17,22,0.06)',
               display: 'flex',
               flexDirection: 'column',
             }}
@@ -402,6 +362,7 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
           onOpenSettings={openHotkeyRecordingSettings}
         />
       ) : null}
+      <AudioCueListener />
 
       {/* tab 切换 + provider prompt + footer popover 公用的入场关键帧 */}
       <style>{`
@@ -415,12 +376,112 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
           color: var(--ol-ink-3);
           font-weight: 500;
         }
+        .ol-aura-sidebar {
+          padding: 14px 12px 14px;
+          background: var(--ol-sidebar-bg);
+          border-right: 1px solid var(--ol-sidebar-border);
+        }
+        .ol-aura-sidebar-brand {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          padding: 6px 10px 16px;
+          margin-bottom: 6px;
+          border-radius: 0;
+          background: var(--ol-sidebar-brand-bg);
+          border: 1px solid var(--ol-sidebar-brand-border);
+          box-shadow: none;
+        }
+        .ol-aura-sidebar-brand-mark {
+          width: 26px;
+          height: 26px;
+          border-radius: 8px;
+          box-shadow: none;
+        }
+        .ol-aura-sidebar-brand-title {
+          font-size: 14px;
+          font-weight: 600;
+          font-family: var(--ol-font-display);
+          color: var(--ol-ink);
+        }
+        .ol-aura-sidebar-brand-kicker {
+          font-size: 10.5px;
+          color: var(--ol-ink-4);
+          font-family: var(--ol-font-mono);
+          letter-spacing: .08em;
+        }
+        .ol-aura-sidebar-pill {
+          background: var(--ol-sidebar-pill-bg);
+          border-radius: 12px;
+          border: 1px solid var(--ol-sidebar-pill-border);
+          box-shadow: none;
+        }
+        .ol-aura-sidebar-nav-btn {
+          padding: 8px 12px;
+          border-radius: 12px;
+          border: 0;
+          background: transparent;
+          font-family: inherit;
+          font-size: 13px;
+          cursor: default;
+          transition: color 0.16s var(--ol-motion-quick), background 0.16s var(--ol-motion-quick);
+          text-align: left;
+          position: relative;
+          z-index: 1;
+        }
+        .ol-aura-sidebar-footer {
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+          padding: 12px 10px 0;
+          margin-top: 10px;
+          border-top: 1px solid var(--ol-sidebar-footer-border);
+        }
+        .ol-aura-sidebar-version {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          flex-wrap: wrap;
+          padding: 10px 12px;
+          font-family: var(--ol-font-sans);
+          font-size: 11px;
+          color: var(--ol-ink-4);
+          background: var(--ol-sidebar-version-bg);
+          border: 1px solid var(--ol-sidebar-version-border);
+          border-radius: var(--ol-pill-radius);
+          box-shadow: none;
+        }
+        .ol-aura-beta-tag {
+          display: inline-block;
+          padding: 2px 8px;
+          font-size: 10px;
+          font-weight: 600;
+          letter-spacing: 0.04em;
+          text-transform: uppercase;
+          color: var(--ol-blue);
+          background: rgba(37,99,235,0.10);
+          border-radius: 999px;
+        }
+        .ol-aura-sidebar-settings {
+          padding: 10px 12px;
+          border-radius: 12px;
+          border: 1px solid var(--ol-sidebar-settings-border);
+          background: var(--ol-sidebar-settings-bg);
+          box-shadow: none;
+        }
+        .ol-aura-sidebar-settings.ol-nav-btn-active {
+          background: var(--ol-sidebar-settings-active-bg);
+          box-shadow: none;
+        }
+        .ol-aura-console-main {
+          border-radius: var(--ol-panel-radius);
+        }
         .ol-nav-btn.ol-nav-btn-active {
           color: var(--ol-ink);
           font-weight: 600;
         }
         .ol-nav-btn:not(.ol-nav-btn-active):hover {
-          background: rgba(0,0,0,0.04);
+          background: var(--ol-nav-hover-bg);
           color: var(--ol-ink);
         }
         @keyframes ol-page-slide {
@@ -456,7 +517,7 @@ function ProviderSetupPrompt({ onLater, onOpenSettings }: { onLater: () => void;
         alignItems: 'center',
         justifyContent: 'center',
         padding: 28,
-        background: 'rgba(15,17,22,0.28)',
+        background: 'var(--ol-overlay-bg)',
         backdropFilter: 'blur(6px) saturate(140%)',
         WebkitBackdropFilter: 'blur(6px) saturate(140%)',
         animation: 'ol-prompt-fade 0.2s var(--ol-motion-soft)',
@@ -521,7 +582,7 @@ function ProviderSetupPrompt({ onLater, onOpenSettings }: { onLater: () => void;
               borderRadius: 8,
               border: 0,
               background: 'var(--ol-ink)',
-              color: '#fff',
+              color: 'var(--ol-on-accent)',
               fontFamily: 'inherit',
               fontSize: 12.5,
               fontWeight: 500,
@@ -549,7 +610,7 @@ function HotkeyModeMigrationPrompt({ onLater, onOpenSettings }: { onLater: () =>
         alignItems: 'center',
         justifyContent: 'center',
         padding: 28,
-        background: 'rgba(15,17,22,0.28)',
+        background: 'var(--ol-overlay-bg)',
         backdropFilter: 'blur(6px) saturate(140%)',
         WebkitBackdropFilter: 'blur(6px) saturate(140%)',
         animation: 'ol-prompt-fade 0.2s var(--ol-motion-soft)',
@@ -614,7 +675,7 @@ function HotkeyModeMigrationPrompt({ onLater, onOpenSettings }: { onLater: () =>
               borderRadius: 8,
               border: 0,
               background: 'var(--ol-ink)',
-              color: '#fff',
+              color: 'var(--ol-on-accent)',
               fontFamily: 'inherit',
               fontSize: 12.5,
               fontWeight: 500,
@@ -629,4 +690,3 @@ function HotkeyModeMigrationPrompt({ onLater, onOpenSettings }: { onLater: () =>
     </div>
   );
 }
-
