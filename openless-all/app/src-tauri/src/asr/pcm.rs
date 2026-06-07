@@ -33,6 +33,9 @@ mod tests {
     #[test]
     fn odd_trailing_byte_is_floored() {
         // 末尾半个采样向下取整，与历史行为一致
-        assert_eq!(pcm_duration_ms(&vec![0u8; 33]), pcm_duration_ms(&vec![0u8; 32]));
+        assert_eq!(
+            pcm_duration_ms(&vec![0u8; 33]),
+            pcm_duration_ms(&vec![0u8; 32])
+        );
     }
 }
