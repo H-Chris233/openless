@@ -696,6 +696,11 @@ fn asr_configured_for_provider(provider: &str, snap: &CredentialsSnapshot) -> bo
     if provider == crate::asr::bailian::PROVIDER_ID {
         return configured(&snap.asr_api_key);
     }
+    if provider == crate::asr::mimo::PROVIDER_ID {
+        return configured(&snap.asr_api_key)
+            && configured(&snap.asr_endpoint)
+            && configured(&snap.asr_model);
+    }
     configured(&snap.asr_endpoint) && configured(&snap.asr_model)
 }
 
@@ -894,6 +899,11 @@ pub async fn list_provider_models(kind: String) -> Result<ProviderModelsResult, 
             models: vec![crate::asr::bailian::DEFAULT_MODEL.to_string()],
         });
     }
+    if kind == "asr" && CredentialsVault::get_active_asr() == crate::asr::mimo::PROVIDER_ID {
+        return Ok(ProviderModelsResult {
+            models: vec![crate::asr::mimo::DEFAULT_MODEL.to_string()],
+        });
+    }
     if kind == "llm" && CredentialsVault::get_active_llm() == CODEX_OAUTH_PROVIDER_ID {
         return Ok(ProviderModelsResult {
             models: vec![
@@ -1026,6 +1036,9 @@ async fn validate_asr_provider() -> Result<(), String> {
     if active_asr == crate::asr::bailian::PROVIDER_ID {
         return validate_bailian_asr_provider().await;
     }
+    if active_asr == crate::asr::mimo::PROVIDER_ID {
+        return validate_mimo_asr_provider().await;
+    }
 
     let config = read_openai_provider_config("asr")?;
     let model = CredentialsVault::get(CredentialAccount::AsrModel)
@@ -1033,6 +1046,23 @@ async fn validate_asr_provider() -> Result<(), String> {
         .filter(|s| !s.trim().is_empty())
         .ok_or_else(|| "asrModelMissing".to_string())?;
     validate_asr_transcription(&config, model.trim()).await
+}
+
+async fn validate_mimo_asr_provider() -> Result<(), String> {
+    let config = read_openai_provider_config("asr")?;
+    let model = CredentialsVault::get(CredentialAccount::AsrModel)
+        .map_err(|e| e.to_string())?
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| crate::asr::mimo::DEFAULT_MODEL.to_string());
+    let asr = crate::asr::MimoBatchASR::new(config.api_key, config.base_url, model);
+    crate::recorder::AudioConsumer::consume_pcm_chunk(
+        &asr,
+        &encode_wav_16k_mono_silence(250)[44..],
+    );
+    asr.transcribe()
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 async fn validate_bailian_asr_provider() -> Result<(), String> {
@@ -3666,12 +3696,6 @@ pub async fn github_device_flow_poll(
         _ => "未知 OAuth 错误（access_token 缺失）".to_string(),
     };
     Ok(GithubDevicePollResult::Error { message: msg })
-}
-
-#[tauri::command]
-pub fn is_no_compositing_mode() -> bool {
-    // Linux WebKitGTK: WEBKIT_DISABLE_COMPOSITING_MODE=1 时 backdrop-filter 不可用
-    std::env::var("WEBKIT_DISABLE_COMPOSITING_MODE").as_deref() == Ok("1")
 }
 
 #[cfg(test)]

@@ -1508,7 +1508,11 @@ fn unix_now_secs() -> u64 {
 }
 
 fn apply_openai_compatible_thinking_control(body: &mut Value, config: &OpenAICompatibleConfig) {
-    match openai_compatible_thinking_control(&config.provider_id) {
+    // 优先按 provider_id 预设分派；custom / 未声明 provider 时回退到 base_url 兜底,
+    // 让用户用"自定义"preset 接入 MiniMax 也能正确下发 thinking 控制参数。
+    let control = openai_compatible_thinking_control(&config.provider_id)
+        .or_else(|| openai_compatible_thinking_control_for_base_url(&config.base_url));
+    match control {
         Some(ThinkingControl::ReasoningEffort) => {
             // OpenAI 官方 Chat Completions 只在推理模型族接受 reasoning_effort；
             // 普通 chat 模型会直接 400。其它兼容渠道按渠道声明继续下发。
@@ -1540,6 +1544,17 @@ fn apply_openai_compatible_thinking_control(body: &mut Value, config: &OpenAICom
                 "type": if config.thinking_enabled { "enabled" } else { "disabled" },
             });
         }
+        // MiniMax OpenAI 兼容 Chat Completions 接受官方 `thinking` 字段，关闭用
+        // `disabled`、开启用 `adaptive`(不传即默认开启,这里显式发 `adaptive` 与
+        // 渠道文档保持一致)。schema 与 DeepSeekThinking 相同,仅取值字面量不同——
+        // 走独立变体避免 OpenLess 默认值(DeepSeek 写"enabled")污染 MiniMax 字段。
+        // 注:M2.x 系列不支持关闭,后端即便下发 `disabled` 服务端仍会保持开启;
+        // 这与 OpenLess 渠道级"按官方参数声明下发"的策略一致,不维护单模型白名单。
+        Some(ThinkingControl::MiniMaxThinking) => {
+            body["thinking"] = json!({
+                "type": if config.thinking_enabled { "adaptive" } else { "disabled" },
+            });
+        }
         None => {}
     }
 }
@@ -1550,16 +1565,53 @@ enum ThinkingControl {
     EnableThinking,
     OpenRouterReasoning,
     DeepSeekThinking,
+    MiniMaxThinking,
 }
 
 fn openai_compatible_thinking_control(provider_id: &str) -> Option<ThinkingControl> {
     match provider_id.trim() {
         "deepseek" => Some(ThinkingControl::DeepSeekThinking),
+        // provider_id 预设(见 ProvidersSection.tsx::LLM_PRESETS)。
+        "minimax" => Some(ThinkingControl::MiniMaxThinking),
         "openrouterFree" => Some(ThinkingControl::OpenRouterReasoning),
         "alibabaCoding" => Some(ThinkingControl::EnableThinking),
         "openai" | "codingPlanX" => Some(ThinkingControl::ReasoningEffort),
+        // custom / 其他未声明 provider 走 base_url 兜底识别——用户用自定义
+        // endpoint 接入 MiniMax 时,根据 base_url 命中即下发官方 thinking 参数。
         _ => None,
     }
+}
+
+/// 当 provider_id 不在已知列表(典型场景:用户用"自定义"preset 接入)时,
+/// 通过 base_url 推断该走哪种 thinking 控制策略。返回 `None` 表示无法
+/// 识别,沿用原"不主动干预"行为。
+///
+/// 命中策略:base_url 主机名包含厂商关键字。
+fn openai_compatible_thinking_control_for_base_url(base_url: &str) -> Option<ThinkingControl> {
+    // 抽 host(不区分大小写),允许带端口。`base_url` 末尾可能带 `/v1`、`/v1/`、
+    // 甚至 `/v1/chat/completions`——统一取第一个 `/` 段当 host。
+    let host = base_url
+        .trim()
+        .trim_end_matches('/')
+        .split_once("://")
+        .map(|(_, rest)| rest.split('/').next().unwrap_or(rest).to_ascii_lowercase())
+        .unwrap_or_default();
+    if host.is_empty() {
+        return None;
+    }
+    if host.contains("minimax") {
+        return Some(ThinkingControl::MiniMaxThinking);
+    }
+    if host.contains("deepseek") {
+        return Some(ThinkingControl::DeepSeekThinking);
+    }
+    if host.contains("openrouter") {
+        return Some(ThinkingControl::OpenRouterReasoning);
+    }
+    if host.contains("dashscope") || host.contains("aliyuncs") {
+        return Some(ThinkingControl::EnableThinking);
+    }
+    None
 }
 
 fn openai_chat_reasoning_effort(model: &str, thinking_enabled: bool) -> Option<&'static str> {
@@ -2824,6 +2876,89 @@ mod tests {
         let body = provider.chat_body(false, vec![json!({ "role": "user", "content": "hi" })]);
 
         assert_eq!(body["thinking"]["type"], "disabled");
+    }
+
+    #[test]
+    fn openai_chat_body_disables_minimax_thinking_by_preset() {
+        // provider_id 预设命中 "minimax" → 走 MiniMaxThinking 分支,关闭时下发
+        // `thinking.type = "disabled"`,与 minimaxi 官方 Chat Completions 文档
+        // (https://platform.minimaxi.com/docs/api-reference/text-chat-openai#thinking-控制) 一致。
+        // 修这个 bug 前,provider_id 未命中时根本不下发 thinking 参数,UI 关闭无效。
+        let provider = OpenAICompatibleLLMProvider::new(
+            OpenAICompatibleConfig::new(
+                "minimax",
+                "MiniMax",
+                "https://api.minimaxi.com/v1",
+                "k",
+                "MiniMax-M3",
+            )
+            .with_thinking_enabled(false),
+        );
+
+        let body = provider.chat_body(false, vec![json!({ "role": "user", "content": "hi" })]);
+
+        assert_eq!(body["thinking"]["type"], "disabled");
+    }
+
+    #[test]
+    fn openai_chat_body_enables_minimax_thinking_with_adaptive_literal() {
+        // MiniMax 开启 thinking 必须用 `"adaptive"`,不是 DeepSeek 的 `"enabled"`。
+        // 若错发 `"enabled"`,M3 会落到未声明的 type 并报参数错误,反而失去思考。
+        let provider = OpenAICompatibleLLMProvider::new(
+            OpenAICompatibleConfig::new(
+                "minimax",
+                "MiniMax",
+                "https://api.minimaxi.com/v1",
+                "k",
+                "MiniMax-M3",
+            )
+            .with_thinking_enabled(true),
+        );
+
+        let body = provider.chat_body(true, vec![json!({ "role": "user", "content": "hi" })]);
+
+        assert_eq!(body["thinking"]["type"], "adaptive");
+    }
+
+    #[test]
+    fn openai_chat_body_falls_back_to_base_url_for_custom_minimax_endpoint() {
+        // 用 "custom" preset + 自定义 MiniMax base_url 接入时,base_url 兜底
+        // 识别需要命中"minimax"关键字,下发 thinking 控制参数。
+        let provider = OpenAICompatibleLLMProvider::new(
+            OpenAICompatibleConfig::new(
+                "custom",
+                "Custom",
+                "https://api.minimaxi.com/v1",
+                "k",
+                "MiniMax-M3",
+            )
+            .with_thinking_enabled(false),
+        );
+
+        let body = provider.chat_body(false, vec![json!({ "role": "user", "content": "hi" })]);
+
+        assert_eq!(body["thinking"]["type"], "disabled");
+    }
+
+    #[test]
+    fn openai_chat_body_base_url_fallback_respects_trailing_slash_and_path() {
+        // base_url 可能带尾斜杠或带 /v1 后缀,host 提取逻辑都要能正确识别。
+        for base_url in [
+            "https://api.minimaxi.com/v1",
+            "https://api.minimaxi.com/v1/",
+            "https://api.minimaxi.com",
+            "https://api.minimaxi.com/",
+        ] {
+            let provider = OpenAICompatibleLLMProvider::new(
+                OpenAICompatibleConfig::new("custom", "Custom", base_url, "k", "MiniMax-M3")
+                    .with_thinking_enabled(false),
+            );
+            let body = provider.chat_body(false, vec![json!({ "role": "user", "content": "hi" })]);
+            assert_eq!(
+                body["thinking"]["type"], "disabled",
+                "base_url={base_url} should trigger MiniMax thinking control"
+            );
+        }
     }
 
     #[test]

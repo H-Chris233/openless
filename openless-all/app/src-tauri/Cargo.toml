@@ -54,7 +54,7 @@ ferrous-opencc = "0.4"
 global-hotkey = "0.6"
 cpal = "0.15"
 enigo = "0.2"
-arboard = "3"
+arboard = { version = "3", features = ["wayland-data-control"] }
 
 [target.'cfg(target_os = "macos")'.dependencies.keyring]
 version = "3.6.3"

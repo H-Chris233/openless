@@ -489,7 +489,6 @@ pub fn run() {
             #[cfg(target_os = "windows")]
             commands::sherpa_onnx_asr_reveal_model_dir,
             commands::export_error_log,
-            commands::is_no_compositing_mode,
             restart_app,
         ])
         .build(tauri::generate_context!())

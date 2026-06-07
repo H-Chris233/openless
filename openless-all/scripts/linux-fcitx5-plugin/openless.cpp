@@ -96,30 +96,29 @@ public:
                 << "DBus module not available";
         }
 
-        // 3. 注册快捷键事件监听
+        // 3. 快捷键事件监听。
+        // PreInputMethod 在引擎 InputMethod 阶段之前运行，
+        // filterAndAccept() 设 filtered+accepted → 引擎跳过 commit → 字符不泄漏。
         eventHandlers_.push_back(
             instance_->watchEvent(
                 EventType::InputContextKeyEvent,
                 EventWatcherPhase::PreInputMethod,
                 [this](Event &event) {
                     auto &keyEvent = static_cast<KeyEvent &>(event);
-                    // 保存当前输入上下文：快捷键按下时用户在目标 app 中，
-                    // 此后胶囊窗口可能抢走焦点，但 commitText 仍能用此 IC 提交文字。
                     if (!keyEvent.isRelease()) {
                         savedIc_ = keyEvent.inputContext();
                     }
-
                     auto sym = static_cast<uint32_t>(keyEvent.key().sym());
                     auto states = static_cast<uint32_t>(keyEvent.key().states());
                     bool isPress = !keyEvent.isRelease();
 
-                    // 检查自定义组合键（优先级最高）
-                    if (hasCustomDictationKey_ &&
-                        keyEvent.key().check(customDictationKey_)) {
+                    // 自定义组合键：Alt 状态下字母 sym 可能大写（A vs a），归一化比较
+                    if (hasCustomDictationKey_ && states == static_cast<uint32_t>(customDictationKey_.states()) &&
+                        (sym == static_cast<uint32_t>(customDictationKey_.sym()) ||
+                         (sym >= 65 && sym <= 90 && sym + 32 == static_cast<uint32_t>(customDictationKey_.sym())) ||
+                         (sym >= 97 && sym <= 122 && sym - 32 == static_cast<uint32_t>(customDictationKey_.sym())))) {
                         FCITX_LOGC(openless, Debug)
-                            << "Custom dictation combo: sym=" << sym
-                            << " states=" << states
-                            << " isPress=" << isPress;
+                            << "Custom dictation: sym=" << sym << " states=" << states;
                         dictationKeyEvent(
                             static_cast<uint32_t>(customDictationKey_.sym()),
                             static_cast<uint32_t>(customDictationKey_.states()),
@@ -127,8 +126,6 @@ public:
                         keyEvent.filterAndAccept();
                         return;
                     }
-
-                    // 检查听写触发键（raw + keylist 双路径）
                     if ((triggerRawSym_ != 0 &&
                          keyEvent.key().check(Key(static_cast<KeySym>(triggerRawSym_),
                                                    static_cast<KeyStates>(triggerRawStates_)))) ||
@@ -140,55 +137,35 @@ public:
                             }
                             return false;
                         }())) {
-                        auto dsym = triggerRawSym_ != 0
-                            ? triggerRawSym_
+                        auto dsym = triggerRawSym_ != 0 ? triggerRawSym_
                             : static_cast<uint32_t>(triggerKeyList_[0].sym());
-                        auto dstates = triggerRawStates_ != 0
-                            ? triggerRawStates_
+                        auto dstates = triggerRawStates_ != 0 ? triggerRawStates_
                             : static_cast<uint32_t>(triggerKeyList_[0].states());
                         FCITX_LOGC(openless, Debug)
-                            << "Dictation hotkey: sym=" << dsym
-                            << " states=" << dstates
-                            << " isPress=" << isPress;
+                            << "Dictation hotkey sym=" << dsym;
                         dictationKeyEvent(dsym, dstates, isPress);
                         keyEvent.filterAndAccept();
                         return;
                     }
-
-                    // 检查 QA 快捷键
-                    if (qaRawSym_ != 0 &&
-                        sym == qaRawSym_ &&
+                    if (qaRawSym_ != 0 && sym == qaRawSym_ &&
                         states == qaRawStates_) {
                         FCITX_LOGC(openless, Debug)
-                            << "QA shortcut: sym=" << qaRawSym_
-                            << " states=" << qaRawStates_
-                            << " isPress=" << isPress;
+                            << "QA shortcut";
                         qaShortcutEvent(qaRawSym_, qaRawStates_, isPress);
                         keyEvent.filterAndAccept();
                         return;
                     }
-
-                    // 检查翻译模式修饰键（自定义 + 内置 Shift）
                     bool translationMatched = false;
-                    if (translationRawSym_ != 0 &&
-                        sym == translationRawSym_ &&
-                        states == translationRawStates_) {
+                    if (translationRawSym_ != 0 && sym == translationRawSym_ &&
+                        states == translationRawStates_)
                         translationMatched = true;
-                    }
-                    // 内置 Shift 修饰键（仅在配置了自定义翻译键时生效，
-                    // 避免无翻译配置时每次按 Shift 都触发信号）。
                     if (translationRawSym_ != 0 &&
-                        (sym == 0xffe1 || sym == 0xffe2)) {
+                        (sym == 0xffe1 || sym == 0xffe2))
                         translationMatched = true;
-                    }
                     if (translationMatched) {
                         FCITX_LOGC(openless, Debug)
-                            << "Translation modifier: sym=" << sym
-                            << " states=" << states
-                            << " isPress=" << isPress;
+                            << "Translation modifier: sym=" << sym;
                         translationModifierEvent(sym, states, isPress);
-                        // 不 filterAndAccept：修改键只需通知 OpenLess 翻译状态变更，
-                        // 不应阻塞输入法引擎处理 Shift 事件（如中英文切换）。
                     }
                 }));
 
@@ -222,8 +199,7 @@ public:
                     instance_->flushUI();
                 }));
 
-        // 6. PostInputMethod 阶段恢复 lastAuxText_：fcitx5 在处理按键后可能
-        //    清掉 auxDown（如 enter/backspace 触发内联模式），此钩子自动补回。
+        // 6. PostInputMethod：恢复 auxDown（fcitx5 内联模式/方向键后可能清掉）
         eventHandlers_.push_back(
             instance_->watchEvent(
                 EventType::InputContextKeyEvent,
