@@ -48,6 +48,13 @@ const LEGACY_CREDS_FILE: &str = "credentials.json";
 
 const KEYRING_CREDENTIALS_ACCOUNT: &str = "credentials.v1";
 const KEYRING_CREDENTIALS_CHUNK_PREFIX: &str = "credentials.v1.chunk.";
+/// issue #609 F-03：history.json HMAC 完整性密钥的 keyring account。和凭据共用
+/// `CredentialsVault::SERVICE_NAME`，但走独立 account，不掺进 chunked CredsRoot。
+const KEYRING_HISTORY_HMAC_ACCOUNT: &str = "history.hmac_key.v1";
+/// HMAC 密钥长度（字节）。
+const HISTORY_HMAC_KEY_LEN: usize = 32;
+/// history HMAC sidecar 文件后缀：`history.json.hmac`。
+const HISTORY_HMAC_SUFFIX: &str = ".hmac";
 // Windows Credential Manager caps one credential blob at 2560 bytes. keyring stores
 // passwords as UTF-16 on Windows, so keep each JSON chunk comfortably below that.
 const KEYRING_CHUNK_MAX_UTF16_UNITS: usize = 1000;
@@ -762,6 +769,100 @@ fn delete_keyring_password(account: &str) {
     }
 }
 
+// ───────────── issue #609 F-03：history.json HMAC 完整性 ─────────────
+
+/// 进程内缓存的 history HMAC 密钥，避免每次读写都打 keyring。
+static HISTORY_HMAC_KEY: OnceLock<Option<Vec<u8>>> = OnceLock::new();
+
+/// 取（必要时生成）history HMAC 密钥。
+///
+/// 首次用时从 keyring 读 32 字节 hex；不存在则用 OS CSPRNG 生成并写回 keyring。
+/// keyring 不可用（如 Linux 无 secret service）→ 返回 None，调用方据此**退化为不
+/// 校验**（保持可用，但不提供完整性保证）；用 `OnceLock` 把这个状态固化到进程。
+fn history_hmac_key() -> Option<Vec<u8>> {
+    HISTORY_HMAC_KEY
+        .get_or_init(|| match load_or_create_history_hmac_key() {
+            Ok(key) => Some(key),
+            Err(e) => {
+                log::warn!(
+                    "[history] HMAC 密钥不可用，本次运行跳过完整性校验（仍按内容读写）：{e}"
+                );
+                None
+            }
+        })
+        .clone()
+}
+
+fn load_or_create_history_hmac_key() -> Result<Vec<u8>> {
+    let _guard = credentials_lock().lock();
+    if let Some(hex_key) = get_keyring_password(KEYRING_HISTORY_HMAC_ACCOUNT)? {
+        let key =
+            decode_hex(&hex_key).with_context(|| "history HMAC key in keyring is not valid hex")?;
+        if key.len() == HISTORY_HMAC_KEY_LEN {
+            return Ok(key);
+        }
+        log::warn!("[history] keyring 里的 HMAC 密钥长度异常，重新生成");
+    }
+    // 生成 32 字节随机密钥并落盘 keyring。
+    let mut key = vec![0u8; HISTORY_HMAC_KEY_LEN];
+    getrandom::fill(&mut key).map_err(|e| anyhow!("OS CSPRNG 生成 HMAC 密钥失败：{e}"))?;
+    let hex_key = encode_hex(&key);
+    keyring_entry_for(KEYRING_HISTORY_HMAC_ACCOUNT)?
+        .set_password(&hex_key)
+        .context("写入 history HMAC 密钥到系统凭据库失败")?;
+    Ok(key)
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+fn decode_hex(s: &str) -> Result<Vec<u8>> {
+    let s = s.trim();
+    if s.len() % 2 != 0 {
+        return Err(anyhow!("hex 长度为奇数"));
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| anyhow!("hex 解析失败：{e}")))
+        .collect()
+}
+
+/// 计算 `HMAC-SHA256(key, bytes)`，返回 hex。
+fn compute_history_hmac(key: &[u8], bytes: &[u8]) -> String {
+    use hmac::{Hmac, Mac};
+    // 标准 HMAC：new_from_slice 接受任意长度 key（内部按 RFC2104 处理 key padding）。
+    let mut mac = <Hmac<sha2::Sha256> as Mac>::new_from_slice(key).expect("HMAC 接受任意长度 key");
+    mac.update(bytes);
+    encode_hex(&mac.finalize().into_bytes())
+}
+
+fn history_hmac_sidecar_path(history_path: &Path) -> PathBuf {
+    let mut name = history_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| HISTORY_FILE.to_string());
+    name.push_str(HISTORY_HMAC_SUFFIX);
+    history_path.with_file_name(name)
+}
+
+/// 常量时间比较两段 hex HMAC，避免计时侧信道。两者都是定长 hex，长度不等直接 false。
+fn hmac_hex_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.trim().as_bytes(), b.trim().as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 fn load_keyring_credentials() -> Result<Option<CredsRoot>> {
     let Some(json_or_manifest) = get_keyring_password(KEYRING_CREDENTIALS_ACCOUNT)? else {
         return Ok(None);
@@ -1049,6 +1150,20 @@ fn write_account(root: &mut CredsRoot, account: CredentialAccount, value: Option
 
 // ───────────────────────── HistoryStore ─────────────────────────
 
+/// 听写历史（`history.json`）。
+///
+/// **At-rest 行为（issue #609 F-03 / F-04）**：
+/// - 内容以**明文 JSON** 落盘（`DictationSession[]`），便于用户导出/审阅。
+/// - 机密性靠 **OS 文件系统权限**：unix 下写入后收紧到 `0o600`（仅属主可读写）；
+///   Windows 走 `%APPDATA%` 的 per-user ACL。
+/// - 完整性靠 **HMAC-SHA256**（F-03）：密钥 32 字节随机、存系统凭据库
+///   （`KEYRING_HISTORY_HMAC_ACCOUNT`）；每次写入算 HMAC 写 sidecar
+///   `history.json.hmac`；读取时校验，不匹配则 fail-safe 返回空历史，绝不把被篡改
+///   的历史喂给下游 LLM。
+///
+/// **已知残留**：尚未做**完整静态加密（at-rest encryption）**——本地能读文件的
+/// 攻击者仍可读到明文历史（但无法在不被发现的情况下篡改）。完整加密（用 keyring
+/// 派生密钥加密整个文件）留待后续，见 issue #609 F-04（明确允许"clearly document"）。
 pub struct HistoryStore {
     path: PathBuf,
     lock: Mutex<()>,
@@ -1143,13 +1258,108 @@ impl HistoryStore {
         self.write_locked(&Vec::<DictationSession>::new())
     }
 
+    /// issue #609 F-03：读 history 前先做 HMAC 完整性校验。
+    ///
+    /// - HMAC 密钥不可用（keyring 缺失等）→ 退化为不校验，按内容直接读（保持可用）。
+    /// - 文件不存在 / 为空 → 空历史（正常首次启动）。
+    /// - sidecar 存在且 HMAC 不匹配 → **判定被投毒/损坏，fail-safe 返回空历史**并
+    ///   log::warn，绝不把被篡改的历史喂给下游 LLM（对话感知 polish）。
+    /// - sidecar 缺失但 history 非空 → legacy 文件：接受当前内容并**立即补写 sidecar**
+    ///   完成迁移，让此后写入都带完整性标记。
     fn read_locked(&self) -> Result<Vec<DictationSession>> {
-        read_or_default::<Vec<DictationSession>>(&self.path)
+        read_history_with_key(&self.path, history_hmac_key().as_deref())
     }
 
+    /// issue #609 F-03/F-04：写 history 后算 HMAC 写 sidecar；unix 下把两文件都设 0o600。
     fn write_locked(&self, sessions: &[DictationSession]) -> Result<()> {
         let json = serde_json::to_vec_pretty(sessions).context("encode history failed")?;
-        atomic_write(&self.path, &json)
+        write_history_with_key(&self.path, &json, history_hmac_key().as_deref())
+    }
+}
+
+/// 读 history 并按 `key` 做 HMAC 完整性校验（纯函数，便于单测）。
+///
+/// `key == None`：无密钥，退化为不校验，按内容直接读（与历史行为一致）。
+/// 详细语义见 `HistoryStore::read_locked` 的文档。
+fn read_history_with_key(path: &Path, key: Option<&[u8]>) -> Result<Vec<DictationSession>> {
+    let Some(key) = key else {
+        return read_or_default::<Vec<DictationSession>>(path);
+    };
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let bytes = fs::read(path).with_context(|| format!("read failed: {}", path.display()))?;
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let sidecar = history_hmac_sidecar_path(path);
+    let expected = compute_history_hmac(key, &bytes);
+    match fs::read_to_string(&sidecar) {
+        Ok(stored) => {
+            if !hmac_hex_eq(stored.trim(), &expected) {
+                // 投毒/损坏：fail-safe，不解析、不喂下游。
+                log::warn!(
+                    "[history] HMAC 校验失败（疑似被篡改或损坏），fail-safe 返回空历史：{}",
+                    path.display()
+                );
+                return Ok(Vec::new());
+            }
+            serde_json::from_slice::<Vec<DictationSession>>(&bytes)
+                .with_context(|| format!("decode failed: {}", path.display()))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // legacy：老用户的 history.json 没有 .hmac → 接受并补写 sidecar 迁移。
+            log::info!("[history] 未发现 HMAC sidecar，视为 legacy 文件，接受并补写完整性标记");
+            if let Err(err) = write_hmac_sidecar(&sidecar, &expected) {
+                log::warn!("[history] 迁移补写 HMAC sidecar 失败：{err}");
+            }
+            serde_json::from_slice::<Vec<DictationSession>>(&bytes)
+                .with_context(|| format!("decode failed: {}", path.display()))
+        }
+        Err(e) => {
+            Err(e).with_context(|| format!("read HMAC sidecar failed: {}", sidecar.display()))
+        }
+    }
+}
+
+/// 写 history JSON、收紧权限、按 `key` 写 HMAC sidecar（纯函数，便于单测）。
+fn write_history_with_key(path: &Path, json: &[u8], key: Option<&[u8]>) -> Result<()> {
+    atomic_write(path, json)?;
+    // F-04：history.json 是明文存储，at-rest 防护靠 OS 文件系统权限——unix 收紧到
+    // 仅属主可读写（0o600）。Windows 走用户目录默认 ACL（%APPDATA% 已是 per-user）。
+    restrict_file_permissions_best_effort(path);
+    if let Some(key) = key {
+        let sidecar = history_hmac_sidecar_path(path);
+        let mac = compute_history_hmac(key, json);
+        if let Err(e) = write_hmac_sidecar(&sidecar, &mac) {
+            // sidecar 写失败不阻断主写入（数据已落盘），但记一笔——下次读会被当
+            // legacy 迁移或（若 sidecar 部分写入损坏）触发 fail-safe。
+            log::warn!("[history] 写 HMAC sidecar 失败：{e}");
+        }
+    }
+    Ok(())
+}
+
+/// 写 HMAC sidecar 文件并（unix）设 0o600。
+fn write_hmac_sidecar(sidecar: &Path, hmac_hex: &str) -> Result<()> {
+    atomic_write(sidecar, hmac_hex.as_bytes())?;
+    restrict_file_permissions_best_effort(sidecar);
+    Ok(())
+}
+
+/// issue #609 F-04：unix 下把文件权限收紧到 0o600（仅属主可读写）。
+/// Windows / 其他平台 no-op（依赖用户目录 ACL）。best-effort：失败只 warn。
+fn restrict_file_permissions_best_effort(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = fs::set_permissions(path, fs::Permissions::from_mode(0o600)) {
+            log::warn!("[history] 设置 {} 权限 0o600 失败：{e}", path.display());
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
     }
 }
 
@@ -2419,13 +2629,134 @@ impl CredentialsVault {
 #[cfg(test)]
 mod tests {
     use super::{
-        chunk_json_payload, list_vocab_presets, read_preferences, save_vocab_presets,
-        sync_style_pack_preferences, validate_correction_rule_syntax,
-        KEYRING_CHUNK_MAX_UTF16_UNITS,
+        chunk_json_payload, compute_history_hmac, decode_hex, encode_hex,
+        history_hmac_sidecar_path, hmac_hex_eq, list_vocab_presets, read_history_with_key,
+        read_preferences, save_vocab_presets, sync_style_pack_preferences,
+        validate_correction_rule_syntax, write_history_with_key, KEYRING_CHUNK_MAX_UTF16_UNITS,
     };
     use crate::types::{builtin_style_packs, CustomStylePrompts, VocabPreset, VocabPresetStore};
     use std::fs;
     use std::path::PathBuf;
+
+    fn history_test_dir() -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("openless-history-hmac-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    // 一条最小但合法的 DictationSession JSON 数组，足够 serde 往返。
+    // DictationSession 是 camelCase 序列化。
+    const SAMPLE_HISTORY_JSON: &str = r#"[{
+        "id": "s1",
+        "createdAt": "2026-06-07T00:00:00Z",
+        "rawTranscript": "你好",
+        "finalText": "你好。",
+        "mode": "light",
+        "appBundleId": null,
+        "appName": null,
+        "insertStatus": "inserted",
+        "errorCode": null,
+        "durationMs": null,
+        "dictionaryEntryCount": null
+    }]"#;
+
+    #[test]
+    fn hex_roundtrip() {
+        let bytes = [0u8, 1, 15, 16, 255, 128, 42];
+        assert_eq!(decode_hex(&encode_hex(&bytes)).unwrap(), bytes);
+        assert_eq!(encode_hex(&[0xab, 0xcd]), "abcd");
+        assert!(decode_hex("xyz").is_err());
+    }
+
+    #[test]
+    fn hmac_hex_eq_constant_time_matches() {
+        let key = b"k";
+        let a = compute_history_hmac(key, b"hello");
+        let b = compute_history_hmac(key, b"hello");
+        let c = compute_history_hmac(key, b"world");
+        assert!(hmac_hex_eq(&a, &b));
+        assert!(!hmac_hex_eq(&a, &c));
+        assert!(!hmac_hex_eq(&a, "deadbeef"));
+    }
+
+    #[test]
+    fn history_write_then_read_passes_verification() {
+        let dir = history_test_dir();
+        let path = dir.join("history.json");
+        let key = [7u8; 32];
+        write_history_with_key(&path, SAMPLE_HISTORY_JSON.as_bytes(), Some(&key)).unwrap();
+        // sidecar 应存在。
+        assert!(history_hmac_sidecar_path(&path).exists());
+        let sessions = read_history_with_key(&path, Some(&key)).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "s1");
+    }
+
+    #[test]
+    fn history_tampered_bytes_fail_safe_to_empty() {
+        let dir = history_test_dir();
+        let path = dir.join("history.json");
+        let key = [9u8; 32];
+        write_history_with_key(&path, SAMPLE_HISTORY_JSON.as_bytes(), Some(&key)).unwrap();
+        // 攻击者篡改 history.json，但 sidecar 仍是旧 HMAC → 校验失败。
+        let tampered = SAMPLE_HISTORY_JSON.replace("你好。", "被注入的内容");
+        fs::write(&path, tampered.as_bytes()).unwrap();
+        let sessions = read_history_with_key(&path, Some(&key)).unwrap();
+        assert!(
+            sessions.is_empty(),
+            "篡改后必须 fail-safe 返回空历史，不喂下游"
+        );
+    }
+
+    #[test]
+    fn history_legacy_without_sidecar_is_accepted_and_migrated() {
+        let dir = history_test_dir();
+        let path = dir.join("history.json");
+        let key = [3u8; 32];
+        // 老用户：只有 history.json，没有 .hmac。
+        fs::write(&path, SAMPLE_HISTORY_JSON.as_bytes()).unwrap();
+        let sidecar = history_hmac_sidecar_path(&path);
+        assert!(!sidecar.exists());
+        // 首次读：接受并补写 sidecar。
+        let sessions = read_history_with_key(&path, Some(&key)).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert!(
+            sidecar.exists(),
+            "legacy 读取后必须补写 HMAC sidecar 完成迁移"
+        );
+        // 迁移后再读，HMAC 已匹配，仍正常返回。
+        let again = read_history_with_key(&path, Some(&key)).unwrap();
+        assert_eq!(again.len(), 1);
+    }
+
+    #[test]
+    fn history_no_key_reads_without_verification() {
+        let dir = history_test_dir();
+        let path = dir.join("history.json");
+        fs::write(&path, SAMPLE_HISTORY_JSON.as_bytes()).unwrap();
+        // key=None：退化为不校验，按内容读。
+        let sessions = read_history_with_key(&path, None).unwrap();
+        assert_eq!(sessions.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn history_write_sets_0600_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = history_test_dir();
+        let path = dir.join("history.json");
+        let key = [1u8; 32];
+        write_history_with_key(&path, SAMPLE_HISTORY_JSON.as_bytes(), Some(&key)).unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "history.json 应为 0o600");
+        let sidecar_mode = fs::metadata(history_hmac_sidecar_path(&path))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(sidecar_mode, 0o600, "sidecar 应为 0o600");
+    }
 
     #[test]
     fn credential_payload_chunks_stay_under_windows_blob_limit() {
