@@ -54,6 +54,11 @@ fn build_polish_translate_prompt_contains_markers_and_target() {
     assert!(p.contains(POLISH_TRANSLATE_SRC_MARKER));
     assert!(p.contains(POLISH_TRANSLATE_TGT_MARKER));
     assert!(p.contains("日本語"));
+    // issue #609 F-02：合一路径以 translate_system_prompt 为 base，必须透传对抗式注入防御。
+    assert!(
+        p.contains("不可信用户文本"),
+        "润色+翻译合一 prompt 必须带对抗式注入防御"
+    );
 }
 
 #[tokio::test]
