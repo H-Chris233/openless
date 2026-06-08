@@ -12,7 +12,6 @@ import { invoke } from '@tauri-apps/api/core';
 import type { DownloadEvent } from '@tauri-apps/plugin-updater';
 import { Update } from '@tauri-apps/plugin-updater';
 import { useTranslation } from 'react-i18next';
-import { formatBytes as formatBytesShared } from '../lib/format';
 import { isTauri, restartApp, type UpdateChannel } from '../lib/ipc';
 import { Btn } from '../pages/_atoms';
 
@@ -241,7 +240,9 @@ export function UpdateDialog({
   );
 }
 
-// 下载进度尺寸：封顶 MB、对非有限/<=0 值兜底成 0 B。
 function formatBytes(value: number) {
-  return formatBytesShared(value, { maxUnit: 'MB', guard: true });
+  if (!Number.isFinite(value) || value <= 0) return '0 B';
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / 1024 / 1024).toFixed(1)} MB`;
 }

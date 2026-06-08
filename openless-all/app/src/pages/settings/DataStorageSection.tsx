@@ -2,10 +2,12 @@
 // 自 Settings.tsx 的 RecordingSection「历史与上下文」折叠组拆出，逻辑零改动。
 
 import { useTranslation } from 'react-i18next';
-import { clamp } from '../../lib/format';
 import { useHotkeySettings } from '../../state/HotkeySettingsContext';
 import { Card } from '../_atoms';
 import { SettingRow, SectionTitle, inputStyle } from './shared';
+
+// 范围限制：retention 0-365 天，context window 0-60 分钟（再大对实际对话场景没意义且白烧 token）。
+const clamp = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n));
 
 export function DataStorageSection() {
   const { t } = useTranslation();

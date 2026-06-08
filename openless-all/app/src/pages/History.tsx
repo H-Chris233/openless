@@ -5,7 +5,6 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Icon } from '../components/Icon';
 import { detectOS } from '../components/WindowChrome';
-import { formatDuration, formatTime as formatTimeShared } from '../lib/format';
 import { formatComboLabel } from '../lib/hotkey';
 import { clearHistory, deleteHistoryEntry, listHistory, readAudioRecording } from '../lib/ipc';
 import type { DictationSession, PolishMode } from '../lib/types';
@@ -400,7 +399,19 @@ function AudioRecordingPlayer({
   );
 }
 
-// History 非当天显示带时分（与 Overview 只显示 M/D 不同）。
 function formatTime(iso: string): string {
-  return formatTimeShared(iso, { withTimeOnOtherDays: true });
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  const now = new Date();
+  const sameDay = d.toDateString() === now.toDateString();
+  const pad = (n: number) => String(n).padStart(2, '0');
+  if (sameDay) return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return `${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function formatDuration(ms: number | null, t: ReturnType<typeof useTranslation>['t']): string {
+  if (ms == null || ms <= 0) return '—';
+  const sec = ms / 1000;
+  if (sec < 60) return t('common.durationSeconds', { value: sec.toFixed(1) });
+  return t('common.durationMinutes', { value: (sec / 60).toFixed(1) });
 }

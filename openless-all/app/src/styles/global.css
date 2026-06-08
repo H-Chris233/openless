@@ -14,9 +14,9 @@ html[data-ol-platform="linux"] #root {
 }
 
 body {
+  background: transparent;
   user-select: none;
   -webkit-user-select: none;
-  background: var(--ol-bg-base);
 }
 
 #root {
@@ -69,24 +69,6 @@ input, textarea {
 }
 
 a { color: inherit; text-decoration: none; }
-
-.ol-app-shell-bg {
-  background: var(--ol-app-shell-bg);
-}
-
-.ol-aura-panel {
-  background: var(--ol-panel-bg);
-  backdrop-filter: blur(var(--ol-aura-glass-blur)) saturate(150%);
-  -webkit-backdrop-filter: blur(var(--ol-aura-glass-blur)) saturate(150%);
-  border: 1px solid var(--ol-panel-border);
-  box-shadow: var(--ol-panel-shadow);
-}
-
-.ol-aura-card {
-  background: var(--ol-card-bg);
-  border: 1px solid var(--ol-card-border);
-  box-shadow: var(--ol-card-shadow);
-}
 
 @keyframes ol-window-enter {
   from {
