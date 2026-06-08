@@ -434,23 +434,32 @@ fn validate_llm_endpoint_rejects_metadata_host() {
 
 #[test]
 fn validate_llm_endpoint_rejects_link_local_ipv4() {
+    // link-local 169.254/16（含云元数据网段）始终拒绝，http/https 都拒。
     assert!(validate_llm_endpoint("https://169.254.10.5/v1").is_err());
+    assert!(validate_llm_endpoint("http://169.254.10.5/v1").is_err());
 }
 
 #[test]
-fn validate_llm_endpoint_rejects_rfc1918_private() {
-    assert!(validate_llm_endpoint("http://10.0.0.5/v1").is_err());
-    assert!(validate_llm_endpoint("http://192.168.1.1/v1").is_err());
-    assert!(validate_llm_endpoint("http://172.16.0.1/v1").is_err());
+fn validate_llm_endpoint_allows_rfc1918_private() {
+    // F-01 放宽：RFC1918 私网（局域网自托管 ASR/LLM）放行 http 与 https。
+    validate_llm_endpoint("http://10.0.0.5/v1").expect("10/8 LAN http allowed");
+    validate_llm_endpoint("http://192.168.1.1/v1").expect("192.168/16 LAN http allowed");
+    validate_llm_endpoint("http://172.16.0.1/v1").expect("172.16/12 LAN http allowed");
+    validate_llm_endpoint("https://192.168.1.1/v1").expect("192.168/16 LAN https allowed");
 }
 
 #[test]
 fn validate_llm_endpoint_rejects_cgnat() {
-    // RFC6598 100.64.0.0/10。
+    // RFC6598 100.64.0.0/10 始终拒绝（http/https），与公网 100.128/9 区分。
     assert!(validate_llm_endpoint("https://100.64.0.1/v1").is_err());
+    assert!(validate_llm_endpoint("http://100.64.0.1/v1").is_err());
     assert!(validate_llm_endpoint("https://100.127.255.254/v1").is_err());
-    // 100.128.x 不在段内，应放行（公网）。
-    validate_llm_endpoint("https://100.128.0.1/v1").expect("100.128/9 is public");
+    // 100.128.x 不在段内，是公网 → 需 https。
+    validate_llm_endpoint("https://100.128.0.1/v1").expect("100.128/9 is public https");
+    assert!(
+        validate_llm_endpoint("http://100.128.0.1/v1").is_err(),
+        "100.128/9 是公网，http 应拒绝"
+    );
 }
 
 #[test]
@@ -460,22 +469,39 @@ fn validate_llm_endpoint_allows_ipv6_loopback() {
 }
 
 #[test]
-fn validate_llm_endpoint_rejects_ipv6_ula_and_link_local() {
-    assert!(validate_llm_endpoint("https://[fc00::1]/v1").is_err());
-    assert!(validate_llm_endpoint("https://[fd12:3456::1]/v1").is_err());
-    assert!(validate_llm_endpoint("https://[fe80::1]/v1").is_err());
+fn validate_llm_endpoint_allows_ipv6_ula() {
+    // F-01 放宽：IPv6 ULA fc00::/7（含 fd00::/8）是局域网，放行 http 与 https。
+    validate_llm_endpoint("http://[fc00::1]/v1").expect("fc00::/7 ULA http allowed");
+    validate_llm_endpoint("https://[fc00::1]/v1").expect("fc00::/7 ULA https allowed");
+    validate_llm_endpoint("http://[fd12:3456::1]/v1").expect("fd00::/8 ULA http allowed");
 }
 
 #[test]
-fn validate_llm_endpoint_rejects_ipv4_mapped_private() {
-    // ::ffff:10.0.0.1 等价 RFC1918，必须拒绝。
-    assert!(validate_llm_endpoint("https://[::ffff:10.0.0.1]/v1").is_err());
+fn validate_llm_endpoint_rejects_ipv6_link_local() {
+    // fe80::/10 link-local 始终拒绝。
+    assert!(validate_llm_endpoint("https://[fe80::1]/v1").is_err());
+    assert!(validate_llm_endpoint("http://[fe80::1]/v1").is_err());
+}
+
+#[test]
+fn validate_llm_endpoint_ipv4_mapped() {
+    // ::ffff:192.168.1.1 等价 RFC1918 → 局域网，放行（F-01 放宽）。
+    validate_llm_endpoint("http://[::ffff:192.168.1.1]/v1")
+        .expect("IPv4-mapped RFC1918 LAN http allowed");
+    // ::ffff:169.254.169.254 等价云元数据 link-local → 始终拒绝。
+    assert!(
+        validate_llm_endpoint("http://[::ffff:169.254.169.254]/v1").is_err(),
+        "IPv4-mapped 元数据/link-local 必须拒绝"
+    );
 }
 
 #[test]
 fn validate_llm_endpoint_rejects_non_https_public() {
-    // 外网主机走 http → 拒绝（仅 localhost 放行 http）。
+    // 外网主机走 http → 拒绝（仅 localhost / 局域网放行 http）。
     assert!(validate_llm_endpoint("http://api.example.com/v1").is_err());
+    // 公网字面 IP 走 http → 拒绝；https → 放行。
+    assert!(validate_llm_endpoint("http://8.8.8.8/v1").is_err());
+    validate_llm_endpoint("https://8.8.8.8/v1").expect("public IP https allowed");
 }
 
 // ── issue #609 M-02：F-01 绕过变体（依赖 url crate 的 WHATWG host 归一化）──
@@ -488,20 +514,28 @@ fn validate_llm_endpoint_normalizes_obfuscated_loopback_to_local() {
 }
 
 #[test]
-fn validate_llm_endpoint_rejects_userinfo_private_host() {
-    // userinfo（user@）不参与 host 判定，host 取 192.168.1.1 → 私网拒绝，
-    // 不会被 userinfo 骗过。
+fn validate_llm_endpoint_userinfo_does_not_spoof_host() {
+    // userinfo（user@）不参与 host 判定：host 取 169.254.169.254（元数据）→ 拒绝，
+    // 不会被 userinfo 骗成「合法 user 名」而放行。
     assert!(
-        validate_llm_endpoint("https://user@192.168.1.1/v1").is_err(),
-        "userinfo 不应让私网 host 绕过 SSRF 校验"
+        validate_llm_endpoint("http://user@169.254.169.254/v1").is_err(),
+        "userinfo 不应让元数据 host 绕过 SSRF 校验"
     );
+    // 反向：host 取 192.168.1.1（局域网）→ 放行（F-01 放宽），userinfo 不影响判定。
+    validate_llm_endpoint("http://user@192.168.1.1/v1")
+        .expect("userinfo 不应影响局域网 host 的放行判定");
 }
 
 #[test]
-fn validate_llm_endpoint_rejects_unspecified_ipv4() {
-    // 0.0.0.0 unspecified → 拒绝（http 也先被 https 强制挡下，双保险）。
+fn validate_llm_endpoint_rejects_unspecified_and_broadcast_ipv4() {
+    // 0.0.0.0 unspecified → 始终拒绝（http/https 都拒）。
     assert!(validate_llm_endpoint("http://0.0.0.0/v1").is_err());
     assert!(validate_llm_endpoint("https://0.0.0.0/v1").is_err());
+    // 255.255.255.255 broadcast → 始终拒绝。
+    assert!(validate_llm_endpoint("http://255.255.255.255/v1").is_err());
+    assert!(validate_llm_endpoint("https://255.255.255.255/v1").is_err());
+    // :: unspecified IPv6 → 始终拒绝。
+    assert!(validate_llm_endpoint("http://[::]/v1").is_err());
 }
 
 // ── issue #609 H-01：Gemini base_url 也过 SSRF 校验 ──
@@ -513,9 +547,11 @@ fn resolve_gemini_base_url_default_passes() {
 }
 
 #[test]
-fn resolve_gemini_base_url_rejects_private_endpoint() {
-    // 用户把 Gemini endpoint 改成私网/元数据 → 必须拒绝，防止带 Key 请求被指向内网。
-    assert!(resolve_gemini_base_url(Some("http://192.168.1.1/v1beta".into())).is_err());
+fn resolve_gemini_base_url_endpoint_policy() {
+    // F-01 放宽：局域网（RFC1918）http 放行（用户局域网自托管 Gemini 兼容网关）。
+    resolve_gemini_base_url(Some("http://192.168.1.1/v1beta".into()))
+        .expect("LAN http Gemini endpoint 应放行");
+    // 元数据 / 公网 http → 仍必须拒绝，防止带 Key 请求被指向高价值目标 / 明文外泄。
     assert!(resolve_gemini_base_url(Some("http://169.254.169.254/v1beta".into())).is_err());
     assert!(resolve_gemini_base_url(Some("http://api.example.com/v1beta".into())).is_err());
 }
@@ -536,7 +572,7 @@ fn guard_asr_http_endpoint_passes_public_https() {
 }
 
 #[test]
-fn guard_asr_http_endpoint_passes_localhost_http() {
+fn guard_asr_http_endpoint_passes_localhost_and_lan_http() {
     // 本地 Whisper 服务：localhost / 127.0.0.1 http 放行。
     assert_eq!(
         guard_asr_http_endpoint("http://localhost:9000/v1".into(), "FALLBACK"),
@@ -546,15 +582,20 @@ fn guard_asr_http_endpoint_passes_localhost_http() {
         guard_asr_http_endpoint("http://127.0.0.1:9000/v1".into(), "FALLBACK"),
         "http://127.0.0.1:9000/v1"
     );
+    // F-01 放宽：局域网（RFC1918）http ASR 网关原样放行，不再回退。
+    assert_eq!(
+        guard_asr_http_endpoint("http://192.168.1.50:9000/v1".into(), "FALLBACK"),
+        "http://192.168.1.50:9000/v1"
+    );
+    assert_eq!(
+        guard_asr_http_endpoint("http://10.0.0.5/v1".into(), "FALLBACK"),
+        "http://10.0.0.5/v1"
+    );
 }
 
 #[test]
-fn guard_asr_http_endpoint_rejects_private_and_metadata_falls_back() {
-    // 私网 / 元数据 / 非 https 外网：fail-closed 回退到安全默认值，不把带 Key 的请求指向被拒地址。
-    assert_eq!(
-        guard_asr_http_endpoint("http://192.168.1.1/v1".into(), "FALLBACK"),
-        "FALLBACK"
-    );
+fn guard_asr_http_endpoint_rejects_metadata_and_public_http_falls_back() {
+    // 元数据 / 非 https 公网：fail-closed 回退到安全默认值，不把带 Key 的请求指向被拒地址。
     assert_eq!(
         guard_asr_http_endpoint("http://169.254.169.254/v1".into(), "FALLBACK"),
         "FALLBACK"
@@ -563,8 +604,11 @@ fn guard_asr_http_endpoint_rejects_private_and_metadata_falls_back() {
         guard_asr_http_endpoint("http://api.example.com/v1".into(), "FALLBACK"),
         "FALLBACK"
     );
-    // Whisper 无官方默认：回退空串 → transcription_url 解析失败、请求不发出。
-    assert_eq!(guard_asr_http_endpoint("http://10.0.0.5/v1".into(), ""), "");
+    // CGNAT 始终拒绝。Whisper 无官方默认：回退空串 → transcription_url 解析失败、请求不发出。
+    assert_eq!(
+        guard_asr_http_endpoint("http://100.64.0.1/v1".into(), ""),
+        ""
+    );
 }
 
 #[test]

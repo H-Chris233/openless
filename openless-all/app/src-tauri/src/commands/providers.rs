@@ -513,21 +513,24 @@ mod tests {
     use crate::coordinator::validate_llm_endpoint;
 
     #[test]
-    fn asr_endpoint_rejects_private_metadata_and_non_https() {
-        // 私网（RFC1918）/ 元数据 / 非 https 外网：拒绝，避免带 API Key 的 ASR 请求被指向内网。
-        assert!(validate_llm_endpoint("http://192.168.1.1/v1/audio/transcriptions").is_err());
+    fn asr_endpoint_rejects_metadata_cgnat_and_non_https_public() {
+        // 元数据 / CGNAT / 非 https 外网：拒绝，避免带 API Key 的 ASR 请求被指向高价值目标 / 明文外泄。
         assert!(validate_llm_endpoint("http://169.254.169.254/v1/audio/transcriptions").is_err());
+        assert!(validate_llm_endpoint("http://100.64.0.1/v1/audio/transcriptions").is_err());
         assert!(validate_llm_endpoint("http://api.example.com/v1/audio/transcriptions").is_err());
     }
 
     #[test]
-    fn asr_endpoint_accepts_public_https_and_localhost() {
+    fn asr_endpoint_accepts_public_https_localhost_and_lan() {
         // 公网 https（如自建 Whisper 网关）放行。
         validate_llm_endpoint("https://api.example.com/v1/audio/transcriptions")
             .expect("公网 https ASR endpoint 必须通过");
         // 本地 Whisper 服务：localhost / 127.0.0.1 http 放行。
         validate_llm_endpoint("http://localhost:9000/v1").expect("本地 Whisper http 必须通过");
         validate_llm_endpoint("http://127.0.0.1:9000/v1").expect("本地 Whisper http 必须通过");
+        // F-01 放宽：局域网（RFC1918）http ASR 网关放行（用户局域网自托管 Whisper）。
+        validate_llm_endpoint("http://192.168.1.50:9000/v1/audio/transcriptions")
+            .expect("局域网 http ASR endpoint 必须通过");
         // Mimo 官方默认 endpoint（https）放行。
         validate_llm_endpoint(crate::asr::mimo::DEFAULT_ENDPOINT)
             .expect("Mimo 官方默认 endpoint 必须通过");

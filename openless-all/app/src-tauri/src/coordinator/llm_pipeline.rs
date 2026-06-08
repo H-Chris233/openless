@@ -438,9 +438,11 @@ pub(crate) async fn polish_and_translate_or_passthrough(
 
 /// issue #609 F-01 孪生 gap：ASR 自定义 endpoint 也带 API Key 发请求，运行期听写路径
 /// （非「测试连接」按钮）此前完全绕过 SSRF 校验。对 http/https 的 Whisper 兼容 / Mimo
-/// endpoint 做与 LLM 路径一致的字面 host/IP 校验；命中内网/元数据等地址时 **fail-closed**
-/// —— 返回提供的安全回退值（Whisper 用空串 → `transcription_url` 解析失败、请求不发出；
-/// Mimo 用官方 DEFAULT_ENDPOINT），绝不把带 Key 的请求指向被拒地址。
+/// endpoint 做与 LLM 路径一致的字面 host/IP 校验；命中元数据/CGNAT/link-local 等被拒地址时
+/// **fail-closed** —— 返回提供的安全回退值（Whisper 用空串 → `transcription_url` 解析失败、
+/// 请求不发出；Mimo 用官方 DEFAULT_ENDPOINT），绝不把带 Key 的请求指向被拒地址。
+/// 注：F-01 放宽后，局域网（RFC1918/ULA）http ASR endpoint 会被 `validate_llm_endpoint`
+/// 放行（支持局域网自托管 Whisper 网关），故这里也原样返回、不再回退（见其 doc 安全取舍）。
 /// 注：Bailian 走 `wss://`，scheme 与本校验器不兼容，属已知残留（见下方 read_bailian_credentials）。
 pub(crate) fn guard_asr_http_endpoint(base_url: String, safe_fallback: &str) -> String {
     if base_url.trim().is_empty() {
@@ -698,11 +700,23 @@ pub(crate) fn resolve_ark_endpoint_with_policy(
 /// issue #609 F-01：对 LLM endpoint 做 SSRF 配置校验。
 ///
 /// 规则：
-/// - scheme 必须 `https`，除非 host 是 localhost / `127.0.0.1` / `::1`（本地允许 http）。
-/// - host 若是字面 IP：拒绝 loopback / RFC1918 私网 / link-local(169.254、fe80) /
-///   unspecified / CGNAT 100.64.0.0/10(RFC6598) / IPv6 ULA `fc00::/7` /
-///   IPv4-mapped 的等价私网。
-/// - 拒绝已知元数据主机名子串（`metadata.google.internal`、`169.254.169.254`）。
+/// - 已知云元数据主机名/地址子串（`metadata.google.internal`、`169.254.169.254`）：无条件拒绝。
+/// - loopback（`localhost` / `127.0.0.1` / `::1`）与**局域网**（RFC1918 私网 10/8、172.16/12、
+///   192.168/16；IPv6 ULA `fc00::/7`）：放行 http 或 https。
+/// - blocked 保留段（link-local 169.254/16、fe80::/10；CGNAT 100.64.0.0/10(RFC6598)；
+///   unspecified 0.0.0.0、`::`；broadcast 255.255.255.255）：始终拒绝。
+/// - 公网字面 IP 与公网主机名：强制 `https`（非 https 则拒绝）。
+/// - IPv4-mapped IPv6（`::ffff:a.b.c.d`）解包后按内层 v4 规则判定。
+///
+/// **有意的安全取舍（issue #609 F-01 放宽，用户产品决策）**：
+/// 本应用支持「局域网自托管 ASR/LLM 服务」这一真实使用场景——很多用户在内网机器上跑
+/// ollama / LM Studio / 自建 Whisper 网关，endpoint 是 `http://192.168.x.x` 这类局域网地址。
+/// 为此我们**主动放行 RFC1918 私网与 IPv6 ULA 的 http 请求**。代价是：本校验器**不再防护
+/// 「endpoint 指向私网 HTTP 服务」类型的 SSRF**。这是可接受的，因为：
+/// 1. endpoint 完全由**用户本人**在设置界面手动配置，不是远程可注入的 attacker-controlled 输入；
+/// 2. 我们仍然拦住了**最高价值**的 SSRF 目标——云元数据服务（169.254.169.254 /
+///    metadata.google.internal，可偷取云凭据）、CGNAT、link-local、unspecified、broadcast；
+/// 3. 公网地址仍强制 https，防止凭据在公网明文外泄。
 ///
 /// **已知残留**：本函数只在配置时校验字面 host/IP，无法防住 DNS 重绑定
 /// （主机名解析后再落到内网 IP）。完整防护需在每次请求前解析 + 校验解析结果，
@@ -718,7 +732,9 @@ pub(crate) fn validate_llm_endpoint(raw: &str) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("LLM endpoint 缺少主机名"))?
         .to_ascii_lowercase();
 
-    // 已知云元数据主机名/地址子串：无条件拒绝。
+    // ── 判定顺序：元数据黑名单 → loopback/LAN 放行 → blocked 段拒绝 → 公网强制 https ──
+
+    // 1) 已知云元数据主机名/地址子串：无条件拒绝（最高价值 SSRF 目标，始终挡）。
     const METADATA_HOSTS: [&str; 2] = ["metadata.google.internal", "169.254.169.254"];
     if METADATA_HOSTS.iter().any(|m| host.contains(m)) {
         anyhow::bail!("LLM endpoint 指向云元数据服务，已拒绝：{host}");
@@ -726,72 +742,88 @@ pub(crate) fn validate_llm_endpoint(raw: &str) -> anyhow::Result<()> {
 
     let scheme = url.scheme();
     // `url::Host` 对 IPv6 字面量保留方括号（`host_str()` 返回 `[::1]`、`[fc00::1]`）。
-    // 先剥一次方括号得到裸 IP 形式，后面 is_local_host 判定与 IpAddr 解析都用它。
+    // 先剥一次方括号得到裸 IP 形式，后面主机名判定与 IpAddr 解析都用它。
     let bare_host = host
         .strip_prefix('[')
         .and_then(|h| h.strip_suffix(']'))
         .unwrap_or(host.as_str());
 
-    let is_local_host = matches!(bare_host, "localhost" | "127.0.0.1" | "::1");
-
-    // 本地回环（localhost / 127.0.0.1 / ::1）是显式白名单：放行 http，并跳过后续
-    // loopback IP 段拒绝（否则 127.0.0.1 会被 is_loopback 命中）。本地自建 LLM
-    // 服务（如 ollama / LM Studio）就走这条。
-    if is_local_host {
-        return Ok(());
-    }
-
-    // 非本地 host 一律强制 https。
-    if scheme != "https" {
-        anyhow::bail!("LLM endpoint 必须使用 https（仅 localhost 允许 http）：{raw}");
-    }
-
-    // host 能解析成字面 IP 才走 IP 段校验；纯主机名交给 https 强制 + 元数据黑名单。
+    // 2) host 不是字面 IP（纯主机名）：localhost 放行 http；其它公网域名强制 https。
     let Ok(ip) = bare_host.parse::<IpAddr>() else {
+        if bare_host == "localhost" {
+            return Ok(());
+        }
+        if scheme != "https" {
+            anyhow::bail!("LLM endpoint 必须使用 https（仅 localhost / 局域网允许 http）：{raw}");
+        }
         return Ok(());
     };
 
-    let rejected = match ip {
-        IpAddr::V4(v4) => ip_v4_is_internal(v4),
-        IpAddr::V6(v6) => ip_v6_is_internal(v6),
+    // IPv4-mapped IPv6（::ffff:a.b.c.d）：解包出内层 v4，统一按 v4 规则判 LAN/blocked。
+    let canonical = match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(ip),
+        v4 => v4,
     };
-    if rejected {
-        anyhow::bail!("LLM endpoint 指向内网/保留地址，已拒绝（防 SSRF）：{ip}");
+
+    // 3) loopback / 局域网（RFC1918、ULA）：放行，不看 scheme。用户的本机/局域网自托管服务。
+    let is_lan = match canonical {
+        IpAddr::V4(v4) => ip_v4_is_lan(v4),
+        IpAddr::V6(v6) => ip_v6_is_lan(v6),
+    };
+    if is_lan {
+        return Ok(());
     }
 
-    // IPv4-mapped IPv6（::ffff:a.b.c.d）拆出内层 v4 再判一次，堵等价私网绕过。
-    if let IpAddr::V6(v6) = ip {
-        if let Some(mapped) = v6.to_ipv4_mapped() {
-            if ip_v4_is_internal(mapped) {
-                anyhow::bail!("LLM endpoint 指向 IPv4-mapped 内网地址，已拒绝（防 SSRF）：{ip}");
-            }
-        }
+    // 4) blocked 保留段（link-local / CGNAT / unspecified / broadcast）：始终拒绝。
+    let is_blocked = match canonical {
+        IpAddr::V4(v4) => ip_v4_is_blocked(v4),
+        IpAddr::V6(v6) => ip_v6_is_blocked(v6),
+    };
+    if is_blocked {
+        anyhow::bail!("LLM endpoint 指向保留/危险地址，已拒绝（防 SSRF）：{ip}");
+    }
+
+    // 5) 公网字面 IP：强制 https，防止凭据明文外泄。
+    if scheme != "https" {
+        anyhow::bail!("LLM endpoint 必须使用 https（仅 localhost / 局域网允许 http）：{raw}");
     }
 
     Ok(())
 }
 
-/// 判 IPv4 是否落在内网/保留段。
-fn ip_v4_is_internal(ip: std::net::Ipv4Addr) -> bool {
+/// 判 IPv4 是否属于「可放行 http」的本机/局域网段：
+/// loopback（127/8）、RFC1918 私网（10/8、172.16/12、192.168/16）。
+/// 这些是用户自己的本机/局域网，支持局域网自托管服务（见 `validate_llm_endpoint` 安全取舍）。
+fn ip_v4_is_lan(ip: std::net::Ipv4Addr) -> bool {
+    ip.is_loopback() || ip.is_private()
+}
+
+/// 判 IPv4 是否属于「始终拒绝」的保留/危险段：
+/// link-local（169.254/16，含云元数据）、CGNAT（100.64.0.0/10，RFC6598）、
+/// unspecified（0.0.0.0）、broadcast（255.255.255.255）。
+fn ip_v4_is_blocked(ip: std::net::Ipv4Addr) -> bool {
     // CGNAT 100.64.0.0/10（RFC6598）—— std 没有现成判定，手算。
     let octets = ip.octets();
     let is_cgnat = octets[0] == 100 && (64..=127).contains(&octets[1]);
-    ip.is_loopback()
-        || ip.is_private()
-        || ip.is_link_local()
-        || ip.is_unspecified()
-        || ip.is_broadcast()
-        || is_cgnat
+    ip.is_link_local() || ip.is_unspecified() || ip.is_broadcast() || is_cgnat
 }
 
-/// 判 IPv6 是否落在内网/保留段。
-fn ip_v6_is_internal(ip: std::net::Ipv6Addr) -> bool {
+/// 判 IPv6 是否属于「可放行 http」的本机/局域网段：
+/// loopback（::1）、ULA `fc00::/7`。
+fn ip_v6_is_lan(ip: std::net::Ipv6Addr) -> bool {
     let segs = ip.segments();
     // ULA fc00::/7：首字节高 7 位 == 0b1111110。
     let is_ula = (segs[0] & 0xfe00) == 0xfc00;
+    ip.is_loopback() || is_ula
+}
+
+/// 判 IPv6 是否属于「始终拒绝」的保留/危险段：
+/// link-local（fe80::/10）、unspecified（::）。
+fn ip_v6_is_blocked(ip: std::net::Ipv6Addr) -> bool {
+    let segs = ip.segments();
     // link-local fe80::/10。
     let is_link_local = (segs[0] & 0xffc0) == 0xfe80;
-    ip.is_loopback() || ip.is_unspecified() || is_ula || is_link_local
+    ip.is_unspecified() || is_link_local
 }
 
 pub(crate) fn enabled_phrases(inner: &Arc<Inner>) -> Vec<String> {
