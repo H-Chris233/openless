@@ -1,4 +1,4 @@
-use super::dictation::abort_recording_with_error;
+use super::dictation_session::abort_recording_with_error;
 use super::*;
 use crate::types::{HotkeyMode, HotkeyTrigger};
 use once_cell::sync::Lazy;

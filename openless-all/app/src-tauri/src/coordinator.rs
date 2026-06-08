@@ -64,6 +64,10 @@ use crate::windows_ime_session::{PreparedWindowsImeSession, WindowsImeSessionCon
 mod asr_setup;
 mod capsule;
 mod dictation;
+mod dictation_end;
+mod dictation_session;
+mod dictation_streaming;
+mod dictation_voice_agent;
 mod hotkey_supervisors;
 mod ime_insertion;
 mod llm_pipeline;
@@ -76,6 +80,10 @@ mod voice_agent_hotkeys;
 // 引用继续通过父模块解析（拆分前的 `use super::*` 契约）。
 pub(crate) use asr_setup::*;
 pub(crate) use capsule::*;
+pub(crate) use dictation_end::*;
+pub(crate) use dictation_session::*;
+pub(crate) use dictation_streaming::*;
+pub(crate) use dictation_voice_agent::*;
 pub(crate) use hotkey_supervisors::*;
 pub(crate) use ime_insertion::*;
 pub(crate) use llm_pipeline::*;
@@ -83,11 +91,9 @@ pub(crate) use qa_session::*;
 pub(crate) use voice_agent_hotkeys::*;
 
 #[cfg(test)]
-use dictation::dictation_error_code;
-use dictation::{
-    begin_session, cancel_session, end_session, handle_pressed_edge, handle_released_edge,
-    request_stop_during_starting,
-};
+use dictation_session::dictation_error_code;
+use dictation::{handle_pressed_edge, handle_released_edge};
+use dictation_session::{begin_session, cancel_session, request_stop_during_starting};
 #[cfg(any(debug_assertions, test))]
 use dictation::{handle_pressed, handle_released};
 use qa::{close_qa_panel, handle_qa_hotkey_pressed, QaPhase, QaSessionState};
@@ -815,7 +821,7 @@ impl Coordinator {
 
     /// 内联审批卡的 Approve / Deny 回执：解析等待中的 token。
     pub fn less_computer_approve(&self, token: &str, approved: bool) {
-        dictation::resolve_less_computer_approval(token, approved);
+        dictation_voice_agent::resolve_less_computer_approval(token, approved);
     }
 
     pub fn history(&self) -> &HistoryStore {
