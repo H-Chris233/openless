@@ -48,15 +48,6 @@ const LEGACY_CREDS_FILE: &str = "credentials.json";
 
 const KEYRING_CREDENTIALS_ACCOUNT: &str = "credentials.v1";
 const KEYRING_CREDENTIALS_CHUNK_PREFIX: &str = "credentials.v1.chunk.";
-/// issue #609 F-03：history.json HMAC 完整性密钥的 keyring account。和凭据共用
-/// `CredentialsVault::SERVICE_NAME`，但走独立 account，不掺进 chunked CredsRoot。
-const KEYRING_HISTORY_HMAC_ACCOUNT: &str = "history.hmac_key.v1";
-/// issue #609 C-01：「已启用 HMAC」标志的 keyring account（值固定为 "1"）。
-/// 一旦置位，sidecar 缺失就判定为攻击者删除（而非 legacy），fail-safe 拒绝。
-/// 没有这个标志，攻击者只需删掉 `history.json.hmac` 就能把任意篡改历史伪装成
-/// legacy 文件骗过 HMAC 校验。标志放 keyring（而非文件）正是因为它本身要抗删除。
-const KEYRING_HISTORY_HMAC_ENROLLED_ACCOUNT: &str = "history.hmac_enrolled.v1";
-const KEYRING_HISTORY_HMAC_ENROLLED_VALUE: &str = "1";
 /// HMAC 密钥长度（字节）。
 const HISTORY_HMAC_KEY_LEN: usize = 32;
 /// history HMAC sidecar 文件后缀：`history.json.hmac`。
@@ -828,23 +819,49 @@ fn history_hmac_key() -> Option<Vec<u8>> {
         .clone()
 }
 
+/// history HMAC 密钥 / enrolled 标志的 0o600 文件路径。
+///
+/// **为什么从 keyring 迁到文件**（原 #609 F-03 放 keychain）：macOS 上每个钥匙串条目各自 ACL，
+/// 且 ad-hoc 签名下「始终允许」不持久、条目删建即清空 ACL —— 导致用户**每次听写后反复弹钥匙串
+/// 授权**（凭据 3 次之外又多出 HMAC 密钥 + enrolled 共 2 次）。HMAC 密钥与明文 history 同目录、
+/// at-rest 防护同为 OS 文件权限（M-01），放文件与放 keychain 安全**收益对等**，却彻底消除钥匙串
+/// 弹窗。真正的 API 密钥仍留在 keychain（CredentialsVault）。
+fn history_hmac_key_path() -> Result<PathBuf> {
+    Ok(data_dir()?.join("history_hmac.key"))
+}
+
+fn history_hmac_enrolled_path() -> Result<PathBuf> {
+    Ok(data_dir()?.join(".history_hmac_enrolled.v1"))
+}
+
 fn load_or_create_history_hmac_key() -> Result<Vec<u8>> {
     let _guard = credentials_lock().lock();
-    if let Some(hex_key) = get_keyring_password(KEYRING_HISTORY_HMAC_ACCOUNT)? {
-        let key =
-            decode_hex(&hex_key).with_context(|| "history HMAC key in keyring is not valid hex")?;
-        if key.len() == HISTORY_HMAC_KEY_LEN {
-            return Ok(key);
+    let key_path = history_hmac_key_path()?;
+    if let Ok(hex_key) = fs::read_to_string(&key_path) {
+        let trimmed = hex_key.trim();
+        if !trimmed.is_empty() {
+            let key =
+                decode_hex(trimmed).with_context(|| "history HMAC key file is not valid hex")?;
+            if key.len() == HISTORY_HMAC_KEY_LEN {
+                return Ok(key);
+            }
+            log::warn!("[history] HMAC 密钥文件长度异常，重新生成");
         }
-        log::warn!("[history] keyring 里的 HMAC 密钥长度异常，重新生成");
     }
-    // 生成 32 字节随机密钥并落盘 keyring。
+    // 密钥文件不存在 = 首次启用文件存储（含从旧 keychain 版升级）。生成新 key；旧 history 可能
+    // 是用「旧 keychain key」签的 —— 新 key 会让其 HMAC 不匹配而被误判篡改清空。迁移：删掉旧
+    // sidecar 与 enrolled 文件，让旧 history 走 legacy 路径被重新接受 + 用新 key 补签。全程不读
+    // 旧 keychain，零钥匙串弹窗、不丢历史。
     let mut key = vec![0u8; HISTORY_HMAC_KEY_LEN];
     getrandom::fill(&mut key).map_err(|e| anyhow!("OS CSPRNG 生成 HMAC 密钥失败：{e}"))?;
-    let hex_key = encode_hex(&key);
-    keyring_entry_for(KEYRING_HISTORY_HMAC_ACCOUNT)?
-        .set_password(&hex_key)
-        .context("写入 history HMAC 密钥到系统凭据库失败")?;
+    atomic_write_private(&key_path, encode_hex(&key).as_bytes())
+        .context("写入 history HMAC 密钥文件失败")?;
+    if let Ok(dir) = data_dir() {
+        let _ = fs::remove_file(history_hmac_sidecar_path(&dir.join(HISTORY_FILE)));
+    }
+    if let Ok(enrolled) = history_hmac_enrolled_path() {
+        let _ = fs::remove_file(enrolled);
+    }
     Ok(key)
 }
 
@@ -860,36 +877,28 @@ trait HmacEnrollment {
     fn set_enrolled(&self);
 }
 
-/// 生产实现：标志落 keyring。读不到/写不了都按「未启用」处理（与 M-03 的退化一致）。
-struct KeyringEnrollment;
+/// 生产实现：enrolled 标志落 0o600 文件（不再用 keychain，原因见 history_hmac_key_path 注释：
+/// 避免 ad-hoc 签名下每次听写反复弹钥匙串）。标志文件存在 = 已启用（曾写过 sidecar）。
+/// 读不到 / 写不了都按「未启用」处理（退化与 M-03 一致）。
+struct FileEnrollment;
 
-impl HmacEnrollment for KeyringEnrollment {
+impl HmacEnrollment for FileEnrollment {
     fn is_enrolled(&self) -> bool {
-        let _guard = credentials_lock().lock();
-        match get_keyring_password(KEYRING_HISTORY_HMAC_ENROLLED_ACCOUNT) {
-            Ok(Some(v)) => v == KEYRING_HISTORY_HMAC_ENROLLED_VALUE,
-            Ok(None) => false,
-            Err(e) => {
-                log::warn!("[history] 读取 HMAC enrolled 标志失败，按未启用处理：{e}");
-                false
-            }
-        }
+        history_hmac_enrolled_path()
+            .map(|p| p.exists())
+            .unwrap_or(false)
     }
 
     fn set_enrolled(&self) {
-        let _guard = credentials_lock().lock();
-        // 已置位则不重复写，避免 macOS Keychain 反复弹 ACL 授权。
-        if let Ok(Some(v)) = get_keyring_password(KEYRING_HISTORY_HMAC_ENROLLED_ACCOUNT) {
-            if v == KEYRING_HISTORY_HMAC_ENROLLED_VALUE {
-                return;
-            }
+        let Ok(path) = history_hmac_enrolled_path() else {
+            return;
+        };
+        // 已置位则不重复写（幂等）。
+        if path.exists() {
+            return;
         }
-        match keyring_entry_for(KEYRING_HISTORY_HMAC_ENROLLED_ACCOUNT).and_then(|e| {
-            e.set_password(KEYRING_HISTORY_HMAC_ENROLLED_VALUE)
-                .map_err(Into::into)
-        }) {
-            Ok(()) => {}
-            Err(e) => log::warn!("[history] 置位 HMAC enrolled 标志失败：{e}"),
+        if let Err(e) = atomic_write_private(&path, b"1") {
+            log::warn!("[history] 置位 HMAC enrolled 标志文件失败：{e}");
         }
     }
 }
@@ -1238,10 +1247,10 @@ fn write_account(root: &mut CredsRoot, account: CredentialAccount, value: Option
 /// - 内容以**明文 JSON** 落盘（`DictationSession[]`），便于用户导出/审阅。
 /// - 机密性靠 **OS 文件系统权限**：unix 下写入后收紧到 `0o600`（仅属主可读写）；
 ///   Windows 走 `%APPDATA%` 的 per-user ACL。
-/// - 完整性靠 **HMAC-SHA256**（F-03）：密钥 32 字节随机、存系统凭据库
-///   （`KEYRING_HISTORY_HMAC_ACCOUNT`）；每次写入算 HMAC 写 sidecar
-///   `history.json.hmac`；读取时校验，不匹配则 fail-safe 返回空历史，绝不把被篡改
-///   的历史喂给下游 LLM。
+/// - 完整性靠 **HMAC-SHA256**（F-03）：密钥 32 字节随机、存**同目录 0o600 文件**
+///   （`history_hmac.key`，原 keyring 版因 ad-hoc 签名反复弹钥匙串而迁出，密钥与明文
+///   history 同目录、安全收益对等）；每次写入算 HMAC 写 sidecar `history.json.hmac`；
+///   读取时校验，不匹配则 fail-safe 返回空历史，绝不把被篡改的历史喂给下游 LLM。
 ///
 /// **已知残留**：尚未做**完整静态加密（at-rest encryption）**——本地能读文件的
 /// 攻击者仍可读到明文历史（但无法在不被发现的情况下篡改）。完整加密（用 keyring
@@ -1350,11 +1359,7 @@ impl HistoryStore {
     ///   置位 enrolled 标志完成迁移（issue #609 C-01）。
     /// - sidecar 缺失但**标志已置位** → 攻击者删了 sidecar 想伪装 legacy：fail-safe 返回空。
     fn read_locked(&self) -> Result<Vec<DictationSession>> {
-        read_history_with_key(
-            &self.path,
-            history_hmac_key().as_deref(),
-            &KeyringEnrollment,
-        )
+        read_history_with_key(&self.path, history_hmac_key().as_deref(), &FileEnrollment)
     }
 
     /// issue #609 F-03/F-04/C-01：写 history 后算 HMAC 写 sidecar；unix 下把两文件都设
@@ -1365,7 +1370,7 @@ impl HistoryStore {
             &self.path,
             &json,
             history_hmac_key().as_deref(),
-            &KeyringEnrollment,
+            &FileEnrollment,
         )
     }
 }

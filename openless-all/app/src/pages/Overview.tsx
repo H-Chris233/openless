@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Icon } from '../components/Icon';
-import { formatDuration as formatDurationShared, formatTime } from '../lib/format';
 import { formatComboLabel } from '../lib/hotkey';
 import { getCredentials, listHistory } from '../lib/ipc';
 import type { CredentialsStatus, DictationSession, PolishMode } from '../lib/types';
@@ -171,16 +170,9 @@ export function Overview({ onOpenHistory }: OverviewProps) {
 
   return (
     <>
-      <PageHeader
-        kicker="AURA OVERVIEW"
-        title={t('overview.title')}
-        desc={t('overview.metricTotalTrend')}
-      />
+      <PageHeader title={t('overview.title')} />
 
-      <div
-        className="ol-overview-hero"
-        style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 20 }}
-      >
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 18 }}>
         <ProviderCard
           kind={t('overview.asrKind')}
           name={asrProviderName}
@@ -195,7 +187,7 @@ export function Overview({ onOpenHistory }: OverviewProps) {
         />
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 14, marginBottom: 20 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 18 }}>
         <Metric icon="hash" label={t('overview.metricChars')} value={historyError ? '—' : metrics.charsToday.toLocaleString()} trend={historyError ? t('overview.historyLoadError') : t('overview.metricSegments', { count: metrics.segmentsToday })} />
         <Metric icon="mic" label={t('overview.metricDuration')} value={historyError ? '—' : formatDuration(metrics.totalDurationMs, t)} trend={historyError ? t('overview.historyLoadError') : ''} />
         <Metric icon="clock" label={t('overview.metricAvg')} value={historyError ? '—' : formatDuration(metrics.avgLatencyMs, t)} trend={historyError ? t('overview.historyLoadError') : metrics.segmentsToday > 0 ? t('overview.metricAvgTrend') : t('overview.metricNoData')} />
@@ -205,8 +197,8 @@ export function Overview({ onOpenHistory }: OverviewProps) {
       {/* 底部一行 = flex:1 撑满剩余高度（父 wrapper 是 display:flex/column）。
           只有「最近识别」内部允许滚动；其他卡片按内容自然高度，不破裂底部圆角。
           issue #243 follow-up：去掉外层 overflow 后底部圆角被裁的视觉问题。 */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.4fr', gap: 14, flex: 1, minHeight: 0 }}>
-        <Card className="ol-overview-hero" padding={20} style={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.4fr', gap: 12, flex: 1, minHeight: 0 }}>
+        <Card padding={18} style={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
             <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink-2)' }}>{t('overview.weekTitle')}</span>
             <span style={{ fontSize: 11, color: 'var(--ol-ink-4)' }}>{t('overview.weekUnit')}</span>
@@ -223,7 +215,7 @@ export function Overview({ onOpenHistory }: OverviewProps) {
           </div>
         </Card>
 
-        <Card className="ol-overview-hero" padding={0} style={{ display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
+        <Card padding={0} style={{ display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
           <div style={{ padding: '14px 18px', borderBottom: '0.5px solid var(--ol-line)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0 }}>
             <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink-2)' }}>{t('overview.recentTitle')}</span>
             <Btn size="sm" variant="ghost" onClick={onOpenHistory}>{t('overview.recentAll')}</Btn>
@@ -369,9 +361,21 @@ function RecentRow({ session, modeLabel }: { session: DictationSession; modeLabe
   );
 }
 
-// Overview 用 M:SS 时钟格式展示时长（与 History 的「分钟」i18n 文案不同）。
+function formatTime(iso: string): string {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  const now = new Date();
+  const sameDay = d.toDateString() === now.toDateString();
+  const pad = (n: number) => String(n).padStart(2, '0');
+  if (sameDay) return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return `${d.getMonth() + 1}/${d.getDate()}`;
+}
+
 function formatDuration(ms: number, t: ReturnType<typeof useTranslation>['t']): string {
-  return formatDurationShared(ms, t, { minutesAsClock: true });
+  if (ms <= 0) return '—';
+  const sec = ms / 1000;
+  if (sec < 60) return t('common.durationSeconds', { value: sec.toFixed(1) });
+  return `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, '0')}`;
 }
 
 function weekDayLabels(names: string[]): string[] {

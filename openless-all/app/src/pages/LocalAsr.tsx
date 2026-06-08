@@ -78,7 +78,6 @@ import {
     type SherpaOnnxModelAlias,
     type SherpaPrepareProgress,
 } from "../lib/localAsr"
-import { formatBytes as formatBytesShared } from "../lib/format"
 import { useHotkeySettings } from "../state/HotkeySettingsContext"
 import { detectOS } from "../components/WindowChrome"
 import { SelectLite } from "../components/ui/SelectLite"
@@ -3389,7 +3388,9 @@ function formatFoundrySizeMb(
     return Math.round(fileSizeMb).toLocaleString()
 }
 
-// 模型尺寸：升到 GB、MB 档取整（与 AutoUpdate 的 1 位小数下载进度不同）。
 function formatBytes(n: number): string {
-    return formatBytesShared(n, { maxUnit: "GB", mbDigits: 0 })
+    if (n < 1024) return `${n} B`
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+    if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(0)} MB`
+    return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`
 }

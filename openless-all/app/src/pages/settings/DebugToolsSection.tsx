@@ -4,11 +4,12 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { clamp } from '../../lib/format';
 import { exportErrorLog } from '../../lib/ipc';
 import { useHotkeySettings } from '../../state/HotkeySettingsContext';
 import { Btn, Card } from '../_atoms';
 import { SettingRow, Toggle, SectionTitle, inputStyle } from './shared';
+
+const clamp = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n));
 
 export function DebugToolsSection() {
   const { t } = useTranslation();

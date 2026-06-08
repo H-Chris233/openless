@@ -74,7 +74,7 @@ export function SettingsModal({ os: _os, onClose, initialSettingsSection }: Sett
       onClick={onClose}
       style={{
         position: 'absolute', inset: 0,
-        background: 'var(--ol-overlay-bg)',
+        background: 'rgba(15,17,22,0.32)',
         backdropFilter: 'blur(8px) saturate(140%)',
         WebkitBackdropFilter: 'blur(8px) saturate(140%)',
         display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -84,34 +84,32 @@ export function SettingsModal({ os: _os, onClose, initialSettingsSection }: Sett
       }}>
 
       <div
-        className="ol-aura-settings"
         onClick={(e) => e.stopPropagation()}
         style={{
-          width: '100%',
-          maxWidth: 920,
-          height: '100%',
-          maxHeight: 620,
-          display: 'flex',
-          overflow: 'hidden',
+          width: '100%', maxWidth: 880, height: '100%', maxHeight: 600,
+          background: 'var(--ol-surface)',
+          borderRadius: 14,
+          border: '0.5px solid rgba(0,0,0,.08)',
+          boxShadow: '0 30px 80px -20px rgba(15,17,22,.35), 0 0 0 0.5px rgba(0,0,0,.06)',
+          display: 'flex', overflow: 'hidden',
           animation: 'ol-modal-card-in 0.24s var(--ol-motion-spring)',
           position: 'relative',
         }}>
 
         {/* ─── 单层侧栏 ────────────────────────────────────────────── */}
         <aside
-          className="ol-aura-settings-rail"
           style={{
-            width: 214,
-            flexShrink: 0,
-            display: 'flex',
-            flexDirection: 'column',
+            width: 200, flexShrink: 0,
+            background: 'rgba(247,247,250,0.7)',
+            borderRight: '0.5px solid var(--ol-line-soft)',
+            padding: '18px 12px',
+            display: 'flex', flexDirection: 'column', gap: 14,
           }}>
 
           {/* tab 组 */}
           <div style={{ position: 'relative', display: 'flex', flexDirection: 'column', gap: 1 }}>
             {pillRect && (
               <div
-                className="ol-aura-settings-pill"
                 aria-hidden
                 style={{
                   position: 'absolute',
@@ -119,6 +117,9 @@ export function SettingsModal({ os: _os, onClose, initialSettingsSection }: Sett
                   right: 0,
                   top: pillRect.top,
                   height: pillRect.height,
+                  background: '#fff',
+                  borderRadius: 8,
+                  boxShadow: '0 1px 2px rgba(0,0,0,.05), 0 0 0 0.5px rgba(0,0,0,.06)',
                   transition: 'top 0.36s var(--ol-motion-spring), height 0.36s var(--ol-motion-spring)',
                   pointerEvents: 'none',
                   zIndex: 0,
@@ -132,7 +133,7 @@ export function SettingsModal({ os: _os, onClose, initialSettingsSection }: Sett
                   key={it.id}
                   ref={el => { tabRefs.current[idx] = el; }}
                   onClick={() => setSection(it.id as SettingsSectionId)}
-                  className={active ? 'ol-nav-btn ol-nav-btn-active ol-aura-settings-nav-btn' : 'ol-nav-btn ol-aura-settings-nav-btn'}
+                  className={active ? 'ol-nav-btn ol-nav-btn-active' : 'ol-nav-btn'}
                   style={navBtnStyle}>
                   <Icon name={it.icon} size={14} />
                   <span style={{ flex: 1 }}>{t(`modal.sections.${it.id}`)}</span>
@@ -142,12 +143,12 @@ export function SettingsModal({ os: _os, onClose, initialSettingsSection }: Sett
           </div>
 
           {/* 外链组 */}
-          <div className="ol-aura-settings-links">
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 1, paddingTop: 8, borderTop: '0.5px solid var(--ol-line-soft)' }}>
             {LINK_ITEMS.map(it => (
               <button
                 key={it.id}
                 onClick={() => { if (it.href) void openExternal(it.href); }}
-                className="ol-nav-btn ol-aura-settings-nav-btn"
+                className="ol-nav-btn"
                 style={navBtnStyle}>
                 <Icon name={it.icon} size={14} />
                 <span style={{ flex: 1 }}>{t(`modal.sections.${it.id}`)}</span>
@@ -160,17 +161,7 @@ export function SettingsModal({ os: _os, onClose, initialSettingsSection }: Sett
         {/* ─── 内容区 ──────────────────────────────────────────────
             父容器 overflow:hidden + 列向 flex；关闭按钮、section 标题固定在头部，
             只有最里层的 scroll wrapper 真正滚动。 */}
-        <div
-          className="ol-aura-settings-content"
-          style={{
-            flex: 1,
-            minWidth: 0,
-            overflow: 'hidden',
-            position: 'relative',
-            display: 'flex',
-            flexDirection: 'column',
-          }}
-        >
+        <div style={{ flex: 1, minWidth: 0, overflow: 'hidden', position: 'relative', display: 'flex', flexDirection: 'column' }}>
           {/* "已保存" toast：right:54 避开 28×28 关闭按钮 + 12px gap。 */}
           <SavedToast
             saveState={savedToast.state}
@@ -179,19 +170,22 @@ export function SettingsModal({ os: _os, onClose, initialSettingsSection }: Sett
             offsetStyle={{ position: 'absolute', top: 16, right: 54 }}
           />
           <button
-            className="ol-aura-settings-close"
             onClick={onClose}
             style={{
               position: 'absolute', top: 14, right: 14, zIndex: 2,
               width: 28, height: 28, border: 0, borderRadius: 999,
+              background: 'transparent', color: 'var(--ol-ink-3)',
               display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
               cursor: 'default',
+              transition: 'background 0.16s var(--ol-motion-quick)',
             }}
+            onMouseEnter={e => (e.currentTarget.style.background = 'rgba(0,0,0,0.05)')}
+            onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
             title={t('common.close')}>
             <Icon name="close" size={14} />
           </button>
 
-          <h2 className="ol-aura-settings-title" style={{ margin: 0, flexShrink: 0 }}>
+          <h2 style={{ margin: 0, padding: '22px 28px 8px', fontSize: 22, fontWeight: 600, letterSpacing: '-0.02em', flexShrink: 0 }}>
             {t(`modal.sections.${section}`)}
           </h2>
 
@@ -211,69 +205,18 @@ export function SettingsModal({ os: _os, onClose, initialSettingsSection }: Sett
           </div>
         </div>
       </div>
-      <style>{`
-        .ol-aura-settings {
-          background: var(--ol-panel-bg);
-          border-radius: var(--ol-shell-radius);
-          border: 1px solid var(--ol-panel-border);
-          box-shadow: var(--ol-panel-shadow);
-        }
-        .ol-aura-settings-rail {
-          padding: 20px 14px;
-          gap: 16px;
-          background: var(--ol-settings-rail-bg);
-          border-right: 1px solid var(--ol-settings-rail-border);
-        }
-        .ol-aura-settings-pill {
-          background: var(--ol-sidebar-pill-bg);
-          border-radius: 12px;
-          border: 1px solid var(--ol-sidebar-pill-border);
-          box-shadow: none;
-        }
-        .ol-aura-settings-nav-btn {
-          padding: 7px 10px;
-          border-radius: 12px;
-          border: 0;
-          background: transparent;
-          font-family: inherit;
-          font-size: 13px;
-          cursor: default;
-          text-align: left;
-          position: relative;
-          z-index: 1;
-          transition: color 0.16s var(--ol-motion-quick), background 0.16s var(--ol-motion-quick);
-        }
-        .ol-aura-settings-links {
-          display: flex;
-          flex-direction: column;
-          gap: 1px;
-          padding-top: 10px;
-          border-top: 1px solid var(--ol-settings-links-border);
-        }
-        .ol-aura-settings-content {
-          background: var(--ol-settings-content-bg);
-        }
-        .ol-aura-settings-close {
-          background: var(--ol-settings-close-bg);
-          color: var(--ol-ink-3);
-          transition: background 0.16s var(--ol-motion-quick);
-        }
-        .ol-aura-settings-close:hover {
-          background: var(--ol-settings-close-hover-bg);
-        }
-        .ol-aura-settings-title {
-          padding: 24px 28px 10px;
-          font-size: 22px;
-          font-weight: 600;
-          letter-spacing: -0.02em;
-          font-family: var(--ol-font-display);
-          color: var(--ol-ink);
-        }
-      `}</style>
     </div>
   );
 }
 
 const navBtnStyle = {
   display: 'flex', alignItems: 'center', gap: 10,
+  padding: '7px 10px',
+  borderRadius: 8, border: 0,
+  background: 'transparent',
+  fontFamily: 'inherit', fontSize: 13,
+  cursor: 'default', textAlign: 'left' as const,
+  position: 'relative' as const,
+  zIndex: 1,
+  transition: 'color 0.16s var(--ol-motion-quick), background 0.16s var(--ol-motion-quick)',
 };
