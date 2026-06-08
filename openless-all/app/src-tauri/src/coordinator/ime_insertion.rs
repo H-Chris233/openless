@@ -479,19 +479,48 @@ pub(crate) fn show_capsule_window_no_activate<R: tauri::Runtime>(
         SWP_SHOWWINDOW, SW_SHOWNOACTIVATE,
     };
 
-    let Ok(handle) = window.window_handle() else {
-        // #470 诊断 v2：Win32 show 路径最可能的暗点之一。此前静默 return，
-        // 无法观测「胶囊完全不显示」是否卡在这里。
-        log::warn!(
-            "[capsule] no_activate failed: window_handle() unavailable — Win32 show skipped"
-        );
+    // #470：首帧 show 时 webview 句柄常常还没 realize（window_handle() 暂不可用），
+    // 此前一拿不到就 return false → 回落到会抢焦点的 window.show()，正是「胶囊不显示 /
+    // 焦点 churn」的主嫌。改为短暂有界重试：最多 5 次、每次 18ms（总 < 100ms），拿到
+    // Win32 句柄就走 no-activate 正常路径；全部失败才让调用方回落 show()。
+    // 本函数在 run_on_main_thread 闭包里同步执行（见 capsule.rs），短暂阻塞主线程是
+    // 可接受代价 —— 否则那一帧本就要走 show() 抢焦点。
+    const HANDLE_RETRY_ATTEMPTS: u32 = 5;
+    const HANDLE_RETRY_INTERVAL_MS: u64 = 18;
+    let mut hwnd: Option<HWND> = None;
+    for attempt in 0..HANDLE_RETRY_ATTEMPTS {
+        match window.window_handle() {
+            Ok(handle) => match handle.as_raw() {
+                RawWindowHandle::Win32(raw) => {
+                    hwnd = Some(HWND(raw.hwnd.get() as *mut _));
+                    break;
+                }
+                _ => {
+                    // 非 Win32 句柄不会随重试变化，直接放弃。
+                    log::warn!(
+                        "[capsule] no_activate failed: non-Win32 RawWindowHandle — Win32 show skipped"
+                    );
+                    return false;
+                }
+            },
+            Err(_) if attempt + 1 < HANDLE_RETRY_ATTEMPTS => {
+                std::thread::sleep(std::time::Duration::from_millis(HANDLE_RETRY_INTERVAL_MS));
+            }
+            Err(e) => {
+                // #470：重试耗尽仍拿不到句柄，记录后让调用方回落 show()。
+                log::warn!(
+                    "[capsule] no_activate failed: window_handle() unavailable after {HANDLE_RETRY_ATTEMPTS} retries ({e}) — Win32 show skipped"
+                );
+                return false;
+            }
+        }
+    }
+    // 走到这里 hwnd 必为 Some：上面循环要么在 Win32 分支 break（hwnd 已赋值），
+    // 要么提前 return false。此 else 仅是 HANDLE_RETRY_ATTEMPTS == 0（循环体一次都不跑）
+    // 时的防御性兜底，当前常量为 5 时不可达，保留以防后续把次数改 0。
+    let Some(hwnd) = hwnd else {
         return false;
     };
-    let RawWindowHandle::Win32(raw) = handle.as_raw() else {
-        log::warn!("[capsule] no_activate failed: non-Win32 RawWindowHandle — Win32 show skipped");
-        return false;
-    };
-    let hwnd = HWND(raw.hwnd.get() as *mut _);
 
     let _ = unsafe { ShowWindow(hwnd, SW_SHOWNOACTIVATE) };
     let _ = unsafe {
