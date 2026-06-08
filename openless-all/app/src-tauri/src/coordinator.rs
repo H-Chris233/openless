@@ -64,6 +64,7 @@ use crate::windows_ime_session::{PreparedWindowsImeSession, WindowsImeSessionCon
 mod asr_setup;
 mod capsule;
 mod dictation;
+mod dictation_end;
 mod dictation_session;
 mod dictation_streaming;
 mod dictation_voice_agent;
@@ -79,6 +80,7 @@ mod voice_agent_hotkeys;
 // 引用继续通过父模块解析（拆分前的 `use super::*` 契约）。
 pub(crate) use asr_setup::*;
 pub(crate) use capsule::*;
+pub(crate) use dictation_end::*;
 pub(crate) use dictation_session::*;
 pub(crate) use dictation_streaming::*;
 pub(crate) use dictation_voice_agent::*;
@@ -90,7 +92,7 @@ pub(crate) use voice_agent_hotkeys::*;
 
 #[cfg(test)]
 use dictation_session::dictation_error_code;
-use dictation::{end_session, handle_pressed_edge, handle_released_edge};
+use dictation::{handle_pressed_edge, handle_released_edge};
 use dictation_session::{begin_session, cancel_session, request_stop_during_starting};
 #[cfg(any(debug_assertions, test))]
 use dictation::{handle_pressed, handle_released};
