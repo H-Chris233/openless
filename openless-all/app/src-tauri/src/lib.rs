@@ -1483,18 +1483,22 @@ pub(crate) fn show_less_computer_glow<R: tauri::Runtime>(app: &AppHandle<R>) {
         .ok()
         .flatten()
         .or_else(|| app.primary_monitor().ok().flatten());
-    if let Some(monitor) = monitor {
-        let scale = monitor.scale_factor();
-        let size = monitor.size();
-        let pos = monitor.position();
-        let _ = window.set_position(tauri::LogicalPosition::new(
+    // 逻辑坐标的「铺满整屏」矩形 (x, y, w, h)。f64 元组可 Copy：既在 show 前先铺一次，
+    // 也在主线程 realize（orderFront）后再铺一次（见下，修首次半屏 bug）。
+    let bounds: Option<(f64, f64, f64, f64)> = monitor.map(|m| {
+        let scale = m.scale_factor();
+        let size = m.size();
+        let pos = m.position();
+        (
             pos.x as f64 / scale,
             pos.y as f64 / scale,
-        ));
-        let _ = window.set_size(tauri::LogicalSize::new(
             size.width as f64 / scale,
             size.height as f64 / scale,
-        ));
+        )
+    });
+    if let Some((x, y, w, h)) = bounds {
+        let _ = window.set_position(tauri::LogicalPosition::new(x, y));
+        let _ = window.set_size(tauri::LogicalSize::new(w, h));
     }
     // 点击穿透：纯视觉浮层，绝不拦截鼠标。
     let _ = window.set_ignore_cursor_events(true);
@@ -1521,6 +1525,14 @@ pub(crate) fn show_less_computer_glow<R: tauri::Runtime>(app: &AppHandle<R>) {
             Err(_) => {
                 let _ = window_clone.show();
             }
+        }
+        // 首次使用彩虹边框只画半屏并卡住：glow 窗口 conf 初始 800×600 且 visible:false，
+        // 首次 show 前从未 realize —— current_monitor() 取不到 / show 前的 set_size 没贴住整屏，
+        // webview 首帧按 800×600 画出半屏描边。这里在 realize（orderFront）之后**再铺满一次**，
+        // 强制 webview 按整屏重排重绘。后续使用窗口已 realize，show 前那次就够、不闪。
+        if let Some((x, y, w, h)) = bounds {
+            let _ = window_clone.set_position(tauri::LogicalPosition::new(x, y));
+            let _ = window_clone.set_size(tauri::LogicalSize::new(w, h));
         }
     });
 }
