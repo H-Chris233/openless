@@ -506,10 +506,17 @@ pub(crate) fn read_whisper_credentials() -> (String, String, String) {
 }
 
 pub(crate) fn read_mimo_credentials() -> (String, String, String) {
-    let api_key = CredentialsVault::get(CredentialAccount::AsrApiKey)
-        .ok()
-        .flatten()
-        .unwrap_or_default();
+    let api_key = match CredentialsVault::get(CredentialAccount::AsrApiKey) {
+        Ok(Some(key)) if !key.trim().is_empty() => key,
+        Ok(_) => {
+            log::warn!("[coord] MiMo ASR: asr.api_key 未配置或为空");
+            String::new()
+        }
+        Err(e) => {
+            log::error!("[coord] MiMo ASR: 读取凭据失败: {e}");
+            String::new()
+        }
+    };
     let base_url = CredentialsVault::get(CredentialAccount::AsrEndpoint)
         .ok()
         .flatten()

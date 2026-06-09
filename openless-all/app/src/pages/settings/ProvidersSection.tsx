@@ -623,6 +623,7 @@ function CredentialField({ label, account, placeholder, mono, mask, defaultValue
   const [status, setStatus] = useState<CredentialFieldStatus>('idle');
   const debounceRef = useRef<number | null>(null);
   const statusRef = useRef<number | null>(null);
+  const mountedRef = useRef(true);
 
   useEffect(() => {
     let cancelled = false;
@@ -652,7 +653,9 @@ function CredentialField({ label, account, placeholder, mono, mask, defaultValue
   }, [account]);
 
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
+      mountedRef.current = false;
       if (debounceRef.current) clearTimeout(debounceRef.current);
       if (statusRef.current) clearTimeout(statusRef.current);
     };
@@ -680,13 +683,16 @@ function CredentialField({ label, account, placeholder, mono, mask, defaultValue
 
   const save = async (v: string, force = false) => {
     if (!loaded || (!dirty && !force)) return;
+    if (!mountedRef.current) return;
     setStatus('saving');
     emitSaved('saving', t('common.saving'));
     try {
       await setCredential(account, v);
+      if (!mountedRef.current) return;
       setDirty(false);
       showTemporaryStatus('saved');
     } catch (error) {
+      if (!mountedRef.current) return;
       console.error('[settings] failed to save credential', account, error);
       showTemporaryStatus('saveError');
     }
@@ -707,7 +713,7 @@ function CredentialField({ label, account, placeholder, mono, mask, defaultValue
       clearTimeout(debounceRef.current);
       debounceRef.current = null;
     }
-    save(value, true);
+    void save(value, true);
   };
 
   const fillDefault = async () => {
