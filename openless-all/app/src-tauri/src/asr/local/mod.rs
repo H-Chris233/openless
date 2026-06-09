@@ -30,10 +30,15 @@ pub use sherpa_provider::SherpaOnnxAsr;
 pub use sherpa_runtime::SherpaOnnxRuntime;
 
 #[cfg(target_os = "macos")]
+mod apple_speech_provider;
+#[cfg(target_os = "macos")]
 mod qwen_engine;
 #[cfg(target_os = "macos")]
 mod qwen_ffi;
 
+#[cfg(target_os = "macos")]
+#[allow(unused_imports)]
+pub use apple_speech_provider::AppleSpeechAsr;
 #[cfg(target_os = "macos")]
 pub use local_provider::LocalQwenAsr;
 #[cfg(target_os = "macos")]
@@ -47,4 +52,15 @@ pub const PROVIDER_ID: &str = "local-qwen3";
 
 pub fn is_local_qwen3(id: &str) -> bool {
     id == PROVIDER_ID
+}
+
+/// Apple Speech（SFSpeechRecognizer）本地 ASR 的 provider id；与前端
+/// ASR_PRESETS 的 id 对齐（issue #574）。该字符串在所有平台都可被识别，
+/// 但 provider 实现只在 macOS 编译；非 macOS 上由上层判为 not-configured /
+/// 不可用（见 commands / coordinator 的平台门控）。
+pub const APPLE_SPEECH_PROVIDER_ID: &str = "apple-speech";
+
+#[allow(dead_code)]
+pub fn is_apple_speech(id: &str) -> bool {
+    id == APPLE_SPEECH_PROVIDER_ID
 }

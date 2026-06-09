@@ -166,6 +166,8 @@ const ASR_PRESETS: ReadonlyArray<{ id: AsrPresetId; nameKey: string; baseUrl: st
   // 模型在「高级 → 本地模型」里下载与切换。
   { id: 'sherpa-onnx-local',     nameKey: 'asrSherpaOnnxLocal',     baseUrl: '',                              model: ''                              },
   { id: 'local-qwen3',  nameKey: 'asrLocalQwen3',   baseUrl: '',                                              model: ''                              },
+  // Apple 系统语音识别（macOS）：无 baseUrl/model、无下载、无凭据。
+  { id: 'apple-speech', nameKey: 'asrAppleSpeech',  baseUrl: '',                                              model: ''                              },
 ];
 
 export function ProvidersSection() {
@@ -188,11 +190,12 @@ export function ProvidersSection() {
   const [asrModelRevision, setAsrModelRevision] = useState(0);
   const os = detectOS();
   // 主 ASR 下拉只列云端选项；本地推理（local-qwen3 / foundry-local-whisper /
-  // sherpa-onnx-local）移到「高级 → 本地模型」，防止新手误开 CPU 推理。
+  // sherpa-onnx-local / apple-speech）移到「高级 → 本地模型」，防止新手误开 CPU 推理。
   const visibleAsrPresets = ASR_PRESETS.filter(
     p => p.id !== 'foundry-local-whisper'
       && p.id !== 'local-qwen3'
-      && p.id !== 'sherpa-onnx-local',
+      && p.id !== 'sherpa-onnx-local'
+      && p.id !== 'apple-speech',
   );
 
   useEffect(() => {
@@ -381,7 +384,8 @@ export function ProvidersSection() {
             const isLocked =
               committedAsrProvider === 'local-qwen3' ||
               committedAsrProvider === 'foundry-local-whisper' ||
-              committedAsrProvider === 'sherpa-onnx-local';
+              committedAsrProvider === 'sherpa-onnx-local' ||
+              committedAsrProvider === 'apple-speech';
             const selectedValue: AsrPresetId = isLocked ? committedAsrProvider : asrProvider;
             // 跨机器同步异常兜底：committed 是本地但不在 visibleAsrPresets 里时，受控
             // select 会回退到首项造成假象 —— 补一个 disabled option 让 select 找到当前值。
@@ -395,7 +399,9 @@ export function ProvidersSection() {
                 ? 'asrFoundryLocalWhisper'
                 : anomalousLocal === 'sherpa-onnx-local'
                   ? 'asrSherpaOnnxLocal'
-                  : null;
+                  : anomalousLocal === 'apple-speech'
+                    ? 'asrAppleSpeech'
+                    : null;
             return (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-start', minWidth: 0 }}>
                 <SelectLite
@@ -453,7 +459,7 @@ export function ProvidersSection() {
               {t('settings.providers.volcengineMappingNote')}
             </div>
           </>
-        ) : committedAsrProvider === 'local-qwen3' || committedAsrProvider === 'foundry-local-whisper' || committedAsrProvider === 'sherpa-onnx-local' ? (
+        ) : committedAsrProvider === 'local-qwen3' || committedAsrProvider === 'foundry-local-whisper' || committedAsrProvider === 'sherpa-onnx-local' || committedAsrProvider === 'apple-speech' ? (
           // 用户已经在用本地 ASR——dropdown 行的 asrProviderTakenOver 已经把
           // "在高级中切换或禁用"讲清楚了，body 不再重复。
           // 模型管理 UI 唯一入口在「高级 → 本地模型」里的 <LocalAsr embedded />。

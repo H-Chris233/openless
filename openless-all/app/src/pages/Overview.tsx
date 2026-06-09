@@ -35,6 +35,7 @@ const ASR_NAME_KEY_BY_ID: Record<string, string> = {
   'foundry-local-whisper': 'asrFoundryLocalWhisper',
   'sherpa-onnx-local': 'asrSherpaOnnxLocal',
   'local-qwen3': 'asrLocalQwen3',
+  'apple-speech': 'asrAppleSpeech',
 };
 
 const LLM_NAME_KEY_BY_ID: Record<string, string> = {

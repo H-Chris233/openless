@@ -77,4 +77,8 @@ fn build_qwen_asr_macos() {
 
     // BLAS = Accelerate
     println!("cargo:rustc-link-lib=framework=Accelerate");
+
+    // Apple Speech 本地 ASR（issue #574）：apple_speech_provider 用
+    // SFSpeechRecognizer / SFSpeechURLRecognitionRequest，符号在 Speech.framework。
+    println!("cargo:rustc-link-lib=framework=Speech");
 }

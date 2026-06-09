@@ -741,6 +741,23 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
         }
     }
 
+    // Apple Speech（macOS 系统语音识别）：无模型下载、无凭据，只需把 active
+    // provider 切到 "apple-speech"。复用 setActiveAsrProvider IPC（后端持久化），
+    // 再 updatePrefs 同步本地受控状态。
+    const handleUseAppleSpeech = async () => {
+        try {
+            setError(null)
+            await setActiveAsrProvider("apple-speech")
+            await updatePrefs((current) =>
+                current.activeAsrProvider === "apple-speech"
+                    ? current
+                    : { ...current, activeAsrProvider: "apple-speech" },
+            )
+        } catch (e) {
+            setError(e instanceof Error ? e.message : String(e))
+        }
+    }
+
     const applyModelsBaseDir = async (modelsBaseDir: string | null) => {
         setStorageBusy(true)
         try {
@@ -1428,6 +1445,7 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
         sherpaStatus?.available === true ||
         (foundryPlatformAvailable && sherpaStatus?.available !== false)
     const sherpaDefault = prefs?.activeAsrProvider === "sherpa-onnx-local"
+    const appleSpeechActive = prefs?.activeAsrProvider === "apple-speech"
     const selectedSherpaModel =
         SHERPA_ONNX_ASR_MODELS.find(
             (model) => model.alias === selectedSherpaAlias,
@@ -2799,6 +2817,66 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                         />
                     ))}
                 </div>
+            )}
+
+            {/* Apple Speech（macOS 系统语音识别）：无下载、无凭据，零网络兜底。
+                issue #574。和 Qwen3 模型行平级摆一张卡片即可。 */}
+            {IS_MAC && (
+                <Card style={{ marginTop: 16 }}>
+                    <div
+                        style={{
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            gap: 16,
+                            flexWrap: "wrap",
+                        }}
+                    >
+                        <div style={{ minWidth: 0 }}>
+                            <div
+                                style={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 8,
+                                    marginBottom: 4,
+                                }}
+                            >
+                                <div
+                                    style={{
+                                        fontSize: 13,
+                                        fontWeight: 700,
+                                        color: "var(--ol-ink)",
+                                    }}
+                                >
+                                    {t("localAsr.appleSpeechTitle")}
+                                </div>
+                                {appleSpeechActive && (
+                                    <Pill tone="ok" size="sm">
+                                        {t("localAsr.activeBadge")}
+                                    </Pill>
+                                )}
+                            </div>
+                            <div
+                                style={{
+                                    fontSize: 12.5,
+                                    color: "var(--ol-ink-3)",
+                                    lineHeight: 1.6,
+                                }}
+                            >
+                                {t("localAsr.appleSpeechDesc")}
+                            </div>
+                        </div>
+                        <Btn
+                            variant={appleSpeechActive ? "soft" : "primary"}
+                            disabled={appleSpeechActive}
+                            onClick={() => void handleUseAppleSpeech()}
+                        >
+                            {appleSpeechActive
+                                ? t("localAsr.activeBadge")
+                                : t("localAsr.appleSpeechUse")}
+                        </Btn>
+                    </div>
+                </Card>
             )}
         </Wrapper>
     )
