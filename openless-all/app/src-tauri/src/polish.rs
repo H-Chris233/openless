@@ -1252,9 +1252,16 @@ async fn send_with_transient_retry(
     request: reqwest::RequestBuilder,
 ) -> Result<reqwest::Response, LLMError> {
     const RETRY_DELAY_MS: u64 = 500;
-    let initial = request
-        .try_clone()
-        .expect("memory-backed body (json/form) must be clonable for retry");
+    let Some(initial) = request.try_clone() else {
+        // try_clone 失败（如 stream body 不可 clone）→ 不走重试，直接 send 一次。
+        // 用 expect 会 panic 杀死整个进程，这里兜底为单次发送。
+        log::warn!("[llm] request body not clonable, skipping retry");
+        return match request.send().await {
+            Ok(r) => Ok(r),
+            Err(e) if e.is_timeout() => Err(LLMError::Timeout),
+            Err(e) => Err(LLMError::Network(e.to_string())),
+        };
+    };
     match initial.send().await {
         Ok(r) => Ok(r),
         Err(e) if e.is_connect() || e.is_request() => {
