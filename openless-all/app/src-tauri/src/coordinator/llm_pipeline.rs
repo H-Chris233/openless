@@ -135,11 +135,18 @@ where
         );
         return StreamingPolishOutcome::UnsupportedFallback;
     }
-    let provider = match build_active_llm_provider(llm_thinking_enabled) {
-        Ok(p) => p,
-        Err(e) => {
+    let provider = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        build_active_llm_provider(llm_thinking_enabled)
+    })) {
+        Ok(Ok(p)) => p,
+        Ok(Err(e)) => {
             log::error!("[coord] streaming polish: build provider failed: {e}");
             return StreamingPolishOutcome::Failed(e.to_string());
+        }
+        Err(panic) => {
+            let msg = format!("build_active_llm_provider panicked: {:?}", panic);
+            log::error!("[coord] {msg}");
+            return StreamingPolishOutcome::Failed(msg);
         }
     };
     if !provider.supports_streaming_polish() {
@@ -259,7 +266,17 @@ pub(crate) async fn polish_text(
             .await?);
     }
 
-    let provider = build_active_llm_provider(llm_thinking_enabled)?;
+    let provider = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        build_active_llm_provider(llm_thinking_enabled)
+    })) {
+        Ok(Ok(p)) => p,
+        Ok(Err(e)) => return Err(e),
+        Err(panic) => {
+            let msg = format!("build_active_llm_provider panicked: {:?}", panic);
+            log::error!("[coord] {msg}");
+            anyhow::bail!(msg);
+        }
+    };
     Ok(provider
         .polish(
             raw,
@@ -305,7 +322,17 @@ pub(crate) async fn translate_text(
             .await?);
     }
 
-    let provider = build_active_llm_provider(llm_thinking_enabled)?;
+    let provider = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        build_active_llm_provider(llm_thinking_enabled)
+    })) {
+        Ok(Ok(p)) => p,
+        Ok(Err(e)) => return Err(e),
+        Err(panic) => {
+            let msg = format!("build_active_llm_provider panicked: {:?}", panic);
+            log::error!("[coord] {msg}");
+            anyhow::bail!(msg);
+        }
+    };
     Ok(provider
         .translate_to(
             raw,
@@ -597,7 +624,17 @@ where
             .await?);
     }
 
-    let provider = build_active_llm_provider(llm_thinking_enabled)?;
+    let provider = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        build_active_llm_provider(llm_thinking_enabled)
+    })) {
+        Ok(Ok(p)) => p,
+        Ok(Err(e)) => return Err(e),
+        Err(panic) => {
+            let msg = format!("build_active_llm_provider panicked: {:?}", panic);
+            log::error!("[coord] {msg}");
+            anyhow::bail!(msg);
+        }
+    };
     Ok(provider
         .answer_chat_streaming(
             messages,
@@ -687,8 +724,17 @@ pub(crate) fn resolve_ark_endpoint_with_policy(
     if api_key.trim().is_empty() && endpoint.is_none() {
         anyhow::bail!("API Key 为空");
     }
-    let resolved = endpoint
+    let mut resolved = endpoint
         .unwrap_or_else(|| "https://ark.cn-beijing.volces.com/api/v3/chat/completions".to_string());
+    // 兜底：用户可能在自定义 endpoint 时只写了 "192.168.1.100:8080/v1" 漏了 scheme，
+    // 被 reqwest::IntoUrl 自动补 https:// 后对纯 HTTP 的 llama.cpp 发请求会 TLS 握手失败。
+    // 检测到无 scheme 时自动补 http://（局域网自托管服务最常见的形态）。
+    // 用 to_ascii_lowercase 防用户输大写如 HTTP://... 时被误判为缺 scheme。
+    let lower = resolved.to_ascii_lowercase();
+    if !lower.starts_with("http://") && !lower.starts_with("https://") {
+        resolved = format!("http://{resolved}");
+        log::info!("[llm] endpoint missing scheme, auto-prepended http://");
+    }
     // issue #609 F-01（SSRF）：用户自定义 endpoint 是 attacker-controlled，直接拿来发
     // 带 API Key 的请求等于把凭据指哪打哪。这里对 host/IP 段 + scheme 做配置时校验，
     // 默认官方 endpoint 也过一遍（它本就合法）。注意这只防住"配置即字面内网地址"，
