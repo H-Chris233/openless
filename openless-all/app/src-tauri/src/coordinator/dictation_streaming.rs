@@ -345,10 +345,10 @@ where
 
 pub(crate) fn finalize_polished_text(
     polished: String,
-    translation_active: bool,
+    _translation_active: bool,
     _raw_uses_llm: bool,
-    mode: PolishMode,
-    polish_error: &Option<String>,
+    _mode: PolishMode,
+    _polish_error: &Option<String>,
     chinese_script_preference: crate::types::ChineseScriptPreference,
     correction_rules: &[crate::types::CorrectionRule],
     already_streamed: bool,
@@ -356,16 +356,12 @@ pub(crate) fn finalize_polished_text(
     if already_streamed {
         return polished;
     }
-    let should_force_script = if translation_active {
-        polish_error.is_some()
-    } else {
-        mode == PolishMode::Raw || polish_error.is_some()
-    };
-    let polished = if should_force_script {
-        apply_chinese_script_preference(&polished, chinese_script_preference)
-    } else {
-        polished
-    };
+    // issue #622：无论是否经 LLM 润色成功，插入前都套用中文字形转换。
+    // apply_chinese_script_preference 对 Auto 是 no-op；非 Auto 时确保最终插入文字
+    // 不混简体——此前仅 Raw / 翻译 / 润色失败时强制转换，成功润色只靠 prompt 指示，
+    // 而部分 provider 会跟随简体 ASR 输入继续输出简体（流式路径已在上游回退为一次性，
+    // 见 streaming_insert_eligible）。
+    let polished = apply_chinese_script_preference(&polished, chinese_script_preference);
     if correction_rules.is_empty() {
         polished
     } else {
@@ -386,8 +382,14 @@ pub(crate) fn streaming_insert_eligible(
     translation_active: bool,
     mode: PolishMode,
     raw_uses_llm: bool,
+    chinese_script_preference: crate::types::ChineseScriptPreference,
 ) -> bool {
-    streaming_insert_enabled && !translation_active && (mode != PolishMode::Raw || raw_uses_llm)
+    streaming_insert_enabled
+        && !translation_active
+        && (mode != PolishMode::Raw || raw_uses_llm)
+        // issue #622：非 Auto 字形偏好需在插入前整体转换；流式逐字落字无法回退，
+        // 故关闭流式、走一次性路径（由 finalize_polished_text 套用字形转换）。
+        && chinese_script_preference == crate::types::ChineseScriptPreference::Auto
 }
 
 pub(crate) fn default_done_message(status: InsertStatus, polish_failed: bool) -> Option<String> {
