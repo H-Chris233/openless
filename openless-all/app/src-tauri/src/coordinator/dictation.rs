@@ -341,7 +341,48 @@ mod tests {
             false,
             PolishMode::Light,
             false,
+            crate::types::ChineseScriptPreference::Auto,
         ));
+    }
+
+    // issue #622：非 Auto 字形偏好必须关闭流式，改走会做字形转换的一次性路径。
+    #[test]
+    fn streaming_insert_ineligible_when_chinese_script_forced() {
+        for pref in [
+            crate::types::ChineseScriptPreference::Traditional,
+            crate::types::ChineseScriptPreference::Simplified,
+        ] {
+            assert!(!streaming_insert_eligible(
+                true,
+                false,
+                PolishMode::Light,
+                false,
+                pref,
+            ));
+        }
+    }
+
+    // issue #622：非 Auto + 成功 LLM 润色（非流式、无 error）时，最终插入文字
+    // 必须套用字形转换，不能只靠 prompt 指示。覆盖 issue 给出的两个验收用例。
+    #[test]
+    fn finalize_forces_traditional_even_on_successful_polish() {
+        let cases = [
+            ("你知道你今天想要做什么吗？", "你知道你今天想要做什麼嗎？"),
+            ("所以你已经考过了吗？", "所以你已經考過了嗎？"),
+        ];
+        for (input, expected) in cases {
+            let out = finalize_polished_text(
+                input.to_string(),
+                false,             // translation_active
+                true,              // raw_uses_llm
+                PolishMode::Light, // 成功润色路径（非 Raw、非 error）
+                &None,             // 无 polish_error
+                crate::types::ChineseScriptPreference::Traditional,
+                &[],   // 无 correction rules
+                false, // already_streamed
+            );
+            assert_eq!(out, expected);
+        }
     }
 
     #[test]

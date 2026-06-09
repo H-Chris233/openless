@@ -531,6 +531,7 @@ pub(crate) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         translation_active,
         mode,
         raw_uses_llm,
+        chinese_script_preference,
     );
     log::info!(
         "[coord] polish dispatch: translation={translation_active} mode={mode:?} streaming_eligible={streaming_eligible}"
