@@ -1045,6 +1045,8 @@ impl Coordinator {
     }
 
     /// 手机断连 / 点取消：丢弃本次，不落字。
+    /// stop 正常收尾后的断连也会走到这里（double-cancel）：此时会话已 Idle，
+    /// cancel_session 内部 begin_cancel_session_state 返回 None 早退，安全 no-op。
     pub fn cancel_remote_dictation(&self) {
         cancel_session(&self.inner);
         self.clear_remote_source();

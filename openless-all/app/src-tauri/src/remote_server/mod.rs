@@ -641,32 +641,32 @@ enum AuthResult {
 }
 
 fn verify_hello(txt: &str, state: &Arc<WsState>, peer_ip: IpAddr) -> AuthResult {
-    // 锁定检查（按源 IP）
-    {
-        let mut guard = state.pin_fails.lock();
-        if let Some((_, Some(until))) = guard.get(&peer_ip) {
-            if Instant::now() < *until {
-                return AuthResult::Locked;
-            }
-            // 锁定到期，重置该 IP
-            guard.remove(&peer_ip);
-        }
-    }
+    // PIN 比较在锁外完成（无共享状态；constant_time_eq 防计时侧信道）。
     let v: serde_json::Value = match serde_json::from_str(txt) {
         Ok(v) => v,
-        Err(_) => return AuthResult::BadPin,
+        Err(_) => serde_json::Value::Null, // 非法 JSON 按 BadPin 计数
     };
-    let ok = v.get("type").and_then(|t| t.as_str()) == Some("hello")
+    let pin_ok = v.get("type").and_then(|t| t.as_str()) == Some("hello")
         && v.get("pin")
             .and_then(|p| p.as_str())
             .map(|p| constant_time_eq(p.as_bytes(), state.pin.as_bytes()))
             .unwrap_or(false);
-    if ok {
-        state.pin_fails.lock().remove(&peer_ip);
+
+    // 锁定检查与失败累计放同一临界区：之前分两次拿锁，同一 IP 的并发握手可以
+    // 都先通过锁定检查再各自累计失败，让计数越过阈值却不触发锁定。
+    let now = Instant::now();
+    let mut guard = state.pin_fails.lock();
+    if let Some((_, Some(until))) = guard.get(&peer_ip) {
+        if now < *until {
+            return AuthResult::Locked;
+        }
+        // 锁定到期，重置该 IP
+        guard.remove(&peer_ip);
+    }
+    if pin_ok {
+        guard.remove(&peer_ip);
         AuthResult::Ok
     } else {
-        let now = Instant::now();
-        let mut guard = state.pin_fails.lock();
         // 容量兜底：先丢已解锁/过期的条目，防伪造海量源 IP 撑爆表。
         if guard.len() >= PIN_FAILS_MAX_ENTRIES {
             guard.retain(|_, (_, until)| matches!(until, Some(t) if *t > now));
