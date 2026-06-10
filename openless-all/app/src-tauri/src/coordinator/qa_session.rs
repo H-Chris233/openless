@@ -455,6 +455,40 @@ pub(crate) async fn end_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
                 }
             }
         }
+        #[cfg(target_os = "macos")]
+        ActiveAsr::AppleSpeech(local) => {
+            debug_assert!(uses_global_timeout);
+            let audio_secs = (local.buffer_duration_ms() as f64) / 1000.0;
+            let timeout_duration = local_qwen_transcribe_timeout(audio_secs);
+            log::info!(
+                "[coord] QA Apple Speech transcribe: audio={:.2}s timeout={}s",
+                audio_secs,
+                timeout_duration.as_secs()
+            );
+            match tokio::time::timeout(timeout_duration, local.transcribe()).await {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => {
+                    if inner.qa_state.lock().cancelled {
+                        log::info!(
+                            "[coord] QA Apple Speech transcribe cancelled — discarding transcript"
+                        );
+                        finish_qa_idle_silently(inner);
+                        return Ok(());
+                    }
+                    log::error!("[coord] QA Apple Speech transcribe failed: {e:#}");
+                    finish_qa_with_error(inner, format!("本地识别失败: {e}"));
+                    return Err(e.to_string());
+                }
+                Err(_) => {
+                    log::error!(
+                        "[coord] QA Apple Speech transcribe timeout after {}s",
+                        timeout_duration.as_secs()
+                    );
+                    finish_qa_with_error(inner, "本地识别超时".to_string());
+                    return Err("apple-speech transcribe timeout".to_string());
+                }
+            }
+        }
     };
 
     // cancel race：用户在 transcribe 中按 Esc / dismiss → 静默退出。

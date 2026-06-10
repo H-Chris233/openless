@@ -359,6 +359,65 @@ pub(crate) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                 }
             }
         }
+        // Apple Speech：系统语音识别，无模型加载耗时。批处理 transcribe 受音频
+        // 长度影响，沿用 local_qwen_transcribe_timeout 的动态超时公式（基础 15s
+        // 兜短录音，长录音按音频 0.6 倍 + 10s 余量），coordinator 侧再加一层防线。
+        #[cfg(target_os = "macos")]
+        ActiveAsr::AppleSpeech(local) => {
+            debug_assert!(uses_global_timeout);
+            let audio_secs = (local.buffer_duration_ms() as f64) / 1000.0;
+            let timeout_duration = local_qwen_transcribe_timeout(audio_secs);
+            log::info!(
+                "[coord] Apple Speech transcribe: audio={:.2}s timeout={}s",
+                audio_secs,
+                timeout_duration.as_secs()
+            );
+            match tokio::time::timeout(timeout_duration, local.transcribe()).await {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => {
+                    if inner.state.lock().cancelled {
+                        log::info!(
+                            "[coord] Apple Speech transcribe cancelled — discarding transcript"
+                        );
+                        restore_prepared_windows_ime_session(inner, current_session_id);
+                        set_phase_idle_if_session_matches(inner, current_session_id);
+                        return Ok(());
+                    }
+                    log::error!("[coord] Apple Speech transcribe failed: {e:#}");
+                    emit_capsule(
+                        inner,
+                        CapsuleState::Error,
+                        0.0,
+                        elapsed,
+                        Some(format!("本地识别失败: {e}")),
+                        None,
+                    );
+                    restore_prepared_windows_ime_session(inner, current_session_id);
+                    inner.state.lock().phase = SessionPhase::Idle;
+                    schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
+                    return Err(e.to_string());
+                }
+                Err(_) => {
+                    log::error!(
+                        "[coord] Apple Speech 动态超时 {}s（音频 {:.2}s）",
+                        timeout_duration.as_secs(),
+                        audio_secs
+                    );
+                    emit_capsule(
+                        inner,
+                        CapsuleState::Error,
+                        0.0,
+                        elapsed,
+                        Some("识别超时".to_string()),
+                        None,
+                    );
+                    restore_prepared_windows_ime_session(inner, current_session_id);
+                    inner.state.lock().phase = SessionPhase::Idle;
+                    schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
+                    return Err("apple-speech global timeout".to_string());
+                }
+            }
+        }
     };
 
     // ASR 完成后 cancel 检查：用户在 transcribe 进行中按 Esc 时，这里就会命中。

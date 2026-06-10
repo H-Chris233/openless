@@ -29,6 +29,7 @@ pub(crate) fn asr_configured_for_provider(provider: &str, snap: &CredentialsSnap
         return volcengine_configured(snap);
     }
     if provider == crate::asr::local::PROVIDER_ID
+        || active_apple_speech_asr_is_supported(provider)
         || active_foundry_asr_is_supported(provider)
         || active_sherpa_asr_is_supported(provider)
     {
@@ -167,6 +168,11 @@ pub async fn set_active_asr_provider(
         && !active_sherpa_asr_is_supported(&provider)
     {
         return Err("sherpa-onnx local ASR is only available on Windows".to_string());
+    }
+    if provider == crate::asr::local::APPLE_SPEECH_PROVIDER_ID
+        && !active_apple_speech_asr_is_supported(&provider)
+    {
+        return Err("Apple Speech recognition is only available on macOS".to_string());
     }
     if CredentialsVault::get_active_asr() == provider {
         return Ok(());

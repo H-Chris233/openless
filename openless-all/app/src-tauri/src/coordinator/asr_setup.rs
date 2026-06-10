@@ -75,6 +75,19 @@ pub(crate) fn ensure_asr_credentials() -> Result<(), String> {
         }
     }
 
+    // Apple Speech 没有"凭据"也没有要下载的模型，只需：macOS 平台。
+    // 系统语音识别资源由 OS 管理，首次使用时弹授权框（见 apple_speech_provider）。
+    if crate::asr::local::is_apple_speech(&active_asr) {
+        #[cfg(not(target_os = "macos"))]
+        {
+            return Err("Apple Speech 语音识别仅支持 macOS".to_string());
+        }
+        #[cfg(target_os = "macos")]
+        {
+            return Ok(());
+        }
+    }
+
     if crate::asr::local::foundry::is_foundry_local_whisper(&active_asr) {
         #[cfg(not(target_os = "windows"))]
         {
@@ -122,6 +135,10 @@ pub(crate) fn ensure_asr_credentials() -> Result<(), String> {
 #[cfg(test)]
 pub(crate) fn is_keyless_local_asr_provider(id: &str) -> bool {
     if crate::asr::local::is_local_qwen3(id) {
+        return true;
+    }
+    #[cfg(target_os = "macos")]
+    if crate::asr::local::is_apple_speech(id) {
         return true;
     }
     #[cfg(target_os = "windows")]
@@ -261,6 +278,13 @@ pub(crate) async fn build_local_qwen3(
     Ok(Arc::new(crate::asr::local::LocalQwenAsr::new(app, engine)))
 }
 
+/// 构建 Apple Speech provider。与 build_local_qwen3 不同：无模型、无缓存、无
+/// AppHandle 依赖，授权/识别由 provider 内部按需处理（首次弹系统授权框）。
+#[cfg(target_os = "macos")]
+pub(crate) fn build_apple_speech() -> Arc<crate::asr::local::AppleSpeechAsr> {
+    Arc::new(crate::asr::local::AppleSpeechAsr::new())
+}
+
 pub(crate) enum QaAsrStart {
     Volcengine {
         asr: Arc<VolcengineStreamingASR>,
@@ -386,6 +410,14 @@ pub(crate) async fn build_qa_asr_start(
             .await
             .map_err(|e| format!("local ASR init failed: {e}"))?;
         let active = ActiveAsr::Local(Arc::clone(&local));
+        let consumer: Arc<dyn crate::recorder::AudioConsumer> = local;
+        return Ok(QaAsrStart::Ready { active, consumer });
+    }
+
+    #[cfg(target_os = "macos")]
+    if crate::asr::local::is_apple_speech(active_asr) {
+        let local = build_apple_speech();
+        let active = ActiveAsr::AppleSpeech(Arc::clone(&local));
         let consumer: Arc<dyn crate::recorder::AudioConsumer> = local;
         return Ok(QaAsrStart::Ready { active, consumer });
     }

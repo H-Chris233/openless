@@ -209,6 +209,22 @@ pub(crate) async fn begin_session(inner: &Arc<Inner>) -> Result<(), String> {
         return Ok(());
     }
 
+    // Apple Speech：无模型加载，构建即用；停止录音后整段批处理识别，再复用
+    // 现有 polish / insert / history 收尾路径（与 local-qwen3 同形）。
+    #[cfg(target_os = "macos")]
+    if crate::asr::local::is_apple_speech(&active_asr) {
+        let local = build_apple_speech();
+        store_asr_for_session(
+            inner,
+            current_session_id,
+            ActiveAsr::AppleSpeech(Arc::clone(&local)),
+        );
+        let consumer: Arc<dyn crate::recorder::AudioConsumer> = local;
+        start_recorder_and_enter_listening(inner, current_session_id, &active_asr, consumer)
+            .await?;
+        return Ok(());
+    }
+
     if is_bailian_provider(&active_asr) {
         let asr = Arc::new(BailianRealtimeASR::new(read_bailian_credentials()));
         let bridge = Arc::new(DeferredAsrBridge::new());

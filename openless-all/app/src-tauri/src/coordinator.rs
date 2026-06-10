@@ -119,6 +119,10 @@ pub(crate) enum ActiveAsr {
     /// 本地 Qwen3-ASR；只在 macOS + 模型已下载时可达。
     #[cfg(target_os = "macos")]
     Local(Arc<crate::asr::local::LocalQwenAsr>),
+    /// Apple Speech（SFSpeechRecognizer）系统本地 ASR；只在 macOS 可达。
+    /// 无模型下载、无凭据，首次使用弹系统授权（issue #574）。
+    #[cfg(target_os = "macos")]
+    AppleSpeech(Arc<crate::asr::local::AppleSpeechAsr>),
 }
 
 fn asr_transcribe_uses_global_timeout(asr: &ActiveAsr) -> bool {
