@@ -50,6 +50,15 @@ const PIN_MAX_FAILS: u32 = 5;
 const PIN_LOCK_SECS: u64 = 60;
 /// pin_fails 表的容量上限：超过即清理已过期/已解锁的条目，防止伪造海量源 IP 撑爆内存。
 const PIN_FAILS_MAX_ENTRIES: usize = 256;
+/// 单个 PCM 二进制帧的上限。16kHz/16bit 实时流正常每帧只有几 KB，64KB ≈ 2 秒音频；
+/// 超限帧直接丢弃，防已配对客户端（或驱动它的恶意网页）推超大帧造成内存压力。
+const MAX_PCM_FRAME_BYTES: usize = 64 * 1024;
+/// 服务端 keepalive：每 KEEPALIVE_PING_SECS 发一次 WS Ping（浏览器自动回 Pong）；
+/// 连续 IDLE_TIMEOUT_SECS 收不到任何上行帧（含 Pong）则视为半开死链断开。
+/// 手机息屏/Wi-Fi 漂移常常不发 TCP FIN，没有探活时 recv() 永久挂起：连接任务、
+/// 事件订阅、进行中的远程会话全部悬挂。
+const KEEPALIVE_PING_SECS: u64 = 30;
+const IDLE_TIMEOUT_SECS: u64 = 90;
 
 // ───────────────────────── 对外类型 ─────────────────────────
 
@@ -63,6 +72,10 @@ pub struct RemoteServerConfig {
 /// 运行中的服务句柄。drop / shutdown 触发优雅关停。
 pub struct RemoteServerHandle {
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    /// 广播给所有已建立 WS 连接的关停信号。只停 accept loop 是不够的：连接任务
+    /// 是独立 spawn 的，不通知它们的话，用户关掉远程输入（或重置 PIN 触发重启）
+    /// 后已配对的手机会话原样存活，仍能录音、向 PC 光标落字——撤销语义失效。
+    conn_shutdown_tx: tokio::sync::watch::Sender<bool>,
     join: tauri::async_runtime::JoinHandle<()>,
     pub bound_port: u16,
     #[allow(dead_code)]
@@ -70,11 +83,12 @@ pub struct RemoteServerHandle {
 }
 
 impl RemoteServerHandle {
-    /// 通知 accept loop 退出并等待其结束。
+    /// 通知 accept loop 与所有存量 WS 连接退出，并等待 accept loop 结束。
     pub async fn shutdown(mut self) {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
+        let _ = self.conn_shutdown_tx.send(true);
         let _ = self.join.await;
     }
 }
@@ -224,6 +238,17 @@ fn load_or_generate_cert(
         let _ = std::fs::create_dir_all(dir);
         let _ = std::fs::write(dir.join(CERT_FILE), &cert_der);
         let _ = std::fs::write(dir.join(KEY_FILE), &key_der);
+        // 私钥收紧为 0600：app 配置目录通常已是用户私有，但多用户/共享主机上
+        // 默认 umask 可能给到组/其他用户可读。Windows 下 %APPDATA% 的 ACL
+        // 本身仅限本用户，无对应权限位可设。
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(
+                dir.join(KEY_FILE),
+                std::fs::Permissions::from_mode(0o600),
+            );
+        }
         let _ = std::fs::write(dir.join(SANS_FILE), sans.join("\n"));
         log::info!("[remote-input] generated new self-signed server cert (SAN={sans:?})");
     }
@@ -260,6 +285,8 @@ struct WsState {
     pin_fails: Mutex<std::collections::HashMap<IpAddr, (u32, Option<Instant>)>>,
     /// 自签名证书的 DER 原始字节，供 /cert.cer 下载给手机安装信任。
     cert_der: Vec<u8>,
+    /// 服务关停广播的接收端，每条 WS 连接 clone 一份并在主循环 select 监听。
+    conn_shutdown_rx: tokio::sync::watch::Receiver<bool>,
 }
 
 /// 经 accept loop 注入的对端 IP（axum Extension）。hyper 直连 TLS 流时拿不到
@@ -393,12 +420,14 @@ pub async fn start(cfg: RemoteServerConfig) -> Result<RemoteServerHandle, String
     })?;
     let bound_port = listener.local_addr().map(|a| a.port()).unwrap_or(cfg.port);
 
+    let (conn_shutdown_tx, conn_shutdown_rx) = tokio::sync::watch::channel(false);
     let state = Arc::new(WsState {
         pin: cfg.pin.clone(),
         coordinator: cfg.coordinator,
         app: cfg.app,
         pin_fails: Mutex::new(std::collections::HashMap::new()),
         cert_der,
+        conn_shutdown_rx,
     });
     let router = build_router(state);
 
@@ -445,6 +474,7 @@ pub async fn start(cfg: RemoteServerConfig) -> Result<RemoteServerHandle, String
 
     Ok(RemoteServerHandle {
         shutdown_tx: Some(shutdown_tx),
+        conn_shutdown_tx,
         join,
         bound_port,
         pin: cfg.pin,
@@ -563,13 +593,18 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<WsState>, peer_ip: IpAddr) 
         })
     };
 
-    // 3) 主循环：手机上行（控制 / PCM） + 后端状态下行。
+    // 3) 主循环：手机上行（控制 / PCM） + 后端状态下行 + keepalive 探活 + 关停广播。
+    let mut conn_shutdown_rx = state.conn_shutdown_rx.clone();
+    let mut keepalive = tokio::time::interval(Duration::from_secs(KEEPALIVE_PING_SECS));
+    keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last_rx = Instant::now();
     loop {
         tokio::select! {
             incoming = socket.recv() => {
+                last_rx = Instant::now();
                 match incoming {
                     Some(Ok(Message::Binary(pcm))) => {
-                        if pcm.len() >= 2 && pcm.len() % 2 == 0 {
+                        if pcm.len() >= 2 && pcm.len() % 2 == 0 && pcm.len() <= MAX_PCM_FRAME_BYTES {
                             state.coordinator.feed_remote_pcm(&pcm);
                         }
                     }
@@ -584,6 +619,26 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<WsState>, peer_ip: IpAddr) 
             }
             Some(msg) = evt_rx.recv() => {
                 if socket.send(Message::Text(msg)).await.is_err() {
+                    break;
+                }
+            }
+            _ = keepalive.tick() => {
+                // 半开探活：浏览器收到 Ping 自动回 Pong（上面 recv 收到即刷新 last_rx）。
+                // 超时无任何上行 → 死链，break 走下方统一收尾（cancel + unlisten），
+                // 避免录音中掉线时远程会话与标志悬挂。
+                if last_rx.elapsed() > Duration::from_secs(IDLE_TIMEOUT_SECS) {
+                    log::info!("[remote-input] 连接 {}s 无上行（含 Pong），按半开死链断开", IDLE_TIMEOUT_SECS);
+                    break;
+                }
+                if socket.send(Message::Ping(Vec::new())).await.is_err() {
+                    break;
+                }
+            }
+            changed = conn_shutdown_rx.changed() => {
+                // 服务关停（用户关闭远程输入 / 重置 PIN / 改端口触发重启）：
+                // 主动断开存量连接，撤销已配对手机的会话与落字能力。
+                if changed.is_err() || *conn_shutdown_rx.borrow() {
+                    log::info!("[remote-input] 服务关停，断开存量手机连接");
                     break;
                 }
             }

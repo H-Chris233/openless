@@ -6,7 +6,27 @@ use crate::correction::apply_correction_rules;
 use super::resources::*;
 use super::*;
 
+/// 远程标志清道夫。end_session 的终结路径有十余处（正常收尾、ASR 失败/超时、
+/// 空转写、cancel 丢弃……），任何一处漏清 remote_source_active 都会把下一次本地
+/// 听写错引到远程分支（跳过 cpal、永远等不到手机 PCM）。逐点补调用维护不动，
+/// 改用 Drop 统一兜底：end_session 以任何方式退出时，若会话已回 Idle 则清远程
+/// 标志（本地会话下是 no-op）。phase 非 Idle 时不清——比如 double-stop 的第二次
+/// 调用对着 Processing 中的在飞 end_session 早退，此刻清会让在飞调用读到 false：
+/// 「仅回传」开关失效、remote:result 不回传。
+struct RemoteFlagsJanitor<'a> {
+    inner: &'a Arc<Inner>,
+}
+
+impl Drop for RemoteFlagsJanitor<'_> {
+    fn drop(&mut self) {
+        if self.inner.state.lock().phase == SessionPhase::Idle {
+            clear_remote_source_flags(self.inner);
+        }
+    }
+}
+
 pub(crate) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
+    let _remote_janitor = RemoteFlagsJanitor { inner };
     let current_session_id = {
         let mut state = inner.state.lock();
         let Some(session_id) = start_processing_if_listening(&mut state) else {

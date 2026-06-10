@@ -18,13 +18,36 @@ pub(crate) fn request_stop_during_starting(inner: &Arc<Inner>, reason: &str) {
 }
 
 pub(crate) async fn begin_session(inner: &Arc<Inner>) -> Result<(), String> {
+    begin_session_with_source(inner, false).await
+}
+
+/// 远程会话被拒（busy）时的错误值。remote_server 据此给手机回 busy 提示；
+/// start_remote_dictation 据此区分「未置位无需回滚」与「置位后失败需回滚」。
+pub(crate) const REMOTE_BUSY: &str = "busy";
+
+/// `remote=true`：busy 时返回 `Err(REMOTE_BUSY)`（手机需要回执，不能像本地热键
+/// 那样静默吞掉）；并且 `remote_source_active` 的置位发生在 Idle→Starting 转移的
+/// **同一临界区**内。之前是「预检查 → 锁外置位 → begin_session」三段式，本地热键
+/// 会话在窗口内抢先启动会读到残留的远程标志，被劫持进远程分支（不开麦克风、
+/// 听写全文经 remote:result 泄给手机）。
+pub(crate) async fn begin_session_with_source(
+    inner: &Arc<Inner>,
+    remote: bool,
+) -> Result<(), String> {
     let current_session_id = {
         let mut state = inner.state.lock();
         let Some(session_id) =
             begin_session_state(&mut state, capture_focus_target(), capture_frontmost_app())
         else {
-            return Ok(());
+            return if remote {
+                Err(REMOTE_BUSY.into())
+            } else {
+                Ok(())
+            };
         };
+        if remote {
+            inner.remote_source_active.store(true, Ordering::SeqCst);
+        }
         if let Some(label) = state.front_app.as_deref() {
             log::info!("[coord] front_app captured: {label}");
         }
@@ -631,10 +654,8 @@ pub(crate) async fn finish_starting_session(inner: &Arc<Inner>, session_id: Sess
             log::info!("[coord] session started");
             if matches!(outcome, BeginOutcome::PendingStop) {
                 log::info!("[coord] applying pending_stop edge → end_session immediately");
+                // 远程标志的清理由 end_session 内的 RemoteFlagsJanitor 统一兜底。
                 let _ = end_session(inner).await;
-                // 远程会话经 pending_stop 收尾时，stop_remote_dictation 已经早退，
-                // 不会再有人清远程标志 —— 在这里兜底（本地会话下是 no-op）。
-                clear_remote_source_flags(inner);
             }
         }
     }

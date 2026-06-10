@@ -43,6 +43,8 @@ export function RemoteInputSection() {
   const [status, setStatus] = useState<RemoteInputStatus | null>(null);
   const [startError, setStartError] = useState<{ reason: string; port: number } | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
+  // 端口编辑草稿：失焦/回车时才解析提交，避免逐键持久化导致后端服务在中间值端口反复重启。
+  const [portDraft, setPortDraft] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -57,13 +59,28 @@ export function RemoteInputSection() {
     const unsubs: Array<() => void> = [];
     import('@tauri-apps/api/event').then(({ listen }) => {
       listen('remote-input:running', () => {
+        if (!alive) return;
         setStartError(null);
         refresh();
-      }).then((u) => unsubs.push(u));
+      }).then((u) => {
+        // 异步注册完成时组件可能已卸载，立即退订避免监听器泄漏。
+        if (!alive) {
+          u();
+        } else {
+          unsubs.push(u);
+        }
+      });
       listen('remote-input:error', (e) => {
+        if (!alive) return;
         const p = e.payload as { reason?: string; port?: number } | null;
-        if (alive) setStartError({ reason: p?.reason ?? '', port: p?.port ?? 0 });
-      }).then((u) => unsubs.push(u));
+        setStartError({ reason: p?.reason ?? '', port: p?.port ?? 0 });
+      }).then((u) => {
+        if (!alive) {
+          u();
+        } else {
+          unsubs.push(u);
+        }
+      });
     });
     return () => {
       alive = false;
@@ -74,6 +91,21 @@ export function RemoteInputSection() {
   if (!prefs) return null;
   const enabled = prefs.remoteInputEnabled;
   const mode = prefs.remoteInputDefaultMode ?? 'toggle';
+
+  // 提交端口草稿：非法（非有限数/越界离谱）则丢弃还原显示，合法则取整并 clamp 到 [1024, 65535]。
+  const commitPort = () => {
+    if (portDraft == null) return;
+    const n = Math.round(Number(portDraft));
+    if (!Number.isFinite(n) || n <= 0) {
+      setPortDraft(null);
+      return;
+    }
+    const port = Math.max(1024, Math.min(65535, n));
+    setPortDraft(null);
+    if (port !== prefs.remoteInputPort) {
+      updatePrefs({ ...prefs, remoteInputPort: port });
+    }
+  };
 
   const doCopy = async (url: string, pin: string) => {
     await copyText(`${url}\n${t('settings.remoteInput.pinLabel')}：${pin}`);
@@ -110,16 +142,12 @@ export function RemoteInputSection() {
           min={1024}
           max={65535}
           style={{ ...inputStyle, maxWidth: 140 }}
-          value={prefs.remoteInputPort}
-          onChange={(e) =>
-            updatePrefs({
-              ...prefs,
-              remoteInputPort: Math.max(
-                1,
-                Math.min(65535, Number(e.currentTarget.value) || 0),
-              ),
-            })
-          }
+          value={portDraft ?? String(prefs.remoteInputPort)}
+          onChange={(e) => setPortDraft(e.currentTarget.value)}
+          onBlur={commitPort}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') commitPort();
+          }}
         />
       </SettingRow>
 
@@ -202,9 +230,14 @@ export function RemoteInputSection() {
               </code>
               <button
                 onClick={async () => {
-                  await regenerateRemotePin();
-                  const s = await getRemoteInputStatus();
-                  setStatus(s);
+                  try {
+                    // 直接用命令返回的新 PIN 更新本地状态；后端会异步重启服务，
+                    // 此时查询状态可能拿到 running:false 导致闪烁，刷新交给 remote-input:running 事件。
+                    const pin = await regenerateRemotePin();
+                    setStatus((s) => (s ? { ...s, pin } : s));
+                  } catch (e) {
+                    console.warn('regenerateRemotePin failed', e);
+                  }
                 }}
                 style={smallBtn}
               >

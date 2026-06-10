@@ -343,6 +343,7 @@
   var ws = null;
   var authed = false;
   var recording = false;          // 是否正在录音(决定是否 send 音频)
+  var startSent = false;          // 本次录音的 {type:'start'} 是否已真正发出(等 ensureAudio 异步就绪后才发)
   var busy = false;               // PC 端忙,本次禁用
   var mode = readMode();          // 'toggle' | 'hold'
   var lastPin = '';
@@ -355,6 +356,10 @@
   var scriptNode = null;
   var workletUrl = null;
   var usingWorklet = false;
+  // 音频代际计数:每次重置/释放音频时自增。getUserMedia 可能在 withTimeout 超时后
+  // 迟到 resolve,若不校验代际,迟到的 stream 会泄漏活跃麦克风轨道,甚至覆盖丢失
+  // 用户重试成功后的新流。
+  var audioGen = 0;
   // ScriptProcessor 兜底用的重采样状态(跨块保留)
   var resampleState = { phase: 0, last: 0, hasLast: false };
 
@@ -495,6 +500,33 @@
       if (!recording && authed) setStatus(L.ready, null);
     }, 2500);
   }
+  // 录音/停止/取消入口都要清掉 readyTimer,否则上一次 done 的回 ready 定时器会迟到
+  // 触发,把"识别中…"等新状态错盖成"准备就绪"。
+  function clearReadyTimer() {
+    if (readyTimer) { clearTimeout(readyTimer); readyTimer = null; }
+  }
+
+  // busy 提示的解除定时器:跟踪起来,新状态到来时清除,避免多个 busy 消息叠加定时器
+  // 或迟到的定时器覆盖新状态。
+  var busyTimer = null;
+
+  // 识别/润色阶段的客户端兜底超时:服务端任何原因不回 done/error(如孤立会话、进程异常)
+  // 时,30 秒后显示通用错误并回 ready,防止 UI 永久卡在"识别中…"。
+  var workTimer = null;
+  function armWorkTimeout() {
+    clearWorkTimeout();
+    workTimer = setTimeout(function () {
+      workTimer = null;
+      if (!recording && authed) {
+        setStatus('❌ ' + L.errGeneric, 'error');
+        setLevel(0);
+        scheduleReady();
+      }
+    }, 30000);
+  }
+  function clearWorkTimeout() {
+    if (workTimer) { clearTimeout(workTimer); workTimer = null; }
+  }
 
   // ============================================================
   // WebSocket
@@ -621,11 +653,14 @@
       case 'busy':
         busy = true;
         recording = false;
+        startSent = false; // 本次会话被服务端拒绝,复位 start 标记
         teardownAudioCapture(); // 停止采集但保留 ctx
         updateRecordBtnUI();
         setStatus(fmt(L.busy, { reason: msg.reason || L.busyDefault }), 'error');
-        // 短暂后解除忙态,允许重试
-        setTimeout(function () {
+        // 短暂后解除忙态,允许重试。定时器存入 busyTimer 跟踪,重入时先清,避免叠加。
+        if (busyTimer) clearTimeout(busyTimer);
+        busyTimer = setTimeout(function () {
+          busyTimer = null;
           busy = false;
           updateRecordBtnUI();
           if (!recording) setStatus(L.ready, null);
@@ -640,6 +675,12 @@
   }
 
   function applyStatusKind(msg) {
+    // 真实状态到来即解除 busy 兜底定时,避免它迟到触发把新状态错盖成"准备就绪"。
+    if (busyTimer) {
+      clearTimeout(busyTimer); busyTimer = null;
+      busy = false;
+      updateRecordBtnUI();
+    }
     switch (msg.kind) {
       case 'recording':
         setStatus(stripLeadingIcon(L.statusRecording), 'work');
@@ -647,11 +688,14 @@
       case 'transcribing':
         setStatus(stripLeadingIcon(L.statusTranscribing), 'work');
         if (statusDots) statusDots.hidden = false; // 识别中:三点加载动效
+        armWorkTimeout(); // 工作状态续上兜底超时,防止服务端中途无响应卡死
         break;
       case 'polishing':
         setStatus(L.statusPolishing, 'work'); // 润色保留 ✨
+        armWorkTimeout(); // 同上
         break;
       case 'done':
+        clearWorkTimeout(); // 正常收尾,解除兜底超时
         var n = (typeof msg.insertedChars === 'number') ? msg.insertedChars : 0;
         setStatus(stripLeadingIcon(fmt(L.statusDone, { n: n })), 'ok');
         if (statusIcon) { statusIcon.src = '/done.png'; statusIcon.hidden = false; } // 完成:对勾图
@@ -659,6 +703,7 @@
         scheduleReady();
         break;
       case 'error':
+        clearWorkTimeout(); // 服务端已明确报错,解除兜底超时
         setStatus('❌ ' + (msg.message || L.errGeneric), 'error');
         setLevel(0);
         break;
@@ -865,6 +910,9 @@
     }
     // 先乐观置态,保证 iOS 在手势同步栈内 resume()
     recording = true;
+    startSent = false;  // start 尚未真正发出(等 ensureAudio 异步完成后才发)
+    clearReadyTimer();  // 防止上一次 done 的回 ready 定时器迟到覆盖本次状态
+    clearWorkTimeout(); // 新一次录音开始,作废上一轮的识别兜底超时
     updateRecordBtnUI();
     setStatus(L.preparingMic, 'work');
     clearResult(); // 清掉上一次的识别结果,避免新录音时还显示旧文字
@@ -877,6 +925,7 @@
           return;
         }
         wsSendJSON({ type: 'start' });
+        startSent = true; // start 已发出,stopRecording 才需要配对发 stop
         setStatus(stripLeadingIcon(L.statusRecording), 'work');
       })
       .catch(function (err) {
@@ -893,13 +942,23 @@
   function stopRecording() {
     detachHoldEnd();
     if (!recording) return;
+    clearReadyTimer(); // 防止迟到的回 ready 定时器覆盖"识别中…"
     recording = false;
     updateRecordBtnUI();
     teardownAudioCapture();
+    // start 还没发出(hold 按下后立即松手,ensureAudio 尚未完成)→ 按本地取消处理:
+    // 不发孤立 stop,否则 PC 无对应会话、不回 done/error,UI 会永久卡在"识别中…"。
+    if (!startSent) {
+      setStatus(L.ready, null);
+      setLevel(0);
+      return;
+    }
+    startSent = false;
     wsSendJSON({ type: 'stop' });
     setStatus(stripLeadingIcon(L.statusTranscribing), 'work');
     if (statusDots) statusDots.hidden = false;
     setLevel(0);
+    armWorkTimeout(); // 兜底:30 秒内服务端不回 done/error 则强制回 ready
   }
 
   function cancelRecording() {
@@ -909,10 +968,14 @@
       teardownAudioCapture();
       return;
     }
+    clearReadyTimer();
+    clearWorkTimeout();
     recording = false;
     updateRecordBtnUI();
     teardownAudioCapture();
-    wsSendJSON({ type: 'cancel' });
+    // 同 stopRecording:start 未发出就不发孤立 cancel
+    if (startSent) wsSendJSON({ type: 'cancel' });
+    startSent = false;
     setStatus(L.cancelled, null);
     setLevel(0);
   }
@@ -951,7 +1014,9 @@
       audioCtx = new AC();
     }
 
-    var resumeP = (audioCtx.state === 'suspended')
+    // 注意:iOS Safari 来电/Siri 后 ctx 处于私有的 'interrupted' 状态,只判 'suspended'
+    // 不命中,会导致录音静默无声 —— 凡是非 running 都尝试 resume。
+    var resumeP = (audioCtx.state !== 'running')
       ? audioCtx.resume().catch(function () {})
       : Promise.resolve();
 
@@ -959,6 +1024,9 @@
       .then(function () {
         // 2) 麦克风流(已存在则复用)
         if (mediaStream) return mediaStream;
+        // 捕获当前代际:迟到 resolve 时若代际已变(超时重置/断线释放),停掉轨道并放弃,
+        // 避免泄漏麦克风或覆盖重试成功的新流。
+        var gen = audioGen;
         return navigator.mediaDevices.getUserMedia({
           audio: {
             channelCount: 1,
@@ -968,6 +1036,10 @@
           },
           video: false
         }).then(function (stream) {
+          if (gen !== audioGen) {
+            try { stream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
+            return null; // 交给下一步判空直接放弃
+          }
           mediaStream = stream;
           return stream;
         });
@@ -1201,6 +1273,7 @@
 
   // 彻底释放(断线时):停止麦克风轨道并关闭 ctx。
   function teardownAudio() {
+    audioGen++; // 代际推进:作废所有在途的 getUserMedia 迟到回调
     teardownAudioCapture();
     if (mediaStream) {
       try {
@@ -1219,6 +1292,7 @@
   // 与 teardownAudio 的区别:这里 close 并置空 audioCtx —— 超时根因往往是 ctx 自身坏掉
   // (resume 永不 settle),保留它只会让下次继续卡。
   function resetAudioContext() {
+    audioGen++; // 代际推进:作废所有在途的 getUserMedia 迟到回调
     teardownAudioCapture();
     if (mediaStream) {
       try {
@@ -1254,9 +1328,17 @@
     var reloadedOnce = false;
     try { reloadedOnce = sessionStorage.getItem('ol_reloaded_once') === '1'; } catch (e) {}
     if (!reloadedOnce) {
-      try { sessionStorage.setItem('ol_reloaded_once', '1'); } catch (e) {}
-      location.reload();
-      return;
+      // 写后立即读回校验:sessionStorage 被禁用(写入抛异常/写不进去)时标记永远落不下,
+      // 若仍 reload 会无限循环刷新 —— 校验失败就放弃刷新,直接继续初始化。
+      var marked = false;
+      try {
+        sessionStorage.setItem('ol_reloaded_once', '1');
+        marked = sessionStorage.getItem('ol_reloaded_once') === '1';
+      } catch (e) {}
+      if (marked) {
+        location.reload();
+        return;
+      }
     }
 
     applyStaticI18n();
