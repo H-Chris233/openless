@@ -866,6 +866,7 @@ export const ko: typeof zhCN = {
       pinLabel: '페어링 코드',
       regeneratePin: '재생성',
       portInUse: '포트 {{port}}이(가) 사용 중입니다. 변경하세요',
+      startError: '원격 입력 서비스 시작에 실패했습니다: {{reason}}',
       securityHint: '같은 LAN에서만 접속 가능하며 페어링 코드 입력이 필요합니다. 사용하지 않을 때는 끄는 것을 권장합니다.',
       certHint: '첫 접속 시 브라우저가 인증서를 신뢰할 수 없다고 경고합니다. 안내에 따라 "계속 진행"을 선택하세요.',
       certTrustWarning:

@@ -864,6 +864,7 @@ export const en: typeof zhCN = {
       pinLabel: 'Pairing code',
       regeneratePin: 'Regenerate',
       portInUse: 'Port {{port}} is in use, please change it',
+      startError: 'Failed to start the remote input service: {{reason}}',
       securityHint: 'Reachable only on the same LAN and requires the pairing code; turn it off when not in use.',
       certHint: 'On first visit the browser warns the certificate is untrusted — choose "Proceed".',
       certTrustWarning:

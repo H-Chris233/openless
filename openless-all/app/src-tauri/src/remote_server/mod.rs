@@ -193,9 +193,9 @@ fn load_or_generate_cert(
             }
         }
     }
-    // 生成自签名 CA 证书：iOS Safari / Android Chrome 的 wss 都不复用浏览器页面级的
-    // “继续访问”例外，必须把证书装进系统并信任 —— 而系统的信任开关只对 CA 证书出现。
-    // 所以做成自签名 CA（SAN 含本机各局域网 IP），用户在手机装一次并信任后 wss 才稳定。
+    // 生成自签名服务器证书（SAN 含本机各局域网 IP）。主路径是浏览器页面级
+    // “继续访问/访问此网站”例外；/cert.cer 与 /cert.mobileconfig 是手机系统级
+    // 安装信任的兜底（部分浏览器的 wss 不复用页面级例外时使用）。
     let (cert_der, key_der) = {
         use rcgen::{
             CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, KeyPair,

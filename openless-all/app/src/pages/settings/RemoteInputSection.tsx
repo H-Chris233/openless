@@ -41,7 +41,7 @@ export function RemoteInputSection() {
   const { t, i18n } = useTranslation();
   const { prefs, updatePrefs } = useHotkeySettings();
   const [status, setStatus] = useState<RemoteInputStatus | null>(null);
-  const [errorPort, setErrorPort] = useState<number | null>(null);
+  const [startError, setStartError] = useState<{ reason: string; port: number } | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
 
   useEffect(() => {
@@ -57,12 +57,12 @@ export function RemoteInputSection() {
     const unsubs: Array<() => void> = [];
     import('@tauri-apps/api/event').then(({ listen }) => {
       listen('remote-input:running', () => {
-        setErrorPort(null);
+        setStartError(null);
         refresh();
       }).then((u) => unsubs.push(u));
       listen('remote-input:error', (e) => {
-        const p = e.payload as { port?: number } | null;
-        if (alive) setErrorPort(p?.port ?? 0);
+        const p = e.payload as { reason?: string; port?: number } | null;
+        if (alive) setStartError({ reason: p?.reason ?? '', port: p?.port ?? 0 });
       }).then((u) => unsubs.push(u));
     });
     return () => {
@@ -215,9 +215,11 @@ export function RemoteInputSection() {
         </>
       )}
 
-      {enabled && errorPort != null && (
+      {enabled && startError != null && (
         <div style={{ fontSize: 12, color: '#d9534f', marginTop: 8 }}>
-          {t('settings.remoteInput.portInUse', { port: errorPort })}
+          {startError.reason === 'port-in-use'
+            ? t('settings.remoteInput.portInUse', { port: startError.port })
+            : t('settings.remoteInput.startError', { reason: startError.reason })}
         </div>
       )}
 

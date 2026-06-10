@@ -862,6 +862,7 @@ export const zhCN = {
       pinLabel: '配对码',
       regeneratePin: '重新生成',
       portInUse: '端口 {{port}} 被占用，请更换',
+      startError: '远程输入服务启动失败：{{reason}}',
       securityHint: '仅同一局域网可访问，需输入配对码；不用时建议关闭。',
       certHint: '首次访问浏览器会提示证书不受信任，按提示选择"继续访问"。',
       certTrustWarning:

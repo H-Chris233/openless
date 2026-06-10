@@ -864,6 +864,7 @@ export const zhTW: typeof zhCN = {
       pinLabel: '配對碼',
       regeneratePin: '重新產生',
       portInUse: '連接埠 {{port}} 被佔用，請更換',
+      startError: '遠端輸入服務啟動失敗：{{reason}}',
       securityHint: '僅同一區域網路可存取，需輸入配對碼；不用時建議關閉。',
       certHint: '首次存取瀏覽器會提示憑證不受信任，按提示選擇「繼續存取」。',
       certTrustWarning:

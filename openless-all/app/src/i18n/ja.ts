@@ -866,6 +866,7 @@ export const ja: typeof zhCN = {
       pinLabel: 'ペアリングコード',
       regeneratePin: '再生成',
       portInUse: 'ポート {{port}} は使用中です。変更してください',
+      startError: 'リモート入力サービスの起動に失敗しました：{{reason}}',
       securityHint: '同一 LAN からのみアクセス可能で、ペアリングコードの入力が必要です。使わないときはオフにすることを推奨します。',
       certHint: '初回アクセス時、ブラウザが証明書は信頼されていないと警告します。案内に従って「続行」を選択してください。',
       certTrustWarning:
