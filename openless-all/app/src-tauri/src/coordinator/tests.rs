@@ -212,6 +212,14 @@ fn windows_local_providers_are_keyless_and_not_whisper_compatible() {
 }
 
 #[test]
+fn credential_gate_classifies_mimo_as_api_key_asr_provider() {
+    assert_eq!(
+        cloud_asr_credential_requirement(crate::asr::mimo::PROVIDER_ID),
+        CloudAsrCredentialRequirement::AsrApiKey
+    );
+}
+
+#[test]
 fn verbose_json_enabled_only_for_whisper_family() {
     // verbose_json + 幻听过滤只对返回完整 Whisper 指标的 provider 开启。
     assert!(whisper_supports_verbose_json("whisper"));

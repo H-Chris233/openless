@@ -8,6 +8,25 @@
 
 use super::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CloudAsrCredentialRequirement {
+    AsrApiKey,
+    Volcengine,
+}
+
+pub(crate) fn cloud_asr_credential_requirement(
+    active_asr: &str,
+) -> CloudAsrCredentialRequirement {
+    if is_whisper_compatible_provider(active_asr)
+        || is_bailian_provider(active_asr)
+        || is_mimo_provider(active_asr)
+    {
+        CloudAsrCredentialRequirement::AsrApiKey
+    } else {
+        CloudAsrCredentialRequirement::Volcengine
+    }
+}
+
 pub(crate) fn ensure_microphone_permission(_inner: &Arc<Inner>) -> Result<(), String> {
     use crate::permissions::{self, PermissionStatus};
 
@@ -78,22 +97,25 @@ pub(crate) fn ensure_asr_credentials() -> Result<(), String> {
         }
     }
 
-    if is_whisper_compatible_provider(&active_asr) || is_bailian_provider(&active_asr) {
-        let api_key = CredentialsVault::get(CredentialAccount::AsrApiKey)
-            .ok()
-            .flatten()
-            .unwrap_or_default();
-        if api_key.trim().is_empty() {
-            return Err("请先在设置中填写 ASR 服务商 API Key".to_string());
+    match cloud_asr_credential_requirement(&active_asr) {
+        CloudAsrCredentialRequirement::AsrApiKey => {
+            let api_key = CredentialsVault::get(CredentialAccount::AsrApiKey)
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            if api_key.trim().is_empty() {
+                return Err("请先在设置中填写 ASR 服务商 API Key".to_string());
+            }
+            Ok(())
         }
-        return Ok(());
-    }
-
-    let creds = read_volc_credentials();
-    if creds.app_id.trim().is_empty() || creds.access_token.trim().is_empty() {
-        Err("请先在设置中填写火山引擎 ASR App Key 和 Access Key".to_string())
-    } else {
-        Ok(())
+        CloudAsrCredentialRequirement::Volcengine => {
+            let creds = read_volc_credentials();
+            if creds.app_id.trim().is_empty() || creds.access_token.trim().is_empty() {
+                Err("请先在设置中填写火山引擎 ASR App Key 和 Access Key".to_string())
+            } else {
+                Ok(())
+            }
+        }
     }
 }
 
