@@ -827,6 +827,70 @@ impl Coordinator {
     pub fn history(&self) -> &HistoryStore {
         &self.inner.history
     }
+
+    /// 用**当前配置的** ASR provider 对一段已归档的 16k/mono/16-bit PCM 重新转录
+    /// （issue #613「重新转录」）。复用 `build_qa_asr_start`，对所有 provider 统一：
+    /// 流式 provider 先 open_session 再灌音并取 final，批处理 provider 直接灌音后
+    /// transcribe。整段超时走 COORDINATOR_GLOBAL_TIMEOUT_SECS 兜底，防止挂死。
+    ///
+    /// 只做 ASR，不做润色/落字/写历史 —— 回写历史由 command 层完成，保持本方法纯粹。
+    pub async fn retranscribe_pcm(&self, pcm: Vec<u8>) -> Result<String, String> {
+        let inner = &self.inner;
+        let active_asr = CredentialsVault::get_active_asr();
+        let start = build_qa_asr_start(inner, &active_asr).await?;
+        start.open_streaming_session().await?;
+        let consumer = start.recorder_consumer();
+        consumer.consume_pcm_chunk(&pcm);
+        let timeout = std::time::Duration::from_secs(COORDINATOR_GLOBAL_TIMEOUT_SECS);
+        let raw = match start.active_asr() {
+            ActiveAsr::Volcengine(asr) => {
+                asr.send_last_frame().await.map_err(|e| e.to_string())?;
+                tokio::time::timeout(timeout, asr.await_final_result())
+                    .await
+                    .map_err(|_| "重新转录超时".to_string())?
+                    .map_err(|e| e.to_string())?
+            }
+            ActiveAsr::Bailian(asr) => {
+                asr.send_last_frame().await.map_err(|e| e.to_string())?;
+                tokio::time::timeout(timeout, asr.await_final_result())
+                    .await
+                    .map_err(|_| "重新转录超时".to_string())?
+                    .map_err(|e| e.to_string())?
+            }
+            ActiveAsr::Whisper(w) => tokio::time::timeout(timeout, w.transcribe())
+                .await
+                .map_err(|_| "重新转录超时".to_string())?
+                .map_err(|e| e.to_string())?,
+            ActiveAsr::Mimo(m) => tokio::time::timeout(timeout, m.transcribe())
+                .await
+                .map_err(|_| "重新转录超时".to_string())?
+                .map_err(|e| e.to_string())?,
+            #[cfg(target_os = "windows")]
+            ActiveAsr::FoundryLocalWhisper(local) => local
+                .transcribe(asr_setup::foundry_audio_transcribe_timeout_duration())
+                .await
+                .map_err(|e| e.to_string())?,
+            #[cfg(target_os = "windows")]
+            ActiveAsr::SherpaOnnxLocal(local) => local
+                .transcribe(asr_setup::sherpa_audio_transcribe_timeout_duration())
+                .await
+                .map_err(|e| e.to_string())?,
+            #[cfg(target_os = "macos")]
+            ActiveAsr::Local(local) => {
+                let dur = asr_setup::local_qwen_transcribe_timeout(
+                    (local.buffer_duration_ms() as f64) / 1000.0,
+                );
+                inner.local_asr_cache.touch();
+                let out = tokio::time::timeout(dur, local.transcribe())
+                    .await
+                    .map_err(|_| "重新转录超时".to_string())?
+                    .map_err(|e| e.to_string())?;
+                asr_setup::schedule_local_asr_release(inner);
+                out
+            }
+        };
+        Ok(raw.text)
+    }
     pub fn prefs(&self) -> &PreferencesStore {
         &self.inner.prefs
     }
