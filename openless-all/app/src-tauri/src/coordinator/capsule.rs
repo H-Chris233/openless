@@ -29,6 +29,9 @@ pub(crate) fn capsule_show_strategy_for_platform() -> CapsuleShowStrategy {
 static CAPSULE_NO_ACTIVATE_FALLBACK_WARNED: AtomicBool = AtomicBool::new(false);
 static CAPSULE_SUPPRESSED_BY_TOGGLE_LOGGED: AtomicBool = AtomicBool::new(false);
 static CAPSULE_FIRST_SHOW_LOGGED: AtomicBool = AtomicBool::new(false);
+// issue #631：上一次应用到胶囊窗口的点击穿透值。初始 false 与窗口创建时一致
+// （tauri.conf.json 未设 ignore），按变化去重，避免录音中 ~30Hz 电平帧重复调系统 API。
+static CAPSULE_IGNORE_CURSOR_APPLIED: AtomicBool = AtomicBool::new(false);
 // #470 诊断 v2：capsule webview 句柄取不到时的一次性门，区分「窗口压根没创建」(A0)。
 static CAPSULE_WINDOW_MISSING_LOGGED: AtomicBool = AtomicBool::new(false);
 
@@ -67,6 +70,18 @@ pub(crate) fn show_capsule_window_for_recording<R: tauri::Runtime>(
             log::warn!("[capsule] show fallback failed: {e}");
         }
     }
+}
+
+/// issue #631：该状态下胶囊窗口是否应忽略鼠标事件（点击穿透到下层应用）。
+/// 胶囊窗口 220×110 远大于可见 pill，贴近输入框时透明区域会吃掉用户点击并激活
+/// OpenLess（误触弹出主界面）。终态（Done/Cancelled/Error）与 Idle 没有可交互
+/// 按钮——包括 2s toast 停留和离场动画期间——让点击穿透；录音/转写/润色态有
+/// ✕/✓ 按钮，保持可点。
+pub(crate) fn capsule_ignore_cursor_for_state(state: CapsuleState) -> bool {
+    !matches!(
+        state,
+        CapsuleState::Recording | CapsuleState::Transcribing | CapsuleState::Polishing
+    )
 }
 
 /// 终止态（Done / Cancelled / Error）后延迟 N ms 把胶囊改回 Idle，让浮窗自动消失。
@@ -241,6 +256,13 @@ pub(crate) fn emit_capsule(
         }
         #[cfg(not(target_os = "linux"))]
         {
+
+        // issue #631：终态/空闲让胶囊点击穿透，录音完成后用户点击贴近的输入框
+        // 不再误触胶囊激活 OpenLess。状态变化时才真正调系统 API。
+        let ignore_cursor = capsule_ignore_cursor_for_state(state);
+        if CAPSULE_IGNORE_CURSOR_APPLIED.swap(ignore_cursor, Ordering::SeqCst) != ignore_cursor {
+            let _ = window.set_ignore_cursor_events(ignore_cursor);
+        }
 
         // 三平台统一：Done / Cancelled / Error 状态保留 ~1.5s toast
         // （schedule_capsule_idle 之后会回 Idle 隐藏）。

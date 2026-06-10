@@ -811,6 +811,19 @@ fn window_hotkey_fallback_is_disabled_when_no_explicit_fallback_is_advertised() 
 }
 
 #[test]
+fn capsule_ignore_cursor_only_in_non_interactive_states() {
+    // issue #631：有 ✕/✓ 按钮的三个状态必须可点；终态/空闲（含 toast 停留与
+    // 离场动画期间）点击穿透，避免误触激活 OpenLess 弹出主界面。
+    assert!(!capsule_ignore_cursor_for_state(CapsuleState::Recording));
+    assert!(!capsule_ignore_cursor_for_state(CapsuleState::Transcribing));
+    assert!(!capsule_ignore_cursor_for_state(CapsuleState::Polishing));
+    assert!(capsule_ignore_cursor_for_state(CapsuleState::Done));
+    assert!(capsule_ignore_cursor_for_state(CapsuleState::Cancelled));
+    assert!(capsule_ignore_cursor_for_state(CapsuleState::Error));
+    assert!(capsule_ignore_cursor_for_state(CapsuleState::Idle));
+}
+
+#[test]
 fn capsule_show_strategy_matches_platform_activation_contract() {
     // 平台列表必须与 capsule_show_strategy_for_platform 的 cfg 完全一致：
     // 改实现里的 #[cfg] 时，一并改这两个 #[cfg]，否则 Linux CI 直接红
