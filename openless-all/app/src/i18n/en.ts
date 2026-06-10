@@ -866,6 +866,8 @@ export const en: typeof zhCN = {
       portInUse: 'Port {{port}} is in use, please change it',
       securityHint: 'Reachable only on the same LAN and requires the pairing code; turn it off when not in use.',
       certHint: 'On first visit the browser warns the certificate is untrusted — choose "Proceed".',
+      certTrustWarning:
+        'The certificate is only used by this PC’s remote input service (it cannot issue other certificates). Never trust certificates from unknown sources; remove it from your phone’s settings when no longer needed.',
     },
     about: {
       tagline: 'Speak naturally, write perfectly',

@@ -232,6 +232,8 @@ export function RemoteInputSection() {
         {t('settings.remoteInput.securityHint')}
         <br />
         {t('settings.remoteInput.certHint')}
+        <br />
+        {t('settings.remoteInput.certTrustWarning')}
       </div>
     </Collapsible>
   );

@@ -43,9 +43,13 @@ const HEADER_HTML: &str = "text/html; charset=utf-8";
 const HEADER_JS: &str = "application/javascript; charset=utf-8";
 const HEADER_CSS: &str = "text/css; charset=utf-8";
 
-/// 同一来源连续输错 PIN 的锁定阈值与时长。
+/// 同一来源 IP 连续输错 PIN 的锁定阈值与时长。按 IP 而非全局计数：全局锁会被
+/// 局域网内多台机器分摊（每台只贡献几次失败就触发全局锁，反而 DoS 正常用户）；
+/// 按 IP 则每个攻击源各自被限到 ~5 次/分钟，10^6 个 PIN 组合在锁定节奏下不可行。
 const PIN_MAX_FAILS: u32 = 5;
 const PIN_LOCK_SECS: u64 = 60;
+/// pin_fails 表的容量上限：超过即清理已过期/已解锁的条目，防止伪造海量源 IP 撑爆内存。
+const PIN_FAILS_MAX_ENTRIES: usize = 256;
 
 // ───────────────────────── 对外类型 ─────────────────────────
 
@@ -252,11 +256,16 @@ struct WsState {
     pin: String,
     coordinator: Arc<Coordinator>,
     app: AppHandle,
-    /// 全局 PIN 失败计数 + 锁定截止时刻（简单防爆破；TLS+6 位 PIN 已是主防线）。
-    pin_fails: Mutex<(u32, Option<Instant>)>,
+    /// 按源 IP 的 PIN 失败计数 + 锁定截止时刻（防爆破；TLS+6 位 PIN 已是主防线）。
+    pin_fails: Mutex<std::collections::HashMap<IpAddr, (u32, Option<Instant>)>>,
     /// 自签名证书的 DER 原始字节，供 /cert.cer 下载给手机安装信任。
     cert_der: Vec<u8>,
 }
+
+/// 经 accept loop 注入的对端 IP（axum Extension）。hyper 直连 TLS 流时拿不到
+/// ConnectInfo，这里在每条连接的 service 上挂一层 Extension 把 peer 传进 handler。
+#[derive(Clone, Copy)]
+struct PeerIp(IpAddr);
 
 fn build_router(state: Arc<WsState>) -> Router {
     Router::new()
@@ -339,6 +348,12 @@ fn base64_encode(data: &[u8]) -> String {
 /// iOS 配置描述文件：把证书包成 .mobileconfig。Safari 点击后凭 content-type
 /// (application/x-apple-aspen-config) 直接进入“安装描述文件”流程，比裸 .cer 顺滑、
 /// 也不会把当前页面导航走。安装后仍需到「设置→通用→关于本机→证书信任设置」打开完全信任。
+///
+/// 安全边界：PayloadType `com.apple.security.root` 只是 iOS 安装证书的固定入口，
+/// 证书本身是非 CA 的纯服务器证书（rcgen NoCa + EKU=ServerAuth，见
+/// load_or_generate_cert）——不含签发能力，无法用来给其他域名签证书做 MITM。
+/// 信任它的影响范围仅限「持有本机私钥者可冒充 SAN 里列出的本机局域网 IP」，
+/// 私钥只存在用户 PC 的应用配置目录。设置页 certTrustWarning 同步向用户说明。
 async fn mobileconfig_handler(State(state): State<Arc<WsState>>) -> impl IntoResponse {
     let b64 = base64_encode(&state.cert_der);
     let xml = format!(
@@ -382,7 +397,7 @@ pub async fn start(cfg: RemoteServerConfig) -> Result<RemoteServerHandle, String
         pin: cfg.pin.clone(),
         coordinator: cfg.coordinator,
         app: cfg.app,
-        pin_fails: Mutex::new((0, None)),
+        pin_fails: Mutex::new(std::collections::HashMap::new()),
         cert_der,
     });
     let router = build_router(state);
@@ -407,7 +422,8 @@ pub async fn start(cfg: RemoteServerConfig) -> Result<RemoteServerHandle, String
                     // 看到它到底有没有真的到这台电脑、来自哪个网段（排查"是不是连到别的设备"）。
                     log::info!("[remote-input] 收到 TCP 连接，来自 {peer}");
                     let acceptor = acceptor.clone();
-                    let router = router.clone();
+                    // 每条连接把对端 IP 以 Extension 挂进 router，供 PIN 按 IP 锁定。
+                    let router = router.clone().layer(axum::Extension(PeerIp(peer.ip())));
                     tokio::spawn(async move {
                         let tls = match acceptor.accept(tcp).await {
                             Ok(t) => t,
@@ -439,12 +455,13 @@ pub async fn start(cfg: RemoteServerConfig) -> Result<RemoteServerHandle, String
 
 async fn ws_upgrade(
     State(state): State<Arc<WsState>>,
+    axum::Extension(PeerIp(peer_ip)): axum::Extension<PeerIp>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
     // 能走到这里说明 wss 的 TLS 握手已成功（证书被手机接受）。排查"连不上"时看有没有
     // 这行：没有 = 卡在 TLS/证书（握手就失败）；有 = 握手 OK，问题在认证/后续逻辑。
     log::info!("[remote-input] WS 已升级：手机已通过 wss 接入（TLS/证书 OK）");
-    ws.on_upgrade(move |socket| handle_ws(socket, state))
+    ws.on_upgrade(move |socket| handle_ws(socket, state, peer_ip))
 }
 
 fn send_json<T: Serialize>(value: &T) -> Message {
@@ -492,10 +509,10 @@ fn capsule_payload_to_phone(payload: &str) -> Vec<String> {
     out
 }
 
-async fn handle_ws(mut socket: WebSocket, state: Arc<WsState>) {
+async fn handle_ws(mut socket: WebSocket, state: Arc<WsState>, peer_ip: IpAddr) {
     // 1) 握手：等第一帧 hello + PIN。
     let authed = match tokio::time::timeout(Duration::from_secs(15), socket.recv()).await {
-        Ok(Some(Ok(Message::Text(txt)))) => verify_hello(&txt, &state),
+        Ok(Some(Ok(Message::Text(txt)))) => verify_hello(&txt, &state, peer_ip),
         _ => return, // 超时 / 非文本首帧 / 断开
     };
     match authed {
@@ -623,16 +640,16 @@ enum AuthResult {
     Locked,
 }
 
-fn verify_hello(txt: &str, state: &Arc<WsState>) -> AuthResult {
-    // 锁定检查
+fn verify_hello(txt: &str, state: &Arc<WsState>, peer_ip: IpAddr) -> AuthResult {
+    // 锁定检查（按源 IP）
     {
         let mut guard = state.pin_fails.lock();
-        if let Some(until) = guard.1 {
-            if Instant::now() < until {
+        if let Some((_, Some(until))) = guard.get(&peer_ip) {
+            if Instant::now() < *until {
                 return AuthResult::Locked;
             }
-            // 锁定到期，重置
-            *guard = (0, None);
+            // 锁定到期，重置该 IP
+            guard.remove(&peer_ip);
         }
     }
     let v: serde_json::Value = match serde_json::from_str(txt) {
@@ -645,13 +662,19 @@ fn verify_hello(txt: &str, state: &Arc<WsState>) -> AuthResult {
             .map(|p| constant_time_eq(p.as_bytes(), state.pin.as_bytes()))
             .unwrap_or(false);
     if ok {
-        *state.pin_fails.lock() = (0, None);
+        state.pin_fails.lock().remove(&peer_ip);
         AuthResult::Ok
     } else {
+        let now = Instant::now();
         let mut guard = state.pin_fails.lock();
-        guard.0 += 1;
-        if guard.0 >= PIN_MAX_FAILS {
-            guard.1 = Some(Instant::now() + Duration::from_secs(PIN_LOCK_SECS));
+        // 容量兜底：先丢已解锁/过期的条目，防伪造海量源 IP 撑爆表。
+        if guard.len() >= PIN_FAILS_MAX_ENTRIES {
+            guard.retain(|_, (_, until)| matches!(until, Some(t) if *t > now));
+        }
+        let entry = guard.entry(peer_ip).or_insert((0, None));
+        entry.0 += 1;
+        if entry.0 >= PIN_MAX_FAILS {
+            entry.1 = Some(now + Duration::from_secs(PIN_LOCK_SECS));
         }
         AuthResult::BadPin
     }

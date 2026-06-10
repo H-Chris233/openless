@@ -864,6 +864,8 @@ export const zhCN = {
       portInUse: '端口 {{port}} 被占用，请更换',
       securityHint: '仅同一局域网可访问，需输入配对码；不用时建议关闭。',
       certHint: '首次访问浏览器会提示证书不受信任，按提示选择"继续访问"。',
+      certTrustWarning:
+        '该证书仅用于本机远程输入服务（不能签发其他证书），请勿信任来源不明的证书；不再使用时可在手机系统设置中移除。',
     },
     about: {
       tagline: '自然说话，完美书写',

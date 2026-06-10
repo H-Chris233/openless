@@ -1051,10 +1051,7 @@ impl Coordinator {
     }
 
     fn clear_remote_source(&self) {
-        self.inner
-            .remote_source_active
-            .store(false, Ordering::SeqCst);
-        *self.inner.remote_audio_sink.lock() = None;
+        clear_remote_source_flags(&self.inner);
     }
 
     /// 当前远程输入运行态（供命令/前端查询）。
@@ -1354,4 +1351,14 @@ fn set_phase_idle_if_session_matches(inner: &Arc<Inner>, session_id: SessionId) 
     if state.session_id == session_id {
         state.phase = SessionPhase::Idle;
     }
+}
+
+/// 清远程音频源标志（幂等）。必须在远程会话生命周期的**每个**终结点调用：
+/// 残留的 `remote_source_active=true` 会让下一次本地听写误走远程分支
+/// （跳过 cpal、挂上 sink 等手机 PCM），本地录音从此失效。
+/// 终结点：stop/cancel_remote_dictation、start 失败回滚、cancel_session、
+/// pending_stop 的延迟 end_session（finish_starting_session）。
+pub(crate) fn clear_remote_source_flags(inner: &Inner) {
+    inner.remote_source_active.store(false, Ordering::SeqCst);
+    *inner.remote_audio_sink.lock() = None;
 }

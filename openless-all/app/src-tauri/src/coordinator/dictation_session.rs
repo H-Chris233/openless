@@ -632,6 +632,9 @@ pub(crate) async fn finish_starting_session(inner: &Arc<Inner>, session_id: Sess
             if matches!(outcome, BeginOutcome::PendingStop) {
                 log::info!("[coord] applying pending_stop edge → end_session immediately");
                 let _ = end_session(inner).await;
+                // 远程会话经 pending_stop 收尾时，stop_remote_dictation 已经早退，
+                // 不会再有人清远程标志 —— 在这里兜底（本地会话下是 no-op）。
+                clear_remote_source_flags(inner);
             }
         }
     }
@@ -673,6 +676,9 @@ pub(crate) fn cancel_session(inner: &Arc<Inner>) {
 
     stop_recorder_for_session(inner, decision.session_id);
     cancel_asr_for_session(inner, decision.session_id);
+    // 远程会话被取消（含本地 Esc / 错误路径触发的 cancel）时同步清远程标志，
+    // 避免 remote_source_active 残留把下一次本地听写错引到远程分支。
+    clear_remote_source_flags(inner);
     restore_prepared_windows_ime_session(inner, decision.session_id);
     // Processing 阶段保持 phase=Processing 让 end_session 自己走完检查 + 收尾；
     // 其他阶段直接转 Idle。
