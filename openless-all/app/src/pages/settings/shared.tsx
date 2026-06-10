@@ -26,26 +26,12 @@ export function SectionTitle({
     )
 }
 
-export function SectionDesc({
-    children,
-    style,
-}: {
+// 页面瘦身：设置页描述文案全部隐藏（保留组件签名 + 调用点，便于需要时恢复）。
+export function SectionDesc(_props: {
     children: ReactNode
     style?: CSSProperties
 }) {
-    return (
-        <div
-            style={{
-                fontSize: 12.5,
-                color: "var(--ol-ink-3)",
-                lineHeight: 1.6,
-                marginBottom: 16,
-                ...style,
-            }}
-        >
-            {children}
-        </div>
-    )
+    return null
 }
 
 interface SettingRowProps {
@@ -55,9 +41,9 @@ interface SettingRowProps {
     controlWidth?: number | string
 }
 
+// 页面瘦身：不再渲染每行的描述小字（desc 仍保留在 props 里，调用点无需改、便于恢复）。
 export function SettingRow({
     label,
-    desc,
     children,
     controlWidth,
 }: SettingRowProps) {
@@ -69,15 +55,10 @@ export function SettingRow({
                 gap: 16,
                 padding: "14px 0",
                 borderTop: "0.5px solid var(--ol-line-soft)",
-                alignItems: desc ? "flex-start" : "center",
+                alignItems: "center",
             }}
         >
-            <div
-                style={{
-                    minWidth: 0,
-                    alignSelf: desc ? "flex-start" : "center",
-                }}
-            >
+            <div style={{ minWidth: 0, alignSelf: "center" }}>
                 <div
                     style={{
                         fontSize: 13,
@@ -87,18 +68,6 @@ export function SettingRow({
                 >
                     {label}
                 </div>
-                {desc && (
-                    <div
-                        style={{
-                            fontSize: 11.5,
-                            color: "var(--ol-ink-4)",
-                            marginTop: 4,
-                            lineHeight: 1.5,
-                        }}
-                    >
-                        {desc}
-                    </div>
-                )}
             </div>
             <div
                 style={{
@@ -130,7 +99,7 @@ export function Toggle({
                 height: 20,
                 borderRadius: 999,
                 border: 0,
-                background: on ? "var(--ol-blue)" : "var(--ol-toggle-off-bg)",
+                background: on ? "var(--ol-blue)" : "rgba(0,0,0,0.15)",
                 boxShadow: "inset 0 1px 2px rgba(0,0,0,0.06)",
                 cursor: "default",
                 transition: "background 0.16s var(--ol-motion-quick)",
@@ -144,7 +113,7 @@ export function Toggle({
                     width: 16,
                     height: 16,
                     borderRadius: 999,
-                    background: "var(--ol-toggle-knob)",
+                    background: "#fff",
                     boxShadow:
                         "0 1px 2px rgba(0,0,0,.25), 0 0 0 0.5px rgba(0,0,0,.04)",
                     transition: "left .16s var(--ol-motion-spring)",
@@ -163,7 +132,7 @@ export const inputStyle: CSSProperties = {
     fontSize: 12.5,
     fontFamily: "inherit",
     outline: "none",
-    background: "var(--ol-control-elevated)",
+    background: "var(--ol-surface-2)",
     width: "100%",
     maxWidth: 360,
     transition:

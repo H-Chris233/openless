@@ -178,7 +178,7 @@ pub fn extract_mimo_text(json: &Value) -> String {
 }
 
 fn pcm_duration_ms(pcm: &[u8]) -> u64 {
-    (pcm.len() as u64 / PCM_BYTES_PER_SAMPLE as u64) * 1000 / PCM_SAMPLE_RATE_HZ
+    super::pcm::pcm_duration_ms(pcm)
 }
 
 fn split_pcm_by_duration(pcm: &[u8], max_chunk_duration_ms: u64) -> Vec<&[u8]> {

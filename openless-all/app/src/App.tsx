@@ -20,7 +20,6 @@ import { QaPanel } from './pages/QaPanel';
 import { LessComputerPanel } from './pages/LessComputerPanel';
 import { LessComputerGlow } from './pages/LessComputerGlow';
 import { HotkeySettingsProvider } from './state/HotkeySettingsContext';
-import { APP_THEME_KEY, applyAppTheme, readAppTheme } from './lib/appTheme';
 
 interface AppProps {
   isCapsule: boolean;
@@ -49,16 +48,6 @@ export function App({ isCapsule, isQa, isLessComputer, isLessComputerGlow, force
   const os = forcedOs ?? detectOS();
   // Windows 启动不应被权限探测阻塞首屏。
   const [gate, setGate] = useState<Gate>('ready');
-
-  useEffect(() => {
-    applyAppTheme(readAppTheme());
-    const syncTheme = (event: StorageEvent) => {
-      if (event.key !== APP_THEME_KEY) return;
-      applyAppTheme(readAppTheme());
-    };
-    window.addEventListener('storage', syncTheme);
-    return () => window.removeEventListener('storage', syncTheme);
-  }, []);
 
   useEffect(() => {
     if (!isTauri) return;

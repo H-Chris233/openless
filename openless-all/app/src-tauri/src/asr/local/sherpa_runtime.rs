@@ -485,7 +485,7 @@ fn accumulate_dir_size(dir: &Path, bytes: &mut u64) {
 }
 
 fn pcm_duration_ms(pcm: &[u8]) -> u64 {
-    (pcm.len() as u64 / 2) * 1000 / 16_000
+    crate::asr::pcm::pcm_duration_ms(pcm)
 }
 
 enum LoadedModel {

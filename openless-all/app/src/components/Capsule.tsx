@@ -417,7 +417,8 @@ export function Capsule() {
           // - 出场 .24s → .36s（前面 EXIT_ANIM_MS 也同步到 360），曲线改成 ease-in-out 平滑
           //   收缩 + 下移 + 淡出三段同步进行
           ? 'capsule-out .36s cubic-bezier(.55,.06,.68,.19) forwards'
-          : 'capsule-in .38s cubic-bezier(.16,.86,.32,1.18) both',
+          // 入场改成弹性"弹出"：整体 scale 从 .78 弹到 1，back-out 曲线带回弹 overshoot。
+          : 'capsule-in .46s cubic-bezier(.34,1.56,.64,1) both',
         transformOrigin: 'center',
         willChange: 'transform, opacity',
       }}
@@ -483,8 +484,8 @@ export function Capsule() {
            长出到 scaleX 1 / scaleY 1 / 不透明。配合 wrapper 的 transformOrigin:center，
            视觉上是「从中心向左右展开」。 */
         @keyframes capsule-in {
-          from { opacity: 0; transform: scaleX(.18) scaleY(.95); }
-          to   { opacity: 1; transform: scaleX(1)   scaleY(1); }
+          from { opacity: 0; transform: scale(.78) translateY(8px); }
+          to   { opacity: 1; transform: scale(1)   translateY(0); }
         }
         /* 离场：scaleX 由 1 收回 0.18 + 整体向下偏移 8px + 淡出。
            forwards 让最终帧（opacity:0、scaleX:.18）保持到组件被卸载。 */

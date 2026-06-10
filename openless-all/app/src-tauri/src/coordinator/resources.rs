@@ -237,3 +237,40 @@ pub(super) fn stop_recorder_if_pending_start_stop(inner: &Arc<Inner>) {
         log::info!("[coord] stopped recorder while ASR is still connecting");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    // issue #609 F-05：给零覆盖的纯函数补单测。take_session_resource 是 session_id
+    // 守卫的核心——只在 id 匹配时取走资源，避免 stale session 的资源被错误复用。
+    use super::{take_session_resource, SessionResource};
+    use uuid::Uuid;
+
+    fn sid(n: u128) -> Uuid {
+        Uuid::from_u128(n)
+    }
+
+    #[test]
+    fn take_session_resource_returns_resource_on_id_match() {
+        let id = sid(1);
+        let mut slot = Some(SessionResource::new(id, "payload"));
+        let taken = take_session_resource(&mut slot, id);
+        assert_eq!(taken, Some("payload"));
+        // 取走后槽位应为空。
+        assert!(slot.is_none());
+    }
+
+    #[test]
+    fn take_session_resource_keeps_resource_on_id_mismatch() {
+        let mut slot = Some(SessionResource::new(sid(1), "payload"));
+        let taken = take_session_resource(&mut slot, sid(2));
+        assert_eq!(taken, None, "id 不匹配不应取走（stale session 守卫）");
+        // 资源仍在槽里，留给真正的 owner。
+        assert!(slot.is_some());
+    }
+
+    #[test]
+    fn take_session_resource_empty_slot_returns_none() {
+        let mut slot: Option<SessionResource<&str>> = None;
+        assert_eq!(take_session_resource(&mut slot, sid(1)), None);
+    }
+}

@@ -10,7 +10,7 @@ interface SegSimpleProps {
 export function SegSimple({ options, active }: SegSimpleProps) {
   const [v, setV] = useState(active);
   return (
-    <div style={{ display: 'inline-flex', padding: 2, borderRadius: 8, background: 'var(--ol-segmented-bg)' }}>
+    <div style={{ display: 'inline-flex', padding: 2, borderRadius: 8, background: 'rgba(0,0,0,0.05)' }}>
       {options.map((o) => (
         <button
           key={o}
@@ -18,9 +18,9 @@ export function SegSimple({ options, active }: SegSimpleProps) {
           style={{
             padding: '5px 12px', fontSize: 12, fontWeight: 500, border: 0, borderRadius: 6,
             fontFamily: 'inherit',
-            background: v === o ? 'var(--ol-segmented-active-bg)' : 'transparent',
+            background: v === o ? '#fff' : 'transparent',
             color: v === o ? 'var(--ol-ink)' : 'var(--ol-ink-3)',
-            boxShadow: v === o ? 'var(--ol-segmented-active-shadow)' : 'none',
+            boxShadow: v === o ? '0 1px 2px rgba(0,0,0,.08)' : 'none',
             cursor: 'default',
           }}
         >

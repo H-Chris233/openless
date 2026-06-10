@@ -15,39 +15,16 @@ interface PageHeaderProps {
 
 export function PageHeader({ kicker, title, desc, right, titleRight }: PageHeaderProps) {
   return (
-    <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 24, marginBottom: 28 }}>
+    <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 24, marginBottom: 24 }}>
       <div style={{ minWidth: 0 }}>
         {kicker && (
-          <div
-            style={{
-              fontSize: 11,
-              fontWeight: 600,
-              letterSpacing: '.14em',
-              textTransform: 'uppercase',
-              color: 'var(--ol-ink-4)',
-              marginBottom: 10,
-              fontFamily: 'var(--ol-font-mono)',
-            }}
-          >
-            {kicker}
-          </div>
+          <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: '.08em', textTransform: 'uppercase', color: 'var(--ol-ink-4)', marginBottom: 8 }}>{kicker}</div>
         )}
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-          <h1
-            style={{
-              margin: 0,
-              fontSize: 34,
-              fontWeight: 600,
-              letterSpacing: '-0.04em',
-              color: 'var(--ol-ink)',
-              fontFamily: 'var(--ol-font-display)',
-            }}
-          >
-            {title}
-          </h1>
+          <h1 style={{ margin: 0, fontSize: 26, fontWeight: 600, letterSpacing: '-0.02em', color: 'var(--ol-ink)' }}>{title}</h1>
           {titleRight}
         </div>
-        {desc && <p style={{ margin: '10px 0 0', fontSize: 13.5, color: 'var(--ol-ink-3)', maxWidth: 680, lineHeight: 1.6 }}>{desc}</p>}
+        {desc && <p style={{ margin: '8px 0 0', fontSize: 13, color: 'var(--ol-ink-3)', maxWidth: 640, lineHeight: 1.55 }}>{desc}</p>}
       </div>
       {right}
     </div>
@@ -65,15 +42,15 @@ interface CardProps {
 export function Card({ children, style, padding = 18, glassy = false, className }: CardProps) {
   return (
     <div
-      className={['ol-aura-card', className].filter(Boolean).join(' ')}
+      className={className}
       style={{
-        background: glassy ? 'var(--ol-panel-bg)' : 'var(--ol-card-bg)',
-        backdropFilter: glassy ? 'blur(var(--ol-aura-glass-blur)) saturate(150%)' : undefined,
-        WebkitBackdropFilter: glassy ? 'blur(var(--ol-aura-glass-blur)) saturate(150%)' : undefined,
-        border: `1px solid ${glassy ? 'var(--ol-panel-border)' : 'var(--ol-card-border)'}`,
-        borderRadius: 'var(--ol-card-radius)',
+        background: glassy ? 'rgba(255,255,255,0.55)' : 'var(--ol-surface)',
+        backdropFilter: glassy ? 'blur(20px) saturate(160%)' : undefined,
+        WebkitBackdropFilter: glassy ? 'blur(20px) saturate(160%)' : undefined,
+        border: '0.5px solid var(--ol-line)',
+        borderRadius: 'var(--ol-r-lg)',
         padding,
-        boxShadow: glassy ? 'var(--ol-panel-shadow)' : 'var(--ol-card-shadow)',
+        boxShadow: 'var(--ol-shadow-sm)',
         ...style,
       }}
     >
@@ -94,16 +71,16 @@ interface PillProps {
 
 export function Pill({ children, tone = 'default', size = 'md', style }: PillProps) {
   const tones: Record<PillTone, { bg: string; color: string; bd: string }> = {
-    default: { bg: 'var(--ol-pill-bg)',      color: 'var(--ol-ink-2)',     bd: 'var(--ol-pill-border)' },
-    blue:    { bg: 'var(--ol-pill-blue-bg)', color: 'var(--ol-blue)',      bd: 'var(--ol-pill-blue-border)' },
-    ok:      { bg: 'var(--ol-pill-ok-bg)',   color: 'var(--ol-ok)',        bd: 'var(--ol-pill-ok-border)' },
-    outline: { bg: 'var(--ol-pill-bg)',      color: 'var(--ol-ink-3)',     bd: 'var(--ol-pill-border)' },
-    dark:    { bg: 'var(--ol-pill-dark-bg)', color: 'var(--ol-on-accent)', bd: 'var(--ol-pill-dark-border)' },
+    default: { bg: 'rgba(0,0,0,0.05)',   color: 'var(--ol-ink-2)',  bd: 'transparent' },
+    blue:    { bg: 'var(--ol-blue-soft)',color: 'var(--ol-blue)',   bd: 'transparent' },
+    ok:      { bg: 'var(--ol-ok-soft)',  color: 'var(--ol-ok)',     bd: 'transparent' },
+    outline: { bg: 'transparent',        color: 'var(--ol-ink-3)',  bd: 'var(--ol-line-strong)' },
+    dark:    { bg: 'var(--ol-ink)',      color: '#fff',             bd: 'transparent' },
   };
   const t = tones[tone];
   const sz = size === 'sm'
-    ? { padding: '3px 10px', fontSize: 11 }
-    : { padding: '5px 12px', fontSize: 11.5 };
+    ? { padding: '2px 8px', fontSize: 10.5 }
+    : { padding: '4px 10px', fontSize: 11.5 };
   return (
     <span
       style={{
@@ -111,13 +88,8 @@ export function Pill({ children, tone = 'default', size = 'md', style }: PillPro
         borderRadius: 999,
         background: t.bg,
         color: t.color,
-        border: `1px solid ${t.bd}`,
-        boxShadow: tone === 'dark' ? 'var(--ol-pill-dark-shadow)' : 'var(--ol-pill-shadow)',
-        backdropFilter: 'blur(16px) saturate(145%)',
-        WebkitBackdropFilter: 'blur(16px) saturate(145%)',
-        fontWeight: 600,
-        letterSpacing: '.01em',
-        lineHeight: 1.2,
+        border: t.bd === 'transparent' ? '0.5px solid transparent' : `0.5px solid ${t.bd}`,
+        fontWeight: 500,
         whiteSpace: 'nowrap',
         flexShrink: 0,
         ...sz,
@@ -144,10 +116,10 @@ interface BtnProps {
 
 export function Btn({ children, variant = 'ghost', size = 'md', icon, style, onClick, disabled = false }: BtnProps) {
   const variants: Record<BtnVariant, { bg: string; color: string; bd: string; sh: string }> = {
-    primary: { bg: 'linear-gradient(180deg, #141821, #0d1016)', color: 'var(--ol-on-accent)', bd: 'transparent', sh: '0 14px 32px -22px rgba(15,23,42,0.55)' },
-    blue:    { bg: 'linear-gradient(180deg, var(--ol-blue), var(--ol-blue-hover))', color: 'var(--ol-on-accent)', bd: 'transparent', sh: '0 14px 32px -22px rgba(37,99,235,.45)' },
-    ghost:   { bg: 'var(--ol-control-muted)', color: 'var(--ol-ink-2)', bd: 'var(--ol-control-border)', sh: 'var(--ol-control-shadow)' },
-    soft:    { bg: 'var(--ol-control-muted-strong)', color: 'var(--ol-ink-2)', bd: 'transparent', sh: 'var(--ol-control-shadow)' },
+    primary: { bg: 'var(--ol-ink)',     color: '#fff',                bd: 'transparent', sh: '0 1px 2px rgba(0,0,0,.08)' },
+    blue:    { bg: 'var(--ol-blue)',    color: '#fff',                bd: 'transparent', sh: '0 1px 2px rgba(37,99,235,.18)' },
+    ghost:   { bg: 'transparent',       color: 'var(--ol-ink-2)',     bd: 'var(--ol-line-strong)', sh: 'none' },
+    soft:    { bg: 'rgba(0,0,0,0.04)',  color: 'var(--ol-ink-2)',     bd: 'transparent', sh: 'none' },
   };
   const v = variants[variant];
   const sizes: Record<BtnSize, { padding: string; fontSize: number }> = {
@@ -162,7 +134,7 @@ export function Btn({ children, variant = 'ghost', size = 'md', icon, style, onC
         display: 'inline-flex', alignItems: 'center', gap: 6,
         background: v.bg, color: v.color,
         border: v.bd === 'transparent' ? '0.5px solid transparent' : `0.5px solid ${v.bd}`,
-        borderRadius: 999,
+        borderRadius: 8,
         boxShadow: v.sh,
         fontFamily: 'inherit', fontWeight: 500,
         cursor: disabled ? 'not-allowed' : 'pointer',

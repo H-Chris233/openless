@@ -35,7 +35,7 @@ export function MarketplaceModal({ onClose }: MarketplaceModalProps) {
       onClick={onClose}
       style={{
         position: 'absolute', inset: 0,
-        background: 'var(--ol-overlay-bg)',
+        background: 'rgba(15,17,22,0.32)',
         backdropFilter: 'blur(8px) saturate(140%)',
         WebkitBackdropFilter: 'blur(8px) saturate(140%)',
         display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -48,10 +48,10 @@ export function MarketplaceModal({ onClose }: MarketplaceModalProps) {
         onClick={(e) => e.stopPropagation()}
         style={{
           width: '100%', maxWidth: 1080, height: '100%', maxHeight: 720,
-          background: 'var(--ol-style-editor-bg)',
-          borderRadius: 24,
-          border: '1px solid var(--ol-style-editor-border)',
-          boxShadow: 'var(--ol-style-editor-shadow)',
+          background: 'var(--ol-surface)',
+          borderRadius: 14,
+          border: '0.5px solid rgba(0,0,0,.08)',
+          boxShadow: '0 30px 80px -20px rgba(15,17,22,.35), 0 0 0 0.5px rgba(0,0,0,.06)',
           overflow: 'hidden',
           position: 'relative',
           display: 'flex', flexDirection: 'column',
@@ -71,12 +71,12 @@ export function MarketplaceModal({ onClose }: MarketplaceModalProps) {
             style={{
               display: 'inline-flex', alignItems: 'center', gap: 6,
               padding: '4px 10px', borderRadius: 999,
-              border: loggedIn ? '1px solid var(--ol-style-subtle-border)' : '1px solid rgba(239,68,68,0.32)',
-              background: loggedIn ? 'var(--ol-style-subtle-bg)' : 'rgba(239,68,68,0.10)',
+              border: loggedIn ? '0.5px solid var(--ol-line)' : '0.5px solid rgba(239,68,68,0.32)',
+              background: loggedIn ? 'rgba(255,255,255,0.85)' : 'rgba(239,68,68,0.08)',
               color: loggedIn ? 'var(--ol-ink-2)' : 'var(--ol-red, #ef4444)',
               fontSize: 11.5, fontWeight: 500,
               cursor: 'default',
-              boxShadow: 'var(--ol-style-subtle-shadow)',
+              boxShadow: '0 1px 2px rgba(15,17,22,0.05)',
               backdropFilter: 'blur(8px) saturate(140%)',
               WebkitBackdropFilter: 'blur(8px) saturate(140%)',
             }}
@@ -91,23 +91,23 @@ export function MarketplaceModal({ onClose }: MarketplaceModalProps) {
           style={{
             position: 'absolute', top: 16, right: 16, zIndex: 3,
             width: 32, height: 32,
-            border: '1px solid var(--ol-style-subtle-border)',
+            border: '0.5px solid var(--ol-line)',
             borderRadius: 8,
-            background: 'var(--ol-style-subtle-bg)',
+            background: 'rgba(255,255,255,0.85)',
             color: 'var(--ol-ink-2)',
             display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
             cursor: 'default',
-            boxShadow: 'var(--ol-style-subtle-shadow)',
+            boxShadow: '0 1px 2px rgba(15,17,22,0.05)',
             backdropFilter: 'blur(8px) saturate(140%)',
             WebkitBackdropFilter: 'blur(8px) saturate(140%)',
             transition: 'background 0.16s var(--ol-motion-quick), color 0.16s var(--ol-motion-quick)',
           }}
           onMouseEnter={(e) => {
-            (e.currentTarget as HTMLButtonElement).style.background = 'var(--ol-control-solid)';
+            (e.currentTarget as HTMLButtonElement).style.background = 'var(--ol-surface)';
             (e.currentTarget as HTMLButtonElement).style.color = 'var(--ol-ink)';
           }}
           onMouseLeave={(e) => {
-            (e.currentTarget as HTMLButtonElement).style.background = 'var(--ol-style-subtle-bg)';
+            (e.currentTarget as HTMLButtonElement).style.background = 'rgba(255,255,255,0.85)';
             (e.currentTarget as HTMLButtonElement).style.color = 'var(--ol-ink-2)';
           }}
           aria-label={t('common.close')}
