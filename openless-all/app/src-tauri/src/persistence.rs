@@ -1411,6 +1411,20 @@ impl HistoryStore {
         self.write_locked(&sessions)
     }
 
+    /// 原地替换 id 匹配的历史条目（保持原位置）。用于「重新转录」成功后回写
+    /// rawTranscript / finalText / error_code（issue #613）。找不到对应 id 时返回
+    /// `Ok(false)`，调用方据此提示「历史条目已不存在」。
+    pub fn update_entry(&self, updated: DictationSession) -> Result<bool> {
+        let _guard = self.lock.lock();
+        let mut sessions = self.read_locked()?;
+        let Some(slot) = sessions.iter_mut().find(|s| s.id == updated.id) else {
+            return Ok(false);
+        };
+        *slot = updated;
+        self.write_locked(&sessions)?;
+        Ok(true)
+    }
+
     pub fn clear(&self) -> Result<()> {
         let _guard = self.lock.lock();
         self.write_locked(&Vec::<DictationSession>::new())

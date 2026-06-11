@@ -46,6 +46,7 @@ pub(crate) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                 Ok(Ok(r)) => r,
                 Ok(Err(e)) => {
                     log::error!("[coord] await final failed: {e}");
+                    write_transcribe_failed_history(inner, current_session_id, elapsed);
                     emit_capsule(
                         inner,
                         CapsuleState::Error,
@@ -67,6 +68,7 @@ pub(crate) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                     );
                     // 清理 ASR session，避免资源泄漏
                     asr.cancel();
+                    write_transcribe_failed_history(inner, current_session_id, elapsed);
                     emit_capsule(
                         inner,
                         CapsuleState::Error,
@@ -90,6 +92,7 @@ pub(crate) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                 Ok(Ok(r)) => r,
                 Ok(Err(e)) => {
                     log::error!("[coord] whisper transcribe failed: {e}");
+                    write_transcribe_failed_history(inner, current_session_id, elapsed);
                     emit_capsule(
                         inner,
                         CapsuleState::Error,
@@ -108,6 +111,7 @@ pub(crate) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                         "[coord] whisper 全局超时 {} 秒",
                         COORDINATOR_GLOBAL_TIMEOUT_SECS
                     );
+                    write_transcribe_failed_history(inner, current_session_id, elapsed);
                     emit_capsule(
                         inner,
                         CapsuleState::Error,
@@ -130,6 +134,7 @@ pub(crate) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                 Ok(Ok(r)) => r,
                 Ok(Err(e)) => {
                     log::error!("[coord] MiMo ASR transcribe failed: {e}");
+                    write_transcribe_failed_history(inner, current_session_id, elapsed);
                     emit_capsule(
                         inner,
                         CapsuleState::Error,
@@ -148,6 +153,7 @@ pub(crate) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                         "[coord] MiMo ASR 全局超时 {} 秒",
                         COORDINATOR_GLOBAL_TIMEOUT_SECS
                     );
+                    write_transcribe_failed_history(inner, current_session_id, elapsed);
                     emit_capsule(
                         inner,
                         CapsuleState::Error,
@@ -173,6 +179,7 @@ pub(crate) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                 Ok(Ok(r)) => r,
                 Ok(Err(e)) => {
                     log::error!("[coord] Bailian await final failed: {e}");
+                    write_transcribe_failed_history(inner, current_session_id, elapsed);
                     emit_capsule(
                         inner,
                         CapsuleState::Error,
@@ -192,6 +199,7 @@ pub(crate) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                         COORDINATOR_GLOBAL_TIMEOUT_SECS
                     );
                     asr.cancel();
+                    write_transcribe_failed_history(inner, current_session_id, elapsed);
                     emit_capsule(
                         inner,
                         CapsuleState::Error,
@@ -239,6 +247,7 @@ pub(crate) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                         inner,
                         AsrReleaseSession::Dictation(current_session_id),
                     );
+                    write_transcribe_failed_history(inner, current_session_id, elapsed);
                     emit_capsule(
                         inner,
                         CapsuleState::Error,
@@ -288,6 +297,7 @@ pub(crate) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                         inner,
                         AsrReleaseSession::Dictation(current_session_id),
                     );
+                    write_transcribe_failed_history(inner, current_session_id, elapsed);
                     emit_capsule(
                         inner,
                         CapsuleState::Error,
@@ -325,6 +335,7 @@ pub(crate) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                 Ok(Ok(r)) => r,
                 Ok(Err(e)) => {
                     log::error!("[coord] local Qwen3-ASR transcribe failed: {e:#}");
+                    write_transcribe_failed_history(inner, current_session_id, elapsed);
                     emit_capsule(
                         inner,
                         CapsuleState::Error,
@@ -344,6 +355,7 @@ pub(crate) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                         timeout_duration.as_secs(),
                         audio_secs
                     );
+                    write_transcribe_failed_history(inner, current_session_id, elapsed);
                     emit_capsule(
                         inner,
                         CapsuleState::Error,
@@ -783,4 +795,44 @@ pub(crate) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
     schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
 
     Ok(())
+}
+
+/// ASR 转录失败时，若本次录音已成功归档到 `recordings/<session_id>.wav`，写一条
+/// `transcribeFailed` 历史记录，让用户能在历史页回放原始录音并「重新转录」（issue #613）。
+///
+/// 关键：history id 用 coordinator 的 `session_id`（而非新 UUID），与 recorder
+/// 旁路写盘的 wav 文件名对齐 —— 这样前端凭 id 就能找到录音，否则播放/重转会 404。
+///
+/// 未归档录音时（用户没开「保留原始录音」或写盘失败）不写历史：没有可回放/重转的
+/// 内容，写一条空壳记录反而污染历史。沿用 empty-transcript 分支「以实际归档状态为准」
+/// 的语义。
+fn write_transcribe_failed_history(inner: &Arc<Inner>, session_id: SessionId, duration_ms: u64) {
+    if !inner.audio_archive_active.load(Ordering::Relaxed) {
+        return;
+    }
+    let prefs_snapshot = inner.prefs.get();
+    let session = DictationSession {
+        id: session_id.to_string(),
+        created_at: Utc::now().to_rfc3339(),
+        raw_transcript: String::new(),
+        final_text: String::new(),
+        mode: prefs_snapshot.default_mode,
+        style_pack_id: None,
+        translation_active: false,
+        polish_source: None,
+        app_bundle_id: None,
+        app_name: None,
+        insert_status: InsertStatus::Failed,
+        error_code: Some("transcribeFailed".to_string()),
+        duration_ms: Some(duration_ms),
+        dictionary_entry_count: None,
+        has_audio_recording: Some(true),
+    };
+    if let Err(e) = inner.history.append_with_retention(
+        session,
+        prefs_snapshot.history_retention_days,
+        prefs_snapshot.history_max_entries,
+    ) {
+        log::error!("[coord] transcribeFailed history append failed: {e}");
+    }
 }

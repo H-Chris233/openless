@@ -48,3 +48,63 @@ pub async fn read_audio_recording(session_id: String) -> Result<Vec<u8>, String>
         }
     })
 }
+
+/// 对一条「转录失败」历史条目的归档录音用**当前** ASR provider 重新转录（issue #613）。
+///
+/// 流程：读 `recordings/<id>.wav` → 取 PCM（跳过 44 字节 WAV 头）→ 现 provider 重转
+/// → 成功则原地回写该条历史的 rawTranscript / finalText、清除 error_code，返回新文本。
+///
+/// 仅做 ASR，不自动二次润色（润色依赖 LLM 凭据且 issue 标为待定，留作后续）。失败时
+/// 不动历史、不删录音，把错误返回给前端提示，用户可重试。返回更新后的整条记录给前端
+/// 局部刷新。
+#[tauri::command]
+pub async fn retranscribe_recording(
+    coord: CoordinatorState<'_>,
+    session_id: String,
+) -> Result<DictationSession, String> {
+    if !is_valid_session_id(&session_id) {
+        return Err("invalid session id".into());
+    }
+    let path =
+        crate::persistence::recording_path_for_session(&session_id).map_err(|e| e.to_string())?;
+    let wav = tokio::fs::read(&path).await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            "recording not found".into()
+        } else {
+            format!("read wav failed: {e}")
+        }
+    })?;
+    // 归档 wav 是 16k/mono/16-bit、固定 44 字节标准头（见 asr::wav::encode_wav_16k_mono）。
+    if wav.len() <= 44 {
+        return Err("recording is empty or corrupt".into());
+    }
+    let pcm = wav[44..].to_vec();
+
+    let text = coord.retranscribe_pcm(pcm).await?;
+    if text.trim().is_empty() {
+        return Err("重新转录仍未识别到语音".into());
+    }
+
+    // 找到原条目，保留其它字段，只更新转写结果 + 清错误码。
+    let mut entry = coord
+        .history()
+        .list()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|s| s.id == session_id)
+        .ok_or_else(|| "history entry not found".to_string())?;
+    // 只更新转写结果并清除失败标记。insert_status 保持原值（重新转录不向光标落字，
+    // 没有可表达「已转写未落字」的状态，清掉 error_code 即足以标记不再是失败条目）。
+    entry.raw_transcript = text.clone();
+    entry.final_text = text;
+    entry.error_code = None;
+
+    let updated = coord
+        .history()
+        .update_entry(entry.clone())
+        .map_err(|e| e.to_string())?;
+    if !updated {
+        return Err("history entry not found".into());
+    }
+    Ok(entry)
+}

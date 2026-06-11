@@ -6,7 +6,7 @@ import { useTranslation } from 'react-i18next';
 import { Icon } from '../components/Icon';
 import { detectOS } from '../components/WindowChrome';
 import { formatComboLabel } from '../lib/hotkey';
-import { clearHistory, deleteHistoryEntry, listHistory, readAudioRecording } from '../lib/ipc';
+import { clearHistory, deleteHistoryEntry, listHistory, readAudioRecording, retranscribeRecording } from '../lib/ipc';
 import type { DictationSession, PolishMode } from '../lib/types';
 import { useHotkeySettings } from '../state/HotkeySettingsContext';
 import { Btn, Card, PageHeader, Pill } from './_atoms';
@@ -47,6 +47,8 @@ export function History() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [justCopied, setJustCopied] = useState(false);
+  // issue #613：「重新转录」进行中的条目 id（按钮转 loading、防重复点击）。
+  const [retranscribingId, setRetranscribingId] = useState<string | null>(null);
   // 录音文件 lazily-detected missing 状态：retention / 条数 cap 清理后磁盘上 wav
   // 可能已被删，但 history 条目 hasAudioRecording 仍写 true。任一组件
   // （播放 / 导出）首次 IPC 拿到 'recording not found' 时把 id 加进来，
@@ -185,6 +187,28 @@ export function History() {
     }
   };
 
+  // issue #613：对失败条目的归档录音用当前 provider 重新转录，成功后局部刷新该条。
+  const onRetranscribe = async () => {
+    if (!item || retranscribingId) return;
+    const targetId = item.id;
+    setRetranscribingId(targetId);
+    setActionError(null);
+    try {
+      const updated = await retranscribeRecording(targetId);
+      setItems(prev => prev.map(s => (s.id === targetId ? updated : s)));
+    } catch (error) {
+      console.error('[history] failed to retranscribe recording', error);
+      const msg = errorMessage(error);
+      // wav 已被清理：隐藏录音相关操作，不当作用户错误。
+      if (msg.includes('recording not found') || msg.includes('not found')) {
+        markAudioMissing(targetId);
+      }
+      setActionError(t('history.retranscribeFailed', { err: msg }));
+    } finally {
+      setRetranscribingId(null);
+    }
+  };
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <PageHeader
@@ -303,6 +327,18 @@ export function History() {
                 </div>
                 <div style={{ display: 'flex', gap: 6 }}>
                   <Btn icon={justCopied ? 'check' : 'copy'} variant="ghost" size="sm" onClick={() => void onCopy()}>{justCopied ? t('common.copied') : t('common.copy')}</Btn>
+                  {/* issue #613：失败条目（有错误码）且录音仍在时，提供「重新转录」。 */}
+                  {item.errorCode && item.hasAudioRecording && !audioMissingIds.has(item.id) && (
+                    <Btn
+                      icon="refresh"
+                      variant="ghost"
+                      size="sm"
+                      disabled={retranscribingId === item.id}
+                      onClick={() => void onRetranscribe()}
+                    >
+                      {retranscribingId === item.id ? t('history.retranscribing') : t('history.retranscribe')}
+                    </Btn>
+                  )}
                   {item.hasAudioRecording && !audioMissingIds.has(item.id) && (
                     <Btn icon="download" variant="ghost" size="sm" onClick={() => void onExportAudio()}>{t('history.exportRecording')}</Btn>
                   )}

@@ -706,6 +706,17 @@ export function readAudioRecording(sessionId: string): Promise<Uint8Array> {
     })
 }
 
+/** 用当前 ASR provider 对一条「转录失败」历史条目的归档录音重新转录（issue #613）。
+ *  成功时后端原地回写该条历史的 rawTranscript / finalText 并清除错误码，返回更新后的整条记录。
+ *  失败时抛出错误（如「重新转录仍未识别到语音」/「recording not found」），录音保留不丢。 */
+export function retranscribeRecording(sessionId: string): Promise<DictationSession> {
+    return invokeOrMock(
+        "retranscribe_recording",
+        { sessionId },
+        () => mockHistory[0],
+    ) as Promise<DictationSession>
+}
+
 // ── Vocab ──────────────────────────────────────────────────────────────
 export function listVocab(): Promise<DictionaryEntry[]> {
     return invokeOrMock("list_vocab", undefined, () => mockVocab)
