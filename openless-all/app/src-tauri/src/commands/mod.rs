@@ -66,6 +66,7 @@ mod misc;
 mod permissions_cmds;
 mod providers;
 mod qa;
+mod remote_input;
 mod settings;
 mod sherpa_asr;
 mod style_packs;
@@ -83,6 +84,7 @@ pub use misc::*;
 pub use permissions_cmds::*;
 pub use providers::*;
 pub use qa::*;
+pub use remote_input::*;
 pub use settings::*;
 // sherpa_onnx_asr_* 命令整组 `#[cfg(target_os = "windows")]`（见 lib.rs 的
 // generate_handler! 清单）。非 Windows 平台这组 glob 重导出无人引用，会触发

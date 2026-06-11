@@ -18,13 +18,36 @@ pub(crate) fn request_stop_during_starting(inner: &Arc<Inner>, reason: &str) {
 }
 
 pub(crate) async fn begin_session(inner: &Arc<Inner>) -> Result<(), String> {
+    begin_session_with_source(inner, false).await
+}
+
+/// 远程会话被拒（busy）时的错误值。remote_server 据此给手机回 busy 提示；
+/// start_remote_dictation 据此区分「未置位无需回滚」与「置位后失败需回滚」。
+pub(crate) const REMOTE_BUSY: &str = "busy";
+
+/// `remote=true`：busy 时返回 `Err(REMOTE_BUSY)`（手机需要回执，不能像本地热键
+/// 那样静默吞掉）；并且 `remote_source_active` 的置位发生在 Idle→Starting 转移的
+/// **同一临界区**内。之前是「预检查 → 锁外置位 → begin_session」三段式，本地热键
+/// 会话在窗口内抢先启动会读到残留的远程标志，被劫持进远程分支（不开麦克风、
+/// 听写全文经 remote:result 泄给手机）。
+pub(crate) async fn begin_session_with_source(
+    inner: &Arc<Inner>,
+    remote: bool,
+) -> Result<(), String> {
     let current_session_id = {
         let mut state = inner.state.lock();
         let Some(session_id) =
             begin_session_state(&mut state, capture_focus_target(), capture_frontmost_app())
         else {
-            return Ok(());
+            return if remote {
+                Err(REMOTE_BUSY.into())
+            } else {
+                Ok(())
+            };
         };
+        if remote {
+            inner.remote_source_active.store(true, Ordering::SeqCst);
+        }
         if let Some(label) = state.front_app.as_deref() {
             log::info!("[coord] front_app captured: {label}");
         }
@@ -66,20 +89,27 @@ pub(crate) async fn begin_session(inner: &Arc<Inner>) -> Result<(), String> {
 
     let active_asr = CredentialsVault::get_active_asr();
 
-    if let Err(message) = ensure_microphone_permission(inner) {
-        log::warn!("[coord] microphone permission gate failed: {message}");
-        emit_capsule(
-            inner,
-            CapsuleState::Error,
-            0.0,
-            0,
-            Some(message.clone()),
-            None,
-        );
-        restore_prepared_windows_ime_session(inner, current_session_id);
-        inner.state.lock().phase = SessionPhase::Idle;
-        schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-        return Err(message);
+    // 远程输入的音频来自手机，电脑不开本地麦克风，跳过电脑麦克风权限闸门
+    // （否则电脑麦克风为 Denied 时会把远程会话也挡住）。
+    if !inner
+        .remote_source_active
+        .load(std::sync::atomic::Ordering::Relaxed)
+    {
+        if let Err(message) = ensure_microphone_permission(inner) {
+            log::warn!("[coord] microphone permission gate failed: {message}");
+            emit_capsule(
+                inner,
+                CapsuleState::Error,
+                0.0,
+                0,
+                Some(message.clone()),
+                None,
+            );
+            restore_prepared_windows_ime_session(inner, current_session_id);
+            inner.state.lock().phase = SessionPhase::Idle;
+            schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
+            return Err(message);
+        }
     }
 
     // 不在这里 emit Recording capsule —— 让 start_recorder_for_starting 在
@@ -408,6 +438,22 @@ pub(crate) async fn start_recorder_for_starting(
     active_asr: &str,
     consumer: Arc<dyn crate::recorder::AudioConsumer>,
 ) -> Result<(), String> {
+    // 远程输入：不开本地 cpal，把组装好的 consumer 交给 WS server 喂手机 PCM。
+    // 其余（Starting→Listening、pending_stop、cancel race、end_session 收尾）与本地
+    // 听写完全一致。详见 Coordinator::start_remote_dictation。
+    if inner
+        .remote_source_active
+        .load(std::sync::atomic::Ordering::Relaxed)
+    {
+        *inner.remote_audio_sink.lock() = Some(Arc::clone(&consumer));
+        inner
+            .audio_archive_active
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        emit_capsule(inner, CapsuleState::Recording, 0.0, 0, None, None);
+        log::info!("[coord] remote audio source active (asr={active_asr}, session={session_id})");
+        return Ok(());
+    }
+
     let inner_for_level = Arc::clone(inner);
     // 节流：电平回调本身约 185 Hz（cpal 默认音频块），全部转发到前端会让 CSS
     // transition 互相覆盖、视觉上"被平均"成静止。限制为 ~30 Hz（33ms 最少间隔），
@@ -608,6 +654,7 @@ pub(crate) async fn finish_starting_session(inner: &Arc<Inner>, session_id: Sess
             log::info!("[coord] session started");
             if matches!(outcome, BeginOutcome::PendingStop) {
                 log::info!("[coord] applying pending_stop edge → end_session immediately");
+                // 远程标志的清理由 end_session 内的 RemoteFlagsJanitor 统一兜底。
                 let _ = end_session(inner).await;
             }
         }
@@ -650,6 +697,9 @@ pub(crate) fn cancel_session(inner: &Arc<Inner>) {
 
     stop_recorder_for_session(inner, decision.session_id);
     cancel_asr_for_session(inner, decision.session_id);
+    // 远程会话被取消（含本地 Esc / 错误路径触发的 cancel）时同步清远程标志，
+    // 避免 remote_source_active 残留把下一次本地听写错引到远程分支。
+    clear_remote_source_flags(inner);
     restore_prepared_windows_ime_session(inner, decision.session_id);
     // Processing 阶段保持 phase=Processing 让 end_session 自己走完检查 + 收尾；
     // 其他阶段直接转 Idle。

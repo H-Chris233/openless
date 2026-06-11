@@ -338,6 +338,14 @@ export interface UserPreferences {
   marketplaceBaseUrl: string;
   /** Marketplace dev-mode 模拟登录用户名（GitHub login 风格）。生产换 OAuth token 后此字段废弃。 */
   marketplaceDevLogin: string;
+  /** 是否启用远程输入（局域网手机录音）HTTPS+WS 服务。默认 false。 */
+  remoteInputEnabled: boolean;
+  /** 远程输入服务监听端口（HTTPS）。默认 8443。 */
+  remoteInputPort: number;
+  /** 远程输入配对码（6 位数字）。空 = server 首次启动时随机生成。 */
+  remoteInputPin: string;
+  /** 手机录音页默认交互方式：'toggle'（点击切换）/ 'hold'（按住说话）。 */
+  remoteInputDefaultMode: 'toggle' | 'hold';
 }
 
 export interface MarketplaceListItem {

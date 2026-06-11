@@ -35,6 +35,7 @@ mod persistence;
 mod polish;
 mod qa_hotkey;
 mod recorder;
+mod remote_server;
 mod selection;
 mod shortcut_binding;
 mod types;
@@ -327,6 +328,8 @@ pub fn run() {
             let app_handle = app.handle().clone();
             coordinator.bind_app(app_handle);
             coordinator.start_hotkey_listener();
+            // 远程输入：按 prefs 启动局域网录音服务（未启用时为 no-op）。
+            coordinator.refresh_remote_server();
             // QA / custom combo hotkeys use `global-hotkey` (Carbon on macOS).
             // Start those after RunEvent::Ready, when the AppKit event loop is live.
             if std::env::var("OPENLESS_SHOW_MAIN_ON_START").ok().as_deref() == Some("1") {
@@ -347,6 +350,10 @@ pub fn run() {
             commands::get_settings,
             commands::get_default_style_system_prompts,
             commands::set_settings,
+            commands::get_remote_input_status,
+            commands::list_local_ips,
+            commands::regenerate_remote_pin,
+            commands::set_remote_locale,
             commands::get_update_channel,
             commands::set_update_channel,
             commands::fetch_latest_beta_release,

@@ -9,7 +9,7 @@
 //! insertion, persists history, emits `capsule:state` events to the capsule
 //! window.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Instant;
@@ -248,6 +248,29 @@ pub(crate) struct Inner {
     /// supervisor 线程，但 integration test 和未来 RunEvent::Exit 钩子需要这条
     /// 显式退出路径。审计 3.1.2。
     shutdown: AtomicBool,
+    // ── 远程输入（局域网手机录音）─────────────────────────────
+    /// true = 当前 begin_session 应跳过本地 cpal，改用手机经 WS 推来的 PCM。
+    /// 由 Coordinator::start_remote_dictation 在 begin_session 前置位。
+    remote_source_active: AtomicBool,
+    /// 远程会话的音频入口：begin_session 把组装好的 AudioConsumer 存这里，
+    /// WS server 收到手机 PCM 时取出 consume_pcm_chunk。等价于本地 cpal 喂 recorder。
+    remote_audio_sink: Mutex<Option<Arc<dyn crate::recorder::AudioConsumer>>>,
+    /// 远程输入 HTTPS+WS 服务句柄。None = 未启动。
+    remote_server: Mutex<Option<crate::remote_server::RemoteServerHandle>>,
+    /// refresh_remote_server 的代数：每次调用自增，spawn 出的任务持自己的代数，
+    /// 持锁后发现已有更新代排队则直接让位（连点开关/连改端口只跑最后一轮）。
+    remote_refresh_gen: AtomicU64,
+    /// 串行化「停旧 → 启新」全流程的异步锁。无串行化时两轮 refresh 可交错：
+    /// 后到者 take 到 None 跳过关停、去 bind 旧服务尚未释放的端口 → 误报 port-in-use。
+    remote_refresh_lock: tokio::sync::Mutex<()>,
+    /// 当前远程输入配对码（6 位数字）。进程内有效，不持久化（每次启动可轮换）。
+    remote_pin: Mutex<Option<String>>,
+    /// PC 端当前界面语言（BCP-47，如 "zh-CN"）。前端切换语言时经命令同步，
+    /// H5 录音页据此渲染对应语言。进程内镜像，不持久化（前端会在启动/切换时重新下发）。
+    remote_locale: Mutex<String>,
+    /// 远程「仅回传」开关：true = 手机端关掉了「电脑落字」，本次远程听写不插入到电脑光标,
+    /// 只把最终文字回传给手机（见 dictation 落字处 + remote:result）。默认 false（照常落字）。
+    remote_no_insert: AtomicBool,
     /// Less Computer 连续对话：true=浮窗里已有进行中的会话，下一轮 `claude --continue` 续上下文；
     /// 关闭浮窗（dismiss）复位为 false，下次说话开新会话。
     less_computer_conversation: AtomicBool,
@@ -323,6 +346,14 @@ impl Coordinator {
                     qa_stream_cancelled: Arc::new(AtomicBool::new(false)),
                     local_asr_cache: Arc::new(crate::asr::local::LocalAsrCache::new()),
                     shutdown: AtomicBool::new(false),
+                    remote_source_active: AtomicBool::new(false),
+                    remote_audio_sink: Mutex::new(None),
+                    remote_server: Mutex::new(None),
+                    remote_refresh_gen: AtomicU64::new(0),
+                    remote_refresh_lock: tokio::sync::Mutex::new(()),
+                    remote_pin: Mutex::new(None),
+                    remote_locale: Mutex::new(String::from("zh-CN")),
+                    remote_no_insert: AtomicBool::new(false),
                     less_computer_conversation: AtomicBool::new(false),
                 }),
             }
@@ -391,6 +422,14 @@ impl Coordinator {
                 foundry_local_runtime,
                 sherpa_onnx_runtime,
                 shutdown: AtomicBool::new(false),
+                remote_source_active: AtomicBool::new(false),
+                remote_audio_sink: Mutex::new(None),
+                remote_server: Mutex::new(None),
+                remote_refresh_gen: AtomicU64::new(0),
+                remote_refresh_lock: tokio::sync::Mutex::new(()),
+                remote_pin: Mutex::new(None),
+                remote_locale: Mutex::new(String::from("zh-CN")),
+                remote_no_insert: AtomicBool::new(false),
                 less_computer_conversation: AtomicBool::new(false),
             }),
         }
@@ -1024,6 +1063,201 @@ impl Coordinator {
         cancel_session(&self.inner);
     }
 
+    // ───────────────────────── 远程输入（局域网手机录音）─────────────────────────
+    // 把"远程输入"实现为一次普通听写会话，只是音频源换成手机经 WS 推来的 PCM：
+    // 完整复用 begin_session / end_session / cancel_session（一行不改）。本地与远程
+    // 共用 inner.state，天然互斥。详见 dictation::start_recorder_for_starting 的远程分支。
+
+    /// 手机点"开始录音"。本地听写正在进行（phase != Idle）则拒绝并回 "busy"；
+    /// 否则置位 remote 标志后走 begin_session（内部跳过 cpal，把 consumer 存进 sink）。
+    /// 设置远程「仅回传」开关（手机端「电脑落字」开关的反值）。true = 不落字、只回传。
+    pub fn set_remote_no_insert(&self, no_insert: bool) {
+        self.inner
+            .remote_no_insert
+            .store(no_insert, Ordering::SeqCst);
+    }
+
+    pub async fn start_remote_dictation(&self) -> Result<(), String> {
+        // busy 判定与 remote_source_active 置位都在 begin_session_with_source 的
+        // state 临界区内原子完成（与本地热键的 begin_session_state 同构）。之前是
+        // 锁外预检查 + 锁外置位，竞态输家会把残留标志泄给抢先启动的本地会话。
+        let r = begin_session_with_source(&self.inner, true).await;
+        if let Err(e) = &r {
+            // busy = 标志从未置位，不能清——清了会破坏正在进行的远程会话
+            // （手机重复点「开始」就会走到这里）。置位之后的失败（ASR 凭据等）才回滚。
+            if e != REMOTE_BUSY {
+                self.clear_remote_source();
+            }
+        }
+        r
+    }
+
+    /// WS 每收到一帧二进制 PCM 调一次。仅 Starting/Listening 阶段转发给已组装的
+    /// consumer（流式 ASR 的 DeferredAsrBridge 在 attach 前自缓冲，不丢早期音频）。
+    pub fn feed_remote_pcm(&self, pcm: &[u8]) {
+        {
+            let phase = self.inner.state.lock().phase;
+            if phase != SessionPhase::Listening && phase != SessionPhase::Starting {
+                return;
+            }
+        }
+        let sink = self.inner.remote_audio_sink.lock().clone();
+        if let Some(consumer) = sink {
+            consumer.consume_pcm_chunk(pcm);
+        }
+    }
+
+    /// 手机点"停止"。Starting 阶段记 pending_stop（等启动完成自动收尾）；否则走
+    /// end_session（转写→润色→光标落字，与本地一致）。
+    /// 远程标志的清理不在这里做：end_session 内的 RemoteFlagsJanitor 在会话真正
+    /// 回到 Idle 时统一清。这里清会在 double-stop（第二次调用对 Processing 中的
+    /// 在飞 end_session 早退后）把标志过早清掉——在飞调用读到 false 后，
+    /// 「仅回传」开关失效（文字落到 PC）且 remote:result 不再回传手机。
+    pub async fn stop_remote_dictation(&self) -> Result<(), String> {
+        // 守卫：当前会话不是远程发起的则忽略。否则手机的 stop 会终止 PC 用户
+        // 正在进行的本地听写（stop/cancel 方向没有 busy 那样的天然互斥）。
+        if !self.inner.remote_source_active.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        if self.inner.state.lock().phase == SessionPhase::Starting {
+            request_stop_during_starting(&self.inner, "remote stop");
+            return Ok(());
+        }
+        end_session(&self.inner).await
+    }
+
+    /// 手机断连 / 点取消：丢弃本次，不落字。
+    /// 手机锁屏/切后台/Wi-Fi 抖动都会触发 WS 断连进而走到这里——守卫确保只
+    /// 取消远程发起的会话，不误杀 PC 用户正在进行的本地听写。
+    pub fn cancel_remote_dictation(&self) {
+        if !self.inner.remote_source_active.load(Ordering::SeqCst) {
+            return;
+        }
+        cancel_session(&self.inner);
+        self.clear_remote_source();
+    }
+
+    fn clear_remote_source(&self) {
+        clear_remote_source_flags(&self.inner);
+    }
+
+    /// 当前远程输入运行态（供命令/前端查询）。
+    pub fn remote_input_status(&self) -> crate::remote_server::RemoteInputStatus {
+        let prefs = self.inner.prefs.get();
+        let handle = self.inner.remote_server.lock();
+        let running = handle.is_some();
+        let port = handle
+            .as_ref()
+            .map(|h| h.bound_port)
+            .unwrap_or(prefs.remote_input_port);
+        let pin = self.inner.remote_pin.lock().clone().unwrap_or_default();
+        let urls = if running {
+            crate::remote_server::access_urls(port)
+        } else {
+            Vec::new()
+        };
+        crate::remote_server::RemoteInputStatus {
+            running,
+            port,
+            pin,
+            urls,
+        }
+    }
+
+    /// 重新生成 6 位配对码并重启服务。
+    pub fn regenerate_remote_pin(self: &Arc<Self>) -> String {
+        let pin = crate::remote_server::generate_pin();
+        *self.inner.remote_pin.lock() = Some(pin.clone());
+        // 写盘持久化，否则下次启动会读回旧的持久化码、把这次重置覆盖掉。
+        if let Some(app) = self.inner.app.lock().clone() {
+            crate::remote_server::save_pin(&app, &pin);
+        }
+        self.refresh_remote_server();
+        pin
+    }
+
+    /// 同步 PC 端界面语言（前端切换语言时调用）。H5 录音页据此选择显示语言。
+    /// 仅接受受支持的白名单值，非法输入忽略（值会注入到 H5 的 lang，需防注入）。
+    pub fn set_remote_locale(&self, locale: String) {
+        const SUPPORTED: [&str; 5] = ["zh-CN", "zh-TW", "en", "ja", "ko"];
+        if SUPPORTED.contains(&locale.as_str()) {
+            *self.inner.remote_locale.lock() = locale;
+        }
+    }
+
+    /// 当前 PC 端界面语言（供 H5 首页注入 lang）。
+    pub fn remote_locale(&self) -> String {
+        self.inner.remote_locale.lock().clone()
+    }
+
+    /// 按 prefs 启停 / 重启远程输入服务。在 setup 与 prefs 变更（端口/开关）时调用。
+    pub fn refresh_remote_server(self: &Arc<Self>) {
+        let coord = Arc::clone(self);
+        let gen = self.inner.remote_refresh_gen.fetch_add(1, Ordering::SeqCst) + 1;
+        tauri::async_runtime::spawn(async move {
+            // 串行化整个「停旧 → 启新」：并发的两轮 refresh 交错时，后到者会 take 到
+            // None 跳过关停、去 bind 旧服务还没释放的端口 → 误报 port-in-use。
+            let _serial = coord.inner.remote_refresh_lock.lock().await;
+            // 已有更新代排队（用户连点开关/连改端口）：本代直接让位，只跑最后一轮。
+            if coord.inner.remote_refresh_gen.load(Ordering::SeqCst) != gen {
+                return;
+            }
+            // 先停旧（优雅关停）
+            let old = coord.inner.remote_server.lock().take();
+            if let Some(handle) = old {
+                handle.shutdown().await;
+            }
+            let prefs = coord.inner.prefs.get();
+            let app = coord.inner.app.lock().clone();
+            if !prefs.remote_input_enabled {
+                if let Some(app) = &app {
+                    let _ =
+                        app.emit("remote-input:running", serde_json::json!({"running": false}));
+                }
+                return;
+            }
+            let Some(app) = app else {
+                return;
+            };
+            // PIN：进程内 remote_pin 缺失时从磁盘读持久化的（没有才新生成并写盘）——
+            // 否则每次重启配对码都变，用户得反复找新码（这正是"配对码错误"的根因）。
+            let pin = {
+                let mut guard = coord.inner.remote_pin.lock();
+                if guard.is_none() {
+                    *guard = Some(crate::remote_server::load_or_create_pin(&app));
+                }
+                guard.clone().unwrap_or_default()
+            };
+            log::info!("[remote-input] 当前配对码 = {pin}（在手机上输入这个）");
+            let port = prefs.remote_input_port;
+            match crate::remote_server::start(crate::remote_server::RemoteServerConfig {
+                port,
+                pin: pin.clone(),
+                coordinator: Arc::clone(&coord),
+                app: app.clone(),
+            })
+            .await
+            {
+                Ok(handle) => {
+                    let urls = crate::remote_server::access_urls(port);
+                    *coord.inner.remote_server.lock() = Some(handle);
+                    let _ = app.emit(
+                        "remote-input:running",
+                        serde_json::json!({"running": true, "port": port, "urls": urls, "pin": pin}),
+                    );
+                    log::info!("[remote-input] server started on port {port}");
+                }
+                Err(e) => {
+                    let _ = app.emit(
+                        "remote-input:error",
+                        serde_json::json!({"reason": e, "port": port}),
+                    );
+                    log::error!("[remote-input] server start failed: {e}");
+                }
+            }
+        });
+    }
+
     /// 返回当前听写阶段（read-only 快照），供 CLI 入口在 dispatch toggle 时决策。
     /// 与原热键边沿走的 `handle_pressed` 分支完全相同的判定逻辑：Idle → start，
     /// Listening → stop。可用于桌面快捷键 → CLI 转发的备用触发路径。
@@ -1212,4 +1446,14 @@ fn set_phase_idle_if_session_matches(inner: &Arc<Inner>, session_id: SessionId) 
     if state.session_id == session_id {
         state.phase = SessionPhase::Idle;
     }
+}
+
+/// 清远程音频源标志（幂等）。必须在远程会话生命周期的**每个**终结点调用：
+/// 残留的 `remote_source_active=true` 会让下一次本地听写误走远程分支
+/// （跳过 cpal、挂上 sink 等手机 PCM），本地录音从此失效。
+/// 终结点：stop/cancel_remote_dictation、start 失败回滚、cancel_session、
+/// pending_stop 的延迟 end_session（finish_starting_session）。
+pub(crate) fn clear_remote_source_flags(inner: &Inner) {
+    inner.remote_source_active.store(false, Ordering::SeqCst);
+    *inner.remote_audio_sink.lock() = None;
 }

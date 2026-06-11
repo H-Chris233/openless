@@ -749,6 +749,27 @@ pub struct UserPreferences {
     /// 上传 / 点赞需要带这个 header；空时上传被后端 401。
     #[serde(default)]
     pub marketplace_dev_login: String,
+    /// ── 远程输入（局域网手机录音）────────────────────────────────
+    /// 是否启用远程输入 HTTPS+WS 服务。默认 false（关闭，按需手动开启）。
+    #[serde(default)]
+    pub remote_input_enabled: bool,
+    /// 远程输入服务监听端口（HTTPS）。默认 8443。
+    #[serde(default = "default_remote_input_port")]
+    pub remote_input_port: u16,
+    /// 远程输入配对码（6 位数字）。空 = server 首次启动时随机生成并回写。
+    #[serde(default)]
+    pub remote_input_pin: String,
+    /// 手机录音页默认交互方式："toggle"（点击切换）/ "hold"（按住说话）。
+    #[serde(default = "default_remote_input_mode")]
+    pub remote_input_default_mode: String,
+}
+
+fn default_remote_input_port() -> u16 {
+    8443
+}
+
+fn default_remote_input_mode() -> String {
+    "toggle".into()
 }
 
 fn default_local_asr_model() -> String {
@@ -898,6 +919,14 @@ struct UserPreferencesWire {
     marketplace_base_url: String,
     #[serde(default)]
     marketplace_dev_login: String,
+    #[serde(default)]
+    remote_input_enabled: bool,
+    #[serde(default = "default_remote_input_port")]
+    remote_input_port: u16,
+    #[serde(default)]
+    remote_input_pin: String,
+    #[serde(default = "default_remote_input_mode")]
+    remote_input_default_mode: String,
 }
 
 impl Default for UserPreferencesWire {
@@ -965,6 +994,10 @@ impl Default for UserPreferencesWire {
             audio_recording_max_entries: prefs.audio_recording_max_entries,
             marketplace_base_url: prefs.marketplace_base_url,
             marketplace_dev_login: prefs.marketplace_dev_login,
+            remote_input_enabled: prefs.remote_input_enabled,
+            remote_input_port: prefs.remote_input_port,
+            remote_input_pin: prefs.remote_input_pin,
+            remote_input_default_mode: prefs.remote_input_default_mode,
         }
     }
 }
@@ -1061,6 +1094,10 @@ impl<'de> Deserialize<'de> for UserPreferences {
             audio_recording_max_entries: wire.audio_recording_max_entries,
             marketplace_base_url: wire.marketplace_base_url,
             marketplace_dev_login: wire.marketplace_dev_login,
+            remote_input_enabled: wire.remote_input_enabled,
+            remote_input_port: wire.remote_input_port,
+            remote_input_pin: wire.remote_input_pin,
+            remote_input_default_mode: wire.remote_input_default_mode,
         })
     }
 }
@@ -1789,6 +1826,10 @@ impl Default for UserPreferences {
             audio_recording_max_entries: None,
             marketplace_base_url: String::new(),
             marketplace_dev_login: String::new(),
+            remote_input_enabled: false,
+            remote_input_port: default_remote_input_port(),
+            remote_input_pin: String::new(),
+            remote_input_default_mode: default_remote_input_mode(),
         }
     }
 }
