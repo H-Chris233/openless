@@ -75,6 +75,8 @@ pub(super) fn cancel_active_asr(asr: ActiveAsr) {
         ActiveAsr::SherpaOnnxLocal(local) => local.cancel(),
         #[cfg(target_os = "macos")]
         ActiveAsr::Local(local) => local.cancel(),
+        #[cfg(target_os = "macos")]
+        ActiveAsr::AppleSpeech(local) => local.cancel(),
     }
 }
 

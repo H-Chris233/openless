@@ -153,3 +153,4 @@ export type AsrPresetId =
     | "foundry-local-whisper"
     | "sherpa-onnx-local"
     | "local-qwen3"
+    | "apple-speech"

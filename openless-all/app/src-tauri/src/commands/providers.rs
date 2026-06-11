@@ -246,8 +246,21 @@ async fn validate_bailian_asr_provider() -> Result<(), String> {
 
 pub(crate) fn active_asr_is_keyless_for_validation(provider: &str) -> bool {
     provider == crate::asr::local::PROVIDER_ID
+        || active_apple_speech_asr_is_supported(provider)
         || active_foundry_asr_is_supported(provider)
         || active_sherpa_asr_is_supported(provider)
+}
+
+pub(crate) fn active_apple_speech_asr_is_supported(provider: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        provider == crate::asr::local::APPLE_SPEECH_PROVIDER_ID
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = provider;
+        false
+    }
 }
 
 pub(crate) fn active_foundry_asr_is_supported(provider: &str) -> bool {
