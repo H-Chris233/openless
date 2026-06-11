@@ -25,7 +25,7 @@ use crate::asr::local::{
     foundry, sherpa, FoundryLocalRuntime, FoundryLocalWhisperAsr, SherpaOnnxAsr, SherpaOnnxRuntime,
 };
 use crate::asr::{
-    BailianCredentials, BailianRealtimeASR, DictionaryHotword, MimoBatchASR, RawTranscript,
+    pcm, BailianCredentials, BailianRealtimeASR, DictionaryHotword, MimoBatchASR, RawTranscript,
     VolcengineCredentials, VolcengineStreamingASR, WhisperBatchASR,
 };
 use crate::combo_hotkey::{ComboHotkeyError, ComboHotkeyEvent, ComboHotkeyMonitor};
@@ -874,7 +874,7 @@ impl Coordinator {
     /// 用**当前配置的** ASR provider 对一段已归档的 16k/mono/16-bit PCM 重新转录
     /// （issue #613「重新转录」）。复用 `build_qa_asr_start`，对所有 provider 统一：
     /// 流式 provider 先 open_session 再灌音并取 final，批处理 provider 直接灌音后
-    /// transcribe。整段超时走 COORDINATOR_GLOBAL_TIMEOUT_SECS 兜底，防止挂死。
+    /// transcribe。整段转写按 provider 设置超时，防止挂死。
     ///
     /// 只做 ASR，不做润色/落字/写历史 —— 回写历史由 command 层完成，保持本方法纯粹。
     pub async fn retranscribe_pcm(&self, pcm: Vec<u8>) -> Result<String, String> {
@@ -884,6 +884,7 @@ impl Coordinator {
         start.open_streaming_session().await?;
         let consumer = start.recorder_consumer();
         consumer.consume_pcm_chunk(&pcm);
+        let audio_secs = (pcm::pcm_duration_ms(&pcm) as f64) / 1000.0;
         let timeout = std::time::Duration::from_secs(COORDINATOR_GLOBAL_TIMEOUT_SECS);
         let raw = match start.active_asr() {
             ActiveAsr::Volcengine(asr) => {
@@ -900,10 +901,13 @@ impl Coordinator {
                     .map_err(|_| "重新转录超时".to_string())?
                     .map_err(|e| e.to_string())?
             }
-            ActiveAsr::Whisper(w) => tokio::time::timeout(timeout, w.transcribe())
-                .await
-                .map_err(|_| "重新转录超时".to_string())?
-                .map_err(|e| e.to_string())?,
+            ActiveAsr::Whisper(w) => {
+                let timeout = cloud_whisper_transcribe_timeout(audio_secs);
+                tokio::time::timeout(timeout, w.transcribe())
+                    .await
+                    .map_err(|_| "重新转录超时".to_string())?
+                    .map_err(|e| e.to_string())?
+            }
             ActiveAsr::Mimo(m) => tokio::time::timeout(timeout, m.transcribe())
                 .await
                 .map_err(|_| "重新转录超时".to_string())?

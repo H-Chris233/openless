@@ -467,6 +467,8 @@ pub(crate) async fn build_qa_asr_start(
 /// 设置为 15 秒（比 ASR 的 12 秒 FINAL_RESULT_TIMEOUT 稍长），
 /// 只在 ASR 超时机制失效时作为最后的防线触发。
 pub(crate) const COORDINATOR_GLOBAL_TIMEOUT_SECS: u64 = 15;
+pub(crate) const CLOUD_WHISPER_MIN_TIMEOUT_SECS: u64 = 30;
+pub(crate) const CLOUD_WHISPER_MAX_TIMEOUT_SECS: u64 = 300;
 
 #[cfg(target_os = "windows")]
 pub(crate) fn foundry_audio_transcribe_timeout_duration() -> std::time::Duration {
@@ -481,6 +483,17 @@ pub(crate) fn local_qwen_transcribe_timeout(audio_secs: f64) -> std::time::Durat
     let secs = ((audio_secs * 0.6).ceil() as u64)
         .saturating_add(10)
         .max(COORDINATOR_GLOBAL_TIMEOUT_SECS);
+    std::time::Duration::from_secs(secs)
+}
+
+/// Cloud Whisper/Groq ASR 的批量转写超时。短录音给 30s 余量；长录音按音频长度
+/// 扩展，避免数分钟录音被 15s coordinator guard 提前丢弃。5 分钟上限仍保留为
+/// 外部 API 卡死时的最后防线。
+pub(crate) fn cloud_whisper_transcribe_timeout(audio_secs: f64) -> std::time::Duration {
+    let scaled = ((audio_secs * 0.5).ceil() as u64).saturating_add(15);
+    let secs = scaled
+        .max(CLOUD_WHISPER_MIN_TIMEOUT_SECS)
+        .min(CLOUD_WHISPER_MAX_TIMEOUT_SECS);
     std::time::Duration::from_secs(secs)
 }
 
