@@ -935,6 +935,14 @@ impl Coordinator {
                 asr_setup::schedule_local_asr_release(inner);
                 out
             }
+            #[cfg(target_os = "macos")]
+            ActiveAsr::AppleSpeech(local) => {
+                let dur = asr_setup::local_qwen_transcribe_timeout(audio_secs);
+                tokio::time::timeout(dur, local.transcribe())
+                    .await
+                    .map_err(|_| "重新转录超时".to_string())?
+                    .map_err(|e| e.to_string())?
+            }
         };
         Ok(raw.text)
     }
