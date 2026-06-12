@@ -926,6 +926,14 @@ export const ko: typeof zhCN = {
       ko: '한국어 (Beta)',
       restartHint: '일부 네이티브 메뉴(트레이 등)는 앱 재시작 후 반영될 수 있습니다.',
     },
+    appearance: {
+      title: '외관',
+      desc: '라이트/다크 모드를 선택하거나 시스템 설정을 따릅니다.',
+      label: '테마',
+      followSystem: '시스템 따라가기',
+      light: '라이트',
+      dark: '다크',
+    },
     remoteInput: {
       title: '원격 입력',
       enableLabel: '원격 입력 활성화',

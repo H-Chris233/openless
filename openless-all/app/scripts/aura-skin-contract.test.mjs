@@ -186,12 +186,14 @@ assertUsesClassName(
   'sample should accept className usage',
 );
 
-const [tokens, globalCss, shell, settingsModal, overview, sourceFiles, remoteStyle] = await Promise.all([
+const [tokens, globalCss, shell, settingsModal, overview, settingsTabs, themeMode, sourceFiles, remoteStyle] = await Promise.all([
   read('src/styles/tokens.css'),
   read('src/styles/global.css'),
   read('src/components/FloatingShell.tsx'),
   read('src/components/SettingsModal.tsx'),
   read('src/pages/Overview.tsx'),
+  read('src/pages/settings/tabs.tsx'),
+  read('src/lib/themeMode.ts'),
   walkSourceFiles(srcRoot),
   read('src-tauri/src/remote_server/assets/style.css'),
 ]);
@@ -352,6 +354,24 @@ assertUsesClassName(shell, 'ol-aura-panel', 'FloatingShell must expose an Aura p
 
 assertUsesClassName(settingsModal, 'ol-aura-settings', 'SettingsModal must expose an Aura settings wrapper');
 assertUsesClassName(overview, 'ol-overview-hero', 'Overview must expose a high-visibility overview surface hook');
+
+assert.match(
+  settingsTabs,
+  /import\s+\{[^}]*ThemeSection[^}]*\}\s+from\s+['"]\.\/ThemeSection['"]/,
+  'tabs.tsx GeneralTab must import ThemeSection',
+);
+assert.match(settingsTabs, /<ThemeSection\s*\/?>/, 'tabs.tsx GeneralTab must render ThemeSection');
+
+assert.match(
+  themeMode,
+  /prefers-color-scheme:\s*dark/,
+  'themeMode.ts must listen for prefers-color-scheme: dark',
+);
+assert.match(
+  themeMode,
+  /data-ol-theme|olTheme|dataset\.olTheme/,
+  'themeMode.ts must apply theme via data-ol-theme / dataset.olTheme',
+);
 
 const illegalCssStringPatterns = [
   /color:\s*'var\([^)]+\)';/,

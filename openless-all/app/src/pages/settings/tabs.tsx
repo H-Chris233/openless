@@ -6,6 +6,7 @@ import { useEffect, useState } from 'react';
 import { RecordingInputSection } from './RecordingInputSection';
 import { ShortcutsSection } from './ShortcutsSection';
 import { LanguageSection } from './LanguageSection';
+import { ThemeSection } from './ThemeSection';
 import { ProvidersSection } from './ProvidersSection';
 import { MarketplaceSection } from './MarketplaceSection';
 import { PermissionsSection } from './PermissionsSection';
@@ -33,6 +34,7 @@ export function GeneralTab() {
     <>
       <RecordingInputSection />
       {showDesktopShortcuts && <ShortcutsSection />}
+      <ThemeSection />
       <LanguageSection />
     </>
   );

@@ -958,6 +958,14 @@ export const en: typeof zhCN = {
       ko: '한국어 (Beta)',
       restartHint: 'Some native menus (system tray, etc.) may require an app restart to fully switch.',
     },
+    appearance: {
+      title: 'Appearance',
+      desc: 'Choose light or dark mode, or follow your system setting.',
+      label: 'Theme',
+      followSystem: 'Follow system',
+      light: 'Light',
+      dark: 'Dark',
+    },
     remoteInput: {
       title: 'Remote Input',
       enableLabel: 'Enable remote input',

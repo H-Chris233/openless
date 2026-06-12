@@ -3,8 +3,13 @@ import ReactDOM from "react-dom/client";
 import { App } from "./App";
 import { detectOS } from "./components/WindowChrome";
 import i18n from "./i18n"; // 副作用：触发 i18next init
+import { applyThemeMode, readThemeMode, subscribeThemeMode } from "./lib/themeMode";
 import "./styles/tokens.css";
 import "./styles/global.css";
+
+// 首帧前应用主题，避免暗色偏好下先闪一帧亮色。
+applyThemeMode(readThemeMode());
+subscribeThemeMode();
 
 import type { OS } from "./components/WindowChrome";
 

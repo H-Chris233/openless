@@ -4,8 +4,7 @@
 // 「设置」还要再面对第二个侧栏。现在拍平成单层 —— 通用 / 服务 / 隐私 / 高级 /
 // 个性化 / 关于 六个 tab。每个 tab 的内容见 pages/settings/。
 //
-// 设计原则：每个可见控件都必须可用。没有后端支撑的占位（账号 / 主题切换 等）
-// 不在此弹窗出现。
+// 设计原则：每个可见控件都必须可用。没有后端支撑的占位（如账号）不在此弹窗出现。
 
 import { useLayoutEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
