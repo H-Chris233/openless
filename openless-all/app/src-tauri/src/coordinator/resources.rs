@@ -104,14 +104,21 @@ pub(super) fn selected_microphone_device_name(inner: &Arc<Inner>) -> Option<Stri
 }
 
 pub(super) fn stop_microphone_preview_monitor(inner: &Arc<Inner>, owner: &str) {
-    let Some(app) = inner.app.lock().as_ref().cloned() else {
-        return;
-    };
-    let state = app.state::<crate::commands::MicrophoneMonitorState>();
-    let recorder = state.lock().take();
-    if let Some(recorder) = recorder {
-        log::info!("[recorder] stopping microphone preview monitor before {owner}");
-        recorder.stop();
+    #[cfg(mobile)]
+    {
+        let _ = (inner, owner);
+    }
+    #[cfg(not(mobile))]
+    {
+        let Some(app) = inner.app.lock().as_ref().cloned() else {
+            return;
+        };
+        let state = app.state::<crate::commands::MicrophoneMonitorState>();
+        let recorder = state.lock().take();
+        if let Some(recorder) = recorder {
+            log::info!("[recorder] stopping microphone preview monitor before {owner}");
+            recorder.stop();
+        }
     }
 }
 

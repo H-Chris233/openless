@@ -5,7 +5,18 @@ fn main() {
     #[cfg(target_os = "macos")]
     build_qwen_asr_macos();
 
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("android") {
+        link_android_cpp_runtime();
+    }
+
     tauri_build::build();
+}
+
+/// cpal → oboe → oboe-sys 会编译 C++；最终 cdylib 需显式链接 NDK libc++。
+fn link_android_cpp_runtime() {
+    // oboe-ext 已部分静态链入 libc++；补链 c++abi 提供 __cxa_pure_virtual 等 ABI 符号。
+    println!("cargo:rustc-link-lib=c++_static");
+    println!("cargo:rustc-link-lib=c++abi");
 }
 
 #[cfg(target_os = "windows")]

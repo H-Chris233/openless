@@ -10,6 +10,7 @@ import { clearHistory, deleteHistoryEntry, listHistory, readAudioRecording, retr
 import type { DictationSession, PolishMode } from '../lib/types';
 import { useHotkeySettings } from '../state/HotkeySettingsContext';
 import { Btn, Card, PageHeader, Pill } from './_atoms';
+import { useMobileLayout } from '../lib/useMobileLayout';
 
 function useFilters(): Array<{ id: 'all' | PolishMode; label: string }> {
   const { t } = useTranslation();
@@ -35,6 +36,7 @@ function useModeLabel(): Record<PolishMode, string> {
 export function History() {
   const { t } = useTranslation();
   const os = detectOS();
+  const mobile = useMobileLayout();
   const FILTERS = useFilters();
   const MODE_LABEL = useModeLabel();
   const [filter, setFilter] = useState<'all' | PolishMode>('all');
@@ -222,8 +224,16 @@ export function History() {
           </div>
         }
       />
-      <div style={{ display: 'grid', gridTemplateColumns: '300px 1fr', gap: 14, flex: 1, minHeight: 0 }}>
-        <Card padding={0} style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: mobile ? '1fr' : '300px 1fr',
+          gap: 14,
+          flex: mobile ? '0 0 auto' : 1,
+          minHeight: mobile ? undefined : 0,
+        }}
+      >
+        <Card padding={0} style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden', maxHeight: mobile ? 360 : undefined }}>
           <div style={{ padding: '12px 14px', borderBottom: '0.5px solid var(--ol-line)' }}>
             <div style={{
               display: 'flex', alignItems: 'center', gap: 6,
@@ -255,9 +265,9 @@ export function History() {
                   onClick={() => setFilter(f.id)}
                   style={{
                     padding: '3px 9px', fontSize: 11, borderRadius: 999,
-                    border: '0.5px solid ' + (filter === f.id ? 'var(--ol-ink)' : 'var(--ol-line-strong)'),
-                    background: filter === f.id ? 'var(--ol-ink)' : 'transparent',
-                    color: filter === f.id ? '#fff' : 'var(--ol-ink-3)',
+                    border: '0.5px solid ' + (filter === f.id ? 'var(--ol-pill-selected-border)' : 'var(--ol-line-strong)'),
+                    background: filter === f.id ? 'var(--ol-pill-selected-bg)' : 'transparent',
+                    color: filter === f.id ? 'var(--ol-pill-selected-ink)' : 'var(--ol-ink-3)',
                     cursor: 'default', fontFamily: 'inherit', fontWeight: 500,
                     transition: 'background 0.16s var(--ol-motion-quick), color 0.16s var(--ol-motion-quick), border-color 0.16s var(--ol-motion-quick)',
                   }}
@@ -316,16 +326,16 @@ export function History() {
           </div>
         </Card>
 
-        <Card padding={20} className="ol-thinscroll" style={{ overflow: 'auto' }}>
+        <Card padding={mobile ? 16 : 20} className="ol-thinscroll" style={{ overflow: mobile ? 'visible' : 'auto' }}>
           {item ? (
             <>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <div style={{ display: 'flex', alignItems: mobile ? 'flex-start' : 'center', justifyContent: 'space-between', marginBottom: 14, gap: 10, flexDirection: mobile ? 'column' : 'row' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
                   <span style={{ fontSize: 13, fontFamily: 'var(--ol-font-mono)', color: 'var(--ol-ink-3)' }}>{formatTime(item.createdAt)}</span>
                   <Pill size="sm" tone="default">{MODE_LABEL[item.mode]}</Pill>
                   <span style={{ fontSize: 11, color: 'var(--ol-ink-4)' }}>{formatDuration(item.durationMs, t)}</span>
                 </div>
-                <div style={{ display: 'flex', gap: 6 }}>
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                   <Btn icon={justCopied ? 'check' : 'copy'} variant="ghost" size="sm" onClick={() => void onCopy()}>{justCopied ? t('common.copied') : t('common.copy')}</Btn>
                   {/* issue #613：失败条目（有错误码）且录音仍在时，提供「重新转录」。 */}
                   {item.errorCode && item.hasAudioRecording && !audioMissingIds.has(item.id) && (
@@ -352,7 +362,7 @@ export function History() {
                   key={item.id}
                 />
               )}
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: mobile ? '1fr' : '1fr 1fr', gap: 12 }}>
                 <div style={{ padding: 14, border: '0.5px solid var(--ol-line)', borderRadius: 10, background: 'var(--ol-surface-2)' }}>
                   <Pill size="sm" tone="outline" style={{ marginBottom: 10 }}>{t('history.rawLabel')}</Pill>
                   <p style={{ margin: 0, fontSize: 13, lineHeight: 1.7, color: 'var(--ol-ink-2)', whiteSpace: 'pre-wrap' }}>

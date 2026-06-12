@@ -55,7 +55,10 @@ pub async fn run_test(model_id: ModelId) -> Result<TestResult> {
     for fname in &required_files {
         let path = dir.join(fname);
         if !path.exists() {
-            anyhow::bail!("模型文件缺失：{fname}，请重新下载（预期路径：{}）", path.display());
+            anyhow::bail!(
+                "模型文件缺失：{fname}，请重新下载（预期路径：{}）",
+                path.display()
+            );
         }
         let meta = std::fs::metadata(&path)
             .map_err(|e| anyhow::anyhow!("读取 {fname} 元数据失败：{e}"))?;

@@ -1,6 +1,47 @@
 use super::*;
 
 #[tauri::command]
+pub fn get_platform_capabilities() -> crate::types::PlatformCapabilities {
+    crate::types::PlatformCapabilities::current()
+}
+
+#[tauri::command]
+pub fn get_android_overlay_status() -> AndroidOverlayStatus {
+    crate::android::get_android_overlay_status()
+}
+
+#[tauri::command]
+pub fn request_android_overlay_permission() -> crate::android::AndroidOverlayPermissionResult {
+    crate::android::request_android_overlay_permission()
+}
+
+#[tauri::command]
+pub fn show_android_overlay() -> Result<(), String> {
+    crate::android::show_android_overlay()
+}
+
+#[tauri::command]
+pub fn hide_android_overlay() -> Result<(), String> {
+    crate::android::hide_android_overlay()
+}
+
+#[tauri::command]
+pub fn get_android_accessibility_status() -> AndroidAccessibilityStatus {
+    crate::android::get_android_accessibility_status()
+}
+
+#[tauri::command]
+pub fn request_android_accessibility_permission(
+) -> crate::android::AndroidAccessibilityPermissionResult {
+    crate::android::request_android_accessibility_permission()
+}
+
+#[tauri::command]
+pub fn open_external_url(url: String) -> Result<(), String> {
+    crate::external_url::open_external_url(&url)
+}
+
+#[tauri::command]
 pub fn check_accessibility_permission() -> PermissionStatus {
     permissions::check_accessibility()
 }

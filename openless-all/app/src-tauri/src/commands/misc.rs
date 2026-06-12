@@ -36,30 +36,74 @@ pub async fn check_network() -> NetworkCheckResult {
 
 #[tauri::command]
 pub fn get_hotkey_status(coord: CoordinatorState<'_>) -> HotkeyStatus {
+    #[cfg(mobile)]
+    {
+        let _ = coord;
+        return HotkeyStatus {
+            adapter: crate::types::HotkeyAdapterKind::Unavailable,
+            state: crate::types::HotkeyStatusState::Failed,
+            message: Some("移动端不支持全局热键".into()),
+            last_error: Some(crate::types::HotkeyInstallError {
+                code: "unavailable".into(),
+                message: "Global hotkeys are not available on mobile".into(),
+            }),
+        };
+    }
+    #[cfg(not(mobile))]
     coord.hotkey_status()
 }
 
 #[tauri::command]
 pub fn get_hotkey_capability(coord: CoordinatorState<'_>) -> HotkeyCapability {
+    #[cfg(mobile)]
+    {
+        let _ = coord;
+        return HotkeyCapability::current();
+    }
+    #[cfg(not(mobile))]
     coord.hotkey_capability()
 }
 
 #[tauri::command]
 pub fn set_shortcut_recording_active(coord: CoordinatorState<'_>, active: bool) {
+    #[cfg(mobile)]
+    {
+        let _ = (coord, active);
+        return;
+    }
+    #[cfg(not(mobile))]
     coord.set_shortcut_recording_active(active);
 }
 
 #[tauri::command]
+#[cfg(not(mobile))]
 pub fn get_windows_ime_status() -> WindowsImeStatus {
     crate::windows_ime_profile::get_windows_ime_status()
 }
 
 #[tauri::command]
+#[cfg(mobile)]
+pub fn list_microphone_devices() -> Result<Vec<crate::recorder::MicrophoneDevice>, String> {
+    Ok(Vec::new())
+}
+
+#[tauri::command]
+#[cfg(not(mobile))]
 pub fn list_microphone_devices() -> Result<Vec<crate::recorder::MicrophoneDevice>, String> {
     crate::recorder::list_input_devices().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
+#[cfg(mobile)]
+pub async fn start_microphone_level_monitor(
+    _app: AppHandle,
+    _device_name: String,
+) -> Result<(), String> {
+    Ok(())
+}
+
+#[tauri::command]
+#[cfg(not(mobile))]
 pub async fn start_microphone_level_monitor(
     app: AppHandle,
     device_name: String,
@@ -93,6 +137,12 @@ pub async fn start_microphone_level_monitor(
 
 #[tauri::command]
 pub async fn stop_microphone_level_monitor(app: AppHandle) {
+    #[cfg(mobile)]
+    {
+        let _ = app;
+        return;
+    }
+    #[cfg(not(mobile))]
     let _ = tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<MicrophoneMonitorState>();
         let recorder = state.lock().take();

@@ -1,0 +1,241 @@
+name: Android APK (debug)
+
+# Triggers:
+#   - push v*-tauri tag → build debug APK, upload artifact + attach to GitHub Release
+#   - workflow_dispatch → build debug APK, upload artifact only (no release)
+#
+# Scope: full overlay/accessibility APK for ADB testing (v1 RECORD_AUDIO + overlay manifest merge).
+
+on:
+  push:
+    tags:
+      - 'v*-tauri'
+  workflow_dispatch:
+
+jobs:
+  build-android-apk:
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    env:
+      CI: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Java 17 (Zulu)
+        uses: actions/setup-java@v4
+        with:
+          distribution: zulu
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Install NDK and accept SDK licenses
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager "ndk;26.1.10909125"
+          ndk_dir="$ANDROID_HOME/ndk/26.1.10909125"
+          if [ ! -d "$ndk_dir" ]; then
+            echo "::error::NDK not found at $ndk_dir"
+            exit 1
+          fi
+          echo "ANDROID_NDK_HOME=$ndk_dir" >> "$GITHUB_ENV"
+          echo "NDK_HOME=$ndk_dir" >> "$GITHUB_ENV"
+          set +o pipefail
+          yes | sdkmanager --licenses
+          sdkmanager_exit=${PIPESTATUS[1]}
+          set -o pipefail
+          if [ "$sdkmanager_exit" -ne 0 ]; then
+            echo "::error::sdkmanager --licenses failed with exit code $sdkmanager_exit"
+            exit "$sdkmanager_exit"
+          fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: openless-all/app/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: >-
+            aarch64-linux-android,
+            armv7-linux-androideabi,
+            i686-linux-android,
+            x86_64-linux-android
+
+      - name: Cache Cargo
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: openless-all/app/src-tauri -> target
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Install npm deps
+        working-directory: openless-all/app
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: openless-all/app
+        run: npm run build
+
+      - name: Initialize Android project
+        working-directory: openless-all/app
+        run: npm run tauri -- android init --ci
+
+      - name: Copy Android scaffolding (Kotlin + XML)
+        working-directory: openless-all/app
+        run: node scripts/copy-android-scaffolding.mjs
+
+      - name: Merge APK v1 manifest permissions
+        working-directory: openless-all/app
+        run: node scripts/merge-android-v1-manifest.mjs
+
+      - name: Merge overlay / accessibility manifest
+        working-directory: openless-all/app
+        run: node scripts/merge-android-overlay-manifest.mjs
+
+      - name: Prime Gradle wrapper
+        working-directory: openless-all/app
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if src-tauri/gen/android/gradlew --project-dir src-tauri/gen/android --version --no-daemon; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              sleep $([ "$attempt" -eq 1 ] && echo 15 || echo 30)
+            fi
+          done
+          exit 1
+
+      - name: Build Android debug APK
+        working-directory: openless-all/app
+        run: npm run tauri:android:build
+
+      - name: Free disk before artifact upload
+        shell: bash
+        working-directory: openless-all/app
+        run: |
+          set -euo pipefail
+          rm -rf src-tauri/target
+          rm -rf ~/.cargo/registry ~/.cargo/git ~/.gradle/caches
+          df -h
+
+      - name: Collect split debug APKs
+        id: apk
+        shell: bash
+        working-directory: openless-all/app
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.ref }}" == refs/tags/v* ]] && [[ "${{ github.ref_name }}" == *-tauri ]]; then
+            label="${{ github.ref_name }}"
+          else
+            label="run-${{ github.run_number }}"
+          fi
+          export OPENLESS_APK_LABEL="$label"
+          python - <<'PY'
+          import os
+          import shutil
+          import sys
+          import zipfile
+          from pathlib import Path
+
+          expected = {
+              "arm64-v8a": "arm64_v8a",
+              "armeabi-v7a": "armeabi_v7a",
+              "x86": "x86",
+              "x86_64": "x86_64",
+          }
+          root = Path("src-tauri/gen/android")
+          label = os.environ["OPENLESS_APK_LABEL"]
+          out_dir = Path(os.environ["RUNNER_TEMP"]) / "openless-android-debug-split"
+          out_dir.mkdir(parents=True, exist_ok=True)
+          found = {}
+          candidates = [
+              apk for apk in sorted(root.rglob("*.apk"))
+              if "outputs" in apk.parts
+          ]
+          if not candidates:
+              print("::error::No APK found under src-tauri/gen/android/**/outputs/")
+              for apk in sorted(root.rglob("*.apk")):
+                  print(apk)
+              sys.exit(1)
+          for apk in candidates:
+              with zipfile.ZipFile(apk) as archive:
+                  abis = sorted({
+                      name.split("/")[1]
+                      for name in archive.namelist()
+                      if name.startswith("lib/") and len(name.split("/")) >= 3
+                  })
+              if len(abis) != 1:
+                  print(f"::error::{apk} contains ABI directories {abis}; expected exactly one ABI per APK")
+                  sys.exit(1)
+              abi = abis[0]
+              if abi not in expected:
+                  print(f"::error::{apk} contains unexpected ABI {abi}")
+                  sys.exit(1)
+              if abi in found:
+                  print(f"::error::Duplicate APKs for ABI {abi}: {found[abi]} and {apk}")
+                  sys.exit(1)
+              dest = out_dir / f"OpenLess-android-debug-{abi}-{label}.apk"
+              shutil.copy2(apk, dest)
+              found[abi] = dest
+              print(f"Collected {abi}: {apk} -> {dest}")
+          missing = sorted(set(expected) - set(found))
+          if missing:
+              print(f"::error::Missing split APKs for ABI(s): {', '.join(missing)}")
+              sys.exit(1)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              for abi, key in expected.items():
+                  output.write(f"{key}_path={found[abi]}\n")
+              output.write("release_files<<EOF\n")
+              for abi in expected:
+                  output.write(f"{found[abi]}\n")
+              output.write("EOF\n")
+          PY
+
+      - name: Upload Android APK artifact (arm64-v8a)
+        uses: actions/upload-artifact@v4
+        with:
+          name: openless-android-debug-arm64-v8a
+          path: ${{ steps.apk.outputs.arm64_v8a_path }}
+          if-no-files-found: error
+
+      - name: Upload Android APK artifact (armeabi-v7a)
+        uses: actions/upload-artifact@v4
+        with:
+          name: openless-android-debug-armeabi-v7a
+          path: ${{ steps.apk.outputs.armeabi_v7a_path }}
+          if-no-files-found: error
+
+      - name: Upload Android APK artifact (x86)
+        uses: actions/upload-artifact@v4
+        with:
+          name: openless-android-debug-x86
+          path: ${{ steps.apk.outputs.x86_path }}
+          if-no-files-found: error
+
+      - name: Upload Android APK artifact (x86_64)
+        uses: actions/upload-artifact@v4
+        with:
+          name: openless-android-debug-x86_64
+          path: ${{ steps.apk.outputs.x86_64_path }}
+          if-no-files-found: error
+
+      - name: Attach APK to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v') && endsWith(github.ref, '-tauri')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: OpenLess ${{ github.ref_name }}
+          draft: false
+          prerelease: ${{ endsWith(github.ref_name, '-beta-tauri') }}
+          files: ${{ steps.apk.outputs.release_files }}

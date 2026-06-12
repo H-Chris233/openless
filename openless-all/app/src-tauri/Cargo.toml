@@ -18,11 +18,10 @@ cc = "1.1"
 [dependencies]
 # 锁 ~2.11 因为 npm @tauri-apps/api 与 plugin-dialog 都已升 2.11；
 # tauri build 跨 minor 一致性检查会拒绝 npm 2.11 + Rust 2.10 的组合。
-tauri = { version = "~2.11", features = ["macos-private-api", "tray-icon"] }
+# macos-private-api must live in [dependencies] so tauri_build can match tauri.conf.json
+# macOSPrivateApi; tray-icon stays desktop-only in the target table below.
+tauri = { version = "~2.11", features = ["macos-private-api"] }
 tauri-plugin-shell = "2"
-tauri-plugin-updater = "2"
-tauri-plugin-single-instance = "2"
-tauri-plugin-autostart = "2"
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -39,9 +38,9 @@ getrandom = "0.3"
 bzip2 = "0.4"
 tar = "0.4"
 tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
-reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls", "native-tls", "stream", "system-proxy"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls", "stream", "system-proxy"] }
 zip = "2"
 thiserror = "1"
 anyhow = "1"
@@ -56,10 +55,17 @@ bytes = "1"
 url = "2"
 raw-window-handle = "0.6"
 ferrous-opencc = "0.4"
-
-# Hotkey + audio + insertion
-global-hotkey = "0.6"
+# Audio capture — shared across desktop and mobile.
 cpal = "0.15"
+
+# Desktop-only plugins, hotkey/insertion helpers, and tray-icon (not built for mobile).
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["native-tls"] }
+tauri = { version = "~2.11", features = ["macos-private-api", "tray-icon"] }
+tauri-plugin-updater = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-autostart = "2"
+global-hotkey = "0.6"
 enigo = "0.2"
 arboard = { version = "3", features = ["wayland-data-control"] }
 rcgen = "^0.13"
@@ -83,10 +89,15 @@ features = ["windows-native"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 dbus = "0.9"
-[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies.keyring]
+[target.'cfg(all(unix, not(target_os = "macos"), not(target_os = "android")))'.dependencies.keyring]
 version = "3.6.3"
 default-features = false
 features = ["linux-native-sync-persistent", "crypto-rust"]
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+ndk-context = "0.1"
+tao = "0.35"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.5"

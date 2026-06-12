@@ -169,6 +169,7 @@ pub(crate) fn persist_settings<T: SettingsWriter>(
     Ok(())
 }
 
+#[cfg(not(mobile))]
 #[tauri::command]
 pub fn set_settings(
     coord: CoordinatorState<'_>,
@@ -180,10 +181,13 @@ pub fn set_settings(
     let remote_prev = coord.prefs().get();
     let packs = coord.style_packs().list().map_err(|e| e.to_string())?;
     sync_style_pack_preferences(&mut prefs, &packs);
+    prefs.android_overlay_trigger = prefs.android_overlay_trigger.normalized();
     // 广播给所有 webview。issue #205：QaPanel 跑在独立 webview，
     // 没有 HotkeySettingsContext，必须靠事件感知录音键变化，否则面板可见时
     // 用户改键会让浮窗里的 "{recordHotkey}" 文案一直停留在旧值。
     persist_settings(&*coord, prefs.clone())?;
+    #[cfg(target_os = "android")]
+    coord.apply_android_overlay_settings_change(&remote_prev, &prefs);
     // refresh_tray_microphone_menu 内部会调用 NSStatusItem.set_menu，必须在主线程上跑。
     // set_settings 本身是同步 Tauri command，在 IPC handler 线程上执行；从这里直接调
     // 会触发 macOS 主线程断言或在 dispatch 队列上死锁，导致整个 UI 无响应（用户改
@@ -210,6 +214,25 @@ pub fn set_settings(
     {
         coord.refresh_remote_server();
     }
+    Ok(())
+}
+
+#[cfg(mobile)]
+#[tauri::command]
+pub fn set_settings(
+    coord: CoordinatorState<'_>,
+    app: AppHandle,
+    mut prefs: UserPreferences,
+) -> Result<(), String> {
+    let previous = coord.prefs().get();
+    let packs = coord.style_packs().list().map_err(|e| e.to_string())?;
+    sync_style_pack_preferences(&mut prefs, &packs);
+    prefs.android_overlay_trigger = prefs.android_overlay_trigger.normalized();
+    persist_settings(&*coord, prefs.clone())?;
+    #[cfg(target_os = "android")]
+    coord.apply_android_overlay_settings_change(&previous, &prefs);
+    let _ = app.emit("prefs:changed", &prefs);
+    let _ = app.emit_to("main", "prefs:changed", &prefs);
     Ok(())
 }
 
@@ -341,6 +364,7 @@ fn extract_between(haystack: &str, open: &str, close: &str) -> Option<String> {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg(not(mobile))]
 pub struct AppUpdateMetadata {
     pub rid: tauri::ResourceId,
     pub current_version: String,
@@ -357,6 +381,7 @@ pub struct AppUpdateMetadata {
 /// 不传则回落到 `prefs.update_channel`（后台 AutoUpdateGate 自动检查走这条）。
 /// 返回 None = 当前是最新；Some(metadata) = 有新版可装。
 #[tauri::command]
+#[cfg(not(mobile))]
 pub async fn app_check_update_with_channel<R: tauri::Runtime>(
     coord: CoordinatorState<'_>,
     webview: tauri::Webview<R>,
@@ -401,6 +426,7 @@ pub async fn app_check_update_with_channel<R: tauri::Runtime>(
 /// 把 fetch_latest_beta_release 找到的最新 prerelease tag 拼成 -beta manifest URL 对。
 /// 顺序：先镜像（fastgit.cc 代理 GitHub），后直连 —— 跟 tauri.conf 现有 Stable
 /// endpoints 一致，让国内访问优先打到 CDN。
+#[cfg(not(mobile))]
 async fn resolve_beta_manifest_endpoints() -> Result<Vec<url::Url>, String> {
     let Some(latest) = fetch_latest_beta_release().await? else {
         return Err("尚未发布过 Beta 版本".to_string());
