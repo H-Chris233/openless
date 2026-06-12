@@ -373,11 +373,11 @@
   --ol-style-add-tile-bg: rgba(255,255,255,0.02);
   --ol-style-add-tile-icon-bg: rgba(255,255,255,0.10);
   --ol-style-add-tile-border: rgba(255,255,255,0.10);
-  --ol-style-input-bg: rgba(255,255,255,0.04);
-  --ol-style-input-border: rgba(255,255,255,0.08);
+  --ol-style-input-bg: rgba(255,255,255,0.06);
+  --ol-style-input-border: rgba(255,255,255,0.10);
   --ol-style-input-shadow: none;
-  --ol-style-subtle-bg: rgba(255,255,255,0.03);
-  --ol-style-subtle-border: rgba(255,255,255,0.06);
+  --ol-style-subtle-bg: rgba(255,255,255,0.05);
+  --ol-style-subtle-border: rgba(255,255,255,0.09);
   --ol-style-subtle-shadow: none;
   --ol-style-editor-bg: linear-gradient(180deg, rgba(27,27,30,0.96), rgba(23,23,26,0.94));
   --ol-style-editor-border: rgba(255,255,255,0.07);

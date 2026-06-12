@@ -613,15 +613,11 @@ export function Style() {
                     textAlign: 'left',
                     position: 'relative',
                     border: '0.5px solid',
-                    borderColor: pack.active ? 'var(--ol-blue)' : 'var(--ol-line)',
-                    background: pack.active
-                      ? 'linear-gradient(180deg, rgba(239,246,255,0.92), rgba(255,255,255,0.98))'
-                      : isBuiltin
-                        ? 'linear-gradient(180deg, rgba(248,250,252,0.92), rgba(241,245,249,0.85))'
-                        : 'linear-gradient(180deg, rgba(255,255,255,0.98), rgba(248,250,252,0.92))',
+                    borderColor: pack.active ? 'var(--ol-style-card-border-active)' : 'var(--ol-style-card-border)',
+                    background: pack.active ? 'var(--ol-style-card-bg-active)' : 'var(--ol-style-card-bg)',
                     borderRadius: 'var(--ol-modal-radius)',
                     padding: 16,
-                    boxShadow: pack.active ? '0 0 0 3px var(--ol-blue-ring)' : 'none',
+                    boxShadow: pack.active ? 'var(--ol-style-card-shadow-active)' : 'var(--ol-style-card-shadow)',
                     cursor: 'default',
                     minHeight: 204,
                   }}
@@ -629,7 +625,7 @@ export function Style() {
                   <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10, marginBottom: 10 }}>
                     <div style={{ minWidth: 0 }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                        <div style={{ fontSize: 14, fontWeight: 600, color: isBuiltin && !pack.active ? 'var(--ol-ink-2)' : 'var(--ol-ink)' }}>
+                        <div style={{ fontSize: 14, fontWeight: 600, color: isBuiltin && !pack.active ? 'var(--ol-style-card-ink-2)' : 'var(--ol-style-card-ink)' }}>
                           {pack.name}
                         </div>
                         <Pill tone={isBuiltin ? 'outline' : 'blue'} size="sm">
@@ -646,7 +642,7 @@ export function Style() {
                       <div
                         style={{
                           fontSize: 12.5,
-                          color: 'var(--ol-ink-3)',
+                          color: 'var(--ol-style-card-ink-3)',
                           lineHeight: 1.6,
                           display: '-webkit-box',
                           WebkitBoxOrient: 'vertical',
@@ -665,8 +661,8 @@ export function Style() {
                         style={{
                           width: 36, height: 36, borderRadius: 'var(--ol-r-lg)',
                           display: 'grid', placeItems: 'center',
-                          background: pack.active ? 'rgba(37,99,235,0.12)' : 'rgba(15,23,42,0.05)',
-                          color: pack.active ? 'var(--ol-blue)' : 'var(--ol-ink-3)',
+                          background: pack.active ? 'var(--ol-style-card-icon-bg-active)' : 'var(--ol-style-card-icon-bg)',
+                          color: pack.active ? 'var(--ol-blue)' : 'var(--ol-style-card-ink-3)',
                           flexShrink: 0,
                         }}
                       >
@@ -683,8 +679,8 @@ export function Style() {
                           width: 36, height: 36, borderRadius: 'var(--ol-r-lg)',
                           display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
                           flexShrink: 0,
-                          border: '0.5px solid rgba(239,68,68,0.32)',
-                          background: 'rgba(254,242,242,0.6)',
+                          border: '0.5px solid var(--ol-style-delete-border)',
+                          background: 'var(--ol-style-delete-bg)',
                           color: 'var(--ol-red, #ef4444)',
                           cursor: busy === 'deleting' ? 'wait' : 'pointer',
                           opacity: busy === 'deleting' ? 0.55 : 1,
@@ -755,11 +751,11 @@ export function Style() {
                 justifyContent: 'center',
                 gap: 8,
                 textAlign: 'center',
-                border: '0.5px dashed var(--ol-line-strong)',
+                border: '0.5px dashed var(--ol-style-add-tile-border)',
                 borderRadius: 'var(--ol-modal-radius)',
                 padding: 16,
-                background: 'transparent',
-                color: 'var(--ol-ink-3)',
+                background: 'var(--ol-style-add-tile-bg)',
+                color: 'var(--ol-style-card-ink-3)',
                 cursor: busy === 'creating' ? 'wait' : 'pointer',
                 opacity: busy === 'creating' ? 0.55 : 1,
                 minHeight: 204,
@@ -770,14 +766,14 @@ export function Style() {
                 style={{
                   width: 44, height: 44, borderRadius: 'var(--ol-pill-radius)',
                   display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                  background: 'rgba(15,23,42,0.04)',
-                  color: 'var(--ol-ink-2)',
+                  background: 'var(--ol-style-add-tile-icon-bg)',
+                  color: 'var(--ol-style-card-ink-2)',
                 }}
               >
                 <Icon name="plus" size={22} />
               </div>
-              <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--ol-ink-2)' }}>{t('style.pack.addPackTileTitle')}</div>
-              <div style={{ fontSize: 12, color: 'var(--ol-ink-4)', lineHeight: 1.55, maxWidth: 220 }}>{t('style.pack.addPackTileHint')}</div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--ol-style-card-ink-2)' }}>{t('style.pack.addPackTileTitle')}</div>
+              <div style={{ fontSize: 12, color: 'var(--ol-style-card-ink-3)', lineHeight: 1.55, maxWidth: 220 }}>{t('style.pack.addPackTileHint')}</div>
             </motion.button>
             </AnimatePresence>
           </div>
@@ -990,8 +986,9 @@ export function Style() {
                   <Card
                     padding={16}
                     style={{
-                      background: 'linear-gradient(180deg, rgba(255,255,255,0.98), rgba(246,248,252,0.95))',
-                      border: '0.5px solid rgba(148,163,184,0.24)',
+                      background: 'var(--ol-style-subtle-bg)',
+                      border: '0.5px solid var(--ol-style-subtle-border)',
+                      boxShadow: 'var(--ol-style-subtle-shadow)',
                     }}
                   >
                     <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
@@ -1058,8 +1055,9 @@ export function Style() {
                     style={{
                       padding: 14,
                       borderRadius: 'var(--ol-bubble-radius)',
-                      background: 'linear-gradient(180deg, rgba(248,250,252,0.98), rgba(241,245,249,0.95))',
-                      border: '0.5px solid var(--ol-line)',
+                      background: 'var(--ol-style-subtle-bg)',
+                      border: '0.5px solid var(--ol-style-subtle-border)',
+                      boxShadow: 'var(--ol-style-subtle-shadow)',
                     }}
                   >
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
@@ -1095,7 +1093,9 @@ export function Style() {
                         key={`${draft.id}-example-${index}`}
                         padding={16}
                         style={{
-                          background: 'linear-gradient(180deg, rgba(255,255,255,0.98), rgba(248,250,252,0.98))',
+                          background: 'var(--ol-style-card-bg)',
+                          border: '0.5px solid var(--ol-style-card-border)',
+                          boxShadow: 'var(--ol-style-card-shadow)',
                         }}
                       >
                         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 12 }}>
@@ -1129,8 +1129,8 @@ export function Style() {
                           <div
                             style={{
                               borderRadius: 'var(--ol-bubble-radius)',
-                              border: '0.5px solid rgba(148,163,184,0.22)',
-                              background: 'rgba(248,250,252,0.9)',
+                              border: '0.5px solid var(--ol-style-subtle-border)',
+                              background: 'var(--ol-style-subtle-bg)',
                               padding: 14,
                             }}
                           >
@@ -1147,8 +1147,8 @@ export function Style() {
                           <div
                             style={{
                               borderRadius: 'var(--ol-bubble-radius)',
-                              border: '0.5px solid rgba(37,99,235,0.16)',
-                              background: 'rgba(239,246,255,0.86)',
+                              border: '0.5px solid var(--ol-style-card-border-active)',
+                              background: 'var(--ol-style-subtle-bg)',
                               padding: 14,
                             }}
                           >
@@ -1181,8 +1181,8 @@ function MetaItem({ label, value }: { label: string; value: string }) {
     <div
       style={{
         borderRadius: 'var(--ol-r-lg)',
-        border: '0.5px solid rgba(148,163,184,0.2)',
-        background: 'var(--ol-glass-bg-strong)',
+        border: '0.5px solid var(--ol-style-subtle-border)',
+        background: 'var(--ol-style-card-bg)',
         padding: '10px 12px',
       }}
     >
@@ -1218,8 +1218,8 @@ function DirectiveRow({
         gap: 12,
         padding: '10px 12px',
         borderRadius: 'var(--ol-r-lg)',
-        border: '0.5px solid rgba(148,163,184,0.2)',
-        background: 'var(--ol-glass-bg-strong)',
+        border: '0.5px solid var(--ol-style-subtle-border)',
+        background: 'var(--ol-style-card-bg)',
       }}
     >
       <div style={{ minWidth: 0 }}>
@@ -1239,8 +1239,9 @@ const inputStyle: CSSProperties = {
   minHeight: 38,
   padding: '9px 11px',
   borderRadius: 'var(--ol-r-md)',
-  border: '0.5px solid var(--ol-line-strong)',
-  background: 'var(--ol-control-solid)',
+  border: '0.5px solid var(--ol-style-input-border)',
+  background: 'var(--ol-style-input-bg)',
+  boxShadow: 'var(--ol-style-input-shadow)',
   color: 'var(--ol-ink)',
   font: 'inherit',
   fontSize: 12.5,
@@ -1251,8 +1252,9 @@ const textareaStyle: CSSProperties = {
   boxSizing: 'border-box',
   padding: '11px 12px',
   borderRadius: 'var(--ol-r-lg)',
-  border: '0.5px solid var(--ol-line-strong)',
-  background: 'var(--ol-control-solid)',
+  border: '0.5px solid var(--ol-style-input-border)',
+  background: 'var(--ol-style-input-bg)',
+  boxShadow: 'var(--ol-style-input-shadow)',
   color: 'var(--ol-ink)',
   font: 'inherit',
   fontSize: 12.5,

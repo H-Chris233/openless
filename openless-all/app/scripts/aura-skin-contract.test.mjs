@@ -186,7 +186,7 @@ assertUsesClassName(
   'sample should accept className usage',
 );
 
-const [tokens, globalCss, shell, settingsModal, overview, settingsTabs, themeMode, sourceFiles, remoteStyle] = await Promise.all([
+const [tokens, globalCss, shell, settingsModal, overview, settingsTabs, themeMode, stylePage, sourceFiles, remoteStyle] = await Promise.all([
   read('src/styles/tokens.css'),
   read('src/styles/global.css'),
   read('src/components/FloatingShell.tsx'),
@@ -194,6 +194,7 @@ const [tokens, globalCss, shell, settingsModal, overview, settingsTabs, themeMod
   read('src/pages/Overview.tsx'),
   read('src/pages/settings/tabs.tsx'),
   read('src/lib/themeMode.ts'),
+  read('src/pages/Style.tsx'),
   walkSourceFiles(srcRoot),
   read('src-tauri/src/remote_server/assets/style.css'),
 ]);
@@ -395,6 +396,36 @@ assert.match(
   themeMode,
   /data-ol-theme|olTheme|dataset\.olTheme/,
   'themeMode.ts must apply theme via data-ol-theme / dataset.olTheme',
+);
+
+const forbiddenStyleCardLightBackgrounds = [
+  /rgba\(\s*255\s*,\s*255\s*,\s*255/i,
+  /rgba\(\s*248\s*,\s*250\s*,\s*252/i,
+  /rgba\(\s*239\s*,\s*246\s*,\s*255/i,
+];
+
+for (const pattern of forbiddenStyleCardLightBackgrounds) {
+  assert.doesNotMatch(
+    stylePage,
+    pattern,
+    'Style.tsx must not hardcode light style-card backgrounds (use --ol-style-* tokens)',
+  );
+}
+
+assert.match(
+  stylePage,
+  /--ol-style-card-bg/,
+  'Style.tsx must reference --ol-style-card-bg for style pack surfaces',
+);
+assert.match(
+  stylePage,
+  /--ol-style-card-ink/,
+  'Style.tsx must reference --ol-style-card-ink for style pack text',
+);
+assert.match(
+  stylePage,
+  /--ol-style-subtle-bg/,
+  'Style.tsx must reference --ol-style-subtle-bg for editor subtle surfaces',
 );
 
 const illegalCssStringPatterns = [
