@@ -106,8 +106,13 @@ pub(crate) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         }
         ActiveAsr::Whisper(w) => {
             debug_assert!(uses_global_timeout);
-            // Whisper 也添加类似的超时保护
-            let timeout_duration = std::time::Duration::from_secs(COORDINATOR_GLOBAL_TIMEOUT_SECS);
+            let audio_secs = elapsed as f64 / 1000.0;
+            let timeout_duration = cloud_whisper_transcribe_timeout(audio_secs);
+            log::info!(
+                "[coord] whisper transcribe: audio={:.2}s timeout={}s",
+                audio_secs,
+                timeout_duration.as_secs()
+            );
             match tokio::time::timeout(timeout_duration, w.transcribe()).await {
                 Ok(Ok(r)) => r,
                 Ok(Err(e)) => {
@@ -129,7 +134,7 @@ pub(crate) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                 Err(_) => {
                     log::error!(
                         "[coord] whisper 全局超时 {} 秒",
-                        COORDINATOR_GLOBAL_TIMEOUT_SECS
+                        timeout_duration.as_secs()
                     );
                     write_transcribe_failed_history(inner, current_session_id, elapsed);
                     emit_capsule(

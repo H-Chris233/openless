@@ -343,6 +343,48 @@ fn local_qwen_timeout_handles_zero_duration() {
     );
 }
 
+#[test]
+fn cloud_whisper_timeout_has_longer_floor_than_global_guard() {
+    assert_eq!(
+        cloud_whisper_transcribe_timeout(5.0),
+        std::time::Duration::from_secs(CLOUD_WHISPER_MIN_TIMEOUT_SECS)
+    );
+}
+
+#[test]
+fn cloud_whisper_timeout_handles_zero_duration() {
+    assert_eq!(
+        cloud_whisper_transcribe_timeout(0.0),
+        std::time::Duration::from_secs(CLOUD_WHISPER_MIN_TIMEOUT_SECS)
+    );
+}
+
+#[test]
+fn cloud_whisper_timeout_scales_for_long_recordings() {
+    // 422s recording: ceil(422 * 0.5) + 15 = 226s. Do not drop it at 15s.
+    assert_eq!(
+        cloud_whisper_transcribe_timeout(422.0),
+        std::time::Duration::from_secs(226)
+    );
+}
+
+#[test]
+fn cloud_whisper_timeout_is_capped() {
+    assert_eq!(
+        cloud_whisper_transcribe_timeout(1_000.0),
+        std::time::Duration::from_secs(CLOUD_WHISPER_MAX_TIMEOUT_SECS)
+    );
+}
+
+#[test]
+fn cloud_whisper_timeout_preserves_exact_cap_boundary() {
+    // ceil(570 * 0.5) + 15 = 300s, exactly at the cap.
+    assert_eq!(
+        cloud_whisper_transcribe_timeout(570.0),
+        std::time::Duration::from_secs(CLOUD_WHISPER_MAX_TIMEOUT_SECS)
+    );
+}
+
 #[cfg(target_os = "windows")]
 #[test]
 fn foundry_release_uses_foundry_keep_loaded_preference() {
