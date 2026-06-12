@@ -59,14 +59,14 @@ export function PrivacyTab() {
           alignItems: 'center',
           gap: 10,
           padding: '10px 12px',
-          borderRadius: 10,
+          borderRadius: 'var(--ol-r-md)',
           background: 'var(--ol-blue-soft)',
           marginBottom: 2,
         }}
       >
         <span style={{
           fontSize: 11, padding: '3px 8px', borderRadius: 999,
-          background: '#fff', color: 'var(--ol-blue)', fontWeight: 600, flexShrink: 0,
+          background: 'var(--ol-surface-solid)', color: 'var(--ol-blue)', fontWeight: 600, flexShrink: 0,
         }}>
           {t('modal.about.localFirst')}
         </span>

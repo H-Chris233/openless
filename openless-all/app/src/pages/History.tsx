@@ -238,7 +238,7 @@ export function History() {
             <div style={{
               display: 'flex', alignItems: 'center', gap: 6,
               padding: '6px 10px',
-              border: '0.5px solid var(--ol-line-strong)', borderRadius: 8,
+              border: '0.5px solid var(--ol-line-strong)', borderRadius: 'var(--ol-control-radius)',
               background: 'var(--ol-surface-2)', color: 'var(--ol-ink-3)',
             }}>
               <Icon name="search" size={12} />
@@ -264,7 +264,7 @@ export function History() {
                   key={f.id}
                   onClick={() => setFilter(f.id)}
                   style={{
-                    padding: '3px 9px', fontSize: 11, borderRadius: 999,
+                    padding: '3px 9px', fontSize: 11, borderRadius: 'var(--ol-pill-radius)',
                     border: '0.5px solid ' + (filter === f.id ? 'var(--ol-pill-selected-border)' : 'var(--ol-line-strong)'),
                     background: filter === f.id ? 'var(--ol-pill-selected-bg)' : 'transparent',
                     color: filter === f.id ? 'var(--ol-pill-selected-ink)' : 'var(--ol-ink-3)',
@@ -277,7 +277,7 @@ export function History() {
           </div>
           <div className="ol-thinscroll" style={{ flex: 1, overflow: 'auto', padding: 6 }}>
             {actionError && (
-              <div style={{ margin: 8, padding: '9px 10px', borderRadius: 8, background: 'rgba(239,68,68,0.08)', color: 'var(--ol-red, #ef4444)', fontSize: 12, lineHeight: 1.45 }}>
+              <div style={{ margin: 8, padding: '9px 10px', borderRadius: 'var(--ol-control-radius)', background: 'rgba(239,68,68,0.08)', color: 'var(--ol-red, #ef4444)', fontSize: 12, lineHeight: 1.45 }}>
                 {actionError}
               </div>
             )}
@@ -302,7 +302,7 @@ export function History() {
                 style={{
                   width: '100%', padding: '10px 12px', textAlign: 'left',
                   display: 'flex', flexDirection: 'column', gap: 4,
-                  border: 0, borderRadius: 8,
+                  border: 0, borderRadius: 'var(--ol-control-radius)',
                   background: selectedId === s.id ? 'rgba(37,99,235,0.06)' : 'transparent',
                   boxShadow: selectedId === s.id ? 'inset 2px 0 0 var(--ol-blue)' : 'none',
                   cursor: 'default', fontFamily: 'inherit', marginBottom: 1,
@@ -363,13 +363,13 @@ export function History() {
                 />
               )}
               <div style={{ display: 'grid', gridTemplateColumns: mobile ? '1fr' : '1fr 1fr', gap: 12 }}>
-                <div style={{ padding: 14, border: '0.5px solid var(--ol-line)', borderRadius: 10, background: 'var(--ol-surface-2)' }}>
+                <div style={{ padding: 14, border: '0.5px solid var(--ol-line)', borderRadius: 'var(--ol-r-md)', background: 'var(--ol-surface-2)' }}>
                   <Pill size="sm" tone="outline" style={{ marginBottom: 10 }}>{t('history.rawLabel')}</Pill>
                   <p style={{ margin: 0, fontSize: 13, lineHeight: 1.7, color: 'var(--ol-ink-2)', whiteSpace: 'pre-wrap' }}>
                     {item.rawTranscript || t('history.rawEmpty')}
                   </p>
                 </div>
-                <div style={{ padding: 14, border: '0.5px solid var(--ol-blue)', borderRadius: 10, background: 'var(--ol-blue-soft)' }}>
+                <div style={{ padding: 14, border: '0.5px solid var(--ol-blue)', borderRadius: 'var(--ol-r-md)', background: 'var(--ol-blue-soft)' }}>
                   <Pill size="sm" tone="blue" style={{ marginBottom: 10 }}>{MODE_LABEL[item.mode]}</Pill>
                   <p style={{ margin: 0, fontSize: 13, lineHeight: 1.7, color: 'var(--ol-ink)', whiteSpace: 'pre-line' }}>
                     {item.finalText}

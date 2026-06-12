@@ -834,7 +834,7 @@ function CredentialField({ label, account, placeholder, mono, mask, defaultValue
 const miniBtnStyle: CSSProperties = {
   height: 32, padding: '0 12px',
   border: '0.5px solid var(--ol-line-strong)',
-  borderRadius: 8, background: 'var(--ol-surface)',
+  borderRadius: 'var(--ol-control-radius)', background: 'var(--ol-surface)',
   boxShadow: '0 1px 2px rgba(0,0,0,0.04), 0 0 0 0.5px rgba(255,255,255,0.2) inset',
   color: 'var(--ol-ink-2)', cursor: 'default', flexShrink: 0,
   fontSize: 12.5, fontWeight: 500, letterSpacing: '0.01em',
@@ -844,7 +844,7 @@ const miniBtnStyle: CSSProperties = {
 const iconBtnStyle: CSSProperties = {
   width: 32, height: 32,
   border: '0.5px solid var(--ol-line-strong)',
-  borderRadius: 8, background: 'var(--ol-surface)',
+  borderRadius: 'var(--ol-control-radius)', background: 'var(--ol-surface)',
   boxShadow: '0 1px 2px rgba(0,0,0,0.04), 0 0 0 0.5px rgba(255,255,255,0.2) inset',
   display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
   color: 'var(--ol-ink-3)', cursor: 'default', flexShrink: 0,

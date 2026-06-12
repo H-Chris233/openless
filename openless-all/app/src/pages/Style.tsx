@@ -570,7 +570,7 @@ export function Style() {
                       alignItems: 'center',
                       gap: 6,
                       padding: '6px 12px',
-                      borderRadius: 999,
+                      borderRadius: 'var(--ol-pill-radius)',
                       border: '0.5px solid',
                       borderColor: rawPack.active ? 'var(--ol-blue)' : 'var(--ol-line-strong)',
                       background: rawPack.active ? 'var(--ol-blue-soft)' : 'transparent',
@@ -619,7 +619,7 @@ export function Style() {
                       : isBuiltin
                         ? 'linear-gradient(180deg, rgba(248,250,252,0.92), rgba(241,245,249,0.85))'
                         : 'linear-gradient(180deg, rgba(255,255,255,0.98), rgba(248,250,252,0.92))',
-                    borderRadius: 18,
+                    borderRadius: 'var(--ol-modal-radius)',
                     padding: 16,
                     boxShadow: pack.active ? '0 0 0 3px var(--ol-blue-ring)' : 'none',
                     cursor: 'default',
@@ -663,7 +663,7 @@ export function Style() {
                       <div
                         aria-hidden
                         style={{
-                          width: 36, height: 36, borderRadius: 12,
+                          width: 36, height: 36, borderRadius: 'var(--ol-r-lg)',
                           display: 'grid', placeItems: 'center',
                           background: pack.active ? 'rgba(37,99,235,0.12)' : 'rgba(15,23,42,0.05)',
                           color: pack.active ? 'var(--ol-blue)' : 'var(--ol-ink-3)',
@@ -680,7 +680,7 @@ export function Style() {
                         aria-label={t('style.pack.deleteImported')}
                         title={t('style.pack.deleteImported')}
                         style={{
-                          width: 36, height: 36, borderRadius: 12,
+                          width: 36, height: 36, borderRadius: 'var(--ol-r-lg)',
                           display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
                           flexShrink: 0,
                           border: '0.5px solid rgba(239,68,68,0.32)',
@@ -756,7 +756,7 @@ export function Style() {
                 gap: 8,
                 textAlign: 'center',
                 border: '0.5px dashed var(--ol-line-strong)',
-                borderRadius: 18,
+                borderRadius: 'var(--ol-modal-radius)',
                 padding: 16,
                 background: 'transparent',
                 color: 'var(--ol-ink-3)',
@@ -768,7 +768,7 @@ export function Style() {
             >
               <div
                 style={{
-                  width: 44, height: 44, borderRadius: 999,
+                  width: 44, height: 44, borderRadius: 'var(--ol-pill-radius)',
                   display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
                   background: 'rgba(15,23,42,0.04)',
                   color: 'var(--ol-ink-2)',
@@ -843,7 +843,7 @@ export function Style() {
                     style={{
                       width: 28,
                       height: 28,
-                      borderRadius: 999,
+                      borderRadius: 'var(--ol-pill-radius)',
                       border: 0,
                       background: 'transparent',
                       color: 'var(--ol-ink-3)',
@@ -1057,7 +1057,7 @@ export function Style() {
                   <div
                     style={{
                       padding: 14,
-                      borderRadius: 14,
+                      borderRadius: 'var(--ol-bubble-radius)',
                       background: 'linear-gradient(180deg, rgba(248,250,252,0.98), rgba(241,245,249,0.95))',
                       border: '0.5px solid var(--ol-line)',
                     }}
@@ -1113,7 +1113,7 @@ export function Style() {
                               width: 32, height: 32,
                               flexShrink: 0,
                               border: '0.5px solid var(--ol-line-strong)',
-                              borderRadius: 8,
+                              borderRadius: 'var(--ol-control-radius)',
                               background: 'transparent',
                               color: 'var(--ol-ink-2)',
                               display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
@@ -1128,7 +1128,7 @@ export function Style() {
                         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 12 }}>
                           <div
                             style={{
-                              borderRadius: 14,
+                              borderRadius: 'var(--ol-bubble-radius)',
                               border: '0.5px solid rgba(148,163,184,0.22)',
                               background: 'rgba(248,250,252,0.9)',
                               padding: 14,
@@ -1140,13 +1140,13 @@ export function Style() {
                             <textarea
                               value={example.input}
                               onChange={event => patchExample(index, { input: event.target.value })}
-                              style={{ ...textareaStyle, minHeight: 120, background: '#fff' }}
+                              style={{ ...textareaStyle, minHeight: 120, background: 'var(--ol-control-solid)' }}
                             />
                           </div>
 
                           <div
                             style={{
-                              borderRadius: 14,
+                              borderRadius: 'var(--ol-bubble-radius)',
                               border: '0.5px solid rgba(37,99,235,0.16)',
                               background: 'rgba(239,246,255,0.86)',
                               padding: 14,
@@ -1158,7 +1158,7 @@ export function Style() {
                             <textarea
                               value={example.output}
                               onChange={event => patchExample(index, { output: event.target.value })}
-                              style={{ ...textareaStyle, minHeight: 120, background: '#fff' }}
+                              style={{ ...textareaStyle, minHeight: 120, background: 'var(--ol-control-solid)' }}
                             />
                           </div>
                         </div>
@@ -1180,9 +1180,9 @@ function MetaItem({ label, value }: { label: string; value: string }) {
   return (
     <div
       style={{
-        borderRadius: 12,
+        borderRadius: 'var(--ol-r-lg)',
         border: '0.5px solid rgba(148,163,184,0.2)',
-        background: 'rgba(255,255,255,0.92)',
+        background: 'var(--ol-glass-bg-strong)',
         padding: '10px 12px',
       }}
     >
@@ -1217,9 +1217,9 @@ function DirectiveRow({
         justifyContent: 'space-between',
         gap: 12,
         padding: '10px 12px',
-        borderRadius: 12,
+        borderRadius: 'var(--ol-r-lg)',
         border: '0.5px solid rgba(148,163,184,0.2)',
-        background: 'rgba(255,255,255,0.92)',
+        background: 'var(--ol-glass-bg-strong)',
       }}
     >
       <div style={{ minWidth: 0 }}>
@@ -1238,9 +1238,9 @@ const inputStyle: CSSProperties = {
   boxSizing: 'border-box',
   minHeight: 38,
   padding: '9px 11px',
-  borderRadius: 10,
+  borderRadius: 'var(--ol-r-md)',
   border: '0.5px solid var(--ol-line-strong)',
-  background: '#fff',
+  background: 'var(--ol-control-solid)',
   color: 'var(--ol-ink)',
   font: 'inherit',
   fontSize: 12.5,
@@ -1250,9 +1250,9 @@ const textareaStyle: CSSProperties = {
   width: '100%',
   boxSizing: 'border-box',
   padding: '11px 12px',
-  borderRadius: 12,
+  borderRadius: 'var(--ol-r-lg)',
   border: '0.5px solid var(--ol-line-strong)',
-  background: '#fff',
+  background: 'var(--ol-control-solid)',
   color: 'var(--ol-ink)',
   font: 'inherit',
   fontSize: 12.5,

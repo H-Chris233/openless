@@ -163,7 +163,7 @@ export function RecordingInputSection() {
               marginTop: 4,
               marginBottom: 8,
               padding: '12px 14px',
-              borderRadius: 10,
+              borderRadius: 'var(--ol-r-md)',
               background: 'rgba(37,99,235,0.08)',
               border: '0.5px solid rgba(37,99,235,0.18)',
             }}
@@ -189,15 +189,15 @@ export function RecordingInputSection() {
         )}
         {showDesktopHotkey && (
         <SettingRow label={t('settings.recording.modeLabel')}>
-          <div style={{ display: 'inline-flex', padding: 2, borderRadius: 8, background: 'rgba(0,0,0,0.05)' }}>
+          <div style={{ display: 'inline-flex', padding: 2, borderRadius: 'var(--ol-control-radius)', background: 'rgba(0,0,0,0.05)' }}>
             {choices.map(([v, l]) => (
               <button
                 key={v}
                 onClick={() => onModeChange(v)}
                 style={{
                   padding: '5px 14px', fontSize: 12, fontWeight: 500,
-                  border: 0, borderRadius: 6, fontFamily: 'inherit',
-                  background: prefs.hotkey.mode === v ? '#fff' : 'transparent',
+                  border: 0, borderRadius: 'var(--ol-r-sm)', fontFamily: 'inherit',
+                  background: prefs.hotkey.mode === v ? 'var(--ol-surface-solid)' : 'transparent',
                   color: prefs.hotkey.mode === v ? 'var(--ol-ink)' : 'var(--ol-ink-3)',
                   boxShadow: prefs.hotkey.mode === v ? '0 1px 2px rgba(0,0,0,.08)' : 'none',
                   cursor: 'default',
@@ -248,7 +248,7 @@ export function RecordingInputSection() {
                 fontWeight: 500,
                 fontFamily: 'inherit',
                 border: '0.5px solid var(--ol-line-strong)',
-                borderRadius: 8,
+                borderRadius: 'var(--ol-control-radius)',
                 background: 'var(--ol-surface-2)',
                 color: 'var(--ol-ink-2)',
                 cursor: 'default',

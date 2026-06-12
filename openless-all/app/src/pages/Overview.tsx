@@ -289,7 +289,7 @@ function ProviderCard({ kind, name, subname, status }: ProviderCardProps) {
     <Card padding={mobile ? 14 : 16} style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
       <div
         style={{
-          width: 38, height: 38, borderRadius: 10,
+          width: 38, height: 38, borderRadius: 'var(--ol-r-md)',
           background: 'var(--ol-blue-soft)',
           color: 'var(--ol-blue)',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -302,7 +302,7 @@ function ProviderCard({ kind, name, subname, status }: ProviderCardProps) {
           <span style={{ fontSize: 11, color: 'var(--ol-ink-4)', fontWeight: 600, letterSpacing: '.06em', textTransform: 'uppercase' }}>{kind}</span>
           {status === 'configured' && (
             <Pill tone="ok" size="sm">
-              <span style={{ width: 5, height: 5, borderRadius: 999, background: 'var(--ol-ok)' }} />
+              <span style={{ width: 5, height: 5, borderRadius: 'var(--ol-pill-radius)', background: 'var(--ol-ok)' }} />
               {t('overview.statusConfigured')}
             </Pill>
           )}
@@ -573,20 +573,20 @@ function InAppDictationControl() {
         style={{
           width: 52,
           height: 52,
-          borderRadius: 999,
+          borderRadius: 'var(--ol-pill-radius)',
           border: 0,
           display: 'inline-flex',
           alignItems: 'center',
           justifyContent: 'center',
-          background: recording ? 'var(--ol-err, #ef4444)' : 'var(--ol-blue)',
-          color: '#fff',
+          background: recording ? 'var(--ol-danger-solid-bg)' : 'var(--ol-accent-solid-bg)',
+          color: recording ? 'var(--ol-danger-solid-ink)' : 'var(--ol-accent-solid-ink)',
           cursor: busy || processing ? 'not-allowed' : 'default',
           opacity: busy || processing ? 0.7 : 1,
           transition: 'background 0.16s var(--ol-motion-quick), opacity 0.16s var(--ol-motion-quick)',
         }}
       >
         {recording ? (
-          <span style={{ width: 16, height: 16, borderRadius: 3, background: '#fff', display: 'block' }} />
+          <span style={{ width: 16, height: 16, borderRadius: 3, background: 'var(--ol-control-solid)', display: 'block' }} />
         ) : (
           <Icon name="mic" size={20} />
         )}

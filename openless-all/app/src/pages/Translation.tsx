@@ -77,10 +77,10 @@ export function Translation() {
                 style={{
                   alignSelf: 'flex-start',
                   padding: '6px 12px',
-                  borderRadius: 999,
+                  borderRadius: 'var(--ol-pill-radius)',
                   border: 0,
-                  background: 'var(--ol-blue)',
-                  color: '#fff',
+                  background: 'var(--ol-accent-solid-bg)',
+                  color: 'var(--ol-accent-solid-ink)',
                   fontSize: 12,
                   fontWeight: 600,
                   cursor: loading ? 'not-allowed' : 'default',
@@ -140,7 +140,7 @@ export function Translation() {
               justifyContent: 'space-between',
               gap: 10,
               padding: '8px 12px',
-              borderRadius: 10,
+              borderRadius: 'var(--ol-r-md)',
               border: '0.5px solid rgba(239,68,68,0.22)',
               background: 'rgba(239,68,68,0.07)',
               color: 'var(--ol-red, #ef4444)',
@@ -156,7 +156,7 @@ export function Translation() {
               style={{
                 flex: '0 0 auto',
                 border: 0,
-                borderRadius: 999,
+                borderRadius: 'var(--ol-pill-radius)',
                 background: 'rgba(239,68,68,0.12)',
                 color: 'inherit',
                 padding: '4px 10px',
@@ -188,9 +188,9 @@ export function Translation() {
                     fontSize: 12.5,
                     fontWeight: checked ? 600 : 500,
                     border: 0,
-                    borderRadius: 999,
-                    background: checked ? 'var(--ol-blue)' : 'rgba(0,0,0,0.05)',
-                    color: checked ? '#fff' : 'var(--ol-ink-2)',
+                    borderRadius: 'var(--ol-pill-radius)',
+                    background: checked ? 'var(--ol-accent-solid-bg)' : 'rgba(0,0,0,0.05)',
+                    color: checked ? 'var(--ol-accent-solid-ink)' : 'var(--ol-ink-2)',
                     cursor: 'default',
                     fontFamily: 'inherit',
                     transition: 'background 0.12s ease-out, color 0.12s ease-out',
@@ -213,7 +213,7 @@ export function Translation() {
                 fontSize: 10.5,
                 fontWeight: 600,
                 letterSpacing: '0.04em',
-                borderRadius: 999,
+                borderRadius: 'var(--ol-pill-radius)',
                 background: enabled ? 'rgba(37,99,235,0.10)' : 'rgba(0,0,0,0.05)',
                 color: enabled ? 'var(--ol-blue)' : 'var(--ol-ink-4)',
                 textTransform: 'uppercase',
@@ -228,7 +228,7 @@ export function Translation() {
             options={targetOptions}
             placeholder={t('translation.target.disabled')}
             ariaLabel={t('translation.target.title')}
-            style={{ width: '100%', maxWidth: 360, fontSize: 13, background: '#fff' }}
+            style={{ width: '100%', maxWidth: 360, fontSize: 13, background: 'var(--ol-control-solid)' }}
           />
         </Card>
 

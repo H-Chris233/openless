@@ -49,7 +49,7 @@ export function MarketplaceModal({ onClose }: MarketplaceModalProps) {
         style={{
           width: '100%', maxWidth: 1080, height: '100%', maxHeight: 720,
           background: 'var(--ol-surface)',
-          borderRadius: 14,
+          borderRadius: 'var(--ol-bubble-radius)',
           border: '0.5px solid rgba(0,0,0,.08)',
           boxShadow: '0 30px 80px -20px rgba(15,17,22,.35), 0 0 0 0.5px rgba(0,0,0,.06)',
           overflow: 'hidden',
@@ -70,9 +70,9 @@ export function MarketplaceModal({ onClose }: MarketplaceModalProps) {
             title={loggedIn ? t('marketplace.modal.loggedIn') : t('marketplace.modal.notLoggedIn')}
             style={{
               display: 'inline-flex', alignItems: 'center', gap: 6,
-              padding: '4px 10px', borderRadius: 999,
+              padding: '4px 10px', borderRadius: 'var(--ol-pill-radius)',
               border: loggedIn ? '0.5px solid var(--ol-line)' : '0.5px solid rgba(239,68,68,0.32)',
-              background: loggedIn ? 'rgba(255,255,255,0.85)' : 'rgba(239,68,68,0.08)',
+              background: loggedIn ? 'var(--ol-glass-bg-strong)' : 'rgba(239,68,68,0.08)',
               color: loggedIn ? 'var(--ol-ink-2)' : 'var(--ol-red, #ef4444)',
               fontSize: 11.5, fontWeight: 500,
               cursor: 'default',
@@ -92,8 +92,8 @@ export function MarketplaceModal({ onClose }: MarketplaceModalProps) {
             position: 'absolute', top: 16, right: 16, zIndex: 3,
             width: 32, height: 32,
             border: '0.5px solid var(--ol-line)',
-            borderRadius: 8,
-            background: 'rgba(255,255,255,0.85)',
+            borderRadius: 'var(--ol-control-radius)',
+            background: 'var(--ol-glass-bg-strong)',
             color: 'var(--ol-ink-2)',
             display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
             cursor: 'default',
@@ -107,7 +107,7 @@ export function MarketplaceModal({ onClose }: MarketplaceModalProps) {
             (e.currentTarget as HTMLButtonElement).style.color = 'var(--ol-ink)';
           }}
           onMouseLeave={(e) => {
-            (e.currentTarget as HTMLButtonElement).style.background = 'rgba(255,255,255,0.85)';
+            (e.currentTarget as HTMLButtonElement).style.background = 'var(--ol-glass-bg-strong)';
             (e.currentTarget as HTMLButtonElement).style.color = 'var(--ol-ink-2)';
           }}
           aria-label={t('common.close')}

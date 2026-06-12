@@ -80,6 +80,7 @@ export function SettingsModal({ os: _os, onClose, initialSettingsSection }: Sett
 
       <div
         className="ol-aura-settings"
+        data-ol-mobile={mobile ? 'true' : 'false'}
         onClick={(e) => e.stopPropagation()}
         style={{
           width: '100%',
@@ -175,7 +176,7 @@ export function SettingsModal({ os: _os, onClose, initialSettingsSection }: Sett
             onClick={onClose}
             style={{
               position: 'absolute', top: 14, right: 14, zIndex: 2,
-              width: 28, height: 28, border: 0, borderRadius: 999,
+              width: 28, height: 28, border: 0, borderRadius: 'var(--ol-pill-radius)',
               display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
               cursor: 'default',
             }}
@@ -210,73 +211,6 @@ export function SettingsModal({ os: _os, onClose, initialSettingsSection }: Sett
           </div>
         </div>
       </div>
-      <style>{`
-        .ol-aura-settings {
-          background: var(--ol-panel-bg);
-          border-radius: ${mobile ? '0' : 'var(--ol-shell-radius)'};
-          border: 1px solid var(--ol-panel-border);
-          box-shadow: var(--ol-panel-shadow);
-        }
-        .ol-aura-settings-rail {
-          padding: ${mobile ? 'calc(10px + env(safe-area-inset-top, 0px)) 10px 8px' : '20px 14px'};
-          gap: ${mobile ? '8px' : '16px'};
-          background: var(--ol-settings-rail-bg);
-          border-right: ${mobile ? '0' : '1px solid var(--ol-settings-rail-border)'};
-          border-bottom: ${mobile ? '1px solid var(--ol-settings-rail-border)' : '0'};
-        }
-        .ol-aura-settings-pill {
-          background: var(--ol-sidebar-pill-bg);
-          border-radius: 12px;
-          border: 1px solid var(--ol-sidebar-pill-border);
-          box-shadow: none;
-        }
-        .ol-aura-settings-nav-btn {
-          padding: ${mobile ? '8px 11px' : '7px 10px'};
-          border-radius: 12px;
-          border: 0;
-          background: transparent;
-          font-family: inherit;
-          font-size: 13px;
-          cursor: default;
-          text-align: left;
-          position: relative;
-          z-index: 1;
-          transition: color 0.16s var(--ol-motion-quick), background 0.16s var(--ol-motion-quick);
-        }
-        .ol-aura-settings-nav-btn.ol-nav-btn-active {
-          background: ${mobile ? 'var(--ol-sidebar-pill-bg)' : 'transparent'};
-          border: ${mobile ? '1px solid var(--ol-sidebar-pill-border)' : '0'};
-        }
-        .ol-aura-settings-links {
-          display: flex;
-          flex-direction: ${mobile ? 'row' : 'column'};
-          gap: 1px;
-          padding-top: ${mobile ? '0' : '10px'};
-          padding-left: ${mobile ? '8px' : '0'};
-          border-top: ${mobile ? '0' : '1px solid var(--ol-settings-links-border)'};
-          border-left: ${mobile ? '1px solid var(--ol-settings-links-border)' : '0'};
-          overflow-x: ${mobile ? 'auto' : 'visible'};
-        }
-        .ol-aura-settings-content {
-          background: var(--ol-settings-content-bg);
-        }
-        .ol-aura-settings-close {
-          background: var(--ol-settings-close-bg);
-          color: var(--ol-ink-3);
-          transition: background 0.16s var(--ol-motion-quick);
-        }
-        .ol-aura-settings-close:hover {
-          background: var(--ol-settings-close-hover-bg);
-        }
-        .ol-aura-settings-title {
-          padding: ${mobile ? '16px 48px 8px 16px' : '24px 28px 10px'};
-          font-size: ${mobile ? '20px' : '22px'};
-          font-weight: 600;
-          letter-spacing: -0.02em;
-          font-family: var(--ol-font-display);
-          color: var(--ol-ink);
-        }
-      `}</style>
     </div>
   );
 }

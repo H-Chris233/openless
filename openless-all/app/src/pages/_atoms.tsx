@@ -83,13 +83,14 @@ export function Card({ children, style, padding = 18, glassy = false, className 
     <div
       className={['ol-aura-card', className].filter(Boolean).join(' ')}
       style={{
-        background: glassy ? 'var(--ol-panel-bg)' : 'var(--ol-card-bg)',
-        backdropFilter: glassy ? 'blur(var(--ol-aura-glass-blur)) saturate(150%)' : undefined,
-        WebkitBackdropFilter: glassy ? 'blur(var(--ol-aura-glass-blur)) saturate(150%)' : undefined,
-        border: `1px solid ${glassy ? 'var(--ol-panel-border)' : 'var(--ol-card-border)'}`,
-        borderRadius: 'var(--ol-card-radius)',
+        ...(glassy ? {
+          background: 'var(--ol-panel-bg)',
+          backdropFilter: 'blur(var(--ol-aura-glass-blur)) saturate(150%)',
+          WebkitBackdropFilter: 'blur(var(--ol-aura-glass-blur)) saturate(150%)',
+          border: '1px solid var(--ol-panel-border)',
+          boxShadow: 'var(--ol-panel-shadow)',
+        } : undefined),
         padding,
-        boxShadow: glassy ? 'var(--ol-panel-shadow)' : 'var(--ol-card-shadow)',
         ...style,
       }}
     >
@@ -161,7 +162,7 @@ interface BtnProps {
 export function Btn({ children, variant = 'ghost', size = 'md', icon, style, onClick, disabled = false }: BtnProps) {
   const variants: Record<BtnVariant, { bg: string; color: string; bd: string; sh: string }> = {
     primary: { bg: 'linear-gradient(180deg, #141821, #0d1016)', color: 'var(--ol-on-accent)', bd: 'transparent', sh: '0 14px 32px -22px rgba(15,23,42,0.55)' },
-    blue:    { bg: 'linear-gradient(180deg, var(--ol-blue), var(--ol-blue-hover))', color: 'var(--ol-on-accent)', bd: 'transparent', sh: '0 14px 32px -22px rgba(37,99,235,.45)' },
+    blue:    { bg: 'linear-gradient(180deg, var(--ol-accent-solid-bg), var(--ol-accent-solid-bg-hover))', color: 'var(--ol-accent-solid-ink)', bd: 'transparent', sh: '0 14px 32px -22px rgba(37,99,235,.45)' },
     ghost:   { bg: 'var(--ol-control-muted)', color: 'var(--ol-ink-2)', bd: 'var(--ol-control-border)', sh: 'var(--ol-control-shadow)' },
     soft:    { bg: 'var(--ol-control-muted-strong)', color: 'var(--ol-ink-2)', bd: 'transparent', sh: 'var(--ol-control-shadow)' },
   };
@@ -221,10 +222,10 @@ export function Collapsible({ title, desc, defaultOpen = false, embedded = false
     <div
       style={{
         borderBottom: embedded ? '0.5px solid var(--ol-line)' : undefined,
-        border: embedded ? undefined : '0.5px solid var(--ol-line)',
-        borderRadius: embedded ? 0 : 'var(--ol-r-lg)',
-        background: embedded ? 'transparent' : 'var(--ol-surface)',
-        boxShadow: embedded ? 'none' : 'var(--ol-shadow-sm)',
+        border: embedded ? undefined : '1px solid var(--ol-card-border)',
+        borderRadius: embedded ? 0 : 'var(--ol-card-radius)',
+        background: embedded ? 'transparent' : 'var(--ol-card-bg)',
+        boxShadow: embedded ? 'none' : 'var(--ol-card-shadow)',
         overflow: 'hidden',
         // 父级 flex column 带 minHeight:0 + overflow:auto 时，所有 flex 子项默认
         // shrink:1，会把 header 按钮也压成一条线。锁住不压缩，溢出走父容器滚动。
