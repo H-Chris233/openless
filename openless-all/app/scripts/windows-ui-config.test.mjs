@@ -22,7 +22,8 @@ const capsuleTsx = await readFile(new URL('../src/components/Capsule.tsx', impor
 const capsuleLayoutTs = await readFile(new URL('../src/lib/capsuleLayout.ts', import.meta.url), 'utf-8');
 const windowChromeTsx = await readFile(new URL('../src/components/WindowChrome.tsx', import.meta.url), 'utf-8');
 const floatingShellTsx = await readFile(new URL('../src/components/FloatingShell.tsx', import.meta.url), 'utf-8');
-const tokensCss = await readFile(new URL('../src/styles/tokens.css', import.meta.url), 'utf-8');
+const themeModeTs = await readFile(new URL('../src/lib/themeMode.ts', import.meta.url), 'utf-8');
+const platformTs = await readFile(new URL('../src/lib/platform.ts', import.meta.url), 'utf-8');
 
 if (!capsuleWindow) {
   throw new Error('capsule window config missing');
@@ -34,13 +35,31 @@ assertEqual(capsuleWindow.width, 220, 'windows capsule config keeps translation-
 assertEqual(capsuleWindow.height, 110, 'windows capsule config keeps translation-capable height baseline');
 assertEqual(capsuleWindow.transparent, true, 'capsule window should keep transparent visuals');
 assertEqual(capsuleWindow.alwaysOnTop, true, 'capsule window should stay above the focused app while recording');
-assertEqual(mainWindow.decorations, true, 'shared main window config should keep native macOS traffic lights');
+assertEqual(mainWindow.decorations, true, 'windows main window should keep native decorations');
 assertEqual(mainWindow.visible, false, 'windows main window should stay hidden until the intended first show point');
 
 assertMatch(
   libRs,
-  /#\[cfg\(target_os = "windows"\)\][\s\S]*?main\.set_decorations\(false\)/,
-  'windows runtime should disable native chrome before the first show',
+  /fn apply_windows_caption_theme[\s\S]*?DWMWA_USE_IMMERSIVE_DARK_MODE[\s\S]*?DWMWA_CAPTION_COLOR[\s\S]*?DWMWA_TEXT_COLOR[\s\S]*?DWMWA_BORDER_COLOR/,
+  'windows runtime should sync immersive dark mode and caption/text/border colors',
+);
+
+assertMatch(
+  libRs,
+  /#\[tauri::command\][\s\S]*?fn set_windows_caption_theme/,
+  'windows caption theme should be exposed as a Tauri command',
+);
+
+assertMatch(
+  themeModeTs,
+  /export function applyThemeMode[\s\S]*?syncWindowsCaptionTheme/,
+  'applyThemeMode should sync Windows native caption theme',
+);
+
+assertMatch(
+  platformTs,
+  /export async function syncWindowsCaptionTheme[\s\S]*?set_windows_caption_theme/,
+  'platform IPC wrapper should invoke set_windows_caption_theme',
 );
 
 assertMatch(
@@ -49,9 +68,17 @@ assertMatch(
   'macOS capsule should show without taking the key window',
 );
 
-if (!/function WindowsResizeHandles\(\)/.test(windowChromeTsx)) {
-  throw new Error('windows frameless shell should expose explicit resize handles');
+const tokensCss = await readFile(new URL('../src/styles/tokens.css', import.meta.url), 'utf-8');
+
+if (!/os === 'win' \|\| os === 'android' \? 0 : 14/.test(windowChromeTsx)) {
+  throw new Error('windows main shell should rely on native decorations instead of a frameless chrome shell');
 }
+
+assertMatch(
+  windowChromeTsx,
+  /\/\/ Windows: decorations:true 时外层不画圆角/,
+  'windows WindowChrome should defer chrome to native decorations',
+);
 
 assertMatch(
   windowChromeTsx,
@@ -66,8 +93,8 @@ assertMatch(
 if (/standardWindowButton|setFrameOrigin: origin|tune_macos_main_window_controls/.test(libRs)) {
   throw new Error('macOS traffic lights should not be manually repositioned; keep native AppKit button frames visible');
 }
-if (!/action=\"close\"/.test(windowChromeTsx) || !/tone=\"danger\"/.test(windowChromeTsx)) {
-  throw new Error('windows titlebar should keep the close button and danger hover treatment');
+if (!/className=\"ol-linux-close-btn\"/.test(windowChromeTsx)) {
+  throw new Error('linux titlebar should keep the close button treatment');
 }
 assertMatch(
   tokensCss,
@@ -75,12 +102,14 @@ assertMatch(
   'shared motion tokens should drive shell animations and transitions',
 );
 
-if (!/startResizeDragging\(direction\)/.test(windowChromeTsx)) {
-  throw new Error('windows resize handles should delegate edge dragging to Tauri');
-}
+assertMatch(
+  windowChromeTsx,
+  /function LinuxTitlebar\(\)/,
+  'linux should keep the custom ol-linux-titlebar shell',
+);
 
-if (!/borderRadius:\s*'var\(--ol-window-console-radius\)'/.test(floatingShellTsx)) {
-  throw new Error('floating shell should consume the shared window-console radius');
+if (!/borderRadius:\s*'var\(--ol-r-lg\)'/.test(floatingShellTsx)) {
+  throw new Error('floating shell should consume the shared radius token');
 }
 
 assertMatch(

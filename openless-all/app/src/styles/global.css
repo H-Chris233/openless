@@ -66,6 +66,13 @@ input, textarea {
   font-family: inherit;
   user-select: text;
   -webkit-user-select: text;
+  color: var(--ol-input-ink);
+  caret-color: var(--ol-input-ink);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--ol-input-placeholder);
 }
 
 a { color: inherit; text-decoration: none; }
@@ -145,14 +152,7 @@ a { color: inherit; text-decoration: none; }
 .ol-frost {
   position: relative;
   isolation: isolate;
-  /* 体渐变 + 左上高光扫面 —— 半透明白底（~0.9），给磨砂面体积感而不是死平。 */
-  background:
-    radial-gradient(135% 86% at 15% -10%,
-      rgba(255, 255, 255, 0.97) 0%,
-      rgba(255, 255, 255, 0) 56%),
-    linear-gradient(161deg,
-      rgba(255, 255, 255, 0.93) 0%,
-      rgba(244, 247, 252, 0.88) 100%);
+  background: var(--ol-frost-bg);
 }
 
 .ol-frost::before {
@@ -161,12 +161,12 @@ a { color: inherit; text-decoration: none; }
   inset: 0;
   z-index: -1;
   border-radius: inherit;
-  /* 不透明灰度噪点，normal 混合 —— 这是"磨砂颗粒"的来源。opacity 直接等于颗粒
-     强度：0.1 几乎看不见，0.32 能明显看出磨砂质感又不脏。要更糙往 0.45 调。 */
+  /* 不透明灰度噪点，normal 混合 —— 这是"磨砂颗粒"的来源。opacity 由
+     --ol-frost-grain-opacity 控制颗粒强度。 */
   background-image: var(--ol-frost-grain);
   /* tile 与 SVG 视口同尺寸（100），stitchTiles 的无缝拼接才成立 */
   background-size: 100px 100px;
-  opacity: 0.32;
+  opacity: var(--ol-frost-grain-opacity);
   pointer-events: none;
 }
 

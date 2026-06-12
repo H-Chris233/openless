@@ -338,6 +338,30 @@ for (const pair of remoteMutedContrastPairs) {
   remoteMutedContrastRatios[pair.label] = assertMutedContrast(pair.tokens, pair.label, pair.bg, pair.ink);
 }
 
+const olFrostBlock = extractCssBlock(globalCss, '.ol-frost');
+assert.doesNotMatch(
+  olFrostBlock,
+  /rgba\(\s*255\s*,\s*255\s*,\s*255/i,
+  '.ol-frost in global.css must not hardcode white rgba background gradients',
+);
+assert.match(globalCss, /background:\s*var\(--ol-frost-bg\)/, '.ol-frost must use --ol-frost-bg token');
+
+assert.match(
+  tokens,
+  /\[data-ol-theme='dark'\][\s\S]*--ol-input-ink:/,
+  'tokens.css must define --ol-input-ink in dark theme',
+);
+assert.match(
+  tokens,
+  /\[data-ol-theme='dark'\][\s\S]*--ol-capsule-confirm-bg:/,
+  'tokens.css must define --ol-capsule-confirm-bg in dark theme',
+);
+assert.match(
+  tokens,
+  /\[data-ol-theme='dark'\][\s\S]*--ol-capsule-confirm-ink:/,
+  'tokens.css must define --ol-capsule-confirm-ink in dark theme',
+);
+
 assert.match(globalCss, /\.ol-app-shell-bg\b/, 'global.css must expose .ol-app-shell-bg');
 assert.match(globalCss, /\.ol-aura-panel\b/, 'global.css must expose .ol-aura-panel');
 assert.doesNotMatch(globalCss, /@keyframes ol-aura-halo/, 'global.css must not add an animated halo');

@@ -1,11 +1,20 @@
 // 主题模式 — localStorage 持久化，通过 html[data-ol-theme] 切换暗色 token 集。
 
+import { syncWindowsCaptionTheme } from './platform';
+
 export type ThemeMode = 'system' | 'light' | 'dark';
+export type ResolvedThemeMode = 'light' | 'dark';
 
 const THEME_MODE_KEY = 'ol-theme-mode';
 
 function systemPrefersDark(): boolean {
   return window.matchMedia('(prefers-color-scheme: dark)').matches;
+}
+
+export function resolveThemeMode(mode: ThemeMode): ResolvedThemeMode {
+  if (mode === 'dark') return 'dark';
+  if (mode === 'light') return 'light';
+  return systemPrefersDark() ? 'dark' : 'light';
 }
 
 export function readThemeMode(): ThemeMode {
@@ -17,12 +26,14 @@ export function readThemeMode(): ThemeMode {
 }
 
 export function applyThemeMode(mode: ThemeMode): void {
+  const resolved = resolveThemeMode(mode);
   const root = document.documentElement;
-  if (mode === 'dark' || (mode === 'system' && systemPrefersDark())) {
+  if (resolved === 'dark') {
     root.dataset.olTheme = 'dark';
   } else {
     delete root.dataset.olTheme;
   }
+  void syncWindowsCaptionTheme(resolved === 'dark');
 }
 
 export function setThemeMode(mode: ThemeMode): ThemeMode {

@@ -137,7 +137,9 @@ export const inputStyle: CSSProperties = {
     fontSize: 12.5,
     fontFamily: "inherit",
     outline: "none",
-    background: "var(--ol-surface-2)",
+    background: "var(--ol-input-bg)",
+    color: "var(--ol-input-ink)",
+    caretColor: "var(--ol-input-ink)",
     width: "100%",
     maxWidth: 360,
     transition:

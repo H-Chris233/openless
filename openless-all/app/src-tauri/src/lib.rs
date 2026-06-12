@@ -281,6 +281,7 @@ macro_rules! app_invoke_handler_desktop {
             commands::sherpa_onnx_asr_reveal_model_dir,
             commands::export_error_log,
             restart_app,
+            set_windows_caption_theme,
         ]
     };
 }
@@ -507,9 +508,9 @@ fn run_desktop() {
                     if let Err(e) = apply_mica(&main, None) {
                         log::warn!("[main] mica failed: {e}");
                     }
-                    // Win11 22H2+: 把原生标题栏底色调成白色，与应用 sidebar 视觉统一。
+                    // Win11 22H2+: 同步原生标题栏主题；前端就绪后会再调 set_windows_caption_theme。
                     // 老版 Windows 静默失败，不阻塞。
-                    apply_windows_caption_color(&main);
+                    apply_windows_caption_theme(&main, false);
                 }
                 // 静默启动开关：prefs.start_minimized = true → 不弹主窗口，
                 // 用户从菜单栏 / 托盘点击访问。开机自启时尤其有用，避免每次
@@ -957,41 +958,84 @@ pub(crate) fn refresh_tray_microphone_menu(_app: &AppHandle) -> tauri::Result<()
     Ok(())
 }
 
-/// 把 Win11 原生标题栏底色刷成白色，与应用 sidebar 视觉统一。需要 Win11 22H2+
-/// (Build 22621+) 才支持 `DWMWA_CAPTION_COLOR`(35)；老 Windows 上 DwmSetWindowAttribute
-/// 返回错误，仅打 warn 不阻塞启动。
+/// Win11 22H2+ (Build 22621+) 同步原生标题栏沉浸式暗色 / caption / text / border 色。
+/// 老 Windows 上 DwmSetWindowAttribute 返回错误，仅打 warn 不阻塞启动。
 #[cfg(target_os = "windows")]
-fn apply_windows_caption_color<R: Runtime>(window: &tauri::WebviewWindow<R>) {
+fn apply_windows_caption_theme<R: Runtime>(window: &tauri::WebviewWindow<R>, dark: bool) {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use windows::Win32::Foundation::HWND;
-    use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CAPTION_COLOR};
+    use windows::Win32::Graphics::Dwm::{
+        DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR,
+        DWMWA_USE_IMMERSIVE_DARK_MODE,
+    };
 
     let handle = match window.window_handle().map(|h| h.as_raw()) {
         Ok(RawWindowHandle::Win32(handle)) => handle,
         Ok(other) => {
-            log::warn!("[main] unexpected raw window handle for caption color: {other:?}");
+            log::warn!("[main] unexpected raw window handle for caption theme: {other:?}");
             return;
         }
         Err(e) => {
-            log::warn!("[main] read raw window handle for caption color failed: {e}");
+            log::warn!("[main] read raw window handle for caption theme failed: {e}");
             return;
         }
     };
     let hwnd = HWND(handle.hwnd.get() as *mut core::ffi::c_void);
 
-    // COLORREF 0x00BBGGRR 编码——选用 rgb(245,245,247) 跟 WindowChrome 的 glass linear-gradient
-    // 起始色一致，减小原生 caption bar 跟应用磨砂玻璃的色差（用户反馈：纯白 caption + 半透灰 glass
-    // 色差很丑）。R=0xF5 G=0xF5 B=0xF7 → COLORREF = 0x00F7F5F5。
-    let glass_match: u32 = 0x00F7F5F5;
+    // COLORREF 0x00BBGGRR — light 对齐 WindowChrome glass 起始色 rgb(245,245,247)；
+    // dark 对齐 tokens.css --ol-surface (#141922) / --ol-ink (#f4f7fb) / --ol-surface-2 (#1a202b)。
+    let immersive_dark: i32 = i32::from(dark);
+    let caption_color: u32 = if dark { 0x0022_1914 } else { 0x00F7_F5F5 };
+    let text_color: u32 = if dark { 0x00FB_F7F4 } else { 0x002A_170F };
+    let border_color: u32 = if dark { 0x002B_201A } else { 0x00E8_E8E8 };
+
     unsafe {
-        if let Err(e) = DwmSetWindowAttribute(
+        set_dwm_window_attribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            &immersive_dark,
+            "immersive dark mode",
+        );
+        set_dwm_window_attribute(
             hwnd,
             DWMWA_CAPTION_COLOR,
-            &glass_match as *const _ as *const core::ffi::c_void,
-            std::mem::size_of_val(&glass_match) as u32,
-        ) {
-            log::warn!("[main] set caption color failed (likely pre-22H2 Win): {e}");
-        }
+            &caption_color,
+            "caption color",
+        );
+        set_dwm_window_attribute(hwnd, DWMWA_TEXT_COLOR, &text_color, "text color");
+        set_dwm_window_attribute(hwnd, DWMWA_BORDER_COLOR, &border_color, "border color");
+    }
+}
+
+#[cfg(target_os = "windows")]
+unsafe fn set_dwm_window_attribute<T>(
+    hwnd: windows::Win32::Foundation::HWND,
+    attribute: windows::Win32::Graphics::Dwm::DWMWINDOWATTRIBUTE,
+    value: &T,
+    label: &str,
+) {
+    use windows::Win32::Graphics::Dwm::DwmSetWindowAttribute;
+
+    if let Err(e) = DwmSetWindowAttribute(
+        hwnd,
+        attribute,
+        value as *const _ as *const core::ffi::c_void,
+        std::mem::size_of_val(value) as u32,
+    ) {
+        log::warn!("[main] set {label} failed (likely pre-22H2 Win): {e}");
+    }
+}
+
+/// 前端主题切换时同步主窗口原生标题栏；非 Windows 为 no-op。
+#[tauri::command]
+fn set_windows_caption_theme(app: AppHandle, dark: bool) {
+    #[cfg(target_os = "windows")]
+    if let Some(main) = app.get_webview_window("main") {
+        apply_windows_caption_theme(&main, dark);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (app, dark);
     }
 }
 
