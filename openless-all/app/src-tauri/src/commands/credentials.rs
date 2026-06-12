@@ -28,6 +28,14 @@ pub(crate) fn asr_configured_for_provider(provider: &str, snap: &CredentialsSnap
     if provider == "volcengine" {
         return volcengine_configured(snap);
     }
+    if cfg!(mobile)
+        && (provider == crate::asr::local::PROVIDER_ID
+            || provider == crate::asr::local::sherpa::PROVIDER_ID
+            || provider == crate::asr::local::foundry::PROVIDER_ID
+            || provider == crate::asr::local::APPLE_SPEECH_PROVIDER_ID)
+    {
+        return false;
+    }
     if provider == crate::asr::local::PROVIDER_ID
         || active_apple_speech_asr_is_supported(provider)
         || active_foundry_asr_is_supported(provider)
@@ -100,12 +108,14 @@ fn configured(field: &Option<String>) -> bool {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(not(mobile))]
 pub(crate) struct LocalAsrReleasePlan {
     pub(crate) qwen: bool,
     pub(crate) foundry: bool,
     pub(crate) sherpa: bool,
 }
 
+#[cfg(not(mobile))]
 pub(crate) fn local_asr_release_plan_for_provider(provider: &str) -> LocalAsrReleasePlan {
     LocalAsrReleasePlan {
         qwen: provider != crate::asr::local::PROVIDER_ID,
@@ -114,6 +124,7 @@ pub(crate) fn local_asr_release_plan_for_provider(provider: &str) -> LocalAsrRel
     }
 }
 
+#[cfg(not(mobile))]
 pub(crate) async fn release_foundry_runtime_if_inactive(
     runtime: &Arc<FoundryLocalRuntime>,
     release_foundry: bool,
@@ -126,6 +137,7 @@ pub(crate) async fn release_foundry_runtime_if_inactive(
     }
 }
 
+#[cfg(not(mobile))]
 pub(crate) async fn release_sherpa_runtime_if_inactive(
     runtime: &Arc<SherpaOnnxRuntime>,
     release_sherpa: bool,
@@ -154,6 +166,26 @@ pub fn set_credential(window: Window, account: String, value: String) -> Result<
     Ok(())
 }
 
+#[cfg(mobile)]
+#[tauri::command]
+pub async fn set_active_asr_provider(
+    _coord: CoordinatorState<'_>,
+    provider: String,
+) -> Result<(), String> {
+    if provider == crate::asr::local::PROVIDER_ID
+        || provider == crate::asr::local::sherpa::PROVIDER_ID
+        || provider == crate::asr::local::foundry::PROVIDER_ID
+        || provider == crate::asr::local::APPLE_SPEECH_PROVIDER_ID
+    {
+        return Err("Local ASR is not available on mobile".to_string());
+    }
+    if CredentialsVault::get_active_asr() == provider {
+        return Ok(());
+    }
+    CredentialsVault::set_active_asr_provider(&provider).map_err(|e| e.to_string())
+}
+
+#[cfg(not(mobile))]
 #[tauri::command]
 pub async fn set_active_asr_provider(
     coord: CoordinatorState<'_>,

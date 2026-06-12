@@ -14,35 +14,70 @@
 //! - coordinator: dictation state machine glue
 //! - commands: Tauri IPC surface
 
+mod android;
 mod asr;
 mod audio_mute;
 mod cli;
 mod coding_agent;
+#[cfg(not(mobile))]
+mod combo_hotkey;
+#[cfg(mobile)]
+#[path = "mobile_stubs/combo_hotkey.rs"]
 mod combo_hotkey;
 mod commands;
 mod coordinator;
 mod coordinator_state;
 mod correction;
+mod external_url;
+#[cfg(not(mobile))]
 mod global_hotkey_runtime;
+#[cfg(not(mobile))]
+#[path = "hotkey.rs"]
+mod hotkey;
+#[cfg(mobile)]
+#[path = "mobile_stubs/hotkey.rs"]
 mod hotkey;
 mod insertion;
 #[cfg(target_os = "linux")]
 mod linux_fcitx;
 mod llm_gemini;
+#[cfg(mobile)]
+mod mobile_runtime;
 mod net;
 mod permissions;
 mod persistence;
 mod polish;
+#[cfg(not(mobile))]
+mod qa_hotkey;
+#[cfg(mobile)]
+#[path = "mobile_stubs/qa_hotkey.rs"]
 mod qa_hotkey;
 mod recorder;
+#[cfg(not(mobile))]
 mod remote_server;
+#[cfg(not(mobile))]
+#[path = "selection.rs"]
 mod selection;
+#[cfg(mobile)]
+#[path = "mobile_stubs/selection.rs"]
+mod selection;
+#[cfg(not(mobile))]
+mod shortcut_binding;
+#[cfg(mobile)]
+#[path = "mobile_stubs/shortcut_binding.rs"]
 mod shortcut_binding;
 mod types;
+#[cfg(not(mobile))]
 mod unicode_keystroke;
+#[cfg(mobile)]
+#[path = "mobile_stubs/unicode_keystroke.rs"]
+mod unicode_keystroke;
+#[cfg(target_os = "windows")]
 mod windows_ime_ipc;
 mod windows_ime_profile;
+#[cfg(target_os = "windows")]
 mod windows_ime_protocol;
+#[cfg(target_os = "windows")]
 mod windows_ime_session;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -58,10 +93,13 @@ const OPENLESS_BUNDLE_ID: &str = "com.openless.app";
 /// 第一次 show 时把 QA 浮窗摆到屏幕底部居中；之后的 show 不再 reposition，
 /// 让用户拖动后的位置在 hide → show 之间得以保持。详见 issue #118 v2。
 static QA_WINDOW_POSITIONED: AtomicBool = AtomicBool::new(false);
+#[cfg(not(mobile))]
 static TRAY_MICROPHONE_WATCHER_STOPPING: AtomicBool = AtomicBool::new(false);
+#[cfg(not(mobile))]
 use tauri::menu::{
     CheckMenuItemBuilder, Menu, MenuBuilder, MenuItemBuilder, Submenu, SubmenuBuilder,
 };
+#[cfg(not(mobile))]
 use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
 use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, PhysicalPosition, PhysicalSize,
@@ -72,6 +110,267 @@ use crate::types::PolishMode;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(mobile)]
+    {
+        mobile_runtime::run();
+        return;
+    }
+    #[cfg(not(mobile))]
+    run_desktop();
+}
+
+macro_rules! app_invoke_handler_desktop {
+    () => {
+        tauri::generate_handler![
+            commands::get_settings,
+            commands::get_default_style_system_prompts,
+            commands::set_settings,
+            commands::get_remote_input_status,
+            commands::list_local_ips,
+            commands::regenerate_remote_pin,
+            commands::set_remote_locale,
+            commands::get_update_channel,
+            commands::set_update_channel,
+            commands::fetch_latest_beta_release,
+            commands::app_check_update_with_channel,
+            commands::check_network,
+            commands::get_hotkey_status,
+            commands::get_hotkey_capability,
+            commands::set_shortcut_recording_active,
+            commands::get_windows_ime_status,
+            commands::get_platform_capabilities,
+            commands::get_android_overlay_status,
+            commands::request_android_overlay_permission,
+            commands::show_android_overlay,
+            commands::hide_android_overlay,
+            commands::get_android_accessibility_status,
+            commands::request_android_accessibility_permission,
+            commands::open_external_url,
+            commands::list_microphone_devices,
+            commands::start_microphone_level_monitor,
+            commands::stop_microphone_level_monitor,
+            commands::get_credentials,
+            commands::set_credential,
+            commands::list_history,
+            commands::delete_history_entry,
+            commands::clear_history,
+            commands::read_audio_recording,
+            commands::retranscribe_recording,
+            commands::marketplace_list,
+            commands::marketplace_detail,
+            commands::marketplace_install,
+            commands::marketplace_upload,
+            commands::marketplace_like,
+            commands::marketplace_my_likes,
+            commands::marketplace_my_packs,
+            commands::marketplace_delete,
+            commands::github_device_flow_start,
+            commands::github_device_flow_poll,
+            commands::list_vocab,
+            commands::add_vocab,
+            commands::remove_vocab,
+            commands::set_vocab_enabled,
+            commands::list_correction_rules,
+            commands::add_correction_rule,
+            commands::remove_correction_rule,
+            commands::set_correction_rule_enabled,
+            commands::list_vocab_presets,
+            commands::save_vocab_presets,
+            commands::start_dictation,
+            commands::stop_dictation,
+            commands::cancel_dictation,
+            coding_agent::commands::coding_agent_detect,
+            coding_agent::commands::coding_agent_run_test,
+            coding_agent::commands::coding_agent_cancel_test,
+            coding_agent::commands::coding_agent_command_risk,
+            commands::handle_window_hotkey_event,
+            #[cfg(debug_assertions)]
+            commands::inject_hotkey_click_for_dev,
+            commands::repolish,
+            commands::list_style_packs,
+            commands::create_style_pack_from_template,
+            commands::save_style_pack,
+            commands::preview_style_pack_runtime,
+            commands::set_active_style_pack,
+            commands::set_style_pack_enabled,
+            commands::reset_builtin_style_pack,
+            commands::delete_style_pack,
+            commands::import_style_pack_from_zip,
+            commands::export_style_pack_to_zip,
+            commands::set_default_polish_mode,
+            commands::set_style_enabled,
+            commands::check_accessibility_permission,
+            commands::request_accessibility_permission,
+            commands::check_microphone_permission,
+            commands::request_microphone_permission,
+            commands::open_system_settings,
+            commands::trigger_microphone_prompt,
+            commands::read_credential,
+            commands::set_active_asr_provider,
+            commands::set_active_llm_provider,
+            commands::get_qa_hotkey_label,
+            commands::set_qa_hotkey,
+            commands::validate_shortcut_binding,
+            commands::set_dictation_hotkey,
+            commands::set_translation_hotkey,
+            commands::set_switch_style_hotkey,
+            commands::set_open_app_hotkey,
+            commands::qa_window_dismiss,
+            commands::qa_window_pin,
+            commands::less_computer_window_dismiss,
+            commands::less_computer_window_resize,
+            commands::less_computer_approve,
+            commands::validate_combo_hotkey,
+            commands::set_combo_hotkey,
+            commands::validate_provider_credentials,
+            commands::list_provider_models,
+            commands::local_asr_get_settings,
+            commands::local_asr_storage_settings,
+            commands::local_asr_set_models_base_dir,
+            commands::local_asr_set_active_model,
+            commands::local_asr_set_mirror,
+            commands::local_asr_list_models,
+            commands::local_asr_fetch_remote_info,
+            commands::local_asr_download_model,
+            commands::local_asr_cancel_download,
+            commands::local_asr_delete_model,
+            commands::local_asr_model_dir,
+            commands::local_asr_reveal_model_dir,
+            commands::local_asr_reveal_models_root,
+            commands::local_asr_test_model,
+            commands::local_asr_engine_status,
+            commands::local_asr_release_engine,
+            commands::local_asr_preload,
+            commands::local_asr_set_keep_loaded_secs,
+            commands::foundry_local_asr_status,
+            commands::foundry_local_asr_catalog,
+            commands::foundry_local_asr_set_model,
+            commands::foundry_local_asr_set_language_hint,
+            commands::foundry_local_asr_set_runtime_source,
+            commands::foundry_local_asr_prepare,
+            commands::foundry_local_asr_cancel_prepare,
+            commands::foundry_local_asr_release,
+            commands::foundry_local_asr_model_dir,
+            commands::foundry_local_asr_delete_model,
+            commands::foundry_local_asr_reveal_model_dir,
+            #[cfg(target_os = "windows")]
+            commands::sherpa_onnx_asr_status,
+            #[cfg(target_os = "windows")]
+            commands::sherpa_onnx_asr_catalog,
+            #[cfg(target_os = "windows")]
+            commands::sherpa_onnx_asr_fetch_remote_info,
+            #[cfg(target_os = "windows")]
+            commands::sherpa_onnx_asr_download_model,
+            #[cfg(target_os = "windows")]
+            commands::sherpa_onnx_asr_cancel_download,
+            #[cfg(target_os = "windows")]
+            commands::sherpa_onnx_asr_set_model,
+            #[cfg(target_os = "windows")]
+            commands::sherpa_onnx_asr_set_language_hint,
+            #[cfg(target_os = "windows")]
+            commands::sherpa_onnx_asr_prepare,
+            #[cfg(target_os = "windows")]
+            commands::sherpa_onnx_asr_cancel_prepare,
+            #[cfg(target_os = "windows")]
+            commands::sherpa_onnx_asr_release,
+            #[cfg(target_os = "windows")]
+            commands::sherpa_onnx_asr_model_dir,
+            #[cfg(target_os = "windows")]
+            commands::sherpa_onnx_asr_delete_model,
+            #[cfg(target_os = "windows")]
+            commands::sherpa_onnx_asr_reveal_model_dir,
+            commands::export_error_log,
+            restart_app,
+        ]
+    };
+}
+
+/// Android/iOS: only commands usable without desktop hotkeys, tray, updater, or local ASR.
+#[macro_export]
+macro_rules! app_invoke_handler_mobile {
+    () => {
+        tauri::generate_handler![
+            $crate::commands::get_settings,
+            $crate::commands::get_default_style_system_prompts,
+            $crate::commands::set_settings,
+            $crate::commands::check_network,
+            $crate::commands::get_platform_capabilities,
+            $crate::commands::get_android_overlay_status,
+            $crate::commands::request_android_overlay_permission,
+            $crate::commands::show_android_overlay,
+            $crate::commands::hide_android_overlay,
+            $crate::commands::get_android_accessibility_status,
+            $crate::commands::request_android_accessibility_permission,
+            $crate::commands::open_external_url,
+            $crate::commands::list_microphone_devices,
+            $crate::commands::start_microphone_level_monitor,
+            $crate::commands::stop_microphone_level_monitor,
+            $crate::commands::get_credentials,
+            $crate::commands::set_credential,
+            $crate::commands::read_credential,
+            $crate::commands::set_active_asr_provider,
+            $crate::commands::set_active_llm_provider,
+            $crate::commands::validate_provider_credentials,
+            $crate::commands::list_provider_models,
+            $crate::commands::list_history,
+            $crate::commands::delete_history_entry,
+            $crate::commands::clear_history,
+            $crate::commands::read_audio_recording,
+            $crate::commands::retranscribe_recording,
+            $crate::commands::marketplace_list,
+            $crate::commands::marketplace_detail,
+            $crate::commands::marketplace_install,
+            $crate::commands::marketplace_upload,
+            $crate::commands::marketplace_like,
+            $crate::commands::marketplace_my_likes,
+            $crate::commands::marketplace_my_packs,
+            $crate::commands::marketplace_delete,
+            $crate::commands::github_device_flow_start,
+            $crate::commands::github_device_flow_poll,
+            $crate::commands::list_vocab,
+            $crate::commands::add_vocab,
+            $crate::commands::remove_vocab,
+            $crate::commands::set_vocab_enabled,
+            $crate::commands::list_correction_rules,
+            $crate::commands::add_correction_rule,
+            $crate::commands::remove_correction_rule,
+            $crate::commands::set_correction_rule_enabled,
+            $crate::commands::list_vocab_presets,
+            $crate::commands::save_vocab_presets,
+            $crate::commands::start_dictation,
+            $crate::commands::stop_dictation,
+            $crate::commands::cancel_dictation,
+            $crate::commands::qa_window_dismiss,
+            $crate::commands::qa_window_pin,
+            $crate::commands::qa_toggle_recording,
+            $crate::commands::qa_submit_text,
+            $crate::commands::repolish,
+            $crate::commands::list_style_packs,
+            $crate::commands::create_style_pack_from_template,
+            $crate::commands::save_style_pack,
+            $crate::commands::preview_style_pack_runtime,
+            $crate::commands::set_active_style_pack,
+            $crate::commands::set_style_pack_enabled,
+            $crate::commands::reset_builtin_style_pack,
+            $crate::commands::delete_style_pack,
+            $crate::commands::import_style_pack_from_zip,
+            $crate::commands::export_style_pack_to_zip,
+            $crate::commands::set_default_polish_mode,
+            $crate::commands::set_style_enabled,
+            $crate::commands::check_accessibility_permission,
+            $crate::commands::request_accessibility_permission,
+            $crate::commands::check_microphone_permission,
+            $crate::commands::request_microphone_permission,
+            $crate::commands::open_system_settings,
+            $crate::commands::trigger_microphone_prompt,
+            $crate::commands::export_error_log,
+            $crate::restart_app,
+        ]
+    };
+}
+
+#[cfg(not(mobile))]
+fn run_desktop() {
     let foundry_local_runtime = Arc::new(asr::local::FoundryLocalRuntime::new());
     let sherpa_onnx_runtime = Arc::new(asr::local::SherpaOnnxRuntime::new());
     let sherpa_download_manager =
@@ -328,8 +627,6 @@ pub fn run() {
             let app_handle = app.handle().clone();
             coordinator.bind_app(app_handle);
             coordinator.start_hotkey_listener();
-            // 远程输入：按 prefs 启动局域网录音服务（未启用时为 no-op）。
-            coordinator.refresh_remote_server();
             // QA / custom combo hotkeys use `global-hotkey` (Carbon on macOS).
             // Start those after RunEvent::Ready, when the AppKit event loop is live.
             if std::env::var("OPENLESS_SHOW_MAIN_ON_START").ok().as_deref() == Some("1") {
@@ -346,159 +643,7 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
-            commands::get_settings,
-            commands::get_default_style_system_prompts,
-            commands::set_settings,
-            commands::get_remote_input_status,
-            commands::list_local_ips,
-            commands::regenerate_remote_pin,
-            commands::set_remote_locale,
-            commands::get_update_channel,
-            commands::set_update_channel,
-            commands::fetch_latest_beta_release,
-            commands::app_check_update_with_channel,
-            commands::check_network,
-            commands::get_hotkey_status,
-            commands::get_hotkey_capability,
-            commands::set_shortcut_recording_active,
-            commands::get_windows_ime_status,
-            commands::list_microphone_devices,
-            commands::start_microphone_level_monitor,
-            commands::stop_microphone_level_monitor,
-            commands::get_credentials,
-            commands::set_credential,
-            commands::list_history,
-            commands::delete_history_entry,
-            commands::clear_history,
-            commands::read_audio_recording,
-            commands::retranscribe_recording,
-            commands::marketplace_list,
-            commands::marketplace_detail,
-            commands::marketplace_install,
-            commands::marketplace_upload,
-            commands::marketplace_like,
-            commands::marketplace_my_likes,
-            commands::marketplace_my_packs,
-            commands::marketplace_delete,
-            commands::github_device_flow_start,
-            commands::github_device_flow_poll,
-            commands::list_vocab,
-            commands::add_vocab,
-            commands::remove_vocab,
-            commands::set_vocab_enabled,
-            commands::list_correction_rules,
-            commands::add_correction_rule,
-            commands::remove_correction_rule,
-            commands::set_correction_rule_enabled,
-            commands::list_vocab_presets,
-            commands::save_vocab_presets,
-            commands::start_dictation,
-            commands::stop_dictation,
-            commands::cancel_dictation,
-            coding_agent::commands::coding_agent_detect,
-            coding_agent::commands::coding_agent_run_test,
-            coding_agent::commands::coding_agent_cancel_test,
-            coding_agent::commands::coding_agent_command_risk,
-            commands::handle_window_hotkey_event,
-            #[cfg(debug_assertions)]
-            commands::inject_hotkey_click_for_dev,
-            commands::repolish,
-            commands::list_style_packs,
-            commands::create_style_pack_from_template,
-            commands::save_style_pack,
-            commands::preview_style_pack_runtime,
-            commands::set_active_style_pack,
-            commands::set_style_pack_enabled,
-            commands::reset_builtin_style_pack,
-            commands::delete_style_pack,
-            commands::import_style_pack_from_zip,
-            commands::export_style_pack_to_zip,
-            commands::set_default_polish_mode,
-            commands::set_style_enabled,
-            commands::check_accessibility_permission,
-            commands::request_accessibility_permission,
-            commands::check_microphone_permission,
-            commands::request_microphone_permission,
-            commands::open_system_settings,
-            commands::trigger_microphone_prompt,
-            commands::read_credential,
-            commands::set_active_asr_provider,
-            commands::set_active_llm_provider,
-            commands::get_qa_hotkey_label,
-            commands::set_qa_hotkey,
-            commands::validate_shortcut_binding,
-            commands::set_dictation_hotkey,
-            commands::set_translation_hotkey,
-            commands::set_switch_style_hotkey,
-            commands::set_open_app_hotkey,
-            commands::qa_window_dismiss,
-            commands::qa_window_pin,
-            commands::less_computer_window_dismiss,
-            commands::less_computer_window_resize,
-            commands::less_computer_approve,
-            commands::validate_combo_hotkey,
-            commands::set_combo_hotkey,
-            commands::validate_provider_credentials,
-            commands::list_provider_models,
-            commands::local_asr_get_settings,
-            commands::local_asr_storage_settings,
-            commands::local_asr_set_models_base_dir,
-            commands::local_asr_set_active_model,
-            commands::local_asr_set_mirror,
-            commands::local_asr_list_models,
-            commands::local_asr_fetch_remote_info,
-            commands::local_asr_download_model,
-            commands::local_asr_cancel_download,
-            commands::local_asr_delete_model,
-            commands::local_asr_model_dir,
-            commands::local_asr_reveal_model_dir,
-            commands::local_asr_reveal_models_root,
-            commands::local_asr_test_model,
-            commands::local_asr_engine_status,
-            commands::local_asr_release_engine,
-            commands::local_asr_preload,
-            commands::local_asr_set_keep_loaded_secs,
-            commands::foundry_local_asr_status,
-            commands::foundry_local_asr_catalog,
-            commands::foundry_local_asr_set_model,
-            commands::foundry_local_asr_set_language_hint,
-            commands::foundry_local_asr_set_runtime_source,
-            commands::foundry_local_asr_prepare,
-            commands::foundry_local_asr_cancel_prepare,
-            commands::foundry_local_asr_release,
-            commands::foundry_local_asr_model_dir,
-            commands::foundry_local_asr_delete_model,
-            commands::foundry_local_asr_reveal_model_dir,
-            #[cfg(target_os = "windows")]
-            commands::sherpa_onnx_asr_status,
-            #[cfg(target_os = "windows")]
-            commands::sherpa_onnx_asr_catalog,
-            #[cfg(target_os = "windows")]
-            commands::sherpa_onnx_asr_fetch_remote_info,
-            #[cfg(target_os = "windows")]
-            commands::sherpa_onnx_asr_download_model,
-            #[cfg(target_os = "windows")]
-            commands::sherpa_onnx_asr_cancel_download,
-            #[cfg(target_os = "windows")]
-            commands::sherpa_onnx_asr_set_model,
-            #[cfg(target_os = "windows")]
-            commands::sherpa_onnx_asr_set_language_hint,
-            #[cfg(target_os = "windows")]
-            commands::sherpa_onnx_asr_prepare,
-            #[cfg(target_os = "windows")]
-            commands::sherpa_onnx_asr_cancel_prepare,
-            #[cfg(target_os = "windows")]
-            commands::sherpa_onnx_asr_release,
-            #[cfg(target_os = "windows")]
-            commands::sherpa_onnx_asr_model_dir,
-            #[cfg(target_os = "windows")]
-            commands::sherpa_onnx_asr_delete_model,
-            #[cfg(target_os = "windows")]
-            commands::sherpa_onnx_asr_reveal_model_dir,
-            commands::export_error_log,
-            restart_app,
-        ])
+        .invoke_handler(app_invoke_handler_desktop!())
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| match event {
@@ -539,21 +684,25 @@ pub fn run() {
         });
 }
 
+#[cfg(not(mobile))]
 struct MicrophoneTrayMenu {
     submenu: Submenu<tauri::Wry>,
     items: Vec<commands::TrayMicrophoneMenuItem>,
 }
 
+#[cfg(not(mobile))]
 struct StyleTrayMenu {
     submenu: Submenu<tauri::Wry>,
 }
 
+#[cfg(not(mobile))]
 struct TrayMenu {
     menu: Menu<tauri::Wry>,
     microphone_items: Vec<commands::TrayMicrophoneMenuItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(not(mobile))]
 struct TrayPolishModeMenuEntry {
     id: String,
     label: &'static str,
@@ -562,9 +711,13 @@ struct TrayPolishModeMenuEntry {
 }
 
 fn tray_style_menu_enabled() -> bool {
-    cfg!(target_os = "windows")
+    #[cfg(all(not(mobile), target_os = "windows"))]
+    return true;
+    #[cfg(not(all(not(mobile), target_os = "windows")))]
+    false
 }
 
+#[cfg(not(mobile))]
 fn tray_polish_mode_menu_entries(selected: PolishMode) -> Vec<TrayPolishModeMenuEntry> {
     [
         (PolishMode::Raw, "style-raw"),
@@ -582,6 +735,7 @@ fn tray_polish_mode_menu_entries(selected: PolishMode) -> Vec<TrayPolishModeMenu
     .collect()
 }
 
+#[cfg(not(mobile))]
 fn parse_tray_polish_mode_id(id: &str) -> Option<PolishMode> {
     match id {
         "style-raw" => Some(PolishMode::Raw),
@@ -592,6 +746,7 @@ fn parse_tray_polish_mode_id(id: &str) -> Option<PolishMode> {
     }
 }
 
+#[cfg(not(mobile))]
 fn build_tray_menu<M: Manager<tauri::Wry>>(
     app: &M,
     coordinator: &Arc<coordinator::Coordinator>,
@@ -617,6 +772,7 @@ fn build_tray_menu<M: Manager<tauri::Wry>>(
     })
 }
 
+#[cfg(not(mobile))]
 fn build_style_tray_menu<M: Manager<tauri::Wry>>(
     app: &M,
     coordinator: &Arc<coordinator::Coordinator>,
@@ -639,6 +795,7 @@ fn build_style_tray_menu<M: Manager<tauri::Wry>>(
     })
 }
 
+#[cfg(not(mobile))]
 fn build_microphone_tray_menu<M: Manager<tauri::Wry>>(
     app: &M,
     coordinator: &Arc<coordinator::Coordinator>,
@@ -697,6 +854,7 @@ fn build_microphone_tray_menu<M: Manager<tauri::Wry>>(
     })
 }
 
+#[cfg(not(mobile))]
 pub(crate) fn refresh_tray_microphone_menu(app: &AppHandle) -> tauri::Result<()> {
     let coordinator = app.state::<Arc<coordinator::Coordinator>>();
     let tray_menu = build_tray_menu(app, &coordinator)?;
@@ -708,6 +866,7 @@ pub(crate) fn refresh_tray_microphone_menu(app: &AppHandle) -> tauri::Result<()>
     Ok(())
 }
 
+#[cfg(not(mobile))]
 fn microphone_device_signature() -> Option<Vec<(String, bool)>> {
     match recorder::list_input_devices() {
         Ok(devices) => Some(
@@ -723,6 +882,7 @@ fn microphone_device_signature() -> Option<Vec<(String, bool)>> {
     }
 }
 
+#[cfg(not(mobile))]
 fn start_tray_microphone_watcher(app: AppHandle) {
     TRAY_MICROPHONE_WATCHER_STOPPING.store(false, Ordering::Relaxed);
     if let Err(err) = std::thread::Builder::new()
@@ -756,6 +916,7 @@ fn start_tray_microphone_watcher(app: AppHandle) {
     }
 }
 
+#[cfg(not(mobile))]
 fn handle_microphone_tray_menu_event(app: &AppHandle, id: &str) {
     let tray_items = app.state::<commands::TrayMicrophoneMenuState>();
     let items = tray_items.lock();
@@ -775,6 +936,7 @@ fn handle_microphone_tray_menu_event(app: &AppHandle, id: &str) {
     commands::sync_tray_microphone_selection(&items, &selected.device_name);
 }
 
+#[cfg(not(mobile))]
 fn handle_style_tray_menu_event(app: &AppHandle, id: &str) -> bool {
     let Some(mode) = parse_tray_polish_mode_id(id) else {
         return false;
@@ -788,6 +950,11 @@ fn handle_style_tray_menu_event(app: &AppHandle, id: &str) -> bool {
         log::warn!("[tray] refresh style menu after polish mode change failed: {err}");
     }
     true
+}
+
+#[cfg(mobile)]
+pub(crate) fn refresh_tray_microphone_menu(_app: &AppHandle) -> tauri::Result<()> {
+    Ok(())
 }
 
 /// 把 Win11 原生标题栏底色刷成白色，与应用 sidebar 视觉统一。需要 Win11 22H2+
@@ -955,7 +1122,7 @@ pub fn log_dir_path() -> std::path::PathBuf {
                 .join("Logs");
         }
     }
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "android")))]
     {
         if let Ok(home) = std::env::var("HOME") {
             return std::path::PathBuf::from(home)
@@ -965,6 +1132,12 @@ pub fn log_dir_path() -> std::path::PathBuf {
                 .join("logs");
         }
     }
+    #[cfg(target_os = "android")]
+    {
+        if let Ok(dir) = std::env::var("TAURI_ANDROID_APP_DATA_DIR") {
+            return std::path::PathBuf::from(dir).join("logs");
+        }
+    }
     std::env::temp_dir().join("OpenLess")
 }
 
@@ -972,6 +1145,7 @@ pub(crate) fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
     activate_window_mode(app);
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
+        #[cfg(not(mobile))]
         let _ = w.unminimize();
         let _ = w.set_focus();
     }
@@ -1215,35 +1389,6 @@ fn bottom_visual_position(
     (x, y)
 }
 
-/// 把窗口左上角 `(x, y)`（同 area 同坐标系，physical px）夹到给定矩形内，
-/// **保证整窗（含自身 w×h）落在 area 内可见**。area 为工作区时即可避开任务栏。
-///
-/// 纯函数，无 Win32 依赖，便于单测多显示器 / 负原点 / 异常 DPI 输入。issue #470：
-/// 此前 Windows 分支只夹上边（`y.max(mon.top)`），左/右/下未夹，多屏负坐标下胶囊
-/// 可能被算到屏外却无任何观测。这里四边都夹。
-///
-/// area 比窗口还小时（`area_right - w < area_left`），`max_x` 退化为 `area_left`，
-/// `clamp` 把左上角收回 area 左上角，保证至少左上角可见、不溢出为负超界。
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-fn clamp_to_monitor(
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
-    area_left: i32,
-    area_top: i32,
-    area_right: i32,
-    area_bottom: i32,
-) -> (i32, i32) {
-    // 右/下边界 = area 右下角减去窗口自身尺寸，确保整窗可见。
-    // 用 saturating_sub 防 area_right/area_bottom 为极小（含 i32::MIN 近邻）时减法溢出。
-    let max_x = area_right.saturating_sub(w).max(area_left);
-    let max_y = area_bottom.saturating_sub(h).max(area_top);
-    let clamped_x = x.clamp(area_left, max_x);
-    let clamped_y = y.clamp(area_top, max_y);
-    (clamped_x, clamped_y)
-}
-
 /// 把 QA 浮窗放到屏幕底部居中、紧贴胶囊上方。tauri 启动期 + show 之前都会调一次，
 /// 防止用户切换显示器后位置错乱。
 fn position_qa_window<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) -> tauri::Result<()> {
@@ -1269,21 +1414,36 @@ fn position_qa_window<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) -> ta
 
 /// 显示 QA 窗口并发一条状态事件（前端订阅 `qa:state`）。
 /// `content_kind` 是不透明字符串（"loading" / "answer" / "idle" 等），
-/// 让前端 React 视图自行决定渲染哪一种。
-///
-/// ## 跨端焦点契约（#164 / #466，三端**有意**不同，勿盲目对齐）
-/// - **macOS**：`orderFrontRegardless` —— 窗口可见但不成为 key window，frontmost
-///   始终是用户原 app，AX / Cmd+C fallback 能直接读到选区。**全程不抢焦点**。
-/// - **Windows**：`show_qa_window_no_activate` 实际是 `show()` + `set_focus()`，
-///   出现的那一帧会短暂抢前台。这是 #466 对 #164 的**有意取舍**：WebView2 子窗口有
-///   独立 focus 模型，不主动抓焦点则 QA webview 收不到键盘事件 → ESC 到不了 React
-///   监听、X 按钮 first-click 被 OS 当激活点击吃掉。代价由 `coordinator/qa.rs` 的
-///   focus-dance 补偿：抓选区前用 `qa_focus_target` 把焦点临时还给用户原 app，
-///   `simulate_copy` 跑完再 `refocus_qa_window` 收回。**移除 set_focus 会同时回归
-///   #164 的反面（ESC/X 失效），别删。** 详见 `show_qa_window_no_activate` 内注释。
-/// - **Linux**：`window.show()`。qa 窗口静态配置 `focus: false`（tauri.conf.json），
-///   Tauri 将其建成非激活窗口，因此 show() **不抢焦点**，与 macOS 契约一致。
+/// 让前端 React 视图自行决定渲染哪一种。**不**抢前台 app 焦点（保证 Cmd+C
+/// fallback 仍能从原 app 拿到选区）。
 pub(crate) fn show_qa_window<R: tauri::Runtime>(app: &AppHandle<R>, content_kind: &str) {
+    #[cfg(target_os = "android")]
+    {
+        const FLAG_ACTIVITY_NEW_TASK: i32 = 0x10000000;
+        const FLAG_ACTIVITY_REORDER_TO_FRONT: i32 = 0x00020000;
+        const FLAG_ACTIVITY_SINGLE_TOP: i32 = 0x20000000;
+        let flags =
+            FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_REORDER_TO_FRONT | FLAG_ACTIVITY_SINGLE_TOP;
+        match crate::android::jni::android::with_android_env(|env, context| {
+            crate::android::jni::android::start_activity_class_with_flags(
+                env,
+                context,
+                "com.openless.app.MainActivity",
+                flags,
+            )
+        }) {
+            Ok(()) => log::info!("[qa] android requested MainActivity foreground for QA"),
+            Err(error) => log::warn!("[qa] android failed to foreground MainActivity: {error}"),
+        }
+        log::info!("[qa] android emit qa:state to main kind={content_kind}");
+        let _ = app.emit_to(
+            "main",
+            "qa:state",
+            serde_json::json!({ "kind": content_kind }),
+        );
+        return;
+    }
+
     let Some(window) = app.get_webview_window("qa") else {
         log::info!("[qa] show 跳过：qa 窗口不存在 (content_kind={content_kind})");
         return;
@@ -1335,8 +1495,6 @@ pub(crate) fn show_qa_window<R: tauri::Runtime>(app: &AppHandle<R>, content_kind
             log::warn!("[qa] show fallback failed: {e}");
         }
     }
-    // Linux：qa 窗口静态配置 focus:false → Tauri 建成非激活窗口，window.show() 不抢
-    // 焦点，与 macOS「不抢焦点」契约一致（无需 Windows 那套 set_focus + focus-dance）。
     #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
     if let Err(e) = window.show() {
         log::warn!("[qa] show failed: {e}");
@@ -1378,6 +1536,12 @@ fn make_qa_window_draggable_macos<R: tauri::Runtime>(window: &tauri::WebviewWind
 
 /// 隐藏 QA 窗口。供 commands::qa_window_dismiss / coordinator session 收尾共用。
 pub(crate) fn hide_qa_window<R: tauri::Runtime>(app: &AppHandle<R>) {
+    #[cfg(target_os = "android")]
+    {
+        let _ = app.emit_to("main", "qa:dismiss", serde_json::json!({}));
+        return;
+    }
+
     if let Some(window) = app.get_webview_window("qa") {
         let _ = window.hide();
     }
@@ -1491,22 +1655,18 @@ pub(crate) fn show_less_computer_glow<R: tauri::Runtime>(app: &AppHandle<R>) {
         .ok()
         .flatten()
         .or_else(|| app.primary_monitor().ok().flatten());
-    // 逻辑坐标的「铺满整屏」矩形 (x, y, w, h)。f64 元组可 Copy：既在 show 前先铺一次，
-    // 也在主线程 realize（orderFront）后再铺一次（见下，修首次半屏 bug）。
-    let bounds: Option<(f64, f64, f64, f64)> = monitor.map(|m| {
-        let scale = m.scale_factor();
-        let size = m.size();
-        let pos = m.position();
-        (
+    if let Some(monitor) = monitor {
+        let scale = monitor.scale_factor();
+        let size = monitor.size();
+        let pos = monitor.position();
+        let _ = window.set_position(tauri::LogicalPosition::new(
             pos.x as f64 / scale,
             pos.y as f64 / scale,
+        ));
+        let _ = window.set_size(tauri::LogicalSize::new(
             size.width as f64 / scale,
             size.height as f64 / scale,
-        )
-    });
-    if let Some((x, y, w, h)) = bounds {
-        let _ = window.set_position(tauri::LogicalPosition::new(x, y));
-        let _ = window.set_size(tauri::LogicalSize::new(w, h));
+        ));
     }
     // 点击穿透：纯视觉浮层，绝不拦截鼠标。
     let _ = window.set_ignore_cursor_events(true);
@@ -1533,14 +1693,6 @@ pub(crate) fn show_less_computer_glow<R: tauri::Runtime>(app: &AppHandle<R>) {
             Err(_) => {
                 let _ = window_clone.show();
             }
-        }
-        // 首次使用彩虹边框只画半屏并卡住：glow 窗口 conf 初始 800×600 且 visible:false，
-        // 首次 show 前从未 realize —— current_monitor() 取不到 / show 前的 set_size 没贴住整屏，
-        // webview 首帧按 800×600 画出半屏描边。这里在 realize（orderFront）之后**再铺满一次**，
-        // 强制 webview 按整屏重排重绘。后续使用窗口已 realize，show 前那次就够、不闪。
-        if let Some((x, y, w, h)) = bounds {
-            let _ = window_clone.set_position(tauri::LogicalPosition::new(x, y));
-            let _ = window_clone.set_size(tauri::LogicalSize::new(w, h));
         }
     });
 }
@@ -1645,12 +1797,6 @@ pub(crate) struct ForegroundMonitor {
     pub(crate) top: i32,
     pub(crate) right: i32,
     pub(crate) bottom: i32,
-    /// 工作区矩形（physical px，去掉任务栏）。多端一致：胶囊优先夹到工作区内，
-    /// 避免压住任务栏。取不到时回退为整屏矩形。issue #470。
-    pub(crate) work_left: i32,
-    pub(crate) work_top: i32,
-    pub(crate) work_right: i32,
-    pub(crate) work_bottom: i32,
     /// 该显示器的有效 DPI 缩放（1.0 = 96dpi）。
     pub(crate) scale: f64,
 }
@@ -1688,10 +1834,6 @@ pub(crate) fn foreground_window_monitor() -> Option<ForegroundMonitor> {
             top: mi.rcMonitor.top,
             right: mi.rcMonitor.right,
             bottom: mi.rcMonitor.bottom,
-            work_left: mi.rcWork.left,
-            work_top: mi.rcWork.top,
-            work_right: mi.rcWork.right,
-            work_bottom: mi.rcWork.bottom,
             scale: (dpi_x as f64 / 96.0).max(0.1),
         })
     }
@@ -1724,24 +1866,15 @@ pub(crate) fn position_capsule_bottom_center<R: tauri::Runtime>(
             let offset_from_bottom =
                 (capsule_visual_height(translation_active) + 80.0 + bounds.bottom_inset) * scale;
             let y = ((mon.bottom as f64) - offset_from_bottom).round() as i32;
-
-            // #470：四边都夹到「工作区」内（去掉任务栏），保证整窗可见。GetMonitorInfoW
-            // 取不到 rcWork 时（理论上不会，rcWork 总随 rcMonitor 一同填）退回整屏矩形。
-            let (work_l, work_t, work_r, work_b) =
-                if mon.work_right > mon.work_left && mon.work_bottom > mon.work_top {
-                    (mon.work_left, mon.work_top, mon.work_right, mon.work_bottom)
-                } else {
-                    (mon.left, mon.top, mon.right, mon.bottom)
-                };
-            let (clamped_x, clamped_y) =
-                clamp_to_monitor(x, y, phys_w, phys_h, work_l, work_t, work_r, work_b);
+            let clamped_y = y.max(mon.top);
+            // #470 诊断 v2：当前只夹了上边（.max(mon.top)），未夹下/左/右。多显示器、
+            // 负坐标或异常 DPI 下胶囊可能被算到屏幕外却无任何观测。记录显示器几何与
+            // 最终落点，用于证伪/证实「胶囊定位到屏幕外」(C 子嫌疑)。
             log::debug!(
-                "[capsule] win position: mon=({},{})..({},{}) work=({},{})..({},{}) scale={:.2} size=({}x{}) -> raw=({},{}) clamped=({},{})",
-                mon.left, mon.top, mon.right, mon.bottom,
-                work_l, work_t, work_r, work_b,
-                scale, phys_w, phys_h, x, y, clamped_x, clamped_y
+                "[capsule] win position: mon=({},{})..({},{}) scale={:.2} size=({}x{}) -> x={} y={} clamped_y={}",
+                mon.left, mon.top, mon.right, mon.bottom, scale, phys_w, phys_h, x, y, clamped_y
             );
-            window.set_position(PhysicalPosition::new(clamped_x, clamped_y))?;
+            window.set_position(PhysicalPosition::new(x, clamped_y))?;
             return Ok(());
         }
         // 仅当 Win32 取不到前台显示器时，落回下面的 current_monitor 逻辑。
@@ -1822,7 +1955,7 @@ fn capsule_height_for_qa() -> f64 {
 mod tests {
     use super::{
         bottom_center_position, bottom_visual_position, capsule_height_for_qa,
-        capsule_visual_height, capsule_window_bounds, clamp_to_monitor, logical_monitor_frame,
+        capsule_visual_height, capsule_window_bounds, logical_monitor_frame,
         parse_tray_polish_mode_id, rotate_log_if_too_large, tray_polish_mode_menu_entries,
         tray_style_menu_enabled, LogicalMonitorFrame, LOG_ROTATE_LIMIT_BYTES,
     };
@@ -1969,63 +2102,6 @@ mod tests {
         let pos = bottom_visual_position(frame, 220.0, 96.0, 80.0, 0.0);
 
         assert_eq!(pos, (610.0, -176.0));
-    }
-
-    // ---- #470: capsule 四边 clamp（纯函数，合成多显示器 / 负原点 / 1.5x DPI 输入）----
-
-    #[test]
-    fn clamp_to_monitor_leaves_on_screen_position_untouched() {
-        // 1080p 主屏正中偏下，整窗本就可见 → 原样返回。
-        let (x, y) = clamp_to_monitor(800, 900, 264, 126, 0, 0, 1920, 1040);
-        assert_eq!((x, y), (800, 900));
-    }
-
-    #[test]
-    fn clamp_to_monitor_pulls_back_off_screen_right_and_bottom() {
-        // x/y 算到了屏幕右下外侧 → 收回到「右下角减去窗口尺寸」，整窗仍可见。
-        let (x, y) = clamp_to_monitor(2000, 1200, 264, 126, 0, 0, 1920, 1040);
-        assert_eq!((x, y), (1920 - 264, 1040 - 126));
-        // 整窗右/下边界都落在 area 内。
-        assert!(x + 264 <= 1920);
-        assert!(y + 126 <= 1040);
-    }
-
-    #[test]
-    fn clamp_to_monitor_pulls_back_when_right_edge_overflows_inside_area() {
-        // 左上角 x=1800 本在 area 内，但 x+w=2064 越过右边界 1920 →
-        // 应被左移到「右边界 - 窗口宽」，整窗右缘恰好贴住 area_right。
-        let (x, _y) = clamp_to_monitor(1800, 900, 264, 126, 0, 0, 1920, 1040);
-        assert_eq!(x, 1920 - 264);
-        assert!(x + 264 <= 1920);
-    }
-
-    #[test]
-    fn clamp_to_monitor_pushes_into_negative_origin_left_monitor() {
-        // 副屏在主屏左侧（负 X 原点），落点算到了副屏左外侧 → 夹回 area_left。
-        // 1.5x DPI 下尺寸偏大，但 area 仍宽于窗口，左上角夹到 (-2560, top)。
-        let (x, y) = clamp_to_monitor(-3000, -100, 294, 138, -2560, 0, 0, 1440);
-        assert_eq!(x, -2560);
-        assert_eq!(y, 0);
-        // 右/下仍在 area 内。
-        assert!(x >= -2560 && x + 294 <= 0);
-        assert!(y >= 0 && y + 138 <= 1440);
-    }
-
-    #[test]
-    fn clamp_to_monitor_respects_work_area_above_taskbar() {
-        // 工作区底部 = 1040（任务栏占了 1040..1080）。落点本在任务栏区域（y=1030），
-        // 应被夹到「工作区底 - 窗口高」之上，胶囊整窗不压任务栏。
-        let (_x, y) = clamp_to_monitor(800, 1030, 264, 126, 0, 0, 1920, 1040);
-        assert_eq!(y, 1040 - 126);
-        assert!(y + 126 <= 1040);
-    }
-
-    #[test]
-    fn clamp_to_monitor_degrades_gracefully_when_window_wider_than_area() {
-        // 病态输入：area 比窗口还窄（罕见，但要保证不 panic、不溢出为负超界）。
-        // max_x 钳到 area_left，clamp 把左上角收回 area_left。
-        let (x, y) = clamp_to_monitor(500, 500, 800, 600, 0, 0, 400, 300);
-        assert_eq!((x, y), (0, 0));
     }
 
     #[test]

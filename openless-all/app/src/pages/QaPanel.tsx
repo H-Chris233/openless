@@ -12,8 +12,16 @@
 
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { useTranslation } from 'react-i18next';
-import { getSettings, isTauri, qaWindowDismiss, qaWindowPin } from '../lib/ipc';
-import type { QaChatMessage, QaStatePayload, UserPreferences } from '../lib/types';
+import {
+  getPlatformCapabilities,
+  getSettings,
+  isTauri,
+  qaSubmitText,
+  qaToggleRecording,
+  qaWindowDismiss,
+  qaWindowPin,
+} from '../lib/ipc';
+import type { PlatformCapabilities, QaChatMessage, QaStatePayload, UserPreferences } from '../lib/types';
 import { getHotkeyBindingLabel } from '../lib/hotkey';
 import { renderQaMarkdown, renderQaPlainText } from '../lib/qaMarkdown';
 
@@ -21,17 +29,24 @@ const SELECTION_PREVIEW_MAX = 60;
 
 type Status = 'idle' | 'recording' | 'thinking' | 'error';
 
-export function QaPanel() {
+interface QaPanelProps {
+  embedded?: boolean;
+  onRequestClose?: () => void;
+}
+
+export function QaPanel({ embedded = false, onRequestClose }: QaPanelProps = {}) {
   const { t, i18n } = useTranslation();
   const [messages, setMessages] = useState<QaChatMessage[]>([]);
   const [status, setStatus] = useState<Status>('idle');
   const [errorMsg, setErrorMsg] = useState<string>('');
   const [selectionPreview, setSelectionPreview] = useState<string>('');
+  const [composerText, setComposerText] = useState<string>('');
   const [pinned, setPinned] = useState(false);
   /** 流式 LLM 答案：answer_delta 累积、answer 事件来时清空（最终内容已落到 messages）。 */
   const [streamingAnswer, setStreamingAnswer] = useState<string>('');
   /** 录音电平：0..1。后端每帧 33ms 通过 qa:level emit。详见 issue #162。 */
   const [level, setLevel] = useState<number>(0);
+  const [platformCaps, setPlatformCaps] = useState<PlatformCapabilities | null>(null);
   /** 用户当前的录音热键 label（如 "右 Option" / "Right Alt"）。issue #205：
    *  原版硬编码 "Option"，Windows 用户没这个键，文案失真。读 prefs 后由 i18n
    *  插值动态显示，平台与用户配置都能跟上。 */
@@ -40,6 +55,10 @@ export function QaPanel() {
   );
   const tRef = useRef(t);
   tRef.current = t;
+  const embeddedRef = useRef(embedded);
+  embeddedRef.current = embedded;
+  const onRequestCloseRef = useRef(onRequestClose);
+  onRequestCloseRef.current = onRequestClose;
 
   // ── 后端事件订阅（mount 时订阅一次，永不重订阅）──────────────────
   useEffect(() => {
@@ -75,14 +94,18 @@ export function QaPanel() {
               // ASR 在 finalize、user message 还没 push 的过渡帧。提前切到 thinking
               // 视图避免 UI 卡 recording 几百 ms 反馈缺失。详见 issue #161。
               setStatus('thinking');
-              setSelectionPreview('');
+              if (payload.selection_preview != null) {
+                setSelectionPreview(payload.selection_preview);
+              }
               setErrorMsg('');
               setStreamingAnswer('');
               setLevel(0);
               break;
             case 'thinking':
               setStatus('thinking');
-              setSelectionPreview('');
+              if (payload.selection_preview != null) {
+                setSelectionPreview(payload.selection_preview);
+              }
               setErrorMsg('');
               setStreamingAnswer('');
               setLevel(0);
@@ -95,7 +118,6 @@ export function QaPanel() {
               break;
             case 'answer':
               setStatus('idle');
-              setSelectionPreview('');
               setErrorMsg('');
               // messages 已被上面的 setMessages 落定，清掉流式 buffer 避免和最终气泡重影。
               setStreamingAnswer('');
@@ -111,7 +133,13 @@ export function QaPanel() {
         });
         const dismissHandle = await listen<unknown>('qa:dismiss', () => {
           setPinned(false);
-          void qaWindowDismiss();
+          setSelectionPreview('');
+          setComposerText('');
+          if (embeddedRef.current) {
+            onRequestCloseRef.current?.();
+          } else {
+            void qaWindowDismiss();
+          }
         });
         // qa:level — 录音电平，节流 ~33ms/帧。详见 issue #162。
         const levelHandle = await listen<{ level: number }>('qa:level', event => {
@@ -153,11 +181,12 @@ export function QaPanel() {
       if (event.key === 'Escape') {
         event.preventDefault();
         void qaWindowDismiss();
+        onRequestClose?.();
       }
     };
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
-  }, []);
+  }, [onRequestClose]);
 
   // ── 读取用户当前的录音热键 label，给 i18n 插值用（issue #205）。
   // QaPanel 跑在独立 webview（label="qa"），没有 HotkeySettingsContext
@@ -182,6 +211,25 @@ export function QaPanel() {
     };
   }, [i18n.language]);
 
+  useEffect(() => {
+    let cancelled = false;
+    void getPlatformCapabilities()
+      .then(caps => {
+        if (!cancelled) setPlatformCaps(caps);
+      })
+      .catch(err => {
+        console.warn('[QaPanel] load platform capabilities failed', err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const mobileRecordButton = platformCaps?.supportsDesktopHotkey === false;
+  const recordControlLabel = mobileRecordButton
+    ? t('qa.mobileRecordLabel')
+    : recordHotkeyLabel;
+
   const onTogglePin = () => {
     const next = !pinned;
     setPinned(next);
@@ -190,6 +238,18 @@ export function QaPanel() {
 
   const onClose = () => {
     void qaWindowDismiss();
+    onRequestClose?.();
+  };
+
+  const onSubmitText = () => {
+    const text = composerText.trim();
+    if (!text || status === 'thinking' || status === 'recording') return;
+    setComposerText('');
+    void qaSubmitText(text).catch(error => {
+      console.error('[QaPanel] qa_submit_text failed', error);
+      setErrorMsg(error instanceof Error ? error.message : String(error));
+      setStatus('error');
+    });
   };
 
   // ── 自动滚动到底（新消息进来时）────────────────────────────────────
@@ -201,18 +261,18 @@ export function QaPanel() {
   }, [messages, status]);
 
   return (
-    <div className="ol-frost" style={shellStyle}>
-      <Toolbar pinned={pinned} onTogglePin={onTogglePin} onClose={onClose} />
+    <div className="ol-frost" style={embedded ? embeddedShellStyle : shellStyle}>
+      <Toolbar pinned={pinned} onTogglePin={onTogglePin} onClose={onClose} embedded={embedded} />
       <div ref={scrollRef} style={contentStyle}>
         {messages.length === 0 && status === 'idle' && (
-          <EmptyHint t={t} recordHotkey={recordHotkeyLabel} />
+          <EmptyHint t={t} recordHotkey={recordControlLabel} />
         )}
         {messages.length === 0 && status === 'recording' && (
           <RecordingHeader
             preview={selectionPreview}
             t={t}
             level={level}
-            recordHotkey={recordHotkeyLabel}
+            recordHotkey={recordControlLabel}
           />
         )}
         <MessageList messages={messages} />
@@ -222,7 +282,7 @@ export function QaPanel() {
             t={t}
             preview={selectionPreview}
             level={level}
-            recordHotkey={recordHotkeyLabel}
+            recordHotkey={recordControlLabel}
           />
         )}
         {streamingAnswer && (
@@ -232,10 +292,27 @@ export function QaPanel() {
           <TurnIndicator kind="thinking" t={t} />
         )}
         {status === 'error' && (
-          <ErrorRow message={errorMsg} t={t} recordHotkey={recordHotkeyLabel} />
+          <ErrorRow message={errorMsg} t={t} recordHotkey={recordControlLabel} />
         )}
       </div>
-      <StatusBar status={status} t={t} recordHotkey={recordHotkeyLabel} />
+      {mobileRecordButton && (
+        <MobileRecordButton
+          status={status}
+          t={t}
+          onClick={() => {
+            if (status === 'thinking') return;
+            void qaToggleRecording();
+          }}
+        />
+      )}
+      <QaComposer
+        value={composerText}
+        disabled={status === 'thinking' || status === 'recording'}
+        t={t}
+        onChange={setComposerText}
+        onSubmit={onSubmitText}
+      />
+      <StatusBar status={status} t={t} recordHotkey={recordControlLabel} />
     </div>
   );
 }
@@ -246,9 +323,10 @@ interface ToolbarProps {
   pinned: boolean;
   onTogglePin: () => void;
   onClose: () => void;
+  embedded?: boolean;
 }
 
-function Toolbar({ pinned, onTogglePin, onClose }: ToolbarProps) {
+function Toolbar({ pinned, onTogglePin, onClose, embedded = false }: ToolbarProps) {
   const { t } = useTranslation();
   // 拖动 (issue #205)：
   // - macOS: lib.rs::make_qa_window_draggable_macos 在 NSWindow 层把整窗口设
@@ -258,7 +336,7 @@ function Toolbar({ pinned, onTogglePin, onClose }: ToolbarProps) {
   // 两条路径并存不冲突；data-tauri-drag-region 放在 toolbar 的空白 spacer 上，IconBtn
   // 作为 button 子元素仍然正常 click。
   return (
-    <div style={toolbarStyle}>
+    <div style={embedded ? embeddedToolbarStyle : toolbarStyle}>
       <div data-tauri-drag-region style={{ flex: 1, height: '100%' }} />
       <IconBtn
         label={pinned ? t('qa.unpinTooltip') : t('qa.pinTooltip')}
@@ -588,6 +666,83 @@ function StatusBar({
   );
 }
 
+function MobileRecordButton({
+  status,
+  t,
+  onClick,
+}: {
+  status: Status;
+  t: ReturnType<typeof useTranslation>['t'];
+  onClick: () => void;
+}) {
+  const disabled = status === 'thinking';
+  const recording = status === 'recording';
+  return (
+    <div style={mobileRecordDockStyle}>
+      <button
+        type="button"
+        onClick={onClick}
+        disabled={disabled}
+        style={{
+          ...mobileRecordButtonStyle,
+          background: recording ? 'var(--ol-err)' : 'var(--ol-blue)',
+          opacity: disabled ? 0.48 : 1,
+        }}
+      >
+        {recording ? t('qa.mobileRecordStop') : t('qa.mobileRecordStart')}
+      </button>
+    </div>
+  );
+}
+
+function QaComposer({
+  value,
+  disabled,
+  t,
+  onChange,
+  onSubmit,
+}: {
+  value: string;
+  disabled: boolean;
+  t: ReturnType<typeof useTranslation>['t'];
+  onChange: (value: string) => void;
+  onSubmit: () => void;
+}) {
+  const canSubmit = value.trim().length > 0 && !disabled;
+  return (
+    <div style={composerStyle}>
+      <textarea
+        value={value}
+        disabled={disabled}
+        rows={2}
+        placeholder={t('qa.composerPlaceholder')}
+        onChange={event => onChange(event.currentTarget.value)}
+        onKeyDown={event => {
+          if (event.key === 'Enter' && !event.shiftKey) {
+            event.preventDefault();
+            if (canSubmit) onSubmit();
+          }
+        }}
+        style={composerTextareaStyle}
+      />
+      <button
+        type="button"
+        disabled={!canSubmit}
+        onClick={onSubmit}
+        aria-label={t('qa.composerSend')}
+        title={t('qa.composerSend')}
+        style={{
+          ...composerSendStyle,
+          opacity: canSubmit ? 1 : 0.45,
+          cursor: canSubmit ? 'pointer' : 'default',
+        }}
+      >
+        {t('qa.composerSend')}
+      </button>
+    </div>
+  );
+}
+
 function SkeletonLine({ width }: { width: string }) {
   return (
     <div
@@ -624,6 +779,14 @@ const shellStyle: CSSProperties = {
   boxShadow: 'var(--ol-shadow-lg), inset 0 1px 0 0 rgba(255, 255, 255, 0.9)',
   fontFamily: 'var(--ol-font-sans)',
   color: 'var(--ol-ink)',
+};
+
+const embeddedShellStyle: CSSProperties = {
+  ...shellStyle,
+  borderRadius: 0,
+  border: 0,
+  boxShadow: 'none',
+  minHeight: '100vh',
 };
 
 const toolbarStyle: CSSProperties = {
@@ -756,6 +919,70 @@ const statusBarStyle: CSSProperties = {
   padding: '0 16px',
   borderTop: '0.5px solid rgba(0, 0, 0, 0.06)',
   background: 'rgba(255,255,255,0.4)',
+};
+
+const embeddedToolbarStyle: CSSProperties = {
+  ...toolbarStyle,
+  height: 'calc(44px + env(safe-area-inset-top, 0px))',
+  padding: 'env(safe-area-inset-top, 0px) 14px 0 14px',
+  cursor: 'default',
+};
+
+const mobileRecordDockStyle: CSSProperties = {
+  flexShrink: 0,
+  padding: '10px 16px 0',
+  display: 'flex',
+};
+
+const mobileRecordButtonStyle: CSSProperties = {
+  width: '100%',
+  minHeight: 42,
+  border: 0,
+  borderRadius: 10,
+  color: '#fff',
+  fontSize: 14,
+  fontWeight: 700,
+  fontFamily: 'var(--ol-font-sans)',
+};
+
+const composerStyle: CSSProperties = {
+  flexShrink: 0,
+  display: 'grid',
+  gridTemplateColumns: 'minmax(0, 1fr) auto',
+  alignItems: 'end',
+  gap: 8,
+  padding: '10px 12px',
+  borderTop: '0.5px solid rgba(0, 0, 0, 0.06)',
+  background: 'rgba(255,255,255,0.48)',
+};
+
+const composerTextareaStyle: CSSProperties = {
+  width: '100%',
+  minHeight: 40,
+  maxHeight: 88,
+  resize: 'vertical',
+  border: '0.5px solid rgba(0,0,0,0.12)',
+  borderRadius: 8,
+  padding: '8px 9px',
+  fontFamily: 'var(--ol-font-sans)',
+  fontSize: 13,
+  lineHeight: 1.45,
+  color: 'var(--ol-ink)',
+  background: 'rgba(255,255,255,0.78)',
+  outline: 'none',
+};
+
+const composerSendStyle: CSSProperties = {
+  minHeight: 40,
+  minWidth: 58,
+  border: 0,
+  borderRadius: 8,
+  padding: '0 12px',
+  background: 'var(--ol-blue)',
+  color: '#fff',
+  fontFamily: 'var(--ol-font-sans)',
+  fontSize: 13,
+  fontWeight: 700,
 };
 
 const globalCss = `

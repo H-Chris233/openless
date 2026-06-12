@@ -48,10 +48,8 @@ const LEGACY_CREDS_FILE: &str = "credentials.json";
 
 const KEYRING_CREDENTIALS_ACCOUNT: &str = "credentials.v1";
 const KEYRING_CREDENTIALS_CHUNK_PREFIX: &str = "credentials.v1.chunk.";
-/// HMAC 密钥长度（字节）。
-const HISTORY_HMAC_KEY_LEN: usize = 32;
-/// history HMAC sidecar 文件后缀：`history.json.hmac`。
-const HISTORY_HMAC_SUFFIX: &str = ".hmac";
+#[cfg(target_os = "android")]
+const ANDROID_CREDENTIALS_FILE: &str = "credentials.enc.json";
 // Windows Credential Manager caps one credential blob at 2560 bytes. keyring stores
 // passwords as UTF-16 on Windows, so keep each JSON chunk comfortably below that.
 const KEYRING_CHUNK_MAX_UTF16_UNITS: usize = 1000;
@@ -95,17 +93,6 @@ fn store_credentials_cache(root: &CredsRoot) {
 #[cfg(test)]
 fn reset_credentials_cache_for_tests() {
     *credentials_cache().lock() = None;
-    *credentials_manifest_cache().lock() = None;
-}
-
-/// issue #602：进程内缓存「上次成功读/写的 chunk manifest」。save_credentials 用它
-/// 替代保存前的 keychain manifest 读 —— macOS 上这次读本身就要过 ACL 检查（弹窗）。
-/// None = 本进程还没成功读/写过 manifest（冷启动或 keyring 不可用），此时才回
-/// keychain 读真实 manifest，保证 UUID-generation 旧 chunks 的清理信息不丢。
-static CREDENTIALS_MANIFEST_CACHE: OnceLock<Mutex<Option<CredsChunkManifest>>> = OnceLock::new();
-
-fn credentials_manifest_cache() -> &'static Mutex<Option<CredsChunkManifest>> {
-    CREDENTIALS_MANIFEST_CACHE.get_or_init(|| Mutex::new(None))
 }
 
 // ───────────────────────── path helpers ─────────────────────────
@@ -126,7 +113,7 @@ fn data_dir() -> Result<PathBuf> {
         Ok(PathBuf::from(appdata).join("OpenLess"))
     }
 
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "android")))]
     {
         if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
             if !xdg.is_empty() {
@@ -138,6 +125,14 @@ fn data_dir() -> Result<PathBuf> {
             .join(".local")
             .join("share")
             .join("OpenLess"))
+    }
+
+    #[cfg(target_os = "android")]
+    {
+        if let Ok(dir) = std::env::var("TAURI_ANDROID_APP_DATA_DIR") {
+            return Ok(PathBuf::from(dir).join("OpenLess"));
+        }
+        Ok(std::env::temp_dir().join("OpenLess"))
     }
 }
 
@@ -448,31 +443,6 @@ fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// 与 `atomic_write` 相同，但（unix）在 rename **之前**把 tmp 文件设 0o600。
-///
-/// issue #609 M-01：原先「rename 后再 chmod」之间存在一段世界可读窗口（tmp 按
-/// umask 创建，目标文件 rename 后到收紧权限前可被同机其他用户读到）。在 rename
-/// 前对 tmp chmod，保证目标文件一出现就已是 0o600，无暴露窗口。仅用于 history.json
-/// 与其 sidecar（含明文/完整性数据），其余配置走普通 `atomic_write`。
-fn atomic_write_private(path: &Path, contents: &[u8]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        ensure_dir(parent)?;
-    }
-    let file_name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let tmp_path = path.with_file_name(format!("{file_name}.tmp-{}", Uuid::new_v4().simple()));
-    fs::write(&tmp_path, contents)
-        .with_context(|| format!("write tmp failed: {}", tmp_path.display()))?;
-    restrict_file_permissions_best_effort(&tmp_path);
-    if let Err(err) = fs::rename(&tmp_path, path) {
-        let _ = fs::remove_file(&tmp_path);
-        return Err(err).with_context(|| format!("rename failed: {}", path.display()));
-    }
-    Ok(())
-}
-
 fn read_or_default<T: for<'de> Deserialize<'de> + Default>(path: &Path) -> Result<T> {
     if !path.exists() {
         return Ok(T::default());
@@ -680,13 +650,52 @@ fn credentials_path() -> Result<PathBuf> {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 fn keyring_entry() -> Result<keyring::Entry> {
     keyring_entry_for(KEYRING_CREDENTIALS_ACCOUNT)
 }
 
+#[cfg(not(target_os = "android"))]
 fn keyring_entry_for(account: &str) -> Result<keyring::Entry> {
     keyring::Entry::new(CredentialsVault::SERVICE_NAME, account)
         .context("open system credential vault")
+}
+
+#[cfg(target_os = "android")]
+fn android_credentials_path() -> Result<PathBuf> {
+    Ok(data_dir()?.join(ANDROID_CREDENTIALS_FILE))
+}
+
+#[cfg(target_os = "android")]
+fn load_android_credentials() -> Result<Option<CredsRoot>> {
+    let path = android_credentials_path()?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = fs::read(&path).with_context(|| format!("read failed: {}", path.display()))?;
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    // Stub: base64 envelope — replace with Keystore-backed AES when JNI lands.
+    use base64::Engine;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(bytes)
+        .context("decode android credentials envelope")?;
+    let root =
+        serde_json::from_slice::<CredsRoot>(&decoded).context("parse android credentials json")?;
+    Ok(Some(root))
+}
+
+#[cfg(target_os = "android")]
+fn save_android_credentials(root: &CredsRoot) -> Result<()> {
+    let cleaned = clean_credentials(root);
+    let json = serde_json::to_string(&cleaned).context("encode credentials failed")?;
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(json.as_bytes());
+    let path = android_credentials_path()?;
+    ensure_dir(path.parent().unwrap_or_else(|| Path::new(".")))?;
+    fs::write(&path, encoded).with_context(|| format!("write failed: {}", path.display()))?;
+    Ok(())
 }
 
 fn clean_credentials(root: &CredsRoot) -> CredsRoot {
@@ -733,7 +742,7 @@ fn remove_legacy_credentials_file_best_effort() {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct CredsChunkManifest {
     openless_credentials_storage: String,
     version: u32,
@@ -773,23 +782,6 @@ fn chunk_json_payload(json: &str) -> Vec<String> {
     chunks
 }
 
-/// issue #602：给定「上次成功落盘的 JSON」与「本次要写的各 chunk」，返回每个新 chunk
-/// 是否可跳过重写（与同号旧 chunk 逐字节一致）。注意 chunk 按偏移切分：靠前字段的
-/// 变长改动会移动后续所有 chunk 边界（全部重写，等同旧行为）；等长改动/无改动则只
-/// 写真正变化的 chunk。previous_json=None（冷缓存/旧 UUID 代际）→ 全部重写。
-fn chunk_skip_mask(previous_json: Option<&str>, new_chunks: &[String]) -> Vec<bool> {
-    let prev_chunks = previous_json.map(chunk_json_payload);
-    new_chunks
-        .iter()
-        .enumerate()
-        .map(|(index, chunk)| {
-            prev_chunks
-                .as_ref()
-                .is_some_and(|prev| prev.get(index) == Some(chunk))
-        })
-        .collect()
-}
-
 fn read_chunk_manifest(json: &str) -> Option<CredsChunkManifest> {
     let manifest = serde_json::from_str::<CredsChunkManifest>(json).ok()?;
     if manifest.openless_credentials_storage == "chunked" && manifest.version == 1 {
@@ -799,6 +791,7 @@ fn read_chunk_manifest(json: &str) -> Option<CredsChunkManifest> {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 fn get_keyring_password(account: &str) -> Result<Option<String>> {
     match keyring_entry_for(account)?.get_password() {
         Ok(value) => Ok(Some(value)),
@@ -809,6 +802,7 @@ fn get_keyring_password(account: &str) -> Result<Option<String>> {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 fn delete_keyring_password(account: &str) {
     match keyring_entry_for(account).and_then(|entry| {
         entry
@@ -819,169 +813,7 @@ fn delete_keyring_password(account: &str) {
     }
 }
 
-// ───────────── issue #609 F-03：history.json HMAC 完整性 ─────────────
-
-/// 进程内缓存的 history HMAC 密钥，避免每次读写都打 keyring。
-static HISTORY_HMAC_KEY: OnceLock<Option<Vec<u8>>> = OnceLock::new();
-
-/// 取（必要时生成）history HMAC 密钥。
-///
-/// 首次用时从 keyring 读 32 字节 hex；不存在则用 OS CSPRNG 生成并写回 keyring。
-/// keyring 不可用（如 Linux 无 secret service）→ 返回 None，调用方据此**退化为不
-/// 校验**（保持可用，但不提供完整性保证）；用 `OnceLock` 把这个状态固化到进程。
-///
-/// issue #609 M-03：keyring 不可用时只能放弃完整性校验，这里 `log::warn!` 一次。
-/// **后续可做**：keyring 缺失时把 HMAC 密钥落到一个 0o600 文件里兜底（当前留作
-/// future work，因为文件密钥与明文 history 同目录，威胁模型收益有限）。
-fn history_hmac_key() -> Option<Vec<u8>> {
-    HISTORY_HMAC_KEY
-        .get_or_init(|| match load_or_create_history_hmac_key() {
-            Ok(key) => Some(key),
-            Err(e) => {
-                log::warn!(
-                    "[history] 完整性校验未激活（keyring 不可用），本次运行跳过 HMAC 校验（仍按内容读写）：{e}"
-                );
-                None
-            }
-        })
-        .clone()
-}
-
-/// history HMAC 密钥 / enrolled 标志的 0o600 文件路径。
-///
-/// **为什么从 keyring 迁到文件**（原 #609 F-03 放 keychain）：macOS 上每个钥匙串条目各自 ACL，
-/// 且 ad-hoc 签名下「始终允许」不持久、条目删建即清空 ACL —— 导致用户**每次听写后反复弹钥匙串
-/// 授权**（凭据 3 次之外又多出 HMAC 密钥 + enrolled 共 2 次）。HMAC 密钥与明文 history 同目录、
-/// at-rest 防护同为 OS 文件权限（M-01），放文件与放 keychain 安全**收益对等**，却彻底消除钥匙串
-/// 弹窗。真正的 API 密钥仍留在 keychain（CredentialsVault）。
-fn history_hmac_key_path() -> Result<PathBuf> {
-    Ok(data_dir()?.join("history_hmac.key"))
-}
-
-fn history_hmac_enrolled_path() -> Result<PathBuf> {
-    Ok(data_dir()?.join(".history_hmac_enrolled.v1"))
-}
-
-fn load_or_create_history_hmac_key() -> Result<Vec<u8>> {
-    let _guard = credentials_lock().lock();
-    let key_path = history_hmac_key_path()?;
-    if let Ok(hex_key) = fs::read_to_string(&key_path) {
-        let trimmed = hex_key.trim();
-        if !trimmed.is_empty() {
-            let key =
-                decode_hex(trimmed).with_context(|| "history HMAC key file is not valid hex")?;
-            if key.len() == HISTORY_HMAC_KEY_LEN {
-                return Ok(key);
-            }
-            log::warn!("[history] HMAC 密钥文件长度异常，重新生成");
-        }
-    }
-    // 密钥文件不存在 = 首次启用文件存储（含从旧 keychain 版升级）。生成新 key；旧 history 可能
-    // 是用「旧 keychain key」签的 —— 新 key 会让其 HMAC 不匹配而被误判篡改清空。迁移：删掉旧
-    // sidecar 与 enrolled 文件，让旧 history 走 legacy 路径被重新接受 + 用新 key 补签。全程不读
-    // 旧 keychain，零钥匙串弹窗、不丢历史。
-    let mut key = vec![0u8; HISTORY_HMAC_KEY_LEN];
-    getrandom::fill(&mut key).map_err(|e| anyhow!("OS CSPRNG 生成 HMAC 密钥失败：{e}"))?;
-    atomic_write_private(&key_path, encode_hex(&key).as_bytes())
-        .context("写入 history HMAC 密钥文件失败")?;
-    if let Ok(dir) = data_dir() {
-        let _ = fs::remove_file(history_hmac_sidecar_path(&dir.join(HISTORY_FILE)));
-    }
-    if let Ok(enrolled) = history_hmac_enrolled_path() {
-        let _ = fs::remove_file(enrolled);
-    }
-    Ok(key)
-}
-
-/// issue #609 C-01：「是否已启用 HMAC」标志的抽象，便于单测注入内存实现。
-///
-/// 标志存 keyring（不是文件），因为它本身要抗删除：sidecar 是文件、易删，
-/// 一旦攻击者删掉 sidecar，靠这个 keyring 标志判定「本应有 sidecar 却没了」=
-/// 篡改，而不是误当 legacy 接受。
-trait HmacEnrollment {
-    /// 标志已置位（曾经写过 sidecar）。keyring 不可读时返回 false（退化）。
-    fn is_enrolled(&self) -> bool;
-    /// 置位标志（幂等）。keyring 不可写时静默忽略（best-effort）。
-    fn set_enrolled(&self);
-}
-
-/// 生产实现：enrolled 标志落 0o600 文件（不再用 keychain，原因见 history_hmac_key_path 注释：
-/// 避免 ad-hoc 签名下每次听写反复弹钥匙串）。标志文件存在 = 已启用（曾写过 sidecar）。
-/// 读不到 / 写不了都按「未启用」处理（退化与 M-03 一致）。
-struct FileEnrollment;
-
-impl HmacEnrollment for FileEnrollment {
-    fn is_enrolled(&self) -> bool {
-        history_hmac_enrolled_path()
-            .map(|p| p.exists())
-            .unwrap_or(false)
-    }
-
-    fn set_enrolled(&self) {
-        let Ok(path) = history_hmac_enrolled_path() else {
-            return;
-        };
-        // 已置位则不重复写（幂等）。
-        if path.exists() {
-            return;
-        }
-        if let Err(e) = atomic_write_private(&path, b"1") {
-            log::warn!("[history] 置位 HMAC enrolled 标志文件失败：{e}");
-        }
-    }
-}
-
-fn encode_hex(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        // write! 到 String 不会失败；直接吞掉 Result 即可。
-        let _ = write!(s, "{b:02x}");
-    }
-    s
-}
-
-fn decode_hex(s: &str) -> Result<Vec<u8>> {
-    let s = s.trim();
-    if s.len() % 2 != 0 {
-        return Err(anyhow!("hex 长度为奇数"));
-    }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| anyhow!("hex 解析失败：{e}")))
-        .collect()
-}
-
-/// 计算 `HMAC-SHA256(key, bytes)`，返回 hex。
-fn compute_history_hmac(key: &[u8], bytes: &[u8]) -> String {
-    use hmac::{Hmac, Mac};
-    // 标准 HMAC：new_from_slice 接受任意长度 key（内部按 RFC2104 处理 key padding）。
-    let mut mac = <Hmac<sha2::Sha256> as Mac>::new_from_slice(key).expect("HMAC 接受任意长度 key");
-    mac.update(bytes);
-    encode_hex(&mac.finalize().into_bytes())
-}
-
-fn history_hmac_sidecar_path(history_path: &Path) -> PathBuf {
-    let mut name = history_path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| HISTORY_FILE.to_string());
-    name.push_str(HISTORY_HMAC_SUFFIX);
-    history_path.with_file_name(name)
-}
-
-/// 常量时间比较两段 hex HMAC，避免计时侧信道。两者都是定长 hex，长度不等直接 false。
-/// issue #609 H-02：用 `subtle::ConstantTimeEq` 而非手写 XOR 循环，避免编译器把
-/// 短路优化引回去（手写循环不保证不被向量化/提前退出）。
-fn hmac_hex_eq(a: &str, b: &str) -> bool {
-    use subtle::ConstantTimeEq;
-    let (a, b) = (a.trim().as_bytes(), b.trim().as_bytes());
-    if a.len() != b.len() {
-        return false;
-    }
-    a.ct_eq(b).into()
-}
-
+#[cfg(not(target_os = "android"))]
 fn load_keyring_credentials() -> Result<Option<CredsRoot>> {
     let Some(json_or_manifest) = get_keyring_password(KEYRING_CREDENTIALS_ACCOUNT)? else {
         return Ok(None);
@@ -989,8 +821,6 @@ fn load_keyring_credentials() -> Result<Option<CredsRoot>> {
 
     let manifest = read_chunk_manifest(&json_or_manifest)
         .ok_or_else(|| anyhow!("invalid system credential vault manifest"))?;
-    // issue #602：manifest 刚从 keychain 读出，进缓存 —— 后续 save 不必再读一次。
-    *credentials_manifest_cache().lock() = Some(manifest.clone());
     let mut json = String::new();
     for index in 0..manifest.chunks {
         let account = chunk_account(manifest.generation.as_deref(), index);
@@ -1004,6 +834,7 @@ fn load_keyring_credentials() -> Result<Option<CredsRoot>> {
         .context("decode system credential vault payload")
 }
 
+#[cfg(not(target_os = "android"))]
 fn load_legacy_keyring_credentials() -> CredsRoot {
     match load_legacy_keyring_credentials_for_update() {
         Ok(root) => root,
@@ -1014,6 +845,7 @@ fn load_legacy_keyring_credentials() -> CredsRoot {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 fn load_legacy_keyring_credentials_for_update() -> Result<CredsRoot> {
     let mut root = CredsRoot::default();
     for account in CredentialAccount::all() {
@@ -1027,6 +859,7 @@ fn load_legacy_keyring_credentials_for_update() -> Result<CredsRoot> {
     Ok(clean_credentials(&root))
 }
 
+#[cfg(not(target_os = "android"))]
 fn remove_legacy_keyring_credentials() {
     for account in CredentialAccount::all() {
         delete_keyring_password(account.keyring_account());
@@ -1048,9 +881,12 @@ fn load_legacy_sources_without_migration() -> CredsRoot {
         return legacy;
     }
 
-    let legacy_vault = load_legacy_keyring_credentials();
-    if legacy_vault_has_credentials(&legacy_vault) {
-        return legacy_vault;
+    #[cfg(not(target_os = "android"))]
+    {
+        let legacy_vault = load_legacy_keyring_credentials();
+        if legacy_vault_has_credentials(&legacy_vault) {
+            return legacy_vault;
+        }
     }
 
     CredsRoot::default()
@@ -1069,15 +905,19 @@ fn migrate_legacy_sources() -> CredsRoot {
 fn migrate_legacy_sources_for_update() -> Result<CredsRoot> {
     if let Some(legacy) = load_legacy_credentials() {
         save_credentials(&legacy)?;
+        #[cfg(not(target_os = "android"))]
         remove_legacy_keyring_credentials();
         return Ok(legacy);
     }
 
-    let legacy_vault = load_legacy_keyring_credentials_for_update()?;
-    if legacy_vault_has_credentials(&legacy_vault) {
-        save_credentials(&legacy_vault)?;
-        remove_legacy_keyring_credentials();
-        return Ok(legacy_vault);
+    #[cfg(not(target_os = "android"))]
+    {
+        let legacy_vault = load_legacy_keyring_credentials_for_update()?;
+        if legacy_vault_has_credentials(&legacy_vault) {
+            save_credentials(&legacy_vault)?;
+            remove_legacy_keyring_credentials();
+            return Ok(legacy_vault);
+        }
     }
 
     Ok(CredsRoot::default())
@@ -1087,6 +927,22 @@ fn load_credentials() -> CredsRoot {
     if let Some(cached) = credentials_cache().lock().as_ref().cloned() {
         return cached;
     }
+
+    #[cfg(target_os = "android")]
+    {
+        let root = match load_android_credentials() {
+            Ok(Some(root)) => root,
+            Ok(None) => CredsRoot::default(),
+            Err(e) => {
+                log::warn!("[vault] android credential read failed: {e}");
+                CredsRoot::default()
+            }
+        };
+        store_credentials_cache(&root);
+        return root;
+    }
+
+    #[cfg(not(target_os = "android"))]
     match load_keyring_credentials() {
         Ok(Some(root)) => {
             // 不在这里调 remove_legacy_keyring_credentials() —— 它内部对每个
@@ -1123,6 +979,18 @@ fn load_credentials_for_update() -> Result<CredsRoot> {
     if let Some(cached) = credentials_cache().lock().as_ref().cloned() {
         return Ok(cached);
     }
+
+    #[cfg(target_os = "android")]
+    {
+        let root = match load_android_credentials()? {
+            Some(root) => root,
+            None => CredsRoot::default(),
+        };
+        store_credentials_cache(&root);
+        return Ok(root);
+    }
+
+    #[cfg(not(target_os = "android"))]
     match load_keyring_credentials() {
         Ok(Some(root)) => {
             // 同 load_credentials：不再每次 update 都尝试 delete legacy keyring
@@ -1146,96 +1014,70 @@ fn load_credentials_for_update() -> Result<CredsRoot> {
 
 fn save_credentials(root: &CredsRoot) -> Result<()> {
     let cleaned = clean_credentials(root);
-    let json = serde_json::to_string(&cleaned).context("encode credentials failed")?;
-    // issue #602：上次成功读/写的 manifest 有进程缓存时不再回 keychain 读 ——
-    // macOS 上这次读本身就要过 ACL 检查（一次弹窗）。冷路径才读真实 manifest。
-    let previous_manifest = credentials_manifest_cache().lock().clone().or_else(|| {
-        get_keyring_password(KEYRING_CREDENTIALS_ACCOUNT)
-            .ok()
-            .flatten()
-            .and_then(|value| read_chunk_manifest(&value))
-    });
-    let chunks = chunk_json_payload(&json);
 
-    // issue #602：切换供应商等小改动会触发整套「重写所有 chunks + manifest」，每个
-    // keychain 条目各自 ACL、各弹一次「OpenLess 想访问钥匙串」。用进程缓存里上次
-    // 成功落盘的 root 反推各 chunk 旧内容，内容没变的 chunk 跳过重写。仅当旧
-    // manifest 已是稳定名（generation=None）时可跳 —— UUID 代际的旧 chunk 账户名
-    // 不同，内容相同也必须写到新稳定名。缓存序列化顺序偶有差异时只会多写（回到
-    // 旧行为），不会漏写。
-    let previous_json: Option<String> = match &previous_manifest {
-        Some(m) if m.generation.is_none() => credentials_cache()
-            .lock()
-            .as_ref()
-            .and_then(|prev| serde_json::to_string(prev).ok()),
-        _ => None,
-    };
-    let skip = chunk_skip_mask(previous_json.as_deref(), &chunks);
-
-    // 先写所有 chunks（稳定名），再写 manifest —— 保证 partial-write 不会让
-    // manifest 指向不完整 chunks。stable name 让 macOS Keychain ACL 一次允许后
-    // 长期有效，不再因 UUID 轮换反复弹窗（这是 PR #277 早期 UUID-rotation
-    // 设计的回退）。
-    let mut chunks_written = 0usize;
-    for (index, chunk) in chunks.iter().enumerate() {
-        if skip[index] {
-            continue;
-        }
-        let account = chunk_account(None, index);
-        keyring_entry_for(&account)?
-            .set_password(chunk)
-            .with_context(|| format!("write system credential vault chunk {index}"))?;
-        chunks_written += 1;
+    #[cfg(target_os = "android")]
+    {
+        save_android_credentials(&cleaned)?;
+        store_credentials_cache(&cleaned);
+        return Ok(());
     }
 
-    let manifest = CredsChunkManifest {
-        openless_credentials_storage: "chunked".to_string(),
-        version: 1,
-        generation: None,
-        chunks: chunks.len(),
-    };
-    // manifest 内容只由 chunks 数决定：数量没变且旧 manifest 已是稳定名时内容
-    // 逐字节一致，跳过重写（又省一次 ACL 弹窗）。
-    let manifest_unchanged = previous_manifest
-        .as_ref()
-        .is_some_and(|m| m.generation.is_none() && m.chunks == chunks.len());
-    if !manifest_unchanged {
+    #[cfg(not(target_os = "android"))]
+    {
+        let json = serde_json::to_string(&cleaned).context("encode credentials failed")?;
+        let previous_manifest = get_keyring_password(KEYRING_CREDENTIALS_ACCOUNT)
+            .ok()
+            .flatten()
+            .and_then(|value| read_chunk_manifest(&value));
+        let chunks = chunk_json_payload(&json);
+
+        // 先写所有 chunks（稳定名），再写 manifest —— 保证 partial-write 不会让
+        // manifest 指向不完整 chunks。stable name 让 macOS Keychain ACL 一次允许后
+        // 长期有效，不再因 UUID 轮换反复弹窗（这是 PR #277 早期 UUID-rotation
+        // 设计的回退）。
+        for (index, chunk) in chunks.iter().enumerate() {
+            let account = chunk_account(None, index);
+            keyring_entry_for(&account)?
+                .set_password(chunk)
+                .with_context(|| format!("write system credential vault chunk {index}"))?;
+        }
+
+        let manifest = CredsChunkManifest {
+            openless_credentials_storage: "chunked".to_string(),
+            version: 1,
+            generation: None,
+            chunks: chunks.len(),
+        };
         let manifest_json =
             serde_json::to_string(&manifest).context("encode credential manifest failed")?;
         keyring_entry()?
             .set_password(&manifest_json)
             .context("write system credential vault manifest")?;
-    }
-    log::info!(
-        "[vault] save_credentials: {chunks_written}/{} chunks written, manifest {}",
-        chunks.len(),
-        if manifest_unchanged { "unchanged" } else { "rewritten" }
-    );
 
-    // 清理旧 chunks：
-    // 1) 旧 manifest 用 UUID generation → 那一代 chunks 全删（迁移到 stable name）
-    // 2) 旧 manifest 也是 stable name，但 chunks 数量比这次多 → 删多余的 idx
-    if let Some(previous) = previous_manifest {
-        match previous.generation.as_deref() {
-            Some(prev_gen) => {
-                for index in 0..previous.chunks {
-                    delete_keyring_password(&chunk_account(Some(prev_gen), index));
+        // 清理旧 chunks：
+        // 1) 旧 manifest 用 UUID generation → 那一代 chunks 全删（迁移到 stable name）
+        // 2) 旧 manifest 也是 stable name，但 chunks 数量比这次多 → 删多余的 idx
+        if let Some(previous) = previous_manifest {
+            match previous.generation.as_deref() {
+                Some(prev_gen) => {
+                    for index in 0..previous.chunks {
+                        delete_keyring_password(&chunk_account(Some(prev_gen), index));
+                    }
                 }
-            }
-            None => {
-                for index in chunks.len()..previous.chunks {
-                    delete_keyring_password(&chunk_account(None, index));
+                None => {
+                    for index in chunks.len()..previous.chunks {
+                        delete_keyring_password(&chunk_account(None, index));
+                    }
                 }
             }
         }
-    }
 
-    remove_legacy_credentials_file_best_effort();
-    // 写完成功后立刻刷新 process cache —— 同进程后续读不再回 Keychain。
-    // 见 CREDENTIALS_CACHE 的 doc。
-    store_credentials_cache(&cleaned);
-    *credentials_manifest_cache().lock() = Some(manifest);
-    Ok(())
+        remove_legacy_credentials_file_best_effort();
+        // 写完成功后立刻刷新 process cache —— 同进程后续读不再回 Keychain。
+        // 见 CREDENTIALS_CACHE 的 doc。
+        store_credentials_cache(&cleaned);
+        Ok(())
+    }
 }
 
 fn lookup_account(root: &CredsRoot, account: CredentialAccount) -> Option<String> {
@@ -1308,20 +1150,6 @@ fn write_account(root: &mut CredsRoot, account: CredentialAccount, value: Option
 
 // ───────────────────────── HistoryStore ─────────────────────────
 
-/// 听写历史（`history.json`）。
-///
-/// **At-rest 行为（issue #609 F-03 / F-04）**：
-/// - 内容以**明文 JSON** 落盘（`DictationSession[]`），便于用户导出/审阅。
-/// - 机密性靠 **OS 文件系统权限**：unix 下写入后收紧到 `0o600`（仅属主可读写）；
-///   Windows 走 `%APPDATA%` 的 per-user ACL。
-/// - 完整性靠 **HMAC-SHA256**（F-03）：密钥 32 字节随机、存**同目录 0o600 文件**
-///   （`history_hmac.key`，原 keyring 版因 ad-hoc 签名反复弹钥匙串而迁出，密钥与明文
-///   history 同目录、安全收益对等）；每次写入算 HMAC 写 sidecar `history.json.hmac`；
-///   读取时校验，不匹配则 fail-safe 返回空历史，绝不把被篡改的历史喂给下游 LLM。
-///
-/// **已知残留**：尚未做**完整静态加密（at-rest encryption）**——本地能读文件的
-/// 攻击者仍可读到明文历史（但无法在不被发现的情况下篡改）。完整加密（用 keyring
-/// 派生密钥加密整个文件）留待后续，见 issue #609 F-04（明确允许"clearly document"）。
 pub struct HistoryStore {
     path: PathBuf,
     lock: Mutex<()>,
@@ -1411,9 +1239,6 @@ impl HistoryStore {
         self.write_locked(&sessions)
     }
 
-    /// 原地替换 id 匹配的历史条目（保持原位置）。用于「重新转录」成功后回写
-    /// rawTranscript / finalText / error_code（issue #613）。找不到对应 id 时返回
-    /// `Ok(false)`，调用方据此提示「历史条目已不存在」。
     pub fn update_entry(&self, updated: DictationSession) -> Result<bool> {
         let _guard = self.lock.lock();
         let mut sessions = self.read_locked()?;
@@ -1430,142 +1255,13 @@ impl HistoryStore {
         self.write_locked(&Vec::<DictationSession>::new())
     }
 
-    /// issue #609 F-03：读 history 前先做 HMAC 完整性校验。
-    ///
-    /// - HMAC 密钥不可用（keyring 缺失等）→ 退化为不校验，按内容直接读（保持可用）。
-    /// - 文件不存在 / 为空 → 空历史（正常首次启动）。
-    /// - sidecar 存在且 HMAC 不匹配 → **判定被投毒/损坏，fail-safe 返回空历史**并
-    ///   log::warn，绝不把被篡改的历史喂给下游 LLM（对话感知 polish）。
-    /// - sidecar 缺失但**标志未置位** → 真正的 legacy 文件：接受当前内容、补写 sidecar、
-    ///   置位 enrolled 标志完成迁移（issue #609 C-01）。
-    /// - sidecar 缺失但**标志已置位** → 攻击者删了 sidecar 想伪装 legacy：fail-safe 返回空。
     fn read_locked(&self) -> Result<Vec<DictationSession>> {
-        read_history_with_key(&self.path, history_hmac_key().as_deref(), &FileEnrollment)
+        read_or_default::<Vec<DictationSession>>(&self.path)
     }
 
-    /// issue #609 F-03/F-04/C-01：写 history 后算 HMAC 写 sidecar；unix 下把两文件都设
-    /// 0o600；首次写顺带置位 enrolled 标志。
     fn write_locked(&self, sessions: &[DictationSession]) -> Result<()> {
         let json = serde_json::to_vec_pretty(sessions).context("encode history failed")?;
-        write_history_with_key(
-            &self.path,
-            &json,
-            history_hmac_key().as_deref(),
-            &FileEnrollment,
-        )
-    }
-}
-
-/// 读 history 并按 `key` 做 HMAC 完整性校验（纯函数，便于单测）。
-///
-/// `key == None`：无密钥，退化为不校验，按内容直接读（与历史行为一致）。
-/// 详细语义见 `HistoryStore::read_locked` 的文档。
-fn read_history_with_key(
-    path: &Path,
-    key: Option<&[u8]>,
-    enrollment: &dyn HmacEnrollment,
-) -> Result<Vec<DictationSession>> {
-    let Some(key) = key else {
-        return read_or_default::<Vec<DictationSession>>(path);
-    };
-    // TOCTOU 收口（rust）：不先 exists() 再 read()，直接 read()，NotFound 当空历史。
-    let bytes = match fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e).with_context(|| format!("read failed: {}", path.display())),
-    };
-    if bytes.is_empty() {
-        return Ok(Vec::new());
-    }
-    let sidecar = history_hmac_sidecar_path(path);
-    let expected = compute_history_hmac(key, &bytes);
-    match fs::read_to_string(&sidecar) {
-        Ok(stored) => {
-            if !hmac_hex_eq(stored.trim(), &expected) {
-                // 投毒/损坏：fail-safe，不解析、不喂下游。
-                log::warn!(
-                    "[history] HMAC 校验失败（疑似被篡改或损坏），fail-safe 返回空历史：{}",
-                    path.display()
-                );
-                return Ok(Vec::new());
-            }
-            serde_json::from_slice::<Vec<DictationSession>>(&bytes)
-                .with_context(|| format!("decode failed: {}", path.display()))
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // issue #609 C-01：sidecar 缺失要分两种情况。
-            if enrollment.is_enrolled() {
-                // 标志已置位：本应有 sidecar 却没了 → 攻击者删 sidecar 想伪装 legacy
-                // 绕过 HMAC。fail-safe：返回空历史，绝不接受、绝不补签。
-                log::warn!(
-                    "[history] HMAC 已启用但 sidecar 缺失（疑似被删除以绕过完整性校验），fail-safe 返回空历史：{}",
-                    path.display()
-                );
-                return Ok(Vec::new());
-            }
-            // 真正的 legacy：老用户的 history.json 从没带过 .hmac → 接受、补写 sidecar、
-            // 置位 enrolled 标志完成迁移。此后再缺 sidecar 就会落到上面的 fail-safe。
-            log::info!(
-                "[history] 未发现 HMAC sidecar 且未启用，视为 legacy 文件，接受并补写完整性标记"
-            );
-            if let Err(err) = write_hmac_sidecar(&sidecar, &expected) {
-                log::warn!("[history] 迁移补写 HMAC sidecar 失败：{err}");
-            } else {
-                enrollment.set_enrolled();
-            }
-            serde_json::from_slice::<Vec<DictationSession>>(&bytes)
-                .with_context(|| format!("decode failed: {}", path.display()))
-        }
-        Err(e) => {
-            Err(e).with_context(|| format!("read HMAC sidecar failed: {}", sidecar.display()))
-        }
-    }
-}
-
-/// 写 history JSON、收紧权限、按 `key` 写 HMAC sidecar（纯函数，便于单测）。
-///
-/// issue #609 C-01：成功写出 sidecar 后**幂等置位 enrolled 标志**——这样此后任何
-/// sidecar 缺失都会被读路径判定为篡改，而不是误当 legacy 接受。
-fn write_history_with_key(
-    path: &Path,
-    json: &[u8],
-    key: Option<&[u8]>,
-    enrollment: &dyn HmacEnrollment,
-) -> Result<()> {
-    // M-01：history.json 明文存储，at-rest 防护靠 OS 文件系统权限——unix 在 rename
-    // **之前**就把 tmp 文件设 0o600，消除「rename 后再 chmod」之间的世界可读窗口。
-    atomic_write_private(path, json)?;
-    if let Some(key) = key {
-        let sidecar = history_hmac_sidecar_path(path);
-        let mac = compute_history_hmac(key, json);
-        match write_hmac_sidecar(&sidecar, &mac) {
-            Ok(()) => enrollment.set_enrolled(),
-            // sidecar 写失败不阻断主写入（数据已落盘），但记一笔——也不置位标志，
-            // 让下次读仍能走 legacy 迁移补写，而不是误判篡改。
-            Err(e) => log::warn!("[history] 写 HMAC sidecar 失败：{e}"),
-        }
-    }
-    Ok(())
-}
-
-/// 写 HMAC sidecar 文件并（unix）在 rename 前设 0o600（M-01：无 umask 暴露窗口）。
-fn write_hmac_sidecar(sidecar: &Path, hmac_hex: &str) -> Result<()> {
-    atomic_write_private(sidecar, hmac_hex.as_bytes())
-}
-
-/// issue #609 F-04：unix 下把文件权限收紧到 0o600（仅属主可读写）。
-/// Windows / 其他平台 no-op（依赖用户目录 ACL）。best-effort：失败只 warn。
-fn restrict_file_permissions_best_effort(path: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Err(e) = fs::set_permissions(path, fs::Permissions::from_mode(0o600)) {
-            log::warn!("[history] 设置 {} 权限 0o600 失败：{e}", path.display());
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
+        atomic_write(&self.path, &json)
     }
 }
 
@@ -2835,216 +2531,13 @@ impl CredentialsVault {
 #[cfg(test)]
 mod tests {
     use super::{
-        chunk_json_payload, chunk_skip_mask, compute_history_hmac, decode_hex, encode_hex,
-        history_hmac_sidecar_path, hmac_hex_eq, list_vocab_presets, read_history_with_key,
-        read_preferences, save_vocab_presets, sync_style_pack_preferences,
-        validate_correction_rule_syntax, write_history_with_key, HmacEnrollment,
+        chunk_json_payload, list_vocab_presets, read_preferences, save_vocab_presets,
+        sync_style_pack_preferences, validate_correction_rule_syntax,
         KEYRING_CHUNK_MAX_UTF16_UNITS,
     };
     use crate::types::{builtin_style_packs, CustomStylePrompts, VocabPreset, VocabPresetStore};
-    use std::cell::Cell;
     use std::fs;
     use std::path::PathBuf;
-
-    /// 内存版 enrolled 标志，单测注入，不打真 keyring。
-    #[derive(Default)]
-    struct MemEnrollment {
-        enrolled: Cell<bool>,
-    }
-
-    impl MemEnrollment {
-        fn new() -> Self {
-            Self::default()
-        }
-        fn enrolled() -> Self {
-            let m = Self::default();
-            m.enrolled.set(true);
-            m
-        }
-    }
-
-    impl HmacEnrollment for MemEnrollment {
-        fn is_enrolled(&self) -> bool {
-            self.enrolled.get()
-        }
-        fn set_enrolled(&self) {
-            self.enrolled.set(true);
-        }
-    }
-
-    fn history_test_dir() -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("openless-history-hmac-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&dir).expect("create temp dir");
-        dir
-    }
-
-    // 一条最小但合法的 DictationSession JSON 数组，足够 serde 往返。
-    // DictationSession 是 camelCase 序列化。
-    const SAMPLE_HISTORY_JSON: &str = r#"[{
-        "id": "s1",
-        "createdAt": "2026-06-07T00:00:00Z",
-        "rawTranscript": "你好",
-        "finalText": "你好。",
-        "mode": "light",
-        "appBundleId": null,
-        "appName": null,
-        "insertStatus": "inserted",
-        "errorCode": null,
-        "durationMs": null,
-        "dictionaryEntryCount": null
-    }]"#;
-
-    #[test]
-    fn hex_roundtrip() {
-        let bytes = [0u8, 1, 15, 16, 255, 128, 42];
-        assert_eq!(decode_hex(&encode_hex(&bytes)).unwrap(), bytes);
-        assert_eq!(encode_hex(&[0xab, 0xcd]), "abcd");
-        assert!(decode_hex("xyz").is_err());
-    }
-
-    #[test]
-    fn hmac_hex_eq_constant_time_matches() {
-        let key = b"k";
-        let a = compute_history_hmac(key, b"hello");
-        let b = compute_history_hmac(key, b"hello");
-        let c = compute_history_hmac(key, b"world");
-        assert!(hmac_hex_eq(&a, &b));
-        assert!(!hmac_hex_eq(&a, &c));
-        assert!(!hmac_hex_eq(&a, "deadbeef"));
-    }
-
-    #[test]
-    fn history_write_then_read_passes_verification() {
-        let dir = history_test_dir();
-        let path = dir.join("history.json");
-        let key = [7u8; 32];
-        let enr = MemEnrollment::new();
-        write_history_with_key(&path, SAMPLE_HISTORY_JSON.as_bytes(), Some(&key), &enr).unwrap();
-        // sidecar 应存在，且写入后置位 enrolled 标志。
-        assert!(history_hmac_sidecar_path(&path).exists());
-        assert!(enr.is_enrolled(), "首次写 sidecar 后必须置位 enrolled 标志");
-        let sessions = read_history_with_key(&path, Some(&key), &enr).unwrap();
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].id, "s1");
-    }
-
-    #[test]
-    fn history_tampered_bytes_fail_safe_to_empty() {
-        let dir = history_test_dir();
-        let path = dir.join("history.json");
-        let key = [9u8; 32];
-        let enr = MemEnrollment::new();
-        write_history_with_key(&path, SAMPLE_HISTORY_JSON.as_bytes(), Some(&key), &enr).unwrap();
-        // 攻击者篡改 history.json，但 sidecar 仍是旧 HMAC → 校验失败。
-        let tampered = SAMPLE_HISTORY_JSON.replace("你好。", "被注入的内容");
-        fs::write(&path, tampered.as_bytes()).unwrap();
-        let sessions = read_history_with_key(&path, Some(&key), &enr).unwrap();
-        assert!(
-            sessions.is_empty(),
-            "篡改后必须 fail-safe 返回空历史，不喂下游"
-        );
-    }
-
-    #[test]
-    fn history_legacy_without_sidecar_is_accepted_and_migrated() {
-        let dir = history_test_dir();
-        let path = dir.join("history.json");
-        let key = [3u8; 32];
-        // 老用户：只有 history.json，没有 .hmac，且 enrolled 标志未置位。
-        fs::write(&path, SAMPLE_HISTORY_JSON.as_bytes()).unwrap();
-        let sidecar = history_hmac_sidecar_path(&path);
-        assert!(!sidecar.exists());
-        let enr = MemEnrollment::new();
-        // 首次读：接受并补写 sidecar，置位标志。
-        let sessions = read_history_with_key(&path, Some(&key), &enr).unwrap();
-        assert_eq!(sessions.len(), 1);
-        assert!(
-            sidecar.exists(),
-            "legacy 读取后必须补写 HMAC sidecar 完成迁移"
-        );
-        assert!(
-            enr.is_enrolled(),
-            "legacy 迁移后必须置位 enrolled 标志（C-01）"
-        );
-        // 迁移后再读，HMAC 已匹配，仍正常返回。
-        let again = read_history_with_key(&path, Some(&key), &enr).unwrap();
-        assert_eq!(again.len(), 1);
-    }
-
-    /// issue #609 C-01 核心回归：enrolled 已置位后攻击者删 sidecar 想伪装 legacy，
-    /// 必须 fail-safe 返回空（不再误当 legacy 接受+补签）。
-    #[test]
-    fn history_enrolled_then_sidecar_deleted_fails_safe_not_legacy() {
-        let dir = history_test_dir();
-        let path = dir.join("history.json");
-        let key = [5u8; 32];
-        let enr = MemEnrollment::new();
-        // 正常写入：sidecar 生成，标志置位。
-        write_history_with_key(&path, SAMPLE_HISTORY_JSON.as_bytes(), Some(&key), &enr).unwrap();
-        let sidecar = history_hmac_sidecar_path(&path);
-        assert!(sidecar.exists());
-        assert!(enr.is_enrolled());
-        // 攻击者篡改 history.json 并删除 sidecar，企图把篡改内容伪装成 legacy。
-        let tampered = SAMPLE_HISTORY_JSON.replace("你好。", "被注入的内容");
-        fs::write(&path, tampered.as_bytes()).unwrap();
-        fs::remove_file(&sidecar).unwrap();
-        let sessions = read_history_with_key(&path, Some(&key), &enr).unwrap();
-        assert!(
-            sessions.is_empty(),
-            "enrolled 后 sidecar 缺失必须判定篡改、fail-safe 返回空，不接受、不补签"
-        );
-        // 关键：不得偷偷补回 sidecar（不补签）。
-        assert!(!sidecar.exists(), "fail-safe 路径不得为攻击者补写 sidecar");
-    }
-
-    /// enrolled 已置位、sidecar 缺失但 history 也未篡改 —— 仍按篡改处理（fail-safe）。
-    /// 因为读路径无法区分「无害删除」与「篡改后删除」，一律保守。
-    #[test]
-    fn history_enrolled_sidecar_missing_is_failsafe_even_if_content_intact() {
-        let dir = history_test_dir();
-        let path = dir.join("history.json");
-        let key = [6u8; 32];
-        let enr = MemEnrollment::enrolled();
-        // history 内容合法，但 sidecar 从未写入（已 enrolled）。
-        fs::write(&path, SAMPLE_HISTORY_JSON.as_bytes()).unwrap();
-        let sessions = read_history_with_key(&path, Some(&key), &enr).unwrap();
-        assert!(sessions.is_empty(), "enrolled + 无 sidecar → fail-safe");
-    }
-
-    #[test]
-    fn history_no_key_reads_without_verification() {
-        let dir = history_test_dir();
-        let path = dir.join("history.json");
-        fs::write(&path, SAMPLE_HISTORY_JSON.as_bytes()).unwrap();
-        // key=None：退化为不校验，按内容读。
-        let sessions = read_history_with_key(&path, None, &MemEnrollment::new()).unwrap();
-        assert_eq!(sessions.len(), 1);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn history_write_sets_0600_permissions() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = history_test_dir();
-        let path = dir.join("history.json");
-        let key = [1u8; 32];
-        write_history_with_key(
-            &path,
-            SAMPLE_HISTORY_JSON.as_bytes(),
-            Some(&key),
-            &MemEnrollment::new(),
-        )
-        .unwrap();
-        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "history.json 应为 0o600");
-        let sidecar_mode = fs::metadata(history_hmac_sidecar_path(&path))
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(sidecar_mode, 0o600, "sidecar 应为 0o600");
-    }
 
     #[test]
     fn credential_payload_chunks_stay_under_windows_blob_limit() {
@@ -3060,41 +2553,6 @@ mod tests {
         assert!(chunks
             .iter()
             .all(|chunk| chunk.encode_utf16().count() <= KEYRING_CHUNK_MAX_UTF16_UNITS));
-    }
-
-    #[test]
-    fn chunk_skip_mask_skips_unchanged_and_rewrites_changed() {
-        // issue #602：内容完全一致 → 全部跳过（no-op save 不再碰 keychain chunks）。
-        let json = format!(
-            "{}{}",
-            "a".repeat(KEYRING_CHUNK_MAX_UTF16_UNITS),
-            "b".repeat(KEYRING_CHUNK_MAX_UTF16_UNITS)
-        );
-        let chunks = chunk_json_payload(&json);
-        assert_eq!(chunks.len(), 2);
-        assert!(chunk_skip_mask(Some(&json), &chunks).iter().all(|s| *s));
-
-        // 等长改动只落在第 2 个 chunk → 第 1 个跳过、第 2 个重写。
-        let changed = format!(
-            "{}{}",
-            "a".repeat(KEYRING_CHUNK_MAX_UTF16_UNITS),
-            "c".repeat(KEYRING_CHUNK_MAX_UTF16_UNITS)
-        );
-        let changed_chunks = chunk_json_payload(&changed);
-        assert_eq!(
-            chunk_skip_mask(Some(&json), &changed_chunks),
-            vec![true, false]
-        );
-
-        // 冷缓存（None）→ 全部重写，等同旧行为。
-        assert!(chunk_skip_mask(None, &chunks).iter().all(|s| !*s));
-
-        // 旧内容更短 → 超出部分无旧 chunk 可比，必须写。
-        let shorter = "a".repeat(KEYRING_CHUNK_MAX_UTF16_UNITS);
-        assert_eq!(
-            chunk_skip_mask(Some(&shorter), &chunks),
-            vec![true, false]
-        );
     }
 
     #[test]

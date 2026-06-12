@@ -4,10 +4,27 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Icon } from '../components/Icon';
 import { formatComboLabel } from '../lib/hotkey';
-import { getCredentials, listHistory } from '../lib/ipc';
-import type { CredentialsStatus, DictationSession, PolishMode } from '../lib/types';
+import {
+  checkMicrophonePermission,
+  getCredentials,
+  getPlatformCapabilities,
+  listHistory,
+  startDictation,
+  stopDictation,
+} from '../lib/ipc';
+import type {
+  CapsulePayload,
+  CapsuleState,
+  CredentialsStatus,
+  DictationSession,
+  PermissionStatus,
+  PlatformCapabilities,
+  PolishMode,
+} from '../lib/types';
 import { useHotkeySettings } from '../state/HotkeySettingsContext';
 import { Btn, Card, PageHeader, Pill } from './_atoms';
+import { useMobileLayout } from '../lib/useMobileLayout';
+import { checkAndroidMicrophoneAccess, requestAndroidMicrophoneAccess } from '../lib/androidMicrophonePermission';
 
 function useModeLabels(): Record<PolishMode, string> {
   const { t } = useTranslation();
@@ -35,7 +52,6 @@ const ASR_NAME_KEY_BY_ID: Record<string, string> = {
   'foundry-local-whisper': 'asrFoundryLocalWhisper',
   'sherpa-onnx-local': 'asrSherpaOnnxLocal',
   'local-qwen3': 'asrLocalQwen3',
-  'apple-speech': 'asrAppleSpeech',
 };
 
 const LLM_NAME_KEY_BY_ID: Record<string, string> = {
@@ -54,6 +70,7 @@ const LLM_NAME_KEY_BY_ID: Record<string, string> = {
 
 export function Overview({ onOpenHistory }: OverviewProps) {
   const { t } = useTranslation();
+  const mobile = useMobileLayout();
   const modeLabel = useModeLabels();
   const [history, setHistory] = useState<DictationSession[]>([]);
   const [historyError, setHistoryError] = useState(false);
@@ -171,9 +188,19 @@ export function Overview({ onOpenHistory }: OverviewProps) {
 
   return (
     <>
-      <PageHeader title={t('overview.title')} />
+      <PageHeader
+        kicker="AURA OVERVIEW"
+        title={t('overview.title')}
+        desc={t('overview.metricTotalTrend')}
+      />
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 18 }}>
+      <AndroidMicGrantBanner />
+      <InAppDictationControl />
+
+      <div
+        className="ol-overview-hero"
+        style={{ display: 'grid', gridTemplateColumns: mobile ? '1fr' : '1fr 1fr', gap: 14, marginBottom: mobile ? 14 : 20 }}
+      >
         <ProviderCard
           kind={t('overview.asrKind')}
           name={asrProviderName}
@@ -188,7 +215,7 @@ export function Overview({ onOpenHistory }: OverviewProps) {
         />
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 18 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: mobile ? 'repeat(2, minmax(0, 1fr))' : 'repeat(4, 1fr)', gap: mobile ? 10 : 14, marginBottom: mobile ? 14 : 20 }}>
         <Metric icon="hash" label={t('overview.metricChars')} value={historyError ? '—' : metrics.charsToday.toLocaleString()} trend={historyError ? t('overview.historyLoadError') : t('overview.metricSegments', { count: metrics.segmentsToday })} />
         <Metric icon="mic" label={t('overview.metricDuration')} value={historyError ? '—' : formatDuration(metrics.totalDurationMs, t)} trend={historyError ? t('overview.historyLoadError') : ''} />
         <Metric icon="clock" label={t('overview.metricAvg')} value={historyError ? '—' : formatDuration(metrics.avgLatencyMs, t)} trend={historyError ? t('overview.historyLoadError') : metrics.segmentsToday > 0 ? t('overview.metricAvgTrend') : t('overview.metricNoData')} />
@@ -198,8 +225,8 @@ export function Overview({ onOpenHistory }: OverviewProps) {
       {/* 底部一行 = flex:1 撑满剩余高度（父 wrapper 是 display:flex/column）。
           只有「最近识别」内部允许滚动；其他卡片按内容自然高度，不破裂底部圆角。
           issue #243 follow-up：去掉外层 overflow 后底部圆角被裁的视觉问题。 */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.4fr', gap: 12, flex: 1, minHeight: 0 }}>
-        <Card padding={18} style={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: mobile ? '1fr' : '1fr 1.4fr', gap: 14, flex: mobile ? '0 0 auto' : 1, minHeight: mobile ? undefined : 0 }}>
+        <Card className="ol-overview-hero" padding={mobile ? 16 : 20} style={{ display: 'flex', flexDirection: 'column', minHeight: mobile ? undefined : 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
             <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink-2)' }}>{t('overview.weekTitle')}</span>
             <span style={{ fontSize: 11, color: 'var(--ol-ink-4)' }}>{t('overview.weekUnit')}</span>
@@ -216,12 +243,12 @@ export function Overview({ onOpenHistory }: OverviewProps) {
           </div>
         </Card>
 
-        <Card padding={0} style={{ display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
+        <Card className="ol-overview-hero" padding={0} style={{ display: 'flex', flexDirection: 'column', minHeight: mobile ? undefined : 0, overflow: 'hidden' }}>
           <div style={{ padding: '14px 18px', borderBottom: '0.5px solid var(--ol-line)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0 }}>
             <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink-2)' }}>{t('overview.recentTitle')}</span>
             <Btn size="sm" variant="ghost" onClick={onOpenHistory}>{t('overview.recentAll')}</Btn>
           </div>
-          <div className="ol-thinscroll" style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
+          <div className="ol-thinscroll" style={{ flex: mobile ? '0 0 auto' : 1, minHeight: mobile ? undefined : 0, overflow: mobile ? 'visible' : 'auto' }}>
             {historyError ? (
               <div style={{ padding: 24, textAlign: 'center', fontSize: 12, color: 'var(--ol-ink-4)', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10 }}>
                 <span>{t('overview.recentLoadFailed')}</span>
@@ -255,10 +282,11 @@ interface ProviderCardProps {
 
 function ProviderCard({ kind, name, subname, status }: ProviderCardProps) {
   const { t } = useTranslation();
+  const mobile = useMobileLayout();
   // ASR 卡用 mic 图标，其他用 sparkle —— 通过比较译文判断会随语言改变，故改用本地化无关的字面量比较。
   const isAsr = kind === t('overview.asrKind');
   return (
-    <Card padding={16} style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+    <Card padding={mobile ? 14 : 16} style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
       <div
         style={{
           width: 38, height: 38, borderRadius: 10,
@@ -270,7 +298,7 @@ function ProviderCard({ kind, name, subname, status }: ProviderCardProps) {
         <Icon name={isAsr ? 'mic' : 'sparkle'} size={18} />
       </div>
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 2 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 2, flexWrap: 'wrap' }}>
           <span style={{ fontSize: 11, color: 'var(--ol-ink-4)', fontWeight: 600, letterSpacing: '.06em', textTransform: 'uppercase' }}>{kind}</span>
           {status === 'configured' && (
             <Pill tone="ok" size="sm">
@@ -303,13 +331,14 @@ interface MetricProps {
 }
 
 function Metric({ icon, label, value, trend, accent }: MetricProps) {
+  const mobile = useMobileLayout();
   return (
-    <Card padding={16}>
+    <Card padding={mobile ? 14 : 16}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, color: 'var(--ol-ink-3)' }}>
         <Icon name={icon} size={13} />
         <span style={{ fontSize: 11.5 }}>{label}</span>
       </div>
-      <div style={{ fontSize: 26, fontWeight: 600, letterSpacing: '-0.02em', color: accent ? 'var(--ol-blue)' : 'var(--ol-ink)', lineHeight: 1.1 }}>{value}</div>
+      <div style={{ fontSize: mobile ? 24 : 26, fontWeight: 600, letterSpacing: '-0.02em', color: accent ? 'var(--ol-blue)' : 'var(--ol-ink)', lineHeight: 1.1 }}>{value}</div>
       <div style={{ fontSize: 11, color: 'var(--ol-ink-4)', marginTop: 6 }}>{trend || ' '}</div>
     </Card>
   );
@@ -344,9 +373,10 @@ function WeekChart({ data }: { data: number[] }) {
 
 function RecentRow({ session, modeLabel }: { session: DictationSession; modeLabel: Record<PolishMode, string> }) {
   const { t } = useTranslation();
+  const mobile = useMobileLayout();
   return (
-    <div style={{ padding: '12px 18px', borderBottom: '0.5px solid var(--ol-line-soft)', display: 'flex', gap: 12, alignItems: 'flex-start' }}>
-      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 4, minWidth: 60 }}>
+    <div style={{ padding: mobile ? '12px 14px' : '12px 18px', borderBottom: '0.5px solid var(--ol-line-soft)', display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 4, minWidth: mobile ? 52 : 60 }}>
         <span style={{ fontSize: 11, fontFamily: 'var(--ol-font-mono)', color: 'var(--ol-ink-3)' }}>
           {formatTime(session.createdAt)}
         </span>
@@ -386,4 +416,190 @@ function weekDayLabels(names: string[]): string[] {
     out.push(names[(today - i + 7) % 7]);
   }
   return out;
+}
+
+function AndroidMicGrantBanner() {
+  const { t } = useTranslation();
+  const mobile = useMobileLayout();
+  const [platformCaps, setPlatformCaps] = useState<PlatformCapabilities | null>(null);
+  const [microphone, setMicrophone] = useState<PermissionStatus | 'loading'>('loading');
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    void getPlatformCapabilities().then(setPlatformCaps);
+  }, []);
+
+  const refreshMic = useCallback(async () => {
+    if (platformCaps?.platform === 'android') {
+      setMicrophone(await checkAndroidMicrophoneAccess());
+      return;
+    }
+    setMicrophone(await checkMicrophonePermission());
+  }, [platformCaps?.platform]);
+
+  useEffect(() => {
+    if (platformCaps?.platform !== 'android') return;
+    void refreshMic();
+    const onFocus = () => { void refreshMic(); };
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, [platformCaps?.platform, refreshMic]);
+
+  if (platformCaps?.platform !== 'android') return null;
+  if (microphone === 'loading' || microphone === 'granted' || microphone === 'notApplicable') {
+    return null;
+  }
+
+  const onGrant = async () => {
+    setBusy(true);
+    try {
+      setMicrophone(await requestAndroidMicrophoneAccess());
+    } finally {
+      setBusy(false);
+      void refreshMic();
+    }
+  };
+
+  return (
+    <Card
+      padding={14}
+      style={{
+        marginBottom: mobile ? 12 : 14,
+        display: 'flex',
+        flexDirection: mobile ? 'column' : 'row',
+        alignItems: mobile ? 'stretch' : 'center',
+        gap: 12,
+        background: 'var(--ol-blue-soft)',
+        border: '0.5px solid rgba(37,99,235,0.18)',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0 }}>
+        <Icon name="mic" size={18} />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--ol-ink)' }}>
+            {t('overview.androidMicBanner.title')}
+          </div>
+          <div style={{ fontSize: 12, color: 'var(--ol-ink-3)', marginTop: 2, lineHeight: 1.5 }}>
+            {t('overview.androidMicBanner.desc')}
+          </div>
+        </div>
+      </div>
+      <Btn variant="primary" size="sm" onClick={() => void onGrant()} disabled={busy} style={{ justifyContent: 'center', width: mobile ? '100%' : undefined }}>
+        {t('overview.androidMicBanner.grant')}
+      </Btn>
+    </Card>
+  );
+}
+
+function InAppDictationControl() {
+  const { t } = useTranslation();
+  const mobile = useMobileLayout();
+  const [platformCaps, setPlatformCaps] = useState<PlatformCapabilities | null>(null);
+  const [capsuleState, setCapsuleState] = useState<CapsuleState>('idle');
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    void getPlatformCapabilities().then(setPlatformCaps);
+  }, []);
+
+  useEffect(() => {
+    if (!platformCaps?.supportsInAppDictation) return;
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      try {
+        const { listen } = await import('@tauri-apps/api/event');
+        const handle = await listen<CapsulePayload>('capsule:state', (event) => {
+          if (cancelled) return;
+          setCapsuleState(event.payload.state);
+        });
+        if (cancelled) {
+          handle();
+        } else {
+          unlisten = handle;
+        }
+      } catch {
+        // browser dev mock
+      }
+    })();
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [platformCaps?.supportsInAppDictation]);
+
+  if (!platformCaps?.supportsInAppDictation) {
+    return null;
+  }
+
+  const recording = capsuleState === 'recording';
+  const processing = capsuleState === 'transcribing' || capsuleState === 'polishing';
+  const statusLabel = recording
+    ? t('overview.inAppDictation.recording')
+    : processing
+      ? t('overview.inAppDictation.processing')
+      : t('overview.inAppDictation.idle');
+
+  const onToggle = async () => {
+    if (busy || processing) return;
+    setBusy(true);
+    try {
+      if (recording) {
+        await stopDictation();
+      } else {
+        if (platformCaps?.platform === 'android') {
+          const current = await checkAndroidMicrophoneAccess();
+          const status = current === 'granted'
+            ? current
+            : await requestAndroidMicrophoneAccess();
+          if (status !== 'granted') return;
+        }
+        await startDictation();
+      }
+    } catch (error) {
+      console.error('[overview] in-app dictation toggle failed', error);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card padding={mobile ? 14 : 16} style={{ marginBottom: mobile ? 14 : 20, display: 'flex', alignItems: 'center', gap: 12 }}>
+      <button
+        type="button"
+        onClick={() => void onToggle()}
+        disabled={busy || processing}
+        aria-label={recording ? t('overview.inAppDictation.stop') : t('overview.inAppDictation.start')}
+        style={{
+          width: 52,
+          height: 52,
+          borderRadius: 999,
+          border: 0,
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          background: recording ? 'var(--ol-err, #ef4444)' : 'var(--ol-blue)',
+          color: '#fff',
+          cursor: busy || processing ? 'not-allowed' : 'default',
+          opacity: busy || processing ? 0.7 : 1,
+          transition: 'background 0.16s var(--ol-motion-quick), opacity 0.16s var(--ol-motion-quick)',
+        }}
+      >
+        {recording ? (
+          <span style={{ width: 16, height: 16, borderRadius: 3, background: '#fff', display: 'block' }} />
+        ) : (
+          <Icon name="mic" size={20} />
+        )}
+      </button>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--ol-ink)' }}>
+          {t('overview.inAppDictation.title')}
+        </div>
+        <div style={{ fontSize: 12, color: 'var(--ol-ink-3)', marginTop: 2 }}>
+          {statusLabel}
+        </div>
+      </div>
+      {!mobile && <Pill tone={recording ? 'outline' : 'ok'} size="sm">{statusLabel}</Pill>}
+    </Card>
+  );
 }

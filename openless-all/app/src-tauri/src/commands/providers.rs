@@ -245,6 +245,9 @@ async fn validate_bailian_asr_provider() -> Result<(), String> {
 }
 
 pub(crate) fn active_asr_is_keyless_for_validation(provider: &str) -> bool {
+    if cfg!(mobile) {
+        return false;
+    }
     provider == crate::asr::local::PROVIDER_ID
         || active_apple_speech_asr_is_supported(provider)
         || active_foundry_asr_is_supported(provider)
@@ -264,11 +267,11 @@ pub(crate) fn active_apple_speech_asr_is_supported(provider: &str) -> bool {
 }
 
 pub(crate) fn active_foundry_asr_is_supported(provider: &str) -> bool {
-    #[cfg(target_os = "windows")]
+    #[cfg(all(not(mobile), target_os = "windows"))]
     {
         provider == FOUNDRY_LOCAL_PROVIDER_ID
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(all(not(mobile), target_os = "windows")))]
     {
         let _ = provider;
         false
@@ -276,11 +279,11 @@ pub(crate) fn active_foundry_asr_is_supported(provider: &str) -> bool {
 }
 
 pub(crate) fn active_sherpa_asr_is_supported(provider: &str) -> bool {
-    #[cfg(target_os = "windows")]
+    #[cfg(all(not(mobile), target_os = "windows"))]
     {
         provider == crate::asr::local::sherpa::PROVIDER_ID
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(all(not(mobile), target_os = "windows")))]
     {
         let _ = provider;
         false

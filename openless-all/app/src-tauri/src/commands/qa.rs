@@ -48,6 +48,19 @@ pub fn qa_window_pin(coord: CoordinatorState<'_>, pinned: bool) {
     coord.qa_window_pin(pinned);
 }
 
+/// 移动端 QA 面板录音按钮：Idle -> begin_qa_session，Recording -> end_qa_session。
+#[tauri::command]
+pub async fn qa_toggle_recording(coord: CoordinatorState<'_>) -> Result<(), String> {
+    coord.qa_toggle_recording().await;
+    Ok(())
+}
+
+/// QA 面板键盘输入：复用语音 QA 的 LLM 管线，只替换问题来源。
+#[tauri::command]
+pub async fn qa_submit_text(coord: CoordinatorState<'_>, text: String) -> Result<(), String> {
+    coord.qa_submit_text(text).await
+}
+
 /// 用户点 ✕ / 按 Esc 关 Less Computer 浮窗。
 #[tauri::command]
 pub fn less_computer_window_dismiss(coord: CoordinatorState<'_>) {

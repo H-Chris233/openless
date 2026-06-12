@@ -77,10 +77,11 @@ impl AppleSpeechAsr {
         // SFSpeechRecognizer 是阻塞且基于 objc runloop 的同步桥接；放到
         // spawn_blocking 不占 tokio runtime。与 LocalQwenAsr 走同一个 Tauri
         // 持有的 runtime handle。
-        let result =
-            tauri::async_runtime::spawn_blocking(move || transcribe_pcm_blocking(&pcm, duration_ms))
-                .await
-                .context("apple-speech transcribe spawn_blocking join 失败")?;
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            transcribe_pcm_blocking(&pcm, duration_ms)
+        })
+        .await
+        .context("apple-speech transcribe spawn_blocking join 失败")?;
 
         if result.is_ok() {
             self.buffer.lock().clear();
@@ -265,8 +266,9 @@ fn build_outcome(result: *mut AnyObject, error: *mut AnyObject) -> RecognitionOu
 }
 
 fn speech_recognizer_class() -> Result<&'static AnyClass> {
-    AnyClass::get("SFSpeechRecognizer")
-        .ok_or_else(|| anyhow!("SFSpeechRecognizer 类不可用（需要 macOS 10.15+ 并链接 Speech.framework）"))
+    AnyClass::get("SFSpeechRecognizer").ok_or_else(|| {
+        anyhow!("SFSpeechRecognizer 类不可用（需要 macOS 10.15+ 并链接 Speech.framework）")
+    })
 }
 
 /// `[[SFSpeechRecognizer alloc] init]` —— 用系统当前 locale。

@@ -84,6 +84,12 @@ const previousPrefs: UserPreferences = {
   remoteInputPort: 8443,
   remoteInputPin: '000000',
   remoteInputDefaultMode: 'toggle',
+  androidInsertStrategy: 'accessibility',
+  androidOverlayTrigger: 'background',
+  androidOverlayActivationMode: 'tap',
+  androidOverlayLeftSwipeAction: 'translation',
+  androidOverlayCancelSwipeDirection: 'up',
+  androidOverlaySizeDp: 72,
 };
 
 const nextPrefs: UserPreferences = {

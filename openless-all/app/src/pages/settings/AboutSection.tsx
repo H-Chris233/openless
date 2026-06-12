@@ -7,16 +7,25 @@ import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Icon } from '../../components/Icon';
 import { Row } from '../../components/ui/Row';
-import { openExternal } from '../../lib/ipc';
+import { getPlatformCapabilities, openExternal } from '../../lib/ipc';
+import type { PlatformCapabilities } from '../../lib/types';
 import { APP_VERSION_LABEL } from '../../lib/appVersion';
 import { Card } from '../_atoms';
 import { SectionTitle } from './shared';
 import { CheckUpdateButton } from './CheckUpdateButton';
 
+const HELP_URL = 'https://github.com/appergb/openless#readme';
+const RELEASE_NOTES_URL = 'https://github.com/appergb/openless/releases';
+
 export function AboutSection() {
   const { t } = useTranslation();
   const [qqCopied, setQqCopied] = useState(false);
+  const [platformCaps, setPlatformCaps] = useState<PlatformCapabilities | null>(null);
   const qqCopiedRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    void getPlatformCapabilities().then(setPlatformCaps);
+  }, []);
 
   useEffect(() => () => {
     if (qqCopiedRef.current) clearTimeout(qqCopiedRef.current);
@@ -46,7 +55,9 @@ export function AboutSection() {
             </div>
           </div>
           {/* 图标右上方：查正式版的检查更新按钮。Beta 渠道在「高级」页。 */}
-          <CheckUpdateButton channel="stable" />
+          {platformCaps?.supportsAutoUpdate === true && (
+            <CheckUpdateButton channel="stable" />
+          )}
         </div>
       </Card>
 
@@ -61,8 +72,18 @@ export function AboutSection() {
           </button>
         </Row>
         <Row label={t('modal.about.docs')}>
-          <button style={btnGhost} onClick={() => openExternal('https://github.com/appergb/openless#readme')}>
+          <button style={btnGhost} onClick={() => openExternal(HELP_URL)}>
             {t('modal.about.docsBtn')}
+          </button>
+        </Row>
+        <Row label={t('modal.sections.helpCenter')}>
+          <button style={btnGhost} onClick={() => openExternal(HELP_URL)}>
+            {t('modal.sections.helpCenter')}
+          </button>
+        </Row>
+        <Row label={t('modal.sections.releaseNotes')}>
+          <button style={btnGhost} onClick={() => openExternal(RELEASE_NOTES_URL)}>
+            {t('modal.sections.releaseNotes')}
           </button>
         </Row>
         <Row label={t('modal.about.feedback')}>
@@ -95,5 +116,6 @@ const btnGhost: CSSProperties = {
   border: '0.5px solid var(--ol-line-strong)',
   background: '#fff', color: 'var(--ol-ink-2)',
   cursor: 'default', fontFamily: 'inherit',
+  maxWidth: '100%',
   transition: 'background 0.16s var(--ol-motion-quick), border-color 0.16s var(--ol-motion-quick)',
 };

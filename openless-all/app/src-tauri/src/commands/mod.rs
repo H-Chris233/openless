@@ -10,8 +10,11 @@
 
 use std::sync::Arc;
 
+#[cfg(not(mobile))]
 use parking_lot::Mutex;
-use tauri::{Manager, State};
+#[cfg(not(mobile))]
+use tauri::Manager;
+use tauri::State;
 
 // 跨域共享的 crate 级导入：以 `pub(crate) use` 重导出，子模块用 `use super::*;`
 // 即可拿到，避免在 16 个文件里重复同一组 import。
@@ -19,18 +22,22 @@ pub(crate) use serde::Serialize;
 pub(crate) use serde_json::Value;
 pub(crate) use tauri::{AppHandle, Emitter, Window};
 
+#[cfg(not(mobile))]
 pub(crate) use crate::asr::local::foundry::{
     model_alias_is_known, FoundryCatalogModel, FoundryPrepareProgressPayload, FoundryRuntimeStatus,
     DEFAULT_MODEL_ALIAS, PROVIDER_ID as FOUNDRY_LOCAL_PROVIDER_ID,
 };
+#[cfg(not(mobile))]
 pub(crate) use crate::asr::local::sherpa::{
     model_alias_is_known as sherpa_model_alias_is_known, SherpaCatalogModel,
     SherpaPrepareProgressPayload, SherpaRuntimeStatus,
     DEFAULT_MODEL_ALIAS as SHERPA_DEFAULT_MODEL_ALIAS,
 };
+#[cfg(not(mobile))]
 pub(crate) use crate::asr::local::sherpa_download::{
     fetch_remote_info as fetch_sherpa_remote_info, SherpaDownloadManager, SherpaRemoteInfo,
 };
+#[cfg(not(mobile))]
 pub(crate) use crate::asr::local::{FoundryLocalRuntime, Mirror, SherpaOnnxRuntime};
 pub(crate) use crate::coordinator::Coordinator;
 pub(crate) use crate::net;
@@ -44,73 +51,90 @@ pub(crate) use crate::polish::{
     OpenAICompatibleConfig, OpenAICompatibleLLMProvider, CODEX_DEFAULT_MODEL,
     CODEX_OAUTH_PROVIDER_ID,
 };
+#[cfg(not(mobile))]
 pub(crate) use crate::recorder::{AudioConsumer, Recorder};
+#[cfg(not(mobile))]
+pub(crate) use crate::types::WindowsImeStatus;
 pub(crate) use crate::types::{
-    builtin_style_pack_id, default_active_style_pack_id, ChineseScriptPreference, ComboBinding,
-    CorrectionRule, CredentialsStatus, DictationSession, DictionaryEntry, HotkeyCapability,
-    HotkeyStatus, OutputLanguagePreference, PolishMode, ShortcutBinding, StylePack, StylePackKind,
-    StylePackRuntimeDiagnostics, StyleSystemPrompts, UpdateChannel, UserPreferences,
-    VocabPresetStore, WindowsImeStatus,
+    builtin_style_pack_id, default_active_style_pack_id, AndroidAccessibilityStatus,
+    AndroidOverlayStatus, ChineseScriptPreference, ComboBinding, CorrectionRule, CredentialsStatus,
+    DictationSession, DictionaryEntry, HotkeyCapability, HotkeyStatus, OutputLanguagePreference,
+    PolishMode, ShortcutBinding, StylePack, StylePackKind, StylePackRuntimeDiagnostics,
+    StyleSystemPrompts, UpdateChannel, UserPreferences, VocabPresetStore,
 };
 
 mod credentials;
 mod dictation;
 mod dictionary;
+#[cfg(not(mobile))]
 mod foundry_asr;
 mod github_oauth;
 mod history;
 mod hotkeys;
+#[cfg(not(mobile))]
 mod local_asr;
 mod marketplace;
 mod misc;
 mod permissions_cmds;
 mod providers;
 mod qa;
+#[cfg(not(mobile))]
 mod remote_input;
 mod settings;
+#[cfg(not(mobile))]
 mod sherpa_asr;
 mod style_packs;
 
 pub use credentials::*;
 pub use dictation::*;
 pub use dictionary::*;
+#[cfg(not(mobile))]
 pub use foundry_asr::*;
 pub use github_oauth::*;
 pub use history::*;
 pub use hotkeys::*;
+#[cfg(not(mobile))]
 pub use local_asr::*;
 pub use marketplace::*;
 pub use misc::*;
 pub use permissions_cmds::*;
 pub use providers::*;
 pub use qa::*;
+#[cfg(not(mobile))]
 pub use remote_input::*;
 pub use settings::*;
 // sherpa_onnx_asr_* 命令整组 `#[cfg(target_os = "windows")]`（见 lib.rs 的
 // generate_handler! 清单）。非 Windows 平台这组 glob 重导出无人引用，会触发
 // unused_imports；这是平台 cfg 的正常结果，不是真正的死代码。
+#[cfg(not(mobile))]
 #[allow(unused_imports)]
 pub use sherpa_asr::*;
 pub use style_packs::*;
 
 pub(crate) type CoordinatorState<'a> = State<'a, Arc<Coordinator>>;
+#[cfg(not(mobile))]
 pub type MicrophoneMonitorState = Mutex<Option<Recorder>>;
+#[cfg(not(mobile))]
 pub type TrayMicrophoneMenuState = Mutex<Vec<TrayMicrophoneMenuItem>>;
 
+#[cfg(not(mobile))]
 pub struct TrayMicrophoneMenuItem {
     pub id: String,
     pub device_name: String,
     pub item: tauri::menu::CheckMenuItem<tauri::Wry>,
 }
 
+#[cfg(not(mobile))]
 pub fn sync_tray_microphone_selection(items: &[TrayMicrophoneMenuItem], device_name: &str) {
     for item in items {
         let _ = item.item.set_checked(item.device_name == device_name);
     }
 }
 
+#[cfg(not(mobile))]
 pub(crate) struct LevelProbeConsumer;
 
+#[cfg(not(mobile))]
 impl AudioConsumer for LevelProbeConsumer {
     fn consume_pcm_chunk(&self, _pcm: &[u8]) {}
 }
@@ -188,7 +212,7 @@ pub(crate) fn open_path_in_file_manager(path: &std::path::Path) -> Result<(), St
         .map_err(|e| e.to_string())
 }
 
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(all(unix, not(target_os = "macos"), not(target_os = "android")))]
 pub(crate) fn open_path_in_file_manager(path: &std::path::Path) -> Result<(), String> {
     std::process::Command::new("xdg-open")
         .arg(path)

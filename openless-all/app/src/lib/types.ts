@@ -2,6 +2,26 @@
 // All keys are camelCase (Rust serializes with #[serde(rename_all = "camelCase")]).
 // PolishMode is an exception — Rust uses lowercase serialization.
 
+import type {
+  AndroidAccessibilityStatus,
+  AndroidInsertStrategy,
+  AndroidOverlayActivationMode,
+  AndroidOverlayCancelSwipeDirection,
+  AndroidOverlayLeftSwipeAction,
+  AndroidOverlayStatus,
+  AndroidOverlayTrigger,
+} from '../../android/frontend/lib/androidTypes';
+
+export type {
+  AndroidAccessibilityStatus,
+  AndroidInsertStrategy,
+  AndroidOverlayActivationMode,
+  AndroidOverlayCancelSwipeDirection,
+  AndroidOverlayLeftSwipeAction,
+  AndroidOverlayStatus,
+  AndroidOverlayTrigger,
+};
+
 export type PolishMode = 'raw' | 'light' | 'structured' | 'formal';
 
 export type InsertStatus = 'inserted' | 'pasteSent' | 'copiedFallback' | 'failed';
@@ -78,7 +98,7 @@ export interface HotkeyBinding {
   keys?: HotkeyKey[] | null;
 }
 
-export type HotkeyAdapterKind = 'macEventTap' | 'windowsLowLevel' | 'fcitx5';
+export type HotkeyAdapterKind = 'macEventTap' | 'windowsLowLevel' | 'fcitx5' | 'unavailable';
 
 export interface HotkeyCapability {
   adapter: HotkeyAdapterKind;
@@ -346,6 +366,18 @@ export interface UserPreferences {
   remoteInputPin: string;
   /** 手机录音页默认交互方式：'toggle'（点击切换）/ 'hold'（按住说话）。 */
   remoteInputDefaultMode: 'toggle' | 'hold';
+  /** Android: cross-app dictation insert strategy. */
+  androidInsertStrategy: AndroidInsertStrategy;
+  /** Android: floating overlay visibility trigger mode. */
+  androidOverlayTrigger: AndroidOverlayTrigger;
+  /** Android: how the floating overlay enters the armed interaction state. */
+  androidOverlayActivationMode: AndroidOverlayActivationMode;
+  /** Android: action performed by left swiping while the overlay is armed. */
+  androidOverlayLeftSwipeAction: AndroidOverlayLeftSwipeAction;
+  /** Android: vertical swipe direction that cancels recording. */
+  androidOverlayCancelSwipeDirection: AndroidOverlayCancelSwipeDirection;
+  /** Android: floating overlay control diameter in dp. */
+  androidOverlaySizeDp: number;
 }
 
 export interface MarketplaceListItem {
@@ -495,3 +527,18 @@ export type PermissionStatus =
   | 'notDetermined'
   | 'restricted'
   | 'notApplicable';
+
+/** Runtime platform kind returned by `get_platform_capabilities`. */
+export type PlatformKind = 'desktop' | 'android' | 'mobile';
+
+/** Feature flags for desktop vs Android APK UI gating. Mirrors src-tauri PlatformCapabilities. */
+export interface PlatformCapabilities {
+  platform: PlatformKind;
+  supportsDesktopHotkey: boolean;
+  supportsTray: boolean;
+  supportsOverlay: boolean;
+  supportsImeInput: boolean;
+  supportsLocalAsr: boolean;
+  supportsInAppDictation: boolean;
+  supportsAutoUpdate: boolean;
+}

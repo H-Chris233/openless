@@ -3,6 +3,22 @@
 
 use serde::{Deserialize, Serialize};
 
+#[path = "android/types.rs"]
+pub mod android_types;
+
+use android_types::{
+    default_android_insert_strategy, default_android_overlay_activation_mode,
+    default_android_overlay_cancel_swipe_direction, default_android_overlay_left_swipe_action,
+    default_android_overlay_size_dp, default_android_overlay_trigger,
+    normalize_android_insert_strategy, normalize_android_overlay_size_dp,
+};
+pub use android_types::{
+    AndroidAccessibilityState, AndroidAccessibilityStatus, AndroidInsertStrategy,
+    AndroidOverlayActivationMode, AndroidOverlayCancelSwipeDirection,
+    AndroidOverlayLeftSwipeAction, AndroidOverlayPermissionState, AndroidOverlayStatus,
+    AndroidOverlayTrigger,
+};
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 #[derive(Default)]
@@ -636,6 +652,18 @@ pub struct UserPreferences {
     /// 热键 2：快取用键（选中→Claude→回插）。默认 `None`（用户自配）。
     #[serde(default)]
     pub coding_agent_quick_hotkey: Option<ShortcutBinding>,
+    /// 局域网远程输入服务开关。桌面端启动 HTTPS+WS 服务，手机浏览器推 PCM 到电脑。
+    #[serde(default)]
+    pub remote_input_enabled: bool,
+    /// 局域网远程输入服务端口。
+    #[serde(default = "default_remote_input_port")]
+    pub remote_input_port: u16,
+    /// 当前远程输入 PIN。真实运行时 PIN 另有进程内/磁盘路径维护，此字段保留 wire 兼容。
+    #[serde(default)]
+    pub remote_input_pin: String,
+    /// 远程输入默认按钮模式。
+    #[serde(default = "default_remote_input_mode")]
+    pub remote_input_default_mode: String,
     /// 本地 Qwen3-ASR 当前激活的模型 id（"qwen3-asr-0.6b" / "qwen3-asr-1.7b"）。
     /// 仅在 active_asr_provider == "local-qwen3" 时有意义。
     #[serde(default = "default_local_asr_model")]
@@ -749,19 +777,28 @@ pub struct UserPreferences {
     /// 上传 / 点赞需要带这个 header；空时上传被后端 401。
     #[serde(default)]
     pub marketplace_dev_login: String,
-    /// ── 远程输入（局域网手机录音）────────────────────────────────
-    /// 是否启用远程输入 HTTPS+WS 服务。默认 false（关闭，按需手动开启）。
-    #[serde(default)]
-    pub remote_input_enabled: bool,
-    /// 远程输入服务监听端口（HTTPS）。默认 8443。
-    #[serde(default = "default_remote_input_port")]
-    pub remote_input_port: u16,
-    /// 远程输入配对码（6 位数字）。空 = server 首次启动时随机生成并回写。
-    #[serde(default)]
-    pub remote_input_pin: String,
-    /// 手机录音页默认交互方式："toggle"（点击切换）/ "hold"（按住说话）。
-    #[serde(default = "default_remote_input_mode")]
-    pub remote_input_default_mode: String,
+    /// Android: text insertion strategy for cross-app dictation results.
+    #[serde(default = "default_android_insert_strategy")]
+    pub android_insert_strategy: AndroidInsertStrategy,
+    /// Android: when to show the floating overlay control.
+    #[serde(default = "default_android_overlay_trigger")]
+    pub android_overlay_trigger: AndroidOverlayTrigger,
+    /// Android: how the floating overlay enters the armed interaction state.
+    #[serde(default = "default_android_overlay_activation_mode")]
+    pub android_overlay_activation_mode: AndroidOverlayActivationMode,
+    /// Android: action performed by left swiping while the overlay is armed.
+    #[serde(default = "default_android_overlay_left_swipe_action")]
+    pub android_overlay_left_swipe_action: AndroidOverlayLeftSwipeAction,
+    /// Android: vertical swipe direction that cancels recording.
+    #[serde(default = "default_android_overlay_cancel_swipe_direction")]
+    pub android_overlay_cancel_swipe_direction: AndroidOverlayCancelSwipeDirection,
+    /// Android: floating overlay control diameter in dp.
+    #[serde(default = "default_android_overlay_size_dp")]
+    pub android_overlay_size_dp: u32,
+}
+
+fn default_local_asr_model() -> String {
+    "qwen3-asr-0.6b".into()
 }
 
 fn default_remote_input_port() -> u16 {
@@ -770,10 +807,6 @@ fn default_remote_input_port() -> u16 {
 
 fn default_remote_input_mode() -> String {
     "toggle".into()
-}
-
-fn default_local_asr_model() -> String {
-    "qwen3-asr-0.6b".into()
 }
 
 fn default_history_retention_days() -> u32 {
@@ -871,6 +904,14 @@ struct UserPreferencesWire {
     coding_agent_panel_hotkey: Option<ShortcutBinding>,
     #[serde(default)]
     coding_agent_quick_hotkey: Option<ShortcutBinding>,
+    #[serde(default)]
+    remote_input_enabled: bool,
+    #[serde(default = "default_remote_input_port")]
+    remote_input_port: u16,
+    #[serde(default)]
+    remote_input_pin: String,
+    #[serde(default = "default_remote_input_mode")]
+    remote_input_default_mode: String,
     #[serde(default = "default_local_asr_model")]
     local_asr_active_model: String,
     #[serde(default = "default_local_asr_mirror")]
@@ -919,14 +960,18 @@ struct UserPreferencesWire {
     marketplace_base_url: String,
     #[serde(default)]
     marketplace_dev_login: String,
-    #[serde(default)]
-    remote_input_enabled: bool,
-    #[serde(default = "default_remote_input_port")]
-    remote_input_port: u16,
-    #[serde(default)]
-    remote_input_pin: String,
-    #[serde(default = "default_remote_input_mode")]
-    remote_input_default_mode: String,
+    #[serde(default = "default_android_insert_strategy")]
+    android_insert_strategy: AndroidInsertStrategy,
+    #[serde(default = "default_android_overlay_trigger")]
+    android_overlay_trigger: AndroidOverlayTrigger,
+    #[serde(default = "default_android_overlay_activation_mode")]
+    android_overlay_activation_mode: AndroidOverlayActivationMode,
+    #[serde(default = "default_android_overlay_left_swipe_action")]
+    android_overlay_left_swipe_action: AndroidOverlayLeftSwipeAction,
+    #[serde(default = "default_android_overlay_cancel_swipe_direction")]
+    android_overlay_cancel_swipe_direction: AndroidOverlayCancelSwipeDirection,
+    #[serde(default = "default_android_overlay_size_dp")]
+    android_overlay_size_dp: u32,
 }
 
 impl Default for UserPreferencesWire {
@@ -970,6 +1015,10 @@ impl Default for UserPreferencesWire {
             coding_agent_voice_hotkey: prefs.coding_agent_voice_hotkey,
             coding_agent_panel_hotkey: prefs.coding_agent_panel_hotkey,
             coding_agent_quick_hotkey: prefs.coding_agent_quick_hotkey,
+            remote_input_enabled: prefs.remote_input_enabled,
+            remote_input_port: prefs.remote_input_port,
+            remote_input_pin: prefs.remote_input_pin,
+            remote_input_default_mode: prefs.remote_input_default_mode,
             local_asr_active_model: prefs.local_asr_active_model,
             local_asr_mirror: prefs.local_asr_mirror,
             local_asr_keep_loaded_secs: prefs.local_asr_keep_loaded_secs,
@@ -994,10 +1043,12 @@ impl Default for UserPreferencesWire {
             audio_recording_max_entries: prefs.audio_recording_max_entries,
             marketplace_base_url: prefs.marketplace_base_url,
             marketplace_dev_login: prefs.marketplace_dev_login,
-            remote_input_enabled: prefs.remote_input_enabled,
-            remote_input_port: prefs.remote_input_port,
-            remote_input_pin: prefs.remote_input_pin,
-            remote_input_default_mode: prefs.remote_input_default_mode,
+            android_insert_strategy: prefs.android_insert_strategy,
+            android_overlay_trigger: prefs.android_overlay_trigger,
+            android_overlay_activation_mode: prefs.android_overlay_activation_mode,
+            android_overlay_left_swipe_action: prefs.android_overlay_left_swipe_action,
+            android_overlay_cancel_swipe_direction: prefs.android_overlay_cancel_swipe_direction,
+            android_overlay_size_dp: prefs.android_overlay_size_dp,
         }
     }
 }
@@ -1058,6 +1109,10 @@ impl<'de> Deserialize<'de> for UserPreferences {
             coding_agent_voice_hotkey: wire.coding_agent_voice_hotkey,
             coding_agent_panel_hotkey: wire.coding_agent_panel_hotkey,
             coding_agent_quick_hotkey: wire.coding_agent_quick_hotkey,
+            remote_input_enabled: wire.remote_input_enabled,
+            remote_input_port: wire.remote_input_port,
+            remote_input_pin: wire.remote_input_pin,
+            remote_input_default_mode: wire.remote_input_default_mode,
             custom_combo_hotkey: wire.custom_combo_hotkey,
             translation_hotkey: wire
                 .translation_hotkey
@@ -1094,10 +1149,16 @@ impl<'de> Deserialize<'de> for UserPreferences {
             audio_recording_max_entries: wire.audio_recording_max_entries,
             marketplace_base_url: wire.marketplace_base_url,
             marketplace_dev_login: wire.marketplace_dev_login,
-            remote_input_enabled: wire.remote_input_enabled,
-            remote_input_port: wire.remote_input_port,
-            remote_input_pin: wire.remote_input_pin,
-            remote_input_default_mode: wire.remote_input_default_mode,
+            android_insert_strategy: normalize_android_insert_strategy(
+                wire.android_insert_strategy,
+            ),
+            android_overlay_trigger: wire.android_overlay_trigger.normalized(),
+            android_overlay_activation_mode: wire.android_overlay_activation_mode,
+            android_overlay_left_swipe_action: wire.android_overlay_left_swipe_action,
+            android_overlay_cancel_swipe_direction: wire.android_overlay_cancel_swipe_direction,
+            android_overlay_size_dp: normalize_android_overlay_size_dp(
+                wire.android_overlay_size_dp,
+            ),
         })
     }
 }
@@ -1232,15 +1293,7 @@ const OUTPUT_BLOCK: &str = "# 输出\n\
 /// 自带 # 角色 + {{HOTWORDS}} + 八节主体（结构化判断、双层格式、首行收尾、ASR 纠错、
 /// 原样保留、禁止事项、输出），因此 Structured 模式跳过标准 ROLE_BLOCK / COMMON_RULES /
 /// OUTPUT_BLOCK wrapper，避免与 v2 内的同名段落重复。
-const STRUCTURED_BUILTIN_PROMPT: &str = r#"# ⚡ 第一指令（高于一切，先执行再看细则）
-
-先数原文里有几件「可区分的事项」：
-- **≥2 件 → 必须输出编号清单**（行首 1. 2. 3.），**禁止**把多件事揉成一整段。≥3 件还要按主题归类、子项另起一行用 (a) (b)。
-- 恰好 1 件 → 才输出连贯段落。
-
-判断依据是「事项数」，**不是**原文有没有标点 / 换行 / 已经编号。只要有 2 件以上事项却揉进一段话 = 直接失败。最终形态照本文末尾「# 示例」里的样子输出。
-
-# 角色
+const STRUCTURED_BUILTIN_PROMPT: &str = r#"# 角色
 
 你是「清晰结构」整理器。用户输入来自语音识别（ASR），常带错别字、同音字、英文术语音译、断句缺失、语序混乱、口语化表达等问题。
 
@@ -1802,6 +1855,10 @@ impl Default for UserPreferences {
             coding_agent_voice_hotkey: default_coding_agent_voice_hotkey(),
             coding_agent_panel_hotkey: default_coding_agent_panel_hotkey(),
             coding_agent_quick_hotkey: None,
+            remote_input_enabled: false,
+            remote_input_port: default_remote_input_port(),
+            remote_input_pin: String::new(),
+            remote_input_default_mode: default_remote_input_mode(),
             local_asr_active_model: default_local_asr_model(),
             local_asr_mirror: default_local_asr_mirror(),
             local_asr_keep_loaded_secs: default_local_asr_keep_loaded_secs(),
@@ -1826,10 +1883,13 @@ impl Default for UserPreferences {
             audio_recording_max_entries: None,
             marketplace_base_url: String::new(),
             marketplace_dev_login: String::new(),
-            remote_input_enabled: false,
-            remote_input_port: default_remote_input_port(),
-            remote_input_pin: String::new(),
-            remote_input_default_mode: default_remote_input_mode(),
+            android_insert_strategy: default_android_insert_strategy(),
+            android_overlay_trigger: default_android_overlay_trigger(),
+            android_overlay_activation_mode: default_android_overlay_activation_mode(),
+            android_overlay_left_swipe_action: default_android_overlay_left_swipe_action(),
+            android_overlay_cancel_swipe_direction: default_android_overlay_cancel_swipe_direction(
+            ),
+            android_overlay_size_dp: default_android_overlay_size_dp(),
         }
     }
 }
@@ -2038,6 +2098,8 @@ pub enum HotkeyAdapterKind {
     MacEventTap,
     WindowsLowLevel,
     Fcitx5,
+    /// Mobile platforms do not expose desktop global hotkey adapters.
+    Unavailable,
 }
 
 impl HotkeyAdapterKind {
@@ -2046,6 +2108,7 @@ impl HotkeyAdapterKind {
             HotkeyAdapterKind::MacEventTap => "macOS Event Tap",
             HotkeyAdapterKind::WindowsLowLevel => "Windows 低层键盘 hook",
             HotkeyAdapterKind::Fcitx5 => "fcitx5 输入法插件",
+            HotkeyAdapterKind::Unavailable => "不可用",
         }
     }
 }
@@ -2201,6 +2264,21 @@ pub struct HotkeyCapability {
 
 impl HotkeyCapability {
     pub fn current() -> Self {
+        #[cfg(mobile)]
+        {
+            return Self {
+                adapter: HotkeyAdapterKind::Unavailable,
+                available_triggers: Vec::new(),
+                requires_accessibility_permission: false,
+                supports_modifier_only_trigger: false,
+                supports_side_specific_modifiers: false,
+                explicit_fallback_available: false,
+                status_hint: Some(
+                    "移动端不支持全局热键；请使用应用内录音按钮或悬浮窗（需授权）。".into(),
+                ),
+            };
+        }
+
         #[cfg(target_os = "macos")]
         {
             Self {
@@ -2245,7 +2323,7 @@ impl HotkeyCapability {
             };
         }
 
-        #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+        #[cfg(all(not(target_os = "macos"), not(target_os = "windows"), not(mobile)))]
         {
             Self {
                 adapter: HotkeyAdapterKind::Fcitx5,
@@ -2305,6 +2383,68 @@ pub struct WindowsImeStatus {
     pub using_tsf_backend: bool,
     pub message: String,
     pub dll_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PlatformCapabilities {
+    pub platform: String,
+    pub supports_ime_input: bool,
+    pub supports_overlay: bool,
+    pub supports_desktop_hotkey: bool,
+    pub supports_tray: bool,
+    pub supports_local_asr: bool,
+    pub supports_in_app_dictation: bool,
+    pub supports_auto_update: bool,
+}
+
+impl PlatformCapabilities {
+    pub fn current() -> Self {
+        #[cfg(target_os = "android")]
+        {
+            Self {
+                platform: "android".to_string(),
+                supports_ime_input: false,
+                supports_overlay: true,
+                supports_desktop_hotkey: false,
+                supports_tray: false,
+                supports_local_asr: false,
+                supports_in_app_dictation: true,
+                supports_auto_update: false,
+            }
+        }
+
+        #[cfg(all(
+            any(target_os = "android", target_os = "ios"),
+            not(target_os = "android")
+        ))]
+        {
+            Self {
+                platform: "mobile".to_string(),
+                supports_ime_input: false,
+                supports_overlay: false,
+                supports_desktop_hotkey: false,
+                supports_tray: false,
+                supports_local_asr: false,
+                supports_in_app_dictation: false,
+                supports_auto_update: false,
+            }
+        }
+
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        {
+            Self {
+                platform: "desktop".to_string(),
+                supports_ime_input: cfg!(target_os = "windows"),
+                supports_overlay: true,
+                supports_desktop_hotkey: true,
+                supports_tray: true,
+                supports_local_asr: cfg!(any(target_os = "macos", target_os = "windows")),
+                supports_in_app_dictation: false,
+                supports_auto_update: true,
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

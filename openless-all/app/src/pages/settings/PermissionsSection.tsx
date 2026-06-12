@@ -3,6 +3,7 @@
 
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { AndroidPermissionsPanel } from '@android/components/AndroidPermissionsPanel';
 import { Icon } from '../../components/Icon';
 import {
   checkAccessibilityPermission,
@@ -15,14 +16,19 @@ import {
   requestMicrophonePermission,
 } from '../../lib/ipc';
 import type { NetworkCheckResult } from '../../lib/ipc';
+import { getPlatformCapabilities } from '../../lib/platform';
+import { checkAndroidMicrophoneAccess, requestAndroidMicrophoneAccess } from '@android/lib/androidMicrophonePermission';
 import type {
   HotkeyStatus,
   PermissionStatus,
+  PlatformCapabilities,
   WindowsImeStatus,
 } from '../../lib/types';
 import { useHotkeySettings } from '../../state/HotkeySettingsContext';
 import { Btn, Card, Pill } from '../_atoms';
 import { SettingRow } from './shared';
+
+const ANDROID_SETUP_WIZARD_COMPLETE_KEY = 'openless.androidSetupWizardComplete';
 
 export function PermissionsSection() {
   const { t } = useTranslation();
@@ -31,12 +37,19 @@ export function PermissionsSection() {
   const [hotkey, setHotkey] = useState<HotkeyStatus | null>(null);
   const [windowsIme, setWindowsIme] = useState<WindowsImeStatus | null>(null);
   const [network, setNetwork] = useState<NetworkCheckResult | null>(null);
+  const [platformCaps, setPlatformCaps] = useState<PlatformCapabilities | null>(null);
   const { capability } = useHotkeySettings();
+
+  useEffect(() => {
+    void getPlatformCapabilities().then(setPlatformCaps);
+  }, []);
 
   const refreshPermissions = async () => {
     const [a, m] = await Promise.all([
       checkAccessibilityPermission(),
-      checkMicrophonePermission(),
+      platformCaps?.platform === 'android'
+        ? checkAndroidMicrophoneAccess()
+        : checkMicrophonePermission(),
     ]);
     setAccessibility(a);
     setMicrophone(m);
@@ -60,27 +73,37 @@ export function PermissionsSection() {
 
   useEffect(() => {
     refreshPermissions();
-    refreshHotkey();
-    refreshWindowsIme();
+    if (platformCaps?.supportsDesktopHotkey === true) {
+      refreshHotkey();
+    }
+    if (platformCaps?.platform !== 'android') {
+      refreshWindowsIme();
+    }
     refreshNetwork();
-    const hotkeyId = window.setInterval(refreshHotkey, 1000);
+    const hotkeyId = platformCaps?.supportsDesktopHotkey === true
+      ? window.setInterval(refreshHotkey, 1000)
+      : undefined;
     // 麦克风检查会短暂打开输入流，避免每秒探测导致隐私指示器频繁闪烁。
     const permissionId = window.setInterval(refreshPermissions, 10000);
     const networkId = window.setInterval(refreshNetwork, 30000);
     const onFocus = () => {
       refreshPermissions();
-      refreshHotkey();
-      refreshWindowsIme();
+      if (platformCaps?.supportsDesktopHotkey === true) {
+        refreshHotkey();
+      }
+      if (platformCaps?.platform !== 'android') {
+        refreshWindowsIme();
+      }
       refreshNetwork();
     };
     window.addEventListener('focus', onFocus);
     return () => {
-      window.clearInterval(hotkeyId);
+      if (hotkeyId !== undefined) window.clearInterval(hotkeyId);
       window.clearInterval(permissionId);
       window.clearInterval(networkId);
       window.removeEventListener('focus', onFocus);
     };
-  }, []);
+  }, [platformCaps?.platform, platformCaps?.supportsDesktopHotkey]);
 
   const reRequestAccessibility = async () => {
     await requestAccessibilityPermission();
@@ -88,24 +111,41 @@ export function PermissionsSection() {
   };
 
   const reRequestMicrophone = async () => {
-    if (microphone === 'denied' || microphone === 'restricted') {
+    const isAndroid = platformCaps?.platform === 'android';
+    if (isAndroid && (microphone === 'denied' || microphone === 'restricted')) {
       await openSystemSettings('microphone');
-      refreshPermissions();
+      await refreshPermissions();
       return;
     }
-    const status = await requestMicrophonePermission();
+    const status = isAndroid
+      ? await requestAndroidMicrophoneAccess()
+      : await requestMicrophonePermission();
     setMicrophone(status);
-    if (status === 'denied' || status === 'restricted') {
+    if (!isAndroid && (status === 'denied' || status === 'restricted')) {
       await openSystemSettings('microphone');
     }
-    refreshPermissions();
+    await refreshPermissions();
   };
 
   return (
     <Card>
-      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>{t('settings.permissions.title')}</div>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 6 }}>
+        <div style={{ fontSize: 13, fontWeight: 600 }}>{t('settings.permissions.title')}</div>
+        {platformCaps?.platform === 'android' && (
+          <Btn
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              localStorage.removeItem(ANDROID_SETUP_WIZARD_COMPLETE_KEY);
+              window.location.reload();
+            }}
+          >
+            {t('settings.permissions.rerunAndroidSetup')}
+          </Btn>
+        )}
+      </div>
       <SettingRow label={t('settings.permissions.micLabel')}>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'flex-end', width: '100%' }}>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'flex-end', width: '100%', flexWrap: 'wrap', minWidth: 0 }}>
           <PermissionPill status={microphone} />
           {microphone !== 'granted' && microphone !== 'notApplicable' && microphone !== 'loading' && (
             <Btn variant="ghost" size="sm" onClick={reRequestMicrophone}>
@@ -114,9 +154,9 @@ export function PermissionsSection() {
           )}
         </div>
       </SettingRow>
-      {capability?.requiresAccessibilityPermission && (
+      {capability?.requiresAccessibilityPermission && platformCaps?.platform !== 'android' && (
         <SettingRow label={t('settings.permissions.accLabel')}>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'flex-end', width: '100%' }}>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'flex-end', width: '100%', flexWrap: 'wrap', minWidth: 0 }}>
             <PermissionPill status={accessibility} />
             {accessibility !== 'granted' && accessibility !== 'notApplicable' && (
               <Btn variant="ghost" size="sm" onClick={reRequestAccessibility}>
@@ -126,8 +166,9 @@ export function PermissionsSection() {
           </div>
         </SettingRow>
       )}
+      {platformCaps?.supportsDesktopHotkey === true && (
       <SettingRow label={t('settings.permissions.hotkeyLabel')}>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center', minWidth: 0, justifyContent: 'flex-end', width: '100%' }}>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', minWidth: 0, justifyContent: 'flex-end', width: '100%', flexWrap: 'wrap' }}>
           {hotkey?.message && (
             <span style={{
               fontSize: 11.5, color: 'var(--ol-ink-4)',
@@ -140,9 +181,13 @@ export function PermissionsSection() {
           <HotkeyStatusPill status={hotkey} />
         </div>
       </SettingRow>
-      {windowsIme?.state !== 'notWindows' && (
+      )}
+      {platformCaps?.supportsOverlay && platformCaps.platform === 'android' && (
+        <AndroidPermissionsPanel />
+      )}
+      {windowsIme?.state !== 'notWindows' && platformCaps?.platform !== 'android' && (
         <SettingRow label={t('settings.permissions.windowsImeLabel')}>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center', minWidth: 0, justifyContent: 'flex-end', width: '100%' }}>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', minWidth: 0, justifyContent: 'flex-end', width: '100%', flexWrap: 'wrap' }}>
             {windowsIme && (
               <span style={{
                 fontSize: 11.5, color: 'var(--ol-ink-4)',
@@ -157,7 +202,7 @@ export function PermissionsSection() {
         </SettingRow>
       )}
       <SettingRow label={t('settings.permissions.networkLabel')}>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'flex-end', width: '100%' }}>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'flex-end', width: '100%', flexWrap: 'wrap', minWidth: 0 }}>
           {network && network.latencyMs != null && (
             <span style={{ fontSize: 11, color: 'var(--ol-ink-4)' }}>
               {network.latencyMs}ms

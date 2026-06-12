@@ -244,9 +244,54 @@ mod platform {
     }
 }
 
-// ─────────────────────────── Windows / 其他 ───────────────────────────
+// ─────────────────────────── Android ───────────────────────────
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "android")]
+mod platform {
+    use super::PermissionStatus;
+
+    pub fn check_accessibility() -> PermissionStatus {
+        PermissionStatus::NotApplicable
+    }
+
+    pub fn request_accessibility() -> PermissionStatus {
+        PermissionStatus::NotApplicable
+    }
+
+    pub fn check_microphone() -> PermissionStatus {
+        match crate::android::jni::android::with_android_env(|env, context| {
+            crate::android::jni::android::check_self_permission(
+                env,
+                context,
+                "android.permission.RECORD_AUDIO",
+            )
+        }) {
+            Ok(true) => PermissionStatus::Granted,
+            Ok(false) => PermissionStatus::Denied,
+            Err(error) => {
+                log::warn!("[mic] Android RECORD_AUDIO permission check failed: {error}");
+                PermissionStatus::NotDetermined
+            }
+        }
+    }
+
+    pub fn request_microphone() -> PermissionStatus {
+        match crate::android::jni::android::with_android_env(|env, context| {
+            crate::android::jni::android::request_record_audio_permission(env, context)
+        }) {
+            Ok(true) => PermissionStatus::Granted,
+            Ok(false) => PermissionStatus::NotDetermined,
+            Err(error) => {
+                log::warn!("[mic] Android RECORD_AUDIO permission request failed: {error}");
+                check_microphone()
+            }
+        }
+    }
+}
+
+// ─────────────────────────── Windows / Linux / 其他 ───────────────────────────
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
 mod platform {
     use super::PermissionStatus;
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};

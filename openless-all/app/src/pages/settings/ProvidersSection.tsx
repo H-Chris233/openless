@@ -14,6 +14,7 @@ import {
   validateProviderCredentials,
 } from '../../lib/ipc';
 import { emitSaved } from '../../lib/savedEvent';
+import { useMobileLayout } from '../../lib/useMobileLayout';
 import { useHotkeySettings } from '../../state/HotkeySettingsContext';
 import { SelectLite } from '../../components/ui/SelectLite';
 import { Card } from '../_atoms';
@@ -21,15 +22,18 @@ import { SettingRow, SectionTitle, Toggle, inputStyle, type AsrPresetId } from '
 
 function LlmThinkingToggle({ enabled, onToggle }: { enabled: boolean; onToggle: (next: boolean) => void }) {
   const { t } = useTranslation();
+  const mobile = useMobileLayout();
   return (
     <div
       title={t('settings.providers.thinkingModeHint')}
       style={{
         display: 'flex',
         alignItems: 'center',
+        flex: mobile ? '1 1 100%' : undefined,
+        flexWrap: mobile ? 'wrap' : 'nowrap',
         gap: 6,
         paddingLeft: 2,
-        whiteSpace: 'nowrap',
+        whiteSpace: mobile ? 'normal' : 'nowrap',
       }}
     >
       <span style={{ fontSize: 11.5, color: 'var(--ol-ink-4)' }}>
@@ -170,9 +174,16 @@ const ASR_PRESETS: ReadonlyArray<{ id: AsrPresetId; nameKey: string; baseUrl: st
   { id: 'apple-speech', nameKey: 'asrAppleSpeech',  baseUrl: '',                                              model: ''                              },
 ];
 
-export function ProvidersSection() {
+type ProvidersSectionKind = 'all' | 'llm' | 'asr';
+
+interface ProvidersSectionProps {
+  kind?: ProvidersSectionKind;
+}
+
+export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
   const { t } = useTranslation();
   const { prefs, updatePrefs } = useHotkeySettings();
+  const mobile = useMobileLayout();
   // `*Provider` 立即跟随 <select> 改动（受控组件必须实时反映用户输入）；
   // `committed*Provider` 才决定 CredentialField 的 key，仅在后端 active
   // 切换 + 默认值写完后再 commit。两者拆开是为了同时满足：
@@ -327,11 +338,16 @@ export function ProvidersSection() {
   const preset = LLM_PRESETS.find(p => p.id === committedLlmProvider) ?? LLM_PRESETS[LLM_PRESETS.length - 1];
   const codexOAuthSelected = committedLlmProvider === 'codex_oauth';
   const asrPreset = visibleAsrPresets.find(p => p.id === committedAsrProvider);
+  const showLlm = kind === 'all' || kind === 'llm';
+  const showAsr = kind === 'all' || kind === 'asr';
   return (
     <>
+      {kind === 'all' && (
       <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.6, marginBottom: 10 }}>
         {t('settings.providers.credentialStorageNotice')}
       </div>
+      )}
+      {showLlm && (
       <Card>
         <div style={{ marginBottom: 10 }}>
           <SectionTitle>{t('settings.providers.llmTitle')}</SectionTitle>
@@ -347,7 +363,7 @@ export function ProvidersSection() {
               label: t(`settings.providers.presets.${p.nameKey}`),
             }))}
             ariaLabel={t('settings.providers.providerLabel')}
-            style={{ ...inputStyle, width: '100%', maxWidth: 200 }}
+            style={{ ...inputStyle, width: '100%', maxWidth: mobile ? '100%' : 200 }}
           />
         </SettingRow>
         {codexOAuthSelected ? (
@@ -372,7 +388,9 @@ export function ProvidersSection() {
         />
         <ProviderTools key={committedLlmProvider} kind="llm" modelAccount="ark.model_id" onModelSelected={() => setLlmModelRevision(v => v + 1)} />
       </Card>
+      )}
 
+      {showAsr && (
       <Card>
         <div style={{ marginBottom: 10 }}>
           <SectionTitle>{t('settings.providers.asrTitle')}</SectionTitle>
@@ -403,7 +421,7 @@ export function ProvidersSection() {
                     ? 'asrAppleSpeech'
                     : null;
             return (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-start', minWidth: 0 }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: mobile ? 'stretch' : 'flex-start', minWidth: 0, width: '100%', maxWidth: '100%' }}>
                 <SelectLite
                   value={selectedValue}
                   disabled={isLocked}
@@ -422,7 +440,7 @@ export function ProvidersSection() {
                       : []),
                   ]}
                   ariaLabel={t('settings.providers.providerLabel')}
-                  style={{ ...inputStyle, width: '100%', maxWidth: 200 }}
+                  style={{ ...inputStyle, width: '100%', maxWidth: mobile ? '100%' : 200 }}
                 />
                 {isLocked && (
                   <div style={{ fontSize: 11, color: 'var(--ol-ink-4)', lineHeight: 1.5 }}>
@@ -490,6 +508,7 @@ export function ProvidersSection() {
           </>
         )}
       </Card>
+      )}
     </>
   );
 }
@@ -498,6 +517,7 @@ type ProviderToolStatus = 'idle' | 'loading' | 'success' | 'empty' | 'error';
 
 function ProviderTools({ kind, modelAccount, onModelSelected }: { kind: 'llm' | 'asr'; modelAccount: string; onModelSelected: () => void }) {
   const { t } = useTranslation();
+  const mobile = useMobileLayout();
   const [models, setModels] = useState<string[]>([]);
   const [selectedModel, setSelectedModel] = useState('');
   const [status, setStatus] = useState<ProviderToolStatus>('idle');
@@ -563,8 +583,8 @@ function ProviderTools({ kind, modelAccount, onModelSelected }: { kind: 'llm' | 
 
   return (
     <SettingRow label={t('settings.providers.toolsLabel')}>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, width: '100%', maxWidth: 420 }}>
-        <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, width: '100%', maxWidth: mobile ? '100%' : 420 }}>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', width: '100%' }}>
           <button onClick={validate} style={miniBtnStyle} disabled={status === 'loading'}>{t('settings.providers.validate')}</button>
           <button onClick={loadModels} style={miniBtnStyle} disabled={status === 'loading'}>{t('settings.providers.fetchModels')}</button>
           {models.length > 0 && (
@@ -575,7 +595,7 @@ function ProviderTools({ kind, modelAccount, onModelSelected }: { kind: 'llm' | 
               options={models.map(model => ({ value: model, label: model }))}
               placeholder={t('settings.providers.selectModel')}
               ariaLabel={t('settings.providers.selectModel')}
-              style={{ ...inputStyle, maxWidth: 220 }}
+              style={{ ...inputStyle, flex: mobile ? '1 1 100%' : '1 1 180px', maxWidth: mobile ? '100%' : 220 }}
             />
           )}
         </div>
@@ -622,6 +642,7 @@ interface CredentialFieldProps {
 
 function CredentialField({ label, account, placeholder, mono, mask, defaultValue, trailing }: CredentialFieldProps) {
   const { t } = useTranslation();
+  const mobile = useMobileLayout();
   const [value, setValue] = useState('');
   const [revealed, setRevealed] = useState(false);
   const [loaded, setLoaded] = useState(false);
@@ -750,8 +771,8 @@ function CredentialField({ label, account, placeholder, mono, mask, defaultValue
 
   return (
     <SettingRow label={label}>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 5, width: '100%', maxWidth: 420 }}>
-        <div style={{ display: 'flex', gap: 6, alignItems: 'center', width: '100%' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 5, width: '100%', maxWidth: mobile ? '100%' : 420 }}>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center', width: '100%', flexWrap: mobile ? 'wrap' : 'nowrap' }}>
           <input
             type={inputType}
             value={value}
@@ -759,7 +780,7 @@ function CredentialField({ label, account, placeholder, mono, mask, defaultValue
             onChange={handleChange}
             onBlur={onBlur}
             disabled={disabled}
-            style={{ ...inputStyle, fontFamily: mono ? 'var(--ol-font-mono)' : 'inherit' }}
+            style={{ ...inputStyle, flex: mobile ? '1 1 180px' : 1, minWidth: 0, maxWidth: '100%', fontFamily: mono ? 'var(--ol-font-mono)' : 'inherit' }}
           />
           {defaultValue && !value && loaded && (
             <button onClick={fillDefault} title={t('settings.providers.fillDefault')} style={iconBtnStyle} disabled={!loaded}>

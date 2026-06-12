@@ -299,30 +299,47 @@ fn build_router(state: Arc<WsState>) -> Router {
         .route("/", get(index_handler))
         .route(
             "/app.js",
-            get(|| async { ([(axum::http::header::CONTENT_TYPE, HEADER_JS)], assets::APP_JS) }),
+            get(|| async {
+                (
+                    [(axum::http::header::CONTENT_TYPE, HEADER_JS)],
+                    assets::APP_JS,
+                )
+            }),
         )
         .route(
             "/style.css",
             get(|| async {
-                ([(axum::http::header::CONTENT_TYPE, HEADER_CSS)], assets::STYLE_CSS)
+                (
+                    [(axum::http::header::CONTENT_TYPE, HEADER_CSS)],
+                    assets::STYLE_CSS,
+                )
             }),
         )
         .route(
             "/icon.png",
             get(|| async {
-                ([(axum::http::header::CONTENT_TYPE, "image/png")], assets::ICON_PNG)
+                (
+                    [(axum::http::header::CONTENT_TYPE, "image/png")],
+                    assets::ICON_PNG,
+                )
             }),
         )
         .route(
             "/mic.png",
             get(|| async {
-                ([(axum::http::header::CONTENT_TYPE, "image/png")], assets::MIC_PNG)
+                (
+                    [(axum::http::header::CONTENT_TYPE, "image/png")],
+                    assets::MIC_PNG,
+                )
             }),
         )
         .route(
             "/done.png",
             get(|| async {
-                ([(axum::http::header::CONTENT_TYPE, "image/png")], assets::DONE_PNG)
+                (
+                    [(axum::http::header::CONTENT_TYPE, "image/png")],
+                    assets::DONE_PNG,
+                )
             }),
         )
         // 证书下载：手机在浏览器打开它即可下载并安装信任（iOS Safari 的 wss 不复用
@@ -331,7 +348,10 @@ fn build_router(state: Arc<WsState>) -> Router {
             "/cert.cer",
             get(|State(state): State<Arc<WsState>>| async move {
                 (
-                    [(axum::http::header::CONTENT_TYPE, "application/x-x509-ca-cert")],
+                    [(
+                        axum::http::header::CONTENT_TYPE,
+                        "application/x-x509-ca-cert",
+                    )],
                     state.cert_der.clone(),
                 )
             }),
@@ -548,19 +568,25 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<WsState>, peer_ip: IpAddr) 
     match authed {
         AuthResult::Ok => {
             log::info!("[remote-input] 配对成功，进入录音会话");
-            let _ = socket.send(send_json(&serde_json::json!({"type":"auth","ok":true}))).await;
+            let _ = socket
+                .send(send_json(&serde_json::json!({"type":"auth","ok":true})))
+                .await;
         }
         AuthResult::BadPin => {
             log::warn!("[remote-input] 配对码错误，已拒绝");
             let _ = socket
-                .send(send_json(&serde_json::json!({"type":"auth","ok":false,"reason":"bad-pin"})))
+                .send(send_json(
+                    &serde_json::json!({"type":"auth","ok":false,"reason":"bad-pin"}),
+                ))
                 .await;
             return;
         }
         AuthResult::Locked => {
             log::warn!("[remote-input] 配对已锁定（连续错误过多），已拒绝");
             let _ = socket
-                .send(send_json(&serde_json::json!({"type":"auth","ok":false,"reason":"locked"})))
+                .send(send_json(
+                    &serde_json::json!({"type":"auth","ok":false,"reason":"locked"}),
+                ))
                 .await;
             return;
         }
@@ -666,7 +692,9 @@ async fn handle_control(txt: &str, state: &Arc<WsState>, socket: &mut WebSocket)
                 Err(reason) => {
                     log::warn!("[remote-input] 开始录音被拒：{reason}");
                     let _ = socket
-                        .send(send_json(&serde_json::json!({"type":"busy","reason":reason})))
+                        .send(send_json(
+                            &serde_json::json!({"type":"busy","reason":reason}),
+                        ))
                         .await;
                 }
             }
