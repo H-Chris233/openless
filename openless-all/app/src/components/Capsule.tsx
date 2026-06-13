@@ -9,6 +9,40 @@ import {
 import { invokeOrMock, isTauri } from '../lib/ipc';
 import type { CapsulePayload, CapsuleState } from '../lib/types';
 
+// 胶囊 keyframes 注入一次到 document.head，而不是放在组件 JSX 里。否则录音时音量
+// 每帧（~60Hz）setLevel 都会让 React 重新创建/reconcile 这个 <style> 元素 —— 纯属
+// 浪费，因为这些 keyframes 是静态的。与 QaPanel / LessComputerPanel 注入方式一致。
+const CAPSULE_KEYFRAMES = `
+  /* 入场：从中央很窄的一小条（scaleX 0.18）+ 略压扁（scaleY 0.95）+ 透明，
+     长出到 scaleX 1 / scaleY 1 / 不透明。配合 wrapper 的 transformOrigin:center，
+     视觉上是「从中心向左右展开」。 */
+  @keyframes capsule-in {
+    from { opacity: 0; transform: scale(.78) translateY(8px); }
+    to   { opacity: 1; transform: scale(1)   translateY(0); }
+  }
+  /* 离场：scaleX 由 1 收回 0.18 + 整体向下偏移 8px + 淡出。
+     forwards 让最终帧（opacity:0、scaleX:.18）保持到组件被卸载。 */
+  @keyframes capsule-out {
+    from { opacity: 1; transform: scaleX(1)   translateY(0); }
+    to   { opacity: 0; transform: scaleX(.18) translateY(8px); }
+  }
+  @keyframes cap-shine {
+    0%   { background-position: 200% center; }
+    100% { background-position: -200% center; }
+  }
+  @keyframes cap-state-enter {
+    from { opacity: 0; transform: translateY(2px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+`;
+
+if (typeof document !== 'undefined' && !document.getElementById('capsule-keyframes')) {
+  const tag = document.createElement('style');
+  tag.id = 'capsule-keyframes';
+  tag.textContent = CAPSULE_KEYFRAMES;
+  document.head.appendChild(tag);
+}
+
 interface AudioBarsProps {
   level: number;
 }
@@ -479,29 +513,6 @@ export function Capsule() {
         onCancel={onCancel}
         onConfirm={onConfirm}
       />
-      <style>{`
-        /* 入场：从中央很窄的一小条（scaleX 0.18）+ 略压扁（scaleY 0.95）+ 透明，
-           长出到 scaleX 1 / scaleY 1 / 不透明。配合 wrapper 的 transformOrigin:center，
-           视觉上是「从中心向左右展开」。 */
-        @keyframes capsule-in {
-          from { opacity: 0; transform: scale(.78) translateY(8px); }
-          to   { opacity: 1; transform: scale(1)   translateY(0); }
-        }
-        /* 离场：scaleX 由 1 收回 0.18 + 整体向下偏移 8px + 淡出。
-           forwards 让最终帧（opacity:0、scaleX:.18）保持到组件被卸载。 */
-        @keyframes capsule-out {
-          from { opacity: 1; transform: scaleX(1)   translateY(0); }
-          to   { opacity: 0; transform: scaleX(.18) translateY(8px); }
-        }
-        @keyframes cap-shine {
-          0%   { background-position: 200% center; }
-          100% { background-position: -200% center; }
-        }
-        @keyframes cap-state-enter {
-          from { opacity: 0; transform: translateY(2px); }
-          to   { opacity: 1; transform: translateY(0); }
-        }
-      `}</style>
     </div>
   );
 }

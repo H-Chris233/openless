@@ -12,6 +12,7 @@
 
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useRafThrottle } from '../lib/useRafThrottle';
 import {
   getPlatformCapabilities,
   getSettings,
@@ -519,14 +520,16 @@ function MessageRow({ message }: { message: QaChatMessage }) {
  *  闪烁的 caret 让用户看出还在生成。markdown 边到边渲染，未闭合的代码块不会炸 —
  *  marked 在不完整输入上是宽容的（开 token 没找到闭 token 就当 inline）。 */
 function StreamingAssistantBubble({ markdown }: { markdown: string }) {
+  // 按帧率节流：token 到达速度远高于刷新率，逐 token 全量 parse 是 O(n²)。
+  const throttled = useRafThrottle(markdown);
   const html = useMemo(() => {
     try {
-      return renderQaMarkdown(markdown);
+      return renderQaMarkdown(throttled);
     } catch (error) {
       console.error('[qa] failed to render streaming markdown', error);
-      return renderQaPlainText(String(markdown ?? ''));
+      return renderQaPlainText(String(throttled ?? ''));
     }
-  }, [markdown]);
+  }, [throttled]);
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
       <div

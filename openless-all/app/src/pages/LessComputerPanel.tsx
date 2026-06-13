@@ -19,6 +19,7 @@ import {
 } from 'react';
 import { useTranslation } from 'react-i18next';
 import DOMPurify from 'dompurify';
+import { useRafThrottle } from '../lib/useRafThrottle';
 import {
   isTauri,
   lessComputerApprove,
@@ -186,14 +187,28 @@ export function LessComputerPanel() {
   // ── 内容自适应：measure 内容高 + toolbar → 回传后端 clamp + bottom-anchored 摆放，
   // 让内容增长向上撑开。超出 max 则窗口内部滚动。
   const contentRef = useRef<HTMLDivElement>(null);
+  const resizeFrame = useRef<number | null>(null);
   useEffect(() => {
     if (!isTauri) return;
-    const el = contentRef.current;
-    if (!el) return;
-    const measured = Math.ceil(el.scrollHeight) + TOOLBAR_HEIGHT;
-    const target = Math.min(WINDOW_MAX_HEIGHT, Math.max(WINDOW_MIN_HEIGHT, measured));
-    void lessComputerWindowResize(target);
+    // 把「测量内容高（强制布局）+ 跨进程 IPC resize」坍缩到每帧最多一次：流式回复
+    // 每个 token 都会触发这个 effect，原本每 token 一次 layout + 一次 IPC。rAF 合并成
+    // ~60fps，且回调里读到的是最新 DOM。
+    if (resizeFrame.current != null) return;
+    resizeFrame.current = requestAnimationFrame(() => {
+      resizeFrame.current = null;
+      const el = contentRef.current;
+      if (!el) return;
+      const measured = Math.ceil(el.scrollHeight) + TOOLBAR_HEIGHT;
+      const target = Math.min(WINDOW_MAX_HEIGHT, Math.max(WINDOW_MIN_HEIGHT, measured));
+      void lessComputerWindowResize(target);
+    });
   }, [turns]);
+  useEffect(
+    () => () => {
+      if (resizeFrame.current != null) cancelAnimationFrame(resizeFrame.current);
+    },
+    [],
+  );
 
   // 自动滚动到底
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -288,18 +303,20 @@ function UserBubble({ text, label }: { text: string; label: string }) {
 }
 
 function AssistantBubble({ markdown, working }: { markdown: string; working: boolean }) {
+  // 按帧率节流：流式回复逐 token 全量 parse + DOMPurify 是 O(n²)，长回复越来越卡。
+  const throttled = useRafThrottle(markdown);
   const html = useMemo(() => {
     let rendered: string;
     try {
-      rendered = renderQaMarkdown(markdown);
+      rendered = renderQaMarkdown(throttled);
     } catch (error) {
       console.error('[LessComputer] markdown render failed', error);
-      rendered = renderQaPlainText(String(markdown ?? ''));
+      rendered = renderQaPlainText(String(throttled ?? ''));
     }
     // 兜底再消毒：qaMarkdown 已转义 raw HTML token，这里 DOMPurify 多一道防线，
     // 即便上游渲染逻辑回归也不会把恶意标记注入 DOM。
     return DOMPurify.sanitize(rendered, { ADD_ATTR: ['target', 'rel'] });
-  }, [markdown]);
+  }, [throttled]);
   return (
     <div className="lc-enter" style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 3 }}>
       <div
