@@ -1147,7 +1147,7 @@ export function Style() {
                             <textarea
                               value={example.input}
                               onChange={event => patchExample(index, { input: event.target.value })}
-                              style={{ ...textareaStyle, minHeight: 120, background: '#fff' }}
+                              style={{ ...textareaStyle, minHeight: 120, background: 'var(--ol-style-input-bg)' }}
                             />
                           </div>
 
@@ -1165,7 +1165,7 @@ export function Style() {
                             <textarea
                               value={example.output}
                               onChange={event => patchExample(index, { output: event.target.value })}
-                              style={{ ...textareaStyle, minHeight: 120, background: '#fff' }}
+                              style={{ ...textareaStyle, minHeight: 120, background: 'var(--ol-style-input-bg)' }}
                             />
                           </div>
                         </div>
@@ -1247,7 +1247,7 @@ const inputStyle: CSSProperties = {
   padding: '9px 11px',
   borderRadius: 10,
   border: '0.5px solid var(--ol-line-strong)',
-  background: '#fff',
+  background: 'var(--ol-style-input-bg)',
   color: 'var(--ol-ink)',
   font: 'inherit',
   fontSize: 12.5,
@@ -1259,7 +1259,7 @@ const textareaStyle: CSSProperties = {
   padding: '11px 12px',
   borderRadius: 12,
   border: '0.5px solid var(--ol-line-strong)',
-  background: '#fff',
+  background: 'var(--ol-style-input-bg)',
   color: 'var(--ol-ink)',
   font: 'inherit',
   fontSize: 12.5,
