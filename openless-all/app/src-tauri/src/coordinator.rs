@@ -1788,6 +1788,14 @@ fn qa_hotkey_bridge_loop(inner: Arc<Inner>, rx: mpsc::Receiver<QaHotkeyEvent>) {
 // ─────────────────────── coding agent hotkey supervisor ───────────────────────
 
 fn coding_agent_hotkey_supervisor_loop(inner: Arc<Inner>) {
+    // Less Computer (coding agent) is macOS-only. On Windows/Linux the binding can
+    // never be installed, so do the one-shot take and let the thread exit instead
+    // of waking every 5s for the entire life of the process.
+    #[cfg(not(target_os = "macos"))]
+    {
+        update_coding_agent_hotkey_binding_now(&inner);
+    }
+    #[cfg(target_os = "macos")]
     loop {
         if inner.shutdown.load(Ordering::SeqCst) {
             return;
@@ -6600,21 +6608,24 @@ fn show_capsule_window_no_activate<R: tauri::Runtime>(
         return false;
     }
 
-    // emit_capsule 已经把窗口操作 marshal 到 Tauri 主线程；这里不能再调用
+    // emit_capsule 已经把窗口操作 marshal 到 Tauri 主线程；这里不能调用
     // window.show()/set_focus()/NSApp.activate，否则 AeroSpace 会把 workspace 切回
-    // OpenLess 主窗口所在空间。先让胶囊加入所有 Spaces，再用
-    // orderFrontRegardless 做无激活展示。
-    if let Err(e) = window.set_visible_on_all_workspaces(true) {
-        log::warn!("[capsule] set visible on all macOS Spaces failed: {e}");
-    }
-
+    // OpenLess 主窗口所在空间。直接用 orderFrontRegardless 做无激活展示。
+    //
+    // collectionBehavior 一次性写绝对值（与 show_less_computer_glow 的 273 同款），
+    // 不再走 Tauri 的 set_visible_on_all_workspaces：那个调用会把 collectionBehavior
+    // 经事件循环延后再写一遍，盖掉这里手动加的 FULL_SCREEN_AUXILIARY（→ 全屏 app 上不
+    // 叠加）；而把新 bit OR 到旧的 Managed 上又是 Apple 文档明确互斥的非法组合
+    // （CanJoinAllSpaces / Managed / Transient 三选一，→ 切桌面跟随不稳）。glow 窗口从不
+    // 调它、直接写绝对值，跨 Space + 全屏都正常 —— 胶囊对齐它。
+    //   - CAN_JOIN_ALL_SPACES：出现在所有桌面/Space，切桌面/全屏时跟随。
+    //   - FULL_SCREEN_AUXILIARY：能叠加在全屏 app 之上。
+    //   - STATIONARY：Mission Control / Exposé 时不跟着乱飞。
     unsafe {
-        const NS_WINDOW_COLLECTION_BEHAVIOR_CAN_JOIN_ALL_SPACES: usize = 1 << 0;
-        const NS_WINDOW_COLLECTION_BEHAVIOR_FULL_SCREEN_AUXILIARY: usize = 1 << 8;
-        let behavior: usize = msg_send![ns_window, collectionBehavior];
-        let behavior = behavior
-            | NS_WINDOW_COLLECTION_BEHAVIOR_CAN_JOIN_ALL_SPACES
-            | NS_WINDOW_COLLECTION_BEHAVIOR_FULL_SCREEN_AUXILIARY;
+        const CAN_JOIN_ALL_SPACES: usize = 1 << 0;
+        const STATIONARY: usize = 1 << 4;
+        const FULL_SCREEN_AUXILIARY: usize = 1 << 8;
+        let behavior = CAN_JOIN_ALL_SPACES | STATIONARY | FULL_SCREEN_AUXILIARY;
         let _: () = msg_send![ns_window, setCollectionBehavior: behavior];
         let _: () = msg_send![ns_window, orderFrontRegardless];
     }

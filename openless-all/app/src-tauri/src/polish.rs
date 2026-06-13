@@ -284,12 +284,18 @@ pub(crate) struct PolishSystemPromptAssembly {
 
 impl OpenAICompatibleLLMProvider {
     pub fn new(config: OpenAICompatibleConfig) -> Self {
-        // Build reqwest client with the configured timeout. If client construction
-        // fails for some reason (it should not on a normal target), fall back to
-        // the default client so we still surface a useful error at request time.
-        let client = http_client_builder(&config.base_url, config.request_timeout_secs)
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        // Reuse a cached client (keyed by timeout + proxy-bypass) so the connection
+        // pool survives across utterances instead of paying a fresh TLS handshake
+        // every polish. Falls back to a default client if the builder somehow fails
+        // so we still surface a useful error at request time.
+        let timeout = config.request_timeout_secs;
+        let no_proxy = should_bypass_proxy_for_base_url(&config.base_url);
+        let base_url = config.base_url.clone();
+        let client = crate::net::cached_client((timeout, no_proxy), || {
+            http_client_builder(&base_url, timeout)
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new())
+        });
         Self { config, client }
     }
 
@@ -905,9 +911,16 @@ pub struct CodexOAuthLLMProvider {
 
 impl CodexOAuthLLMProvider {
     pub fn new(config: CodexOAuthConfig) -> Self {
-        let client = http_client_builder(&config.base_url, config.request_timeout_secs)
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        // Reuse a cached client so the connection pool survives across utterances
+        // (see OpenAICompatibleLLMProvider::new for the why).
+        let timeout = config.request_timeout_secs;
+        let no_proxy = should_bypass_proxy_for_base_url(&config.base_url);
+        let base_url = config.base_url.clone();
+        let client = crate::net::cached_client((timeout, no_proxy), || {
+            http_client_builder(&base_url, timeout)
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new())
+        });
         Self { config, client }
     }
 

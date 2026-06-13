@@ -139,3 +139,14 @@ window-vibrancy = "0.7"
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+# 之前没有 [profile.release] —— 发布版走 Cargo 默认（无 LTO、不 strip、
+# codegen-units=16）。这个体量的 Tauri 应用（tokio-full / reqwest / axum /
+# sherpa-onnx / windows crate 全家桶）开 LTO + codegen-units=1 + strip 能
+# 明显减小二进制体积并提升运行速度。保留默认 panic="unwind"：后台线程 panic
+# 时只杀该线程、不 abort 掉常驻进程，稳健性与改动前一致。
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

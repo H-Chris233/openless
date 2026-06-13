@@ -14,9 +14,11 @@
 //!   类错误多为确定性失败（如 endpoint 配置错误），重试只是徒增数秒延迟。HTTP
 //!   4xx/5xx 同样不重试 —— 服务端已应答，状态码交给调用方判断。
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use once_cell::sync::Lazy;
+use parking_lot::Mutex;
 
 static HTTP: Lazy<reqwest::Client> = Lazy::new(|| {
     reqwest::Client::builder()
@@ -34,6 +36,23 @@ static HTTP: Lazy<reqwest::Client> = Lazy::new(|| {
 /// 进程级共享 HTTP 客户端。带连接池 —— 一次握手成功后的连接被后续请求复用。
 pub fn http() -> &'static reqwest::Client {
     &HTTP
+}
+
+/// 按 `(timeout_secs, no_proxy)` 缓存并复用 `reqwest::Client`。
+///
+/// LLM / ASR provider 过去每次请求都新建一个 `reqwest::Client`，新客户端连接池是
+/// 空的 —— 于是每句话都要重新 TLS 握手（~100–300ms）。这里把建好的客户端按其配置
+/// 缓存：相同配置的后续 provider 直接 `clone()` 复用同一连接池（`reqwest::Client`
+/// 内部是 `Arc`，clone 共享连接池与配置），握手成本只在首次付一次。
+///
+/// `build` 只在首次 miss 时调用，必须产出与该 `key` 语义一致的客户端。
+pub fn cached_client<F>(key: (u64, bool), build: F) -> reqwest::Client
+where
+    F: FnOnce() -> reqwest::Client,
+{
+    static CACHE: Lazy<Mutex<HashMap<(u64, bool), reqwest::Client>>> =
+        Lazy::new(|| Mutex::new(HashMap::new()));
+    CACHE.lock().entry(key).or_insert_with(build).clone()
 }
 
 /// 单次请求最多尝试的次数。失败本身很快（握手重置 ~0.5s），10 次总耗时仍可控。

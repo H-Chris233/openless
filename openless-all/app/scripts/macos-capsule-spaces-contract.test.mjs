@@ -6,10 +6,11 @@ function assertMatch(source, pattern, name) {
   }
 }
 
-// show_capsule_window_no_activate 已随 capsule/IME 窗口插入管线拆到
-// coordinator/ime_insertion.rs（SRP 拆分），契约函数本身未改。
+// 契约函数 show_capsule_window_no_activate 的实现就在编译进二进制的 coordinator.rs 里。
+// （coordinator/ime_insertion.rs 曾是它的一份副本，但从未被 mod 进 crate —— 死代码，
+//  已删除；契约必须校验真正编译的那份，否则会出现「测试绿、线上坏」的假信心。）
 const coordinatorRs = (
-  await readFile(new URL('../src-tauri/src/coordinator/ime_insertion.rs', import.meta.url), 'utf-8')
+  await readFile(new URL('../src-tauri/src/coordinator.rs', import.meta.url), 'utf-8')
 ).replace(/\r\n/g, '\n');
 const functionMatch = coordinatorRs.match(
   /#\[cfg\(target_os = "macos"\)\]\s*(?:pub\(crate\) )?fn show_capsule_window_no_activate[\s\S]*?\n}\n\n#\[cfg\(target_os = "linux"\)\]/,
@@ -24,8 +25,8 @@ const executableMacosNoActivateFunction = macosNoActivateFunction.replace(/\/\/.
 
 assertMatch(
   macosNoActivateFunction,
-  /set_visible_on_all_workspaces\(true\)[\s\S]*?orderFrontRegardless/,
-  'macOS capsule should join all Spaces before showing without activation',
+  /CAN_JOIN_ALL_SPACES[\s\S]*?1 << 0[\s\S]*?setCollectionBehavior[\s\S]*?orderFrontRegardless/,
+  'macOS capsule should join all Spaces via an absolute collectionBehavior write before showing without activation',
 );
 
 assertMatch(

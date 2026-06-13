@@ -891,7 +891,13 @@ fn start_tray_microphone_watcher(app: AppHandle) {
         .spawn(move || {
             let mut last_signature = microphone_device_signature();
             while !TRAY_MICROPHONE_WATCHER_STOPPING.load(Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_millis(1500));
+                // 10s, not 1.5s. `list_input_devices()` is a relatively costly
+                // CoreAudio/WASAPI enumeration and this ran every 1.5s forever —
+                // the single biggest idle wakeup. The tray menu refreshes on hover
+                // and the settings page reacts to `microphone:devices-changed`, so
+                // ~10s detection latency is fine. (Proper fix: subscribe to an OS
+                // device-change notification instead of polling.)
+                std::thread::sleep(Duration::from_millis(10_000));
                 if TRAY_MICROPHONE_WATCHER_STOPPING.load(Ordering::Relaxed) {
                     break;
                 }
