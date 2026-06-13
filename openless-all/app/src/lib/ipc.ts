@@ -695,6 +695,23 @@ export function appCheckUpdateWithChannel(
     })
 }
 
+export function appDownloadAndInstallAndroidUpdate(args: {
+    url: string
+    signature: string
+    version: string
+}): Promise<void> {
+    return platformCapabilities().then((caps) => {
+        if (caps.platform !== "android") {
+            return Promise.reject(new Error("Android-only update install"))
+        }
+        return invokeOrMock(
+            "app_download_and_install_android_update",
+            args,
+            () => undefined,
+        )
+    })
+}
+
 export function getHotkeyStatus(): Promise<HotkeyStatus> {
     return platformCapabilities().then((caps) => {
         if (!caps.supportsDesktopHotkey) {

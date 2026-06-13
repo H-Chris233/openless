@@ -72,7 +72,7 @@ pub mod android {
         Ok(())
     }
 
-    fn call_static_bool_with_context_class<'local>(
+    pub(crate) fn call_static_bool_with_context_class<'local>(
         env: &mut JNIEnv<'local>,
         context: &JObject<'local>,
         class_name: &str,
@@ -94,7 +94,7 @@ pub mod android {
             .map_err(|error| format!("create jstring: {error}"))
     }
 
-    fn jobject_str<'local>(
+    pub(crate) fn jobject_str<'local>(
         env: &mut JNIEnv<'local>,
         value: &str,
     ) -> Result<JObject<'local>, String> {
@@ -506,5 +506,20 @@ pub mod android {
         } else {
             0
         }
+    }
+
+    pub(crate) fn install_apk_from_path<'local>(
+        env: &mut JNIEnv<'local>,
+        context: &JObject<'local>,
+        path_obj: &JObject<'local>,
+    ) -> Result<bool, String> {
+        call_static_bool_with_context_class(
+            env,
+            context,
+            "com.openless.app.OpenLessUpdateInstaller",
+            "installApk",
+            "(Landroid/content/Context;Ljava/lang/String;)Z",
+            &[JValue::Object(context), JValue::Object(path_obj)],
+        )
     }
 }

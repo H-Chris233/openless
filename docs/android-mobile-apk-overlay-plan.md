@@ -224,48 +224,58 @@ GitHub Actions workflow: [`.github/workflows/android-apk.yml`](../.github/workfl
 
 ### Capability platform isolation
 
-Desktop permissions live in `capabilities/default.json` with `"platforms": ["macOS", "windows", "linux"]`, so updater, autostart, and multi-window permissions do not apply on Android. Android uses `capabilities/mobile.json` with `"platforms": ["android"]` for the main-window permission set only (no updater/autostart).
+Desktop permissions live in `capabilities/default.json` with `"platforms": ["macOS", "windows", "linux"]`, so updater, autostart, and multi-window permissions do not apply on Android. Android uses `capabilities/mobile.json` with `"platforms": ["android"]` for the main-window permission set. In-app updates use a custom Rust updater (`src-tauri/src/android/updater.rs`) because `tauri-plugin-updater` does not support Android.
 
-### Triggers
+### Triggers & channels
 
-| Trigger | Behavior |
-|---|---|
-| `workflow_dispatch` | Build debug APK → upload Actions artifact only |
-| Push tag `v*-tauri` | Build debug APK → upload artifact **and** attach APK to the existing GitHub Release for that tag |
+| Trigger | Build mode | Behavior |
+|---|---|---|
+| `workflow_dispatch` | **debug** | Build 4 split debug APKs → upload Actions artifacts only |
+| Push tag `v*-tauri` / `v*-beta-tauri` | **release** | Signed release APKs + minisign `.sig` + `latest-android-{arch}[-beta].json` → attach to GitHub Release |
 
-Tag-triggered runs share the same `v*-tauri` convention as [`.github/workflows/release-tauri.yml`](../.github/workflows/release-tauri.yml). The Android job is independent and does not modify the desktop release workflow.
+`OPENLESS_RELEASE_CHANNEL` matches desktop `release-tauri.yml`: `-beta-tauri` → beta (prerelease manifests); otherwise stable.
 
-### Debug APK policy
+Tag releases require secrets: `TAURI_SIGNING_PRIVATE_KEY` (minisign), `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD` (APK signing).
 
-- CI builds **debug** APKs (`tauri android build --apk --debug`) for faster iteration and to avoid release-signing requirements in v1.
-- Actions artifact name: `openless-android-debug`.
-- On-disk APK filename:
-  - Tag runs (`v*-tauri`): `OpenLess-android-debug-<tag>.apk` (e.g. `OpenLess-android-debug-v1.0.0-tauri.apk`)
-  - Manual dispatch: `OpenLess-android-debug-run-<run_number>.apk` (not branch name)
+### APK naming
+
+| ABI | Release (tag) | Debug (dispatch) |
+|---|---|---|
+| arm64-v8a | `OpenLess_<version>_arm64-v8a.apk` | `OpenLess-android-debug-arm64-v8a-run-<n>.apk` |
+| armeabi-v7a | `OpenLess_<version>_armeabi-v7a.apk` | `OpenLess-android-debug-armeabi-v7a-run-<n>.apk` |
+| x86 | `OpenLess_<version>_x86.apk` | `OpenLess-android-debug-x86-run-<n>.apk` |
+| x86_64 | `OpenLess_<version>_x86_64.apk` | `OpenLess-android-debug-x86_64-run-<n>.apk` |
+
+Actions artifact names: `openless-android-release-{abi}` (tag) or `openless-android-debug-{abi}` (dispatch).
+
+Updater manifests: `latest-android-aarch64.json` (arm64), `latest-android-armv7.json`, `latest-android-i686.json`, `latest-android-x86_64.json` (+ `-beta` / `-mirror` variants).
 
 ### Command chain (CI)
 
 ```bash
 cd openless-all/app
 npm ci && npm run build
-CI=true npm run tauri -- android init --ci
+npm run tauri -- android init --ci
+node scripts/copy-android-scaffolding.mjs
 node scripts/merge-android-v1-manifest.mjs
-CI=true npm run tauri:android:build
+node scripts/merge-android-overlay-manifest.mjs
+node scripts/merge-android-updater-manifest.mjs
+# tag only:
+node scripts/configure-android-release-signing.mjs
+npm run tauri:android:build:debug    # dispatch
+npm run tauri:android:build:release  # tag
+# tag only:
+node scripts/sign-android-apks.mjs <apks...>
+OPENLESS_UPDATE_APK_DIR=... OPENLESS_UPDATE_TARGET=android OPENLESS_UPDATE_ARCH=aarch64 node scripts/write-updater-manifest.mjs
 ```
 
-Local equivalent (after Android SDK/NDK setup):
+`ci.yml` also runs `cargo check --target aarch64-linux-android` as a lightweight mobile cfg gate.
 
-```bash
-cd openless-all/app
-npm run build
-npm run tauri:android:init
-npm run merge:android-v1-manifest
-npm run tauri:android:build
-```
+### Manifest merge
 
-### Manifest merge (v1 only)
-
-`scripts/merge-android-v1-manifest.mjs` merges **only** `RECORD_AUDIO` from `android-scaffolding/AndroidManifest.v1.snippet.xml` into the generated `src-tauri/gen/android/app/src/main/AndroidManifest.xml`. The script is idempotent (skips if permission already present). v2 (IME) and v3 (overlay) manifest snippets are **not** merged in this workflow.
+- `merge-android-v1-manifest.mjs` — `RECORD_AUDIO` (v1 in-app dictation)
+- `merge-android-overlay-manifest.mjs` — overlay + accessibility service
+- `merge-android-updater-manifest.mjs` — `REQUEST_INSTALL_PACKAGES` + `FileProvider` for APK install
 
 ---
 

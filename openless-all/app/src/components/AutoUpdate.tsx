@@ -1,18 +1,24 @@
 // 自动更新共用模块 — Settings 的"关于"section 和 footer 按钮共用同一套
 // 状态机 + 对话框 UI。两边各自调用 useAutoUpdate()，dialog 渲染条件相同。
 //
-// 渠道感知：check 不再走 plugin-updater 的 JS check()（它只看 tauri.conf 配的
-// Stable manifest URL），改为 appCheckUpdateWithChannel()（ipc 层按
-// supportsAutoUpdate 在 Android 上 no-op）。
-// Rust 那边按 prefs.update_channel 决定 manifest URL；返回的 metadata 直接
-// `new Update(metadata)` 复用 plugin 的 download / install / close 实现，
-// 我们不重复造下载和签名校验。
+// 渠道感知：check 走 appCheckUpdateWithChannel()（Rust 按渠道拼 manifest URL）。
+// 桌面：download/install 复用 plugin-updater 的 Update 类。
+// Android：download/install 走 appDownloadAndInstallAndroidUpdate（minisign + 系统安装器）。
 
 import { useEffect, useRef, useState } from 'react';
 import type { DownloadEvent } from '@tauri-apps/plugin-updater';
 import { Update } from '@tauri-apps/plugin-updater';
+import { listen } from '@tauri-apps/api/event';
 import { useTranslation } from 'react-i18next';
-import { appCheckUpdateWithChannel, isTauri, restartApp, type AppUpdateMetadata, type UpdateChannel } from '../lib/ipc';
+import {
+  appCheckUpdateWithChannel,
+  appDownloadAndInstallAndroidUpdate,
+  isAndroid,
+  isTauri,
+  restartApp,
+  type AppUpdateMetadata,
+  type UpdateChannel,
+} from '../lib/ipc';
 import { Btn } from '../pages/_atoms';
 
 const UPDATE_CHECK_TIMEOUT_MS = 15_000;
@@ -36,17 +42,20 @@ export interface UseAutoUpdate {
   checking: boolean;
   busy: boolean;
   errorMessage: string | null;
-  /** 触发"检查更新"。如果发现新版本，状态变为 'available'，需要 caller 渲染对话框让用户确认下载。
-   *  `channel` 显式指定查哪个渠道；省略时由 Rust 端回落到 prefs.update_channel。 */
   checkForUpdates: (channel?: UpdateChannel) => Promise<void>;
-  /** 用户在对话框里确认 → 下载 + 安装。完成后状态变为 'downloaded'，等用户点重启。 */
   installUpdate: () => Promise<void>;
-  /** 关闭对话框（仅在非 busy 状态可用）。 */
   dismissDialog: () => Promise<void>;
 }
 
+type AndroidUpdatePayload = {
+  url: string;
+  signature: string;
+  version: string;
+};
+
 export function useAutoUpdate(): UseAutoUpdate {
   const updateRef = useRef<Update | null>(null);
+  const androidUpdateRef = useRef<AndroidUpdatePayload | null>(null);
   const [status, setStatus] = useState<UpdateStatus>('idle');
   const [version, setVersion] = useState('');
   const [downloaded, setDownloaded] = useState(0);
@@ -62,6 +71,7 @@ export function useAutoUpdate(): UseAutoUpdate {
   const closeUpdate = async () => {
     const current = updateRef.current;
     updateRef.current = null;
+    androidUpdateRef.current = null;
     if (current) {
       try {
         await current.close();
@@ -75,9 +85,42 @@ export function useAutoUpdate(): UseAutoUpdate {
     return () => { void closeUpdate(); };
   }, []);
 
+  useEffect(() => {
+    if (!isTauri || !isAndroid()) return;
+    let unlisten: (() => void) | undefined;
+    void listen<{
+      downloaded: number;
+      contentLength: number | null;
+      phase: string;
+    }>('android-update:progress', (event) => {
+      setDownloaded(event.payload.downloaded);
+      setContentLength(event.payload.contentLength);
+      if (event.payload.phase === 'installing') {
+        setStatus('installing');
+      } else {
+        setStatus('downloading');
+      }
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
   const resetProgress = () => {
     setDownloaded(0);
     setContentLength(null);
+  };
+
+  const storeAndroidMetadata = (metadata: AppUpdateMetadata) => {
+    const raw = metadata.rawJson ?? {};
+    const url = typeof raw.url === 'string' ? raw.url : '';
+    const signature = typeof raw.signature === 'string' ? raw.signature : '';
+    if (!url || !signature) {
+      throw new Error('更新清单缺少 url 或 signature');
+    }
+    androidUpdateRef.current = { url, signature, version: metadata.version };
   };
 
   const checkForUpdates = async (channel?: UpdateChannel) => {
@@ -91,8 +134,6 @@ export function useAutoUpdate(): UseAutoUpdate {
         setStatus('none');
         return;
       }
-      // Rust 侧按 update_channel 拼 manifest URL：Stable → tauri.conf 默认；
-      // Beta → fetch_latest_beta_release 拼出 -beta manifest URL 后再 check。
       const metadata = await appCheckUpdateWithChannel(
         UPDATE_CHECK_TIMEOUT_MS,
         channel ?? null,
@@ -101,8 +142,12 @@ export function useAutoUpdate(): UseAutoUpdate {
         setStatus('none');
         return;
       }
-      // metadata 形状跟 plugin 自己 check 返回的 UpdateMetadata 完全一致；
-      // new Update(metadata) 直接复用 plugin 的 download/install/close 实现。
+      if (isAndroid()) {
+        storeAndroidMetadata(metadata);
+        setVersion(metadata.version);
+        setStatus('available');
+        return;
+      }
       const next = new Update({
         rid: metadata.rid,
         currentVersion: metadata.currentVersion,
@@ -123,6 +168,24 @@ export function useAutoUpdate(): UseAutoUpdate {
   };
 
   const installUpdate = async () => {
+    if (isAndroid()) {
+      const payload = androidUpdateRef.current;
+      if (!payload) return;
+      resetProgress();
+      setStatus('downloading');
+      try {
+        await appDownloadAndInstallAndroidUpdate(payload);
+        androidUpdateRef.current = null;
+        setStatus('downloaded');
+      } catch (error) {
+        console.error('[updater] failed to install android update', error);
+        const msg = error instanceof Error ? error.message : String(error);
+        setErrorMessage(msg);
+        setStatus('error');
+      }
+      return;
+    }
+
     const update = updateRef.current;
     if (!update) return;
     resetProgress();
@@ -198,12 +261,15 @@ export function UpdateDialog({
   const { t } = useTranslation();
   const downloading = status === 'downloading';
   const installing = status === 'installing';
+  const androidInstalled = isAndroid() && status === 'downloaded';
   return (
     <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.18)', display: 'grid', placeItems: 'center', zIndex: 40 }}>
       <div style={{ width: 360, borderRadius: 16, background: 'var(--ol-surface)', border: '0.5px solid var(--ol-line-strong)', boxShadow: '0 18px 42px rgba(0,0,0,0.18)', padding: 18 }}>
         <div style={{ fontSize: 15, fontWeight: 650, marginBottom: 8 }}>{t(`settings.about.updateDialog.${status}.title`)}</div>
         <div style={{ fontSize: 12, color: 'var(--ol-ink-3)', lineHeight: 1.6, marginBottom: 14 }}>
-          {t(`settings.about.updateDialog.${status}.desc`, { version })}
+          {androidInstalled
+            ? t('settings.about.updateDialog.androidInstalled.desc', { version, defaultValue: '系统安装器已打开，请按提示完成安装。安装后重新打开 OpenLess 即可使用 {{version}}。' })
+            : t(`settings.about.updateDialog.${status}.desc`, { version })}
         </div>
         {(downloading || installing || status === 'downloaded') && (
           <div style={{ marginBottom: 14 }}>
@@ -224,7 +290,7 @@ export function UpdateDialog({
           {status === 'available' && <Btn variant="blue" size="sm" onClick={onInstall}>{t('settings.about.updateDialog.install')}</Btn>}
           {(downloading || installing) && <Btn size="sm" disabled>{installing ? t('settings.about.updateDialog.installingLabel') : t('settings.about.updateDialog.downloadingLabel')}</Btn>}
           {status === 'downloaded' && <Btn size="sm" onClick={onClose}>{t('settings.about.updateDialog.later')}</Btn>}
-          {status === 'downloaded' && <Btn variant="blue" size="sm" onClick={restartApp}>{t('settings.about.updateDialog.restartNow')}</Btn>}
+          {status === 'downloaded' && !androidInstalled && <Btn variant="blue" size="sm" onClick={restartApp}>{t('settings.about.updateDialog.restartNow')}</Btn>}
         </div>
       </div>
     </div>
