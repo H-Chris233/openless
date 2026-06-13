@@ -4,7 +4,7 @@
 //
 // Ported verbatim from design_handoff_openless/variants.jsx::FloatingShell.
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentType } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentType, type CSSProperties } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Icon } from './Icon';
 import { WindowChrome, detectOS, type OS } from './WindowChrome';
@@ -199,6 +199,7 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
   return (
     <div
       className="ol-app-shell-bg"
+      data-ol-mobile={mobileLayout ? 'true' : 'false'}
       style={{ flex: 1, position: 'relative', display: 'flex', flexDirection: 'column', minHeight: 0, paddingTop: os === 'mac' ? 28 : 0 }}
     >
 
@@ -392,7 +393,11 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
         </div>
 
         {mobileLayout && (
-          <nav className="ol-aura-mobile-nav" aria-label="OpenLess">
+          <nav
+            className="ol-aura-mobile-nav"
+            aria-label="OpenLess"
+            style={{ '--ol-nav-count': NAV.length } as CSSProperties}
+          >
             {NAV.map(n => {
               const active = !settingsOpen && currentTab === n.id;
               return (
@@ -433,237 +438,6 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
         />
       ) : null}
       <AudioCueListener />
-
-      {/* tab 切换 + provider prompt + footer popover 公用的入场关键帧 */}
-      <style>{`
-        /* nav 三段视觉层次：
-             基础态  → ink-3（中灰文字 + 透明底）
-             hover  → ink（深色文字 + 浅灰底）  ← 让"翻译"等字词在悬停时高亮，跟基础/选中都拉开差距
-             选中  → ink（深色文字 + 白色 pill 底，由 absolute pill 提供）
-           inline color/fontWeight 留给 active 项写最高优先级；非 active 走 class，
-           这样 :hover 能正确覆盖（CSS 不能盖 inline style）。 */
-        .ol-nav-btn {
-          color: var(--ol-ink-3);
-          font-weight: 500;
-        }
-        .ol-aura-sidebar {
-          padding: 14px 12px 14px;
-          background: var(--ol-sidebar-bg);
-          border-right: 1px solid var(--ol-sidebar-border);
-        }
-        .ol-aura-sidebar-brand {
-          display: flex;
-          align-items: center;
-          gap: 10px;
-          padding: 6px 10px 16px;
-          margin-bottom: 6px;
-          border-radius: 0;
-          background: var(--ol-sidebar-brand-bg);
-          border: 1px solid var(--ol-sidebar-brand-border);
-          box-shadow: none;
-        }
-        .ol-aura-sidebar-brand-mark {
-          width: 26px;
-          height: 26px;
-          border-radius: 8px;
-          box-shadow: none;
-          box-sizing: border-box;
-          padding: 3px;
-          object-fit: contain;
-        }
-        .ol-aura-sidebar-brand-title {
-          font-size: 14px;
-          font-weight: 600;
-          font-family: var(--ol-font-display);
-          color: var(--ol-ink);
-        }
-        .ol-aura-sidebar-brand-kicker {
-          font-size: 10.5px;
-          color: var(--ol-ink-4);
-          font-family: var(--ol-font-mono);
-          letter-spacing: .08em;
-        }
-        .ol-aura-sidebar-pill {
-          background: var(--ol-sidebar-pill-bg);
-          border-radius: 12px;
-          border: 1px solid var(--ol-sidebar-pill-border);
-          box-shadow: none;
-        }
-        .ol-aura-sidebar-nav-btn {
-          padding: 8px 12px;
-          border-radius: 12px;
-          border: 0;
-          background: transparent;
-          font-family: inherit;
-          font-size: 13px;
-          cursor: default;
-          transition: color 0.16s var(--ol-motion-quick), background 0.16s var(--ol-motion-quick);
-          text-align: left;
-          position: relative;
-          z-index: 1;
-        }
-        .ol-aura-sidebar-footer {
-          display: flex;
-          flex-direction: column;
-          gap: 10px;
-          padding: 12px 10px 0;
-          margin-top: 10px;
-          border-top: 1px solid var(--ol-sidebar-footer-border);
-        }
-        .ol-aura-sidebar-version {
-          display: flex;
-          align-items: center;
-          gap: 8px;
-          flex-wrap: wrap;
-          padding: 10px 12px;
-          font-family: var(--ol-font-sans);
-          font-size: 11px;
-          color: var(--ol-ink-4);
-          background: var(--ol-sidebar-version-bg);
-          border: 1px solid var(--ol-sidebar-version-border);
-          border-radius: var(--ol-pill-radius);
-          box-shadow: none;
-        }
-        .ol-aura-beta-tag {
-          display: inline-block;
-          padding: 2px 8px;
-          font-size: 10px;
-          font-weight: 600;
-          letter-spacing: 0.04em;
-          text-transform: uppercase;
-          color: var(--ol-blue);
-          background: rgba(37,99,235,0.10);
-          border-radius: 999px;
-        }
-        .ol-aura-sidebar-settings {
-          padding: 10px 12px;
-          border-radius: 12px;
-          border: 1px solid var(--ol-sidebar-settings-border);
-          background: var(--ol-sidebar-settings-bg);
-          box-shadow: none;
-        }
-        .ol-aura-sidebar-settings.ol-nav-btn-active {
-          background: var(--ol-sidebar-settings-active-bg);
-          box-shadow: none;
-        }
-        .ol-aura-console-main {
-          border-radius: ${mobileLayout ? '0' : 'var(--ol-panel-radius)'};
-        }
-        .ol-aura-mobile-topbar {
-          flex-shrink: 0;
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 12px;
-          padding: calc(10px + env(safe-area-inset-top, 0px)) 14px 10px;
-          border-bottom: 1px solid var(--ol-sidebar-border);
-          background: var(--ol-sidebar-bg);
-        }
-        .ol-aura-mobile-brand {
-          min-width: 0;
-          display: flex;
-          align-items: center;
-          gap: 10px;
-        }
-        .ol-aura-mobile-brand-mark {
-          width: 30px;
-          height: 30px;
-          border-radius: 8px;
-          flex-shrink: 0;
-          box-sizing: border-box;
-          padding: 3px;
-          object-fit: contain;
-        }
-        .ol-aura-mobile-brand-title {
-          font-size: 14px;
-          font-weight: 700;
-          color: var(--ol-ink);
-          line-height: 1.15;
-        }
-        .ol-aura-mobile-brand-section {
-          margin-top: 2px;
-          font-size: 11px;
-          color: var(--ol-ink-4);
-          font-family: var(--ol-font-mono);
-          white-space: nowrap;
-          overflow: hidden;
-          text-overflow: ellipsis;
-        }
-        .ol-aura-mobile-settings {
-          width: 36px;
-          height: 36px;
-          flex-shrink: 0;
-          display: inline-flex;
-          align-items: center;
-          justify-content: center;
-          border-radius: 12px;
-          color: var(--ol-ink-3);
-          background: var(--ol-sidebar-settings-bg);
-          border: 1px solid var(--ol-sidebar-settings-border);
-        }
-        .ol-aura-mobile-settings-active {
-          color: var(--ol-ink);
-          background: var(--ol-sidebar-settings-active-bg);
-        }
-        .ol-aura-mobile-nav {
-          flex-shrink: 0;
-          display: grid;
-          grid-template-columns: repeat(${NAV.length}, minmax(0, 1fr));
-          gap: 2px;
-          padding: 7px 8px calc(7px + env(safe-area-inset-bottom, 0px));
-          border-top: 1px solid var(--ol-sidebar-border);
-          background: var(--ol-sidebar-bg);
-        }
-        .ol-aura-mobile-nav-btn {
-          min-width: 0;
-          height: 50px;
-          display: inline-flex;
-          flex-direction: column;
-          align-items: center;
-          justify-content: center;
-          gap: 4px;
-          border-radius: 12px;
-          color: var(--ol-ink-4);
-          font-size: 10px;
-          font-weight: 600;
-          line-height: 1.1;
-        }
-        .ol-aura-mobile-nav-btn span {
-          max-width: 100%;
-          overflow: hidden;
-          white-space: nowrap;
-          text-overflow: ellipsis;
-        }
-        .ol-aura-mobile-nav-btn-active {
-          color: var(--ol-ink);
-          background: var(--ol-sidebar-pill-bg);
-          border: 1px solid var(--ol-sidebar-pill-border);
-        }
-        .ol-nav-btn.ol-nav-btn-active {
-          color: var(--ol-ink);
-          font-weight: 600;
-        }
-        .ol-nav-btn:not(.ol-nav-btn-active):hover {
-          background: var(--ol-nav-hover-bg);
-          color: var(--ol-ink);
-        }
-        @keyframes ol-page-slide {
-          from { opacity: 0; transform: translate3d(10px, 0, 0) scale(.996); filter: blur(6px); }
-          to   { opacity: 1; transform: translate3d(0, 0, 0) scale(1); filter: blur(0); }
-        }
-        @keyframes ol-page-fadeout {
-          from { opacity: 1; filter: blur(0); }
-          to   { opacity: 0; filter: blur(8px); }
-        }
-        @keyframes ol-prompt-fade {
-          from { opacity: 0; backdrop-filter: blur(0); -webkit-backdrop-filter: blur(0); }
-          to   { opacity: 1; backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
-        }
-        @keyframes ol-prompt-pop {
-          from { opacity: 0; transform: translateY(6px) scale(.97); filter: blur(6px); }
-          to   { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
-        }
-      `}</style>
     </div>
   );
 }
@@ -689,10 +463,10 @@ function ProviderSetupPrompt({ onLater, onOpenSettings }: { onLater: () => void;
       <div
         style={{
           width: 360,
-          borderRadius: 12,
+          borderRadius: 'var(--ol-r-lg)',
           background: 'var(--ol-surface)',
-          border: '0.5px solid rgba(0,0,0,.08)',
-          boxShadow: '0 24px 70px -24px rgba(15,17,22,.38), 0 0 0 0.5px rgba(0,0,0,.06)',
+          border: '0.5px solid var(--ol-line-strong)',
+          boxShadow: 'var(--ol-shadow-lg)',
           padding: 20,
           animation: 'ol-prompt-pop 0.26s var(--ol-motion-spring)',
         }}
@@ -702,8 +476,8 @@ function ProviderSetupPrompt({ onLater, onOpenSettings }: { onLater: () => void;
             style={{
               width: 34,
               height: 34,
-              borderRadius: 8,
-              background: 'rgba(37,99,235,0.10)',
+              borderRadius: 'var(--ol-control-radius)',
+              background: 'var(--ol-blue-soft)',
               color: 'var(--ol-blue)',
               display: 'inline-flex',
               alignItems: 'center',
@@ -724,7 +498,7 @@ function ProviderSetupPrompt({ onLater, onOpenSettings }: { onLater: () => void;
             style={{
               height: 32,
               padding: '0 13px',
-              borderRadius: 8,
+              borderRadius: 'var(--ol-control-radius)',
               border: '0.5px solid var(--ol-line-strong)',
               background: 'var(--ol-surface)',
               color: 'var(--ol-ink-3)',
@@ -742,10 +516,10 @@ function ProviderSetupPrompt({ onLater, onOpenSettings }: { onLater: () => void;
             style={{
               height: 32,
               padding: '0 14px',
-              borderRadius: 8,
+              borderRadius: 'var(--ol-control-radius)',
               border: 0,
-              background: 'var(--ol-ink)',
-              color: 'var(--ol-on-accent)',
+              background: 'var(--ol-primary-solid-bg)',
+              color: 'var(--ol-primary-solid-ink)',
               fontFamily: 'inherit',
               fontSize: 12.5,
               fontWeight: 500,
@@ -782,10 +556,10 @@ function HotkeyModeMigrationPrompt({ onLater, onOpenSettings }: { onLater: () =>
       <div
         style={{
           width: 380,
-          borderRadius: 12,
+          borderRadius: 'var(--ol-r-lg)',
           background: 'var(--ol-surface)',
-          border: '0.5px solid rgba(0,0,0,.08)',
-          boxShadow: '0 24px 70px -24px rgba(15,17,22,.38), 0 0 0 0.5px rgba(0,0,0,.06)',
+          border: '0.5px solid var(--ol-line-strong)',
+          boxShadow: 'var(--ol-shadow-lg)',
           padding: 20,
           animation: 'ol-prompt-pop 0.26s var(--ol-motion-spring)',
         }}
@@ -795,8 +569,8 @@ function HotkeyModeMigrationPrompt({ onLater, onOpenSettings }: { onLater: () =>
             style={{
               width: 34,
               height: 34,
-              borderRadius: 8,
-              background: 'rgba(37,99,235,0.10)',
+              borderRadius: 'var(--ol-control-radius)',
+              background: 'var(--ol-blue-soft)',
               color: 'var(--ol-blue)',
               display: 'inline-flex',
               alignItems: 'center',
@@ -817,7 +591,7 @@ function HotkeyModeMigrationPrompt({ onLater, onOpenSettings }: { onLater: () =>
             style={{
               height: 32,
               padding: '0 13px',
-              borderRadius: 8,
+              borderRadius: 'var(--ol-control-radius)',
               border: '0.5px solid var(--ol-line-strong)',
               background: 'var(--ol-surface)',
               color: 'var(--ol-ink-3)',
@@ -835,10 +609,10 @@ function HotkeyModeMigrationPrompt({ onLater, onOpenSettings }: { onLater: () =>
             style={{
               height: 32,
               padding: '0 14px',
-              borderRadius: 8,
+              borderRadius: 'var(--ol-control-radius)',
               border: 0,
-              background: 'var(--ol-ink)',
-              color: 'var(--ol-on-accent)',
+              background: 'var(--ol-primary-solid-bg)',
+              color: 'var(--ol-primary-solid-ink)',
               fontFamily: 'inherit',
               fontSize: 12.5,
               fontWeight: 500,

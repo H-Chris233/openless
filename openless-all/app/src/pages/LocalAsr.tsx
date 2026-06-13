@@ -1842,7 +1842,7 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                                         style={{
                                             fontSize: 13,
                                             padding: "6px 10px",
-                                            borderRadius: 8,
+                                            borderRadius: 'var(--ol-control-radius)',
                                             border: "0.5px solid rgba(0,0,0,0.12)",
                                             background: "var(--ol-surface)",
                                             color: "var(--ol-ink)",
@@ -1903,7 +1903,7 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                                         style={{
                                             fontSize: 13,
                                             padding: "6px 10px",
-                                            borderRadius: 8,
+                                            borderRadius: 'var(--ol-control-radius)',
                                             border: "0.5px solid rgba(0,0,0,0.12)",
                                             background: "var(--ol-surface)",
                                             color: "var(--ol-ink)",
@@ -1954,7 +1954,7 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                                         style={{
                                             fontSize: 13,
                                             padding: "6px 10px",
-                                            borderRadius: 8,
+                                            borderRadius: 'var(--ol-control-radius)',
                                             border: "0.5px solid rgba(0,0,0,0.12)",
                                             background: "var(--ol-surface)",
                                             color: "var(--ol-ink)",
@@ -2266,7 +2266,7 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                                             fontSize: 13,
                                             height: 31,
                                             padding: "0 10px",
-                                            borderRadius: 8,
+                                            borderRadius: 'var(--ol-control-radius)',
                                             border: "0.5px solid rgba(0,0,0,0.12)",
                                             background: "var(--ol-surface)",
                                             color: "var(--ol-ink)",
@@ -2301,7 +2301,7 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                                             fontSize: 13,
                                             height: 31,
                                             padding: "0 10px",
-                                            borderRadius: 8,
+                                            borderRadius: 'var(--ol-control-radius)',
                                             border: "0.5px solid rgba(0,0,0,0.12)",
                                             background: "var(--ol-surface)",
                                             color: "var(--ol-ink)",
@@ -2334,7 +2334,7 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                                             fontSize: 13,
                                             height: 31,
                                             padding: "0 10px",
-                                            borderRadius: 8,
+                                            borderRadius: 'var(--ol-control-radius)',
                                             border: "0.5px solid rgba(0,0,0,0.12)",
                                             background: "var(--ol-surface)",
                                             color: "var(--ol-ink)",
@@ -2613,7 +2613,7 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                                 style={{
                                     fontSize: 13,
                                     padding: "6px 10px",
-                                    borderRadius: 8,
+                                    borderRadius: 'var(--ol-control-radius)',
                                     border: "0.5px solid rgba(0,0,0,0.12)",
                                     background: "var(--ol-surface)",
                                     color: "var(--ol-ink)",
@@ -2741,7 +2741,7 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                                         style={{
                                             fontSize: 13,
                                             padding: "6px 10px",
-                                            borderRadius: 8,
+                                            borderRadius: 'var(--ol-control-radius)',
                                             border: "0.5px solid rgba(0,0,0,0.12)",
                                             background: "var(--ol-surface)",
                                             color: "var(--ol-ink)",
@@ -2905,7 +2905,7 @@ function FoundryPrepareProgressBlock({
         <div
             style={{
                 padding: "10px 12px",
-                borderRadius: 8,
+                borderRadius: 'var(--ol-control-radius)',
                 background: "rgba(0,0,0,0.035)",
                 display: "flex",
                 flexDirection: "column",
@@ -3040,7 +3040,7 @@ function DownloadProgressBlock({
         <div
             style={{
                 padding: "10px 12px",
-                borderRadius: 8,
+                borderRadius: 'var(--ol-control-radius)',
                 background: "rgba(0,0,0,0.035)",
                 display: "flex",
                 flexDirection: "column",
@@ -3367,7 +3367,7 @@ function TestResultBlock({
                 background: hasError
                     ? "rgba(255, 220, 220, 0.5)"
                     : "rgba(0, 0, 0, 0.04)",
-                borderRadius: 8,
+                borderRadius: 'var(--ol-control-radius)',
                 fontSize: 12.5,
                 color: hasError ? "#9b2c2c" : "var(--ol-ink-2)",
                 lineHeight: 1.6,

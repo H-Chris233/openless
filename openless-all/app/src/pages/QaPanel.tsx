@@ -685,7 +685,8 @@ function MobileRecordButton({
         disabled={disabled}
         style={{
           ...mobileRecordButtonStyle,
-          background: recording ? 'var(--ol-err)' : 'var(--ol-blue)',
+          background: recording ? 'var(--ol-danger-solid-bg)' : 'var(--ol-accent-solid-bg)',
+          color: recording ? 'var(--ol-danger-solid-ink)' : 'var(--ol-accent-solid-ink)',
           opacity: disabled ? 0.48 : 1,
         }}
       >
@@ -773,10 +774,10 @@ const shellStyle: CSSProperties = {
   height: '100vh',
   display: 'flex',
   flexDirection: 'column',
-  borderRadius: 14,
+  borderRadius: 'var(--ol-bubble-radius)',
   overflow: 'hidden',
-  border: '0.5px solid rgba(0, 0, 0, 0.08)',
-  boxShadow: 'var(--ol-shadow-lg), inset 0 1px 0 0 rgba(255, 255, 255, 0.9)',
+  border: '0.5px solid var(--ol-line)',
+  boxShadow: 'var(--ol-shadow-lg)',
   fontFamily: 'var(--ol-font-sans)',
   color: 'var(--ol-ink)',
 };
@@ -804,7 +805,7 @@ const iconBtnBaseStyle: CSSProperties = {
   width: 22,
   height: 22,
   border: 0,
-  borderRadius: 6,
+  borderRadius: 'var(--ol-r-sm)',
   display: 'inline-flex',
   alignItems: 'center',
   justifyContent: 'center',
@@ -839,7 +840,7 @@ const previewStyle: CSSProperties = {
   fontSize: 11.5,
   lineHeight: 1.5,
   padding: '8px 10px',
-  borderRadius: 8,
+  borderRadius: 'var(--ol-control-radius)',
   background: 'rgba(0, 0, 0, 0.035)',
   border: '0.5px solid rgba(0, 0, 0, 0.06)',
 };
@@ -858,10 +859,10 @@ const turnIndicatorStyle: CSSProperties = {
 const userBubbleStyle: CSSProperties = {
   maxWidth: '80%',
   padding: '8px 12px',
-  borderRadius: 14,
+  borderRadius: 'var(--ol-bubble-radius)',
   borderBottomRightRadius: 4,
-  background: 'var(--ol-blue)',
-  color: '#fff',
+  background: 'var(--ol-accent-solid-bg)',
+  color: 'var(--ol-accent-solid-ink)',
   fontSize: 13,
   lineHeight: 1.55,
   wordBreak: 'break-word',
@@ -870,7 +871,7 @@ const userBubbleStyle: CSSProperties = {
 const selectionQuoteStyle: CSSProperties = {
   maxWidth: '80%',
   padding: '6px 10px',
-  borderRadius: 10,
+  borderRadius: 'var(--ol-r-md)',
   background: 'rgba(0,0,0,0.04)',
   border: '0.5px solid rgba(0,0,0,0.06)',
   fontSize: 11.5,
@@ -882,7 +883,7 @@ const selectionQuoteStyle: CSSProperties = {
 const assistantBubbleStyle: CSSProperties = {
   maxWidth: '92%',
   padding: '8px 12px',
-  borderRadius: 14,
+  borderRadius: 'var(--ol-bubble-radius)',
   borderBottomLeftRadius: 4,
   background: 'rgba(0,0,0,0.04)',
   fontSize: 13,
@@ -897,7 +898,7 @@ const errorRowStyle: CSSProperties = {
   flexDirection: 'column',
   gap: 4,
   padding: '8px 12px',
-  borderRadius: 10,
+  borderRadius: 'var(--ol-r-md)',
   background: 'rgba(220,38,38,0.06)',
   border: '0.5px solid rgba(220,38,38,0.18)',
 };
@@ -918,7 +919,7 @@ const statusBarStyle: CSSProperties = {
   gap: 8,
   padding: '0 16px',
   borderTop: '0.5px solid rgba(0, 0, 0, 0.06)',
-  background: 'rgba(255,255,255,0.4)',
+  background: 'var(--ol-control-muted)',
 };
 
 const embeddedToolbarStyle: CSSProperties = {
@@ -938,8 +939,8 @@ const mobileRecordButtonStyle: CSSProperties = {
   width: '100%',
   minHeight: 42,
   border: 0,
-  borderRadius: 10,
-  color: '#fff',
+  borderRadius: 'var(--ol-r-md)',
+  color: 'var(--ol-accent-solid-ink)',
   fontSize: 14,
   fontWeight: 700,
   fontFamily: 'var(--ol-font-sans)',
@@ -953,7 +954,7 @@ const composerStyle: CSSProperties = {
   gap: 8,
   padding: '10px 12px',
   borderTop: '0.5px solid rgba(0, 0, 0, 0.06)',
-  background: 'rgba(255,255,255,0.48)',
+  background: 'var(--ol-control-muted-strong)',
 };
 
 const composerTextareaStyle: CSSProperties = {
@@ -962,13 +963,13 @@ const composerTextareaStyle: CSSProperties = {
   maxHeight: 88,
   resize: 'vertical',
   border: '0.5px solid rgba(0,0,0,0.12)',
-  borderRadius: 8,
+  borderRadius: 'var(--ol-control-radius)',
   padding: '8px 9px',
   fontFamily: 'var(--ol-font-sans)',
   fontSize: 13,
   lineHeight: 1.45,
   color: 'var(--ol-ink)',
-  background: 'rgba(255,255,255,0.78)',
+  background: 'var(--ol-control-solid)',
   outline: 'none',
 };
 
@@ -976,10 +977,10 @@ const composerSendStyle: CSSProperties = {
   minHeight: 40,
   minWidth: 58,
   border: 0,
-  borderRadius: 8,
+  borderRadius: 'var(--ol-control-radius)',
   padding: '0 12px',
-  background: 'var(--ol-blue)',
-  color: '#fff',
+  background: 'var(--ol-accent-solid-bg)',
+  color: 'var(--ol-accent-solid-ink)',
   fontFamily: 'var(--ol-font-sans)',
   fontSize: 13,
   fontWeight: 700,
@@ -1010,7 +1011,7 @@ const globalCss = `
                       padding: 1px 5px; border-radius: 4px;
                       background: rgba(0,0,0,0.05); }
 .qa-answer pre      { margin: 0 0 6px; padding: 8px 10px;
-                      border-radius: 8px; background: rgba(0,0,0,0.05);
+                      border-radius: var(--ol-control-radius); background: rgba(0,0,0,0.05);
                       overflow-x: auto; }
 .qa-answer pre code { padding: 0; background: transparent; }
 .qa-answer a        { color: var(--ol-blue); text-decoration: none; }

@@ -15,13 +15,17 @@
   --ink: #0a0a0b;
   --ink-2: #2a2a2d;
   --ink-3: rgba(10, 10, 11, 0.62);
-  --ink-4: rgba(10, 10, 11, 0.42);
+  --ink-4: rgba(10, 10, 11, 0.58);
 
   /* 蓝色强调 */
   --blue: #2563eb;
   --blue-hover: #1d4ed8;
   --blue-soft: #eff4ff;
   --blue-ring: rgba(37, 99, 235, 0.22);
+  --on-accent: #ffffff;
+  --accent-solid-bg: var(--blue);
+  --accent-solid-bg-hover: var(--blue-hover);
+  --accent-solid-ink: var(--on-accent);
 
   /* 状态色 */
   --ok: #16a34a;
@@ -35,8 +39,13 @@
   --shadow-lg: 0 20px 60px -20px rgba(15, 17, 22, 0.18), 0 8px 32px -16px rgba(15, 17, 22, 0.10), 0 0 0 0.5px rgba(0, 0, 0, 0.06);
 
   /* 圆角 */
+  --control-radius: 8px;
+  --r-sm: 6px;
+  --r-md: 10px;
   --r-lg: 14px;
   --r-xl: 18px;
+  --bubble-radius: var(--r-lg);
+  --modal-radius: var(--r-xl);
   --r-2xl: 22px;
   --r-pill: 999px;
 
@@ -179,7 +188,7 @@ body {
   padding: 15px 18px;
   font-size: 17px;
   font-weight: 600;
-  color: #fff;
+  color: var(--on-accent);
   border: none;
   border-radius: var(--r-lg);
   cursor: pointer;
@@ -189,10 +198,10 @@ body {
 .btn:disabled { opacity: .5; cursor: default; }
 
 .btn-primary {
-  background: var(--blue);
+  background: var(--accent-solid-bg);
   box-shadow: 0 6px 18px -6px var(--blue-ring);
 }
-.btn-primary:active { background: var(--blue-hover); }
+.btn-primary:active { background: var(--accent-solid-bg-hover); }
 
 .hint-error {
   color: var(--danger);
@@ -230,10 +239,10 @@ body {
 .help-link {
   display: inline-block;
   padding: 9px 16px;
-  border-radius: var(--r-md);
+  border-radius: var(--control-radius);
   border: none;
-  background: var(--blue);
-  color: #fff;
+  background: var(--accent-solid-bg);
+  color: var(--accent-solid-ink);
   font-size: 13px;
   font-weight: 600;
   font-family: inherit;
@@ -242,7 +251,7 @@ body {
   -webkit-appearance: none;
   appearance: none;
 }
-.help-link:active { background: var(--blue-hover); }
+.help-link:active { background: var(--accent-solid-bg-hover); }
 .help-link-ghost {
   background: var(--surface);
   color: var(--blue);
@@ -260,7 +269,7 @@ body {
 .app-icon {
   width: 26px;
   height: 26px;
-  border-radius: 7px;
+  border-radius: var(--control-radius);
   flex: none;
   box-shadow: var(--shadow-sm);
 }
@@ -275,7 +284,7 @@ body {
   display: inline-flex;
   background: var(--surface-2);
   border: 0.5px solid var(--line);
-  border-radius: 12px;
+  border-radius: var(--r-lg);
   padding: 3px;
   gap: 2px;
 }
@@ -288,13 +297,13 @@ body {
   font-size: 13px;
   font-weight: 600;
   padding: 7px 14px;
-  border-radius: 9px;
+  border-radius: var(--control-radius);
   cursor: pointer;
   transition: background .15s ease, color .15s ease;
 }
 .mode-btn.active {
-  background: var(--blue);
-  color: #fff;
+  background: var(--accent-solid-bg);
+  color: var(--accent-solid-ink);
 }
 
 /* ===== 录音主区 ===== */
@@ -315,8 +324,8 @@ body {
   border-radius: 50%;
   border: none;
   cursor: pointer;
-  color: #fff;
-  background: linear-gradient(180deg, #3b82f6 0%, #2563eb 100%);
+  color: var(--accent-solid-ink);
+  background: linear-gradient(180deg, var(--accent-solid-bg-hover) 0%, var(--accent-solid-bg) 100%);
   box-shadow:
     0 16px 36px -10px rgba(37, 99, 235, .5),
     inset 0 1px 0 rgba(255, 255, 255, .25);
@@ -359,7 +368,7 @@ body {
   box-shadow: 0 16px 36px -10px rgba(220, 38, 38, .5);
   animation: breathe 1.6s ease-in-out infinite;
 }
-.record-btn.recording .record-btn-label { color: #fff; }
+.record-btn.recording .record-btn-label { color: var(--on-accent); }
 .record-btn.recording .record-btn-ring {
   opacity: 1;
   border-color: rgba(220, 38, 38, .4);
@@ -498,7 +507,7 @@ body {
   cursor: pointer;
   transition: background .15s ease, color .15s ease;
 }
-.result-copy:active { background: var(--blue); color: #fff; }
+.result-copy:active { background: var(--accent-solid-bg); color: var(--accent-solid-ink); }
 .result-copy.copied { background: var(--ok-soft); border-color: var(--ok); color: var(--ok); }
 
 /* ===== 提示文字 ===== */
@@ -570,7 +579,7 @@ body {
   font-size: 12px;
   line-height: 1.5;
   color: var(--ink-4);
-  background: rgba(255, 255, 255, .85);
+  background: rgba(255, 255, 255, .92);
   backdrop-filter: blur(12px) saturate(160%);
   -webkit-backdrop-filter: blur(12px) saturate(160%);
   border-top: 0.5px solid var(--line);

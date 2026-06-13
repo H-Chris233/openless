@@ -23,10 +23,10 @@ const enableBtnStyle: CSSProperties = {
   alignSelf: 'flex-start',
   fontSize: 12,
   padding: '5px 14px',
-  background: 'var(--ol-blue)',
-  color: '#fff',
+  background: 'var(--ol-accent-solid-bg)',
+  color: 'var(--ol-accent-solid-ink)',
   border: 0,
-  borderRadius: 6,
+  borderRadius: 'var(--ol-r-sm)',
   fontFamily: 'inherit',
   fontWeight: 500,
   cursor: 'pointer',
@@ -107,7 +107,7 @@ export function ShortcutsSection() {
               await setQaHotkey(binding);
               await savePrefs({ ...prefs, qaHotkey: binding });
             }}
-            style={{ fontSize: 12, padding: '5px 14px', background: 'var(--ol-blue)', color: '#fff', border: 0, borderRadius: 6, fontFamily: 'inherit', fontWeight: 500, cursor: 'default' }}
+            style={{ fontSize: 12, padding: '5px 14px', background: 'var(--ol-accent-solid-bg)', color: 'var(--ol-accent-solid-ink)', border: 0, borderRadius: 'var(--ol-r-sm)', fontFamily: 'inherit', fontWeight: 500, cursor: 'default' }}
           >
             {t('selectionAsk.hotkey.enable', 'Enable')}
           </button>
@@ -201,7 +201,7 @@ export function ShortcutsSection() {
           <kbd style={{
             display: 'inline-flex', alignItems: 'center', gap: 4,
             padding: '4px 10px', fontSize: 12, fontFamily: 'var(--ol-font-mono)',
-            borderRadius: 6, background: 'var(--ol-surface-2)',
+            borderRadius: 'var(--ol-r-sm)', background: 'var(--ol-surface-2)',
             border: '0.5px solid var(--ol-line-strong)',
             boxShadow: '0 1px 0 rgba(0,0,0,0.04)',
             color: 'var(--ol-ink-2)',
