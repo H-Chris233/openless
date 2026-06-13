@@ -81,6 +81,7 @@ export const zhCN = {
     translation: '翻译',
     selectionAsk: '划词追问',
     localAsr: '模型设置',
+    more: '更多',
   },
   marketplace: {
     kicker: 'MARKETPLACE',
@@ -330,6 +331,7 @@ export const zhCN = {
     copiedFallback: '已复制(需 {{shortcut}})',
     insertFailed: '插入失败',
     confirmClear: '确定清空全部 {{count}} 条记录？此操作不可恢复。',
+    backToList: '返回列表',
   },
   vocab: {
     kicker: 'VOCABULARY',

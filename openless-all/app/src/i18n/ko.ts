@@ -85,6 +85,7 @@ export const ko: typeof zhCN = {
     translation: '번역',
     selectionAsk: '선택 질문',
     localAsr: '모델 설정',
+    more: '더보기',
   },
   marketplace: {
     kicker: 'MARKETPLACE',
@@ -334,6 +335,7 @@ export const ko: typeof zhCN = {
     copiedFallback: '복사됨({{shortcut}} 필요)',
     insertFailed: '입력 실패',
     confirmClear: '전체 {{count}}건의 기록을 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.',
+    backToList: '목록으로',
   },
   vocab: {
     kicker: 'VOCABULARY',

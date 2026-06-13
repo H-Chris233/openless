@@ -51,6 +51,7 @@ export const ICONS: Record<string, string> = {
   shield: 'M12 22s8-3 8-9V5l-8-3-8 3v8c0 6 8 9 8 9z', // Shield (privacy)
   external: 'M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6M15 3h6v6M10 14L21 3', // External link
   close: 'M18 6L6 18M6 6l12 12', // Close / X
+  more: 'M5 12h.01M12 12h.01M19 12h.01', // More (horizontal dots)
   play: 'M5 3l14 9-14 9V3z', // Play
   download: 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3', // Download
 };

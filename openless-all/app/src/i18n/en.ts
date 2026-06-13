@@ -83,6 +83,7 @@ export const en: typeof zhCN = {
     translation: 'Translation',
     selectionAsk: 'Ask',
     localAsr: 'Models',
+    more: 'More',
   },
   marketplace: {
     kicker: 'MARKETPLACE',
@@ -332,6 +333,7 @@ export const en: typeof zhCN = {
     copiedFallback: 'Copied (use {{shortcut}})',
     insertFailed: 'Insert failed',
     confirmClear: 'Delete all {{count}} history entries? This cannot be undone.',
+    backToList: 'Back to list',
   },
   vocab: {
     kicker: 'VOCABULARY',

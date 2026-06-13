@@ -85,6 +85,7 @@ export const ja: typeof zhCN = {
     translation: '翻訳',
     selectionAsk: '選択追問',
     localAsr: 'モデル設定',
+    more: 'その他',
   },
   marketplace: {
     kicker: 'MARKETPLACE',
@@ -334,6 +335,7 @@ export const ja: typeof zhCN = {
     copiedFallback: 'コピー済み（要 {{shortcut}}）',
     insertFailed: '入力失敗',
     confirmClear: '全 {{count}} 件の記録を削除しますか？この操作は取り消せません。',
+    backToList: '一覧に戻る',
   },
   vocab: {
     kicker: 'VOCABULARY',

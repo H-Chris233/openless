@@ -83,6 +83,7 @@ export const zhTW: typeof zhCN = {
     translation: '翻譯',
     selectionAsk: '劃詞追問',
     localAsr: '模型設置',
+    more: '更多',
   },
   marketplace: {
     kicker: 'MARKETPLACE',
@@ -332,6 +333,7 @@ export const zhTW: typeof zhCN = {
     copiedFallback: '已複製(需 {{shortcut}})',
     insertFailed: '插入失敗',
     confirmClear: '確定清空全部 {{count}} 條記錄？此操作不可恢復。',
+    backToList: '返回列表',
   },
   vocab: {
     kicker: 'VOCABULARY',
