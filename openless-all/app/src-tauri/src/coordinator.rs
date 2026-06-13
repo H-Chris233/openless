@@ -6619,13 +6619,17 @@ fn show_capsule_window_no_activate<R: tauri::Runtime>(
     // （CanJoinAllSpaces / Managed / Transient 三选一，→ 切桌面跟随不稳）。glow 窗口从不
     // 调它、直接写绝对值，跨 Space + 全屏都正常 —— 胶囊对齐它。
     //   - CAN_JOIN_ALL_SPACES：出现在所有桌面/Space，切桌面/全屏时跟随。
-    //   - FULL_SCREEN_AUXILIARY：能叠加在全屏 app 之上。
+    //   - FULL_SCREEN_AUXILIARY：被允许进入全屏 app 的 Space。
     //   - STATIONARY：Mission Control / Exposé 时不跟着乱飞。
+    // 外加 setLevel(25)：光有 FULL_SCREEN_AUXILIARY 只是「被允许」进全屏 Space，但窗口层级
+    // 若停在 alwaysOnTop 的浮动层(~3) 仍会被全屏 app 的窗口盖住而看不见；抬到菜单栏(24)之上
+    // 的 25（与 show_less_computer_glow 同款）才能真正叠在全屏之上。
     unsafe {
         const CAN_JOIN_ALL_SPACES: usize = 1 << 0;
         const STATIONARY: usize = 1 << 4;
         const FULL_SCREEN_AUXILIARY: usize = 1 << 8;
         let behavior = CAN_JOIN_ALL_SPACES | STATIONARY | FULL_SCREEN_AUXILIARY;
+        let _: () = msg_send![ns_window, setLevel: 25i64];
         let _: () = msg_send![ns_window, setCollectionBehavior: behavior];
         let _: () = msg_send![ns_window, orderFrontRegardless];
     }

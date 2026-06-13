@@ -35,6 +35,12 @@ assertMatch(
   'macOS capsule should join fullscreen Spaces as an auxiliary window before showing without activation',
 );
 
+assertMatch(
+  macosNoActivateFunction,
+  /setLevel:\s*25[\s\S]*?orderFrontRegardless/,
+  'macOS capsule must raise window level above the menu bar (25) so it renders over fullscreen apps, not just behind them',
+);
+
 for (const forbidden of ['window.show()', 'set_focus', 'NSApp.activate', 'makeKeyAndOrderFront']) {
   if (executableMacosNoActivateFunction.includes(forbidden)) {
     throw new Error(`macOS capsule no-activate path must not call ${forbidden}`);
