@@ -42,6 +42,16 @@ jobs:
           yes | sdkmanager --licenses
           set -o pipefail
 
+      - name: Configure NDK toolchain for cargo
+        shell: bash
+        run: |
+          set -euo pipefail
+          prebuilt="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64"
+          echo "CC_aarch64_linux_android=$prebuilt/bin/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+          echo "CXX_aarch64_linux_android=$prebuilt/bin/aarch64-linux-android24-clang++" >> "$GITHUB_ENV"
+          echo "AR_aarch64_linux_android=$prebuilt/bin/llvm-ar" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$prebuilt/bin/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
