@@ -323,7 +323,8 @@ pub(crate) struct CapsuleLayoutState {
 /// 返回胶囊「应该摆放到的显示器」的标识信息。
 ///
 /// 它看的显示器必须和 `position_capsule_bottom_center` 实际定位用的一致：
-/// Windows 看「正在输入的 App 所在显示器」，其它平台看胶囊自己的显示器。
+/// Windows 看「正在输入的 App 所在显示器」；macOS 看 focused input / caret
+/// 所在显示器；其它平台看胶囊自己的显示器。
 /// 这是「是否需要重新定位」去重缓存（`maybe_position_capsule_bottom_center`）
 /// 的 key，如果这里看错了显示器，就会出现「输入焦点移到另一块屏、胶囊却没
 /// 跟过去」的 bug。
@@ -347,6 +348,22 @@ pub(crate) fn capsule_layout_snapshot<R: tauri::Runtime>(
             });
         }
         // 仅当 Win32 取不到前台显示器时，落回下面的 current_monitor。
+    }
+    // macOS：同 position_capsule_bottom_center 一样，以 focused input / caret
+    // 所在显示器作为 cache key。否则 capsule 窗口还在旧屏时，current_monitor()
+    // 会把“目标屏已变化”误判成“布局未变化”。
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(mon) = crate::focused_input_target_monitor(window) {
+            return Some(CapsuleLayoutState {
+                translation_active,
+                monitor_x: mon.physical_x,
+                monitor_y: mon.physical_y,
+                monitor_width: mon.physical_width,
+                monitor_height: mon.physical_height,
+                scale_bits: mon.scale.to_bits(),
+            });
+        }
     }
     let monitor = window.current_monitor().ok().flatten()?;
     Some(CapsuleLayoutState {

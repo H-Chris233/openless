@@ -1433,6 +1433,338 @@ fn bottom_visual_position(
     (x, y)
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn frame_contains_point(frame: LogicalMonitorFrame, x: f64, y: f64) -> bool {
+    x >= frame.x
+        && x < frame.x + frame.width
+        && y >= frame.y
+        && y < frame.y + frame.height
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn frame_distance_to_point_squared(frame: LogicalMonitorFrame, x: f64, y: f64) -> f64 {
+    let nearest_x = x.clamp(frame.x, frame.x + frame.width);
+    let nearest_y = y.clamp(frame.y, frame.y + frame.height);
+    let dx = x - nearest_x;
+    let dy = y - nearest_y;
+    dx * dx + dy * dy
+}
+
+/// 胶囊目标显示器快照：物理矩形 + DPI 缩放。
+///
+/// macOS 下由当前 focused input / caret 所在位置映射而来，供实际定位与
+/// capsule layout cache 共用。用 Tauri monitor 的物理坐标作为稳定 key；
+/// 真正 set_position 前再转成逻辑坐标，避免 Retina 下窗口尺寸翻倍。
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct CapsuleTargetMonitor {
+    pub(crate) physical_x: i32,
+    pub(crate) physical_y: i32,
+    pub(crate) physical_width: u32,
+    pub(crate) physical_height: u32,
+    pub(crate) scale: f64,
+}
+
+#[cfg(target_os = "macos")]
+impl CapsuleTargetMonitor {
+    fn logical_frame(self) -> LogicalMonitorFrame {
+        logical_monitor_frame(
+            self.physical_x,
+            self.physical_y,
+            self.physical_width,
+            self.physical_height,
+            self.scale,
+        )
+    }
+}
+
+/// macOS：把「当前 focused input / caret」映射到显示器。
+///
+/// 不能用 capsule window 的 current_monitor：窗口隐藏时它仍停留在上一次出现的屏，
+/// 多屏输入会因此被缓存误判为“不需要移动”。这里先用 AX 取 caret/输入框位置，
+/// 再在 Tauri 的 monitor 坐标系里选包含该点的屏；如果点短暂落在所有屏外，
+/// 退到最近的屏，避免虚拟桌面负坐标/屏幕排列边缘导致完全不显示。
+#[cfg(target_os = "macos")]
+pub(crate) fn focused_input_target_monitor<R: tauri::Runtime>(
+    window: &tauri::WebviewWindow<R>,
+) -> Option<CapsuleTargetMonitor> {
+    let (x, y) = macos_focused_input_anchor_point()?;
+    let monitors = window.available_monitors().ok()?;
+    let mut nearest: Option<(f64, CapsuleTargetMonitor)> = None;
+
+    for monitor in monitors {
+        let target = CapsuleTargetMonitor {
+            physical_x: monitor.position().x,
+            physical_y: monitor.position().y,
+            physical_width: monitor.size().width,
+            physical_height: monitor.size().height,
+            scale: monitor.scale_factor(),
+        };
+        let frame = target.logical_frame();
+        if frame_contains_point(frame, x, y) {
+            return Some(target);
+        }
+        let distance = frame_distance_to_point_squared(frame, x, y);
+        match nearest {
+            Some((best, _)) if best <= distance => {}
+            _ => nearest = Some((distance, target)),
+        }
+    }
+
+    nearest.map(|(_, target)| target)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_focused_input_anchor_point() -> Option<(f64, f64)> {
+    macos_capsule_ax::focused_input_anchor_point()
+}
+
+#[cfg(target_os = "macos")]
+mod macos_capsule_ax {
+    use std::ffi::{c_void, CStr};
+    use std::os::raw::c_char;
+
+    #[repr(C)]
+    struct OpaqueAxRef(c_void);
+    type AxUiElementRef = *mut OpaqueAxRef;
+    type CFStringRef = *const c_void;
+    type CFTypeRef = *const c_void;
+    type CFAllocatorRef = *const c_void;
+    type AxError = i32;
+    type AxValueRef = *const c_void;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct CGPoint {
+        x: f64,
+        y: f64,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct CGSize {
+        width: f64,
+        height: f64,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct CGRect {
+        origin: CGPoint,
+        size: CGSize,
+    }
+
+    const AX_ERROR_SUCCESS: AxError = 0;
+    const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
+    const K_AX_VALUE_CG_POINT_TYPE: i32 = 1;
+    const K_AX_VALUE_CG_SIZE_TYPE: i32 = 2;
+    const K_AX_VALUE_CG_RECT_TYPE: i32 = 3;
+
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn AXUIElementCreateSystemWide() -> AxUiElementRef;
+        fn AXUIElementCopyAttributeValue(
+            element: AxUiElementRef,
+            attribute: CFStringRef,
+            value: *mut CFTypeRef,
+        ) -> AxError;
+        fn AXUIElementCopyParameterizedAttributeValue(
+            element: AxUiElementRef,
+            parameterized_attribute: CFStringRef,
+            parameter: CFTypeRef,
+            value: *mut CFTypeRef,
+        ) -> AxError;
+        fn AXValueGetValue(value: AxValueRef, value_type: i32, out: *mut c_void) -> u8;
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFRelease(cf: CFTypeRef);
+        fn CFStringCreateWithCString(
+            allocator: CFAllocatorRef,
+            cstr: *const c_char,
+            encoding: u32,
+        ) -> CFStringRef;
+    }
+
+    pub(super) fn focused_input_anchor_point() -> Option<(f64, f64)> {
+        unsafe {
+            let focused = focused_element()?;
+            let rect = caret_rect(focused).or_else(|| element_rect(focused));
+            CFRelease(focused as CFTypeRef);
+            let rect = rect?;
+            let width = rect.size.width.max(1.0);
+            let height = rect.size.height.max(1.0);
+            Some((rect.origin.x + width / 2.0, rect.origin.y + height / 2.0))
+        }
+    }
+
+    unsafe fn cfstring_from_static(bytes_with_nul: &[u8]) -> Option<CFStringRef> {
+        let cstr = CStr::from_bytes_with_nul(bytes_with_nul).ok()?;
+        let s = CFStringCreateWithCString(
+            std::ptr::null(),
+            cstr.as_ptr(),
+            K_CF_STRING_ENCODING_UTF8,
+        );
+        if s.is_null() {
+            None
+        } else {
+            Some(s)
+        }
+    }
+
+    unsafe fn focused_element() -> Option<AxUiElementRef> {
+        let system = AXUIElementCreateSystemWide();
+        if system.is_null() {
+            return None;
+        }
+        let Some(focused_attr) = cfstring_from_static(b"AXFocusedUIElement\0") else {
+            CFRelease(system as CFTypeRef);
+            return None;
+        };
+        let mut focused: CFTypeRef = std::ptr::null();
+        let err = AXUIElementCopyAttributeValue(system, focused_attr, &mut focused);
+        CFRelease(system as CFTypeRef);
+        CFRelease(focused_attr);
+        if err != AX_ERROR_SUCCESS || focused.is_null() {
+            None
+        } else {
+            Some(focused as AxUiElementRef)
+        }
+    }
+
+    unsafe fn caret_rect(focused: AxUiElementRef) -> Option<CGRect> {
+        let range_attr = cfstring_from_static(b"AXSelectedTextRange\0")?;
+        let Some(bounds_attr) = cfstring_from_static(b"AXBoundsForRange\0") else {
+            CFRelease(range_attr);
+            return None;
+        };
+
+        let mut range_value: CFTypeRef = std::ptr::null();
+        let range_err = AXUIElementCopyAttributeValue(focused, range_attr, &mut range_value);
+        CFRelease(range_attr);
+        if range_err != AX_ERROR_SUCCESS || range_value.is_null() {
+            CFRelease(bounds_attr);
+            return None;
+        }
+
+        let mut bounds_value: CFTypeRef = std::ptr::null();
+        let bounds_err = AXUIElementCopyParameterizedAttributeValue(
+            focused,
+            bounds_attr,
+            range_value,
+            &mut bounds_value,
+        );
+        CFRelease(bounds_attr);
+        CFRelease(range_value);
+        if bounds_err != AX_ERROR_SUCCESS || bounds_value.is_null() {
+            return None;
+        }
+
+        let mut rect = CGRect::default();
+        let ok = AXValueGetValue(
+            bounds_value as AxValueRef,
+            K_AX_VALUE_CG_RECT_TYPE,
+            &mut rect as *mut _ as *mut c_void,
+        );
+        CFRelease(bounds_value);
+        (ok != 0).then_some(rect)
+    }
+
+    unsafe fn element_rect(focused: AxUiElementRef) -> Option<CGRect> {
+        let position_attr = cfstring_from_static(b"AXPosition\0")?;
+        let Some(size_attr) = cfstring_from_static(b"AXSize\0") else {
+            CFRelease(position_attr);
+            return None;
+        };
+
+        let mut position_value: CFTypeRef = std::ptr::null();
+        let position_err =
+            AXUIElementCopyAttributeValue(focused, position_attr, &mut position_value);
+        CFRelease(position_attr);
+        if position_err != AX_ERROR_SUCCESS || position_value.is_null() {
+            CFRelease(size_attr);
+            return None;
+        }
+
+        let mut point = CGPoint::default();
+        let point_ok = AXValueGetValue(
+            position_value as AxValueRef,
+            K_AX_VALUE_CG_POINT_TYPE,
+            &mut point as *mut _ as *mut c_void,
+        );
+        CFRelease(position_value);
+        if point_ok == 0 {
+            CFRelease(size_attr);
+            return None;
+        }
+
+        let mut size_value: CFTypeRef = std::ptr::null();
+        let size_err = AXUIElementCopyAttributeValue(focused, size_attr, &mut size_value);
+        CFRelease(size_attr);
+        if size_err != AX_ERROR_SUCCESS || size_value.is_null() {
+            return Some(CGRect {
+                origin: point,
+                size: CGSize {
+                    width: 1.0,
+                    height: 1.0,
+                },
+            });
+        }
+
+        let mut size = CGSize::default();
+        let size_ok = AXValueGetValue(
+            size_value as AxValueRef,
+            K_AX_VALUE_CG_SIZE_TYPE,
+            &mut size as *mut _ as *mut c_void,
+        );
+        CFRelease(size_value);
+        if size_ok == 0 {
+            return Some(CGRect {
+                origin: point,
+                size: CGSize {
+                    width: 1.0,
+                    height: 1.0,
+                },
+            });
+        }
+
+        Some(CGRect {
+            origin: point,
+            size,
+        })
+    }
+}
+
+/// 把窗口左上角 `(x, y)`（同 area 同坐标系，physical px）夹到给定矩形内，
+/// **保证整窗（含自身 w×h）落在 area 内可见**。area 为工作区时即可避开任务栏。
+///
+/// 纯函数，无 Win32 依赖，便于单测多显示器 / 负原点 / 异常 DPI 输入。issue #470：
+/// 此前 Windows 分支只夹上边（`y.max(mon.top)`），左/右/下未夹，多屏负坐标下胶囊
+/// 可能被算到屏外却无任何观测。这里四边都夹。
+///
+/// area 比窗口还小时（`area_right - w < area_left`），`max_x` 退化为 `area_left`，
+/// `clamp` 把左上角收回 area 左上角，保证至少左上角可见、不溢出为负超界。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn clamp_to_monitor(
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    area_left: i32,
+    area_top: i32,
+    area_right: i32,
+    area_bottom: i32,
+) -> (i32, i32) {
+    // 右/下边界 = area 右下角减去窗口自身尺寸，确保整窗可见。
+    // 用 saturating_sub 防 area_right/area_bottom 为极小（含 i32::MIN 近邻）时减法溢出。
+    let max_x = area_right.saturating_sub(w).max(area_left);
+    let max_y = area_bottom.saturating_sub(h).max(area_top);
+    let clamped_x = x.clamp(area_left, max_x);
+    let clamped_y = y.clamp(area_top, max_y);
+    (clamped_x, clamped_y)
+}
+
 /// 把 QA 浮窗放到屏幕底部居中、紧贴胶囊上方。tauri 启动期 + show 之前都会调一次，
 /// 防止用户切换显示器后位置错乱。
 fn position_qa_window<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) -> tauri::Result<()> {
@@ -1924,6 +2256,35 @@ pub(crate) fn position_capsule_bottom_center<R: tauri::Runtime>(
         // 仅当 Win32 取不到前台显示器时，落回下面的 current_monitor 逻辑。
     }
 
+    // macOS：跟随当前 focused input / caret 所在显示器，而不是胶囊窗口
+    // 上一次停留的显示器。这样外接屏上输入时，隐藏态胶囊也能先移动再出现。
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(mon) = focused_input_target_monitor(window) {
+            window.set_size(LogicalSize::new(bounds.width, bounds.height))?;
+            let frame = mon.logical_frame();
+            let (x, y) = bottom_visual_position(
+                frame,
+                bounds.width,
+                capsule_visual_height(translation_active),
+                80.0,
+                bounds.bottom_inset,
+            );
+            log::debug!(
+                "[capsule] mac position: mon=({},{}) size=({}x{}) scale={:.2} -> logical=({:.1},{:.1})",
+                mon.physical_x,
+                mon.physical_y,
+                mon.physical_width,
+                mon.physical_height,
+                mon.scale,
+                x,
+                y
+            );
+            window.set_position(LogicalPosition::new(x, y))?;
+            return Ok(());
+        }
+    }
+
     let monitor = match window.current_monitor()? {
         Some(m) => m,
         None => return Ok(()),
@@ -1999,9 +2360,10 @@ fn capsule_height_for_qa() -> f64 {
 mod tests {
     use super::{
         bottom_center_position, bottom_visual_position, capsule_height_for_qa,
-        capsule_visual_height, capsule_window_bounds, logical_monitor_frame,
-        parse_tray_polish_mode_id, rotate_log_if_too_large, tray_polish_mode_menu_entries,
-        tray_style_menu_enabled, LogicalMonitorFrame, LOG_ROTATE_LIMIT_BYTES,
+        capsule_visual_height, capsule_window_bounds, clamp_to_monitor, logical_monitor_frame,
+        frame_contains_point, frame_distance_to_point_squared, parse_tray_polish_mode_id,
+        rotate_log_if_too_large, tray_polish_mode_menu_entries, tray_style_menu_enabled,
+        LogicalMonitorFrame, LOG_ROTATE_LIMIT_BYTES,
     };
     use crate::types::PolishMode;
     use std::io::Write;
@@ -2117,6 +2479,37 @@ mod tests {
                 width: 2560.0,
                 height: 1440.0,
             }
+        );
+    }
+
+    #[test]
+    fn monitor_frame_contains_points_with_negative_origins() {
+        let frame = LogicalMonitorFrame {
+            x: -1280.0,
+            y: 360.0,
+            width: 1280.0,
+            height: 720.0,
+        };
+
+        assert!(frame_contains_point(frame, -640.0, 720.0));
+        assert!(!frame_contains_point(frame, 10.0, 720.0));
+        assert!(!frame_contains_point(frame, -640.0, 1080.0));
+    }
+
+    #[test]
+    fn monitor_frame_distance_is_zero_inside_and_grows_outside() {
+        let frame = LogicalMonitorFrame {
+            x: 0.0,
+            y: -900.0,
+            width: 1440.0,
+            height: 900.0,
+        };
+
+        assert_eq!(frame_distance_to_point_squared(frame, 100.0, -100.0), 0.0);
+        assert_eq!(frame_distance_to_point_squared(frame, 100.0, 20.0), 400.0);
+        assert_eq!(
+            frame_distance_to_point_squared(frame, -10.0, -910.0),
+            200.0
         );
     }
 
