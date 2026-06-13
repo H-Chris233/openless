@@ -1,16 +1,15 @@
 // History.tsx — 接 Tauri 后端 list_history / delete_history_entry / clear_history。
 // 真实数据来自 ~/Library/Application Support/OpenLess/history.json。
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Icon } from '../components/Icon';
 import { detectOS } from '../components/WindowChrome';
 import { formatComboLabel } from '../lib/hotkey';
-import { clearHistory, deleteHistoryEntry, listHistory, readAudioRecording, retranscribeRecording } from '../lib/ipc';
+import { clearHistory, deleteHistoryEntry, listHistory, readAudioRecording } from '../lib/ipc';
 import type { DictationSession, PolishMode } from '../lib/types';
 import { useHotkeySettings } from '../state/HotkeySettingsContext';
 import { Btn, Card, PageHeader, Pill } from './_atoms';
-import { useMobileLayout } from '../lib/useMobileLayout';
 
 function useFilters(): Array<{ id: 'all' | PolishMode; label: string }> {
   const { t } = useTranslation();
@@ -36,21 +35,15 @@ function useModeLabel(): Record<PolishMode, string> {
 export function History() {
   const { t } = useTranslation();
   const os = detectOS();
-  const mobile = useMobileLayout();
   const FILTERS = useFilters();
   const MODE_LABEL = useModeLabel();
   const [filter, setFilter] = useState<'all' | PolishMode>('all');
-  // issue #612：历史页顶部原为静态 div，只显示统计、不可输入。改为真实搜索框。
-  const [query, setQuery] = useState('');
-  const searchRef = useRef<HTMLInputElement>(null);
   const [items, setItems] = useState<DictationSession[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [justCopied, setJustCopied] = useState(false);
-  // issue #613：「重新转录」进行中的条目 id（按钮转 loading、防重复点击）。
-  const [retranscribingId, setRetranscribingId] = useState<string | null>(null);
   // 录音文件 lazily-detected missing 状态：retention / 条数 cap 清理后磁盘上 wav
   // 可能已被删，但 history 条目 hasAudioRecording 仍写 true。任一组件
   // （播放 / 导出）首次 IPC 拿到 'recording not found' 时把 id 加进来，
@@ -87,29 +80,10 @@ export function History() {
     void refresh();
   }, [refresh]);
 
-  // ⌘K / Ctrl+K 聚焦搜索框（issue #612 验收可选项）。
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
-        e.preventDefault();
-        searchRef.current?.focus();
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, []);
-
-  const filtered = useMemo(() => {
-    const byMode = filter === 'all' ? items : items.filter(s => s.mode === filter);
-    const q = query.trim().toLowerCase();
-    if (!q) return byMode;
-    return byMode.filter(
-      s =>
-        s.finalText.toLowerCase().includes(q) ||
-        s.rawTranscript.toLowerCase().includes(q) ||
-        (s.appName ?? '').toLowerCase().includes(q),
-    );
-  }, [items, filter, query]);
+  const filtered = useMemo(
+    () => (filter === 'all' ? items : items.filter(s => s.mode === filter)),
+    [items, filter],
+  );
   const item = useMemo(
     () => filtered.find(s => s.id === selectedId) || filtered[0],
     [filtered, selectedId],
@@ -189,28 +163,6 @@ export function History() {
     }
   };
 
-  // issue #613：对失败条目的归档录音用当前 provider 重新转录，成功后局部刷新该条。
-  const onRetranscribe = async () => {
-    if (!item || retranscribingId) return;
-    const targetId = item.id;
-    setRetranscribingId(targetId);
-    setActionError(null);
-    try {
-      const updated = await retranscribeRecording(targetId);
-      setItems(prev => prev.map(s => (s.id === targetId ? updated : s)));
-    } catch (error) {
-      console.error('[history] failed to retranscribe recording', error);
-      const msg = errorMessage(error);
-      // wav 已被清理：隐藏录音相关操作，不当作用户错误。
-      if (msg.includes('recording not found') || msg.includes('not found')) {
-        markAudioMissing(targetId);
-      }
-      setActionError(t('history.retranscribeFailed', { err: msg }));
-    } finally {
-      setRetranscribingId(null);
-    }
-  };
-
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <PageHeader
@@ -224,39 +176,17 @@ export function History() {
           </div>
         }
       />
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: mobile ? '1fr' : '300px 1fr',
-          gap: 14,
-          flex: mobile ? '0 0 auto' : 1,
-          minHeight: mobile ? undefined : 0,
-        }}
-      >
-        <Card padding={0} style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden', maxHeight: mobile ? 360 : undefined }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '300px 1fr', gap: 14, flex: 1, minHeight: 0 }}>
+        <Card padding={0} style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
           <div style={{ padding: '12px 14px', borderBottom: '0.5px solid var(--ol-line)' }}>
             <div style={{
               display: 'flex', alignItems: 'center', gap: 6,
-              padding: '6px 10px',
-              border: '0.5px solid var(--ol-line-strong)', borderRadius: 'var(--ol-control-radius)',
+              padding: '6px 10px', fontSize: 12,
+              border: '0.5px solid var(--ol-line-strong)', borderRadius: 8,
               background: 'var(--ol-surface-2)', color: 'var(--ol-ink-3)',
             }}>
               <Icon name="search" size={12} />
-              <input
-                ref={searchRef}
-                type="search"
-                value={query}
-                onChange={e => setQuery(e.target.value)}
-                placeholder={t('history.searchPlaceholder', { shortcut: os === 'mac' ? '⌘K' : 'Ctrl+K' })}
-                style={{
-                  flex: 1, minWidth: 0, outline: 'none', border: 0,
-                  background: 'transparent', fontSize: 12, color: 'var(--ol-ink-2)',
-                  fontFamily: 'inherit',
-                }}
-              />
-            </div>
-            <div style={{ marginTop: 8, fontSize: 11, color: 'var(--ol-ink-4)' }}>
-              {t('history.summary', { total: items.length, shown: filtered.length })}
+              <span style={{ flex: 1 }}>{t('history.summary', { total: items.length, shown: filtered.length })}</span>
             </div>
             <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 10 }}>
               {FILTERS.map(f => (
@@ -264,10 +194,10 @@ export function History() {
                   key={f.id}
                   onClick={() => setFilter(f.id)}
                   style={{
-                    padding: '3px 9px', fontSize: 11, borderRadius: 'var(--ol-pill-radius)',
-                    border: '0.5px solid ' + (filter === f.id ? 'var(--ol-pill-selected-border)' : 'var(--ol-line-strong)'),
-                    background: filter === f.id ? 'var(--ol-pill-selected-bg)' : 'transparent',
-                    color: filter === f.id ? 'var(--ol-pill-selected-ink)' : 'var(--ol-ink-3)',
+                    padding: '3px 9px', fontSize: 11, borderRadius: 999,
+                    border: '0.5px solid ' + (filter === f.id ? 'var(--ol-ink)' : 'var(--ol-line-strong)'),
+                    background: filter === f.id ? 'var(--ol-ink)' : 'transparent',
+                    color: filter === f.id ? '#fff' : 'var(--ol-ink-3)',
                     cursor: 'default', fontFamily: 'inherit', fontWeight: 500,
                     transition: 'background 0.16s var(--ol-motion-quick), color 0.16s var(--ol-motion-quick), border-color 0.16s var(--ol-motion-quick)',
                   }}
@@ -277,7 +207,7 @@ export function History() {
           </div>
           <div className="ol-thinscroll" style={{ flex: 1, overflow: 'auto', padding: 6 }}>
             {actionError && (
-              <div style={{ margin: 8, padding: '9px 10px', borderRadius: 'var(--ol-control-radius)', background: 'rgba(239,68,68,0.08)', color: 'var(--ol-red, #ef4444)', fontSize: 12, lineHeight: 1.45 }}>
+              <div style={{ margin: 8, padding: '9px 10px', borderRadius: 8, background: 'rgba(239,68,68,0.08)', color: 'var(--ol-red, #ef4444)', fontSize: 12, lineHeight: 1.45 }}>
                 {actionError}
               </div>
             )}
@@ -290,9 +220,7 @@ export function History() {
             )}
             {!loading && !loadError && filtered.length === 0 && (
               <div style={{ padding: 16, fontSize: 12, color: 'var(--ol-ink-4)' }}>
-                {query.trim()
-                  ? t('history.searchNoMatch', { query: query.trim() })
-                  : t('history.empty', { trigger: prefs ? formatComboLabel(prefs.dictationHotkey) : '' })}
+                {t('history.empty', { trigger: prefs ? formatComboLabel(prefs.dictationHotkey) : '' })}
               </div>
             )}
             {!loadError && filtered.map(s => (
@@ -302,7 +230,7 @@ export function History() {
                 style={{
                   width: '100%', padding: '10px 12px', textAlign: 'left',
                   display: 'flex', flexDirection: 'column', gap: 4,
-                  border: 0, borderRadius: 'var(--ol-control-radius)',
+                  border: 0, borderRadius: 8,
                   background: selectedId === s.id ? 'rgba(37,99,235,0.06)' : 'transparent',
                   boxShadow: selectedId === s.id ? 'inset 2px 0 0 var(--ol-blue)' : 'none',
                   cursor: 'default', fontFamily: 'inherit', marginBottom: 1,
@@ -326,29 +254,17 @@ export function History() {
           </div>
         </Card>
 
-        <Card padding={mobile ? 16 : 20} className="ol-thinscroll" style={{ overflow: mobile ? 'visible' : 'auto' }}>
+        <Card padding={20} className="ol-thinscroll" style={{ overflow: 'auto' }}>
           {item ? (
             <>
-              <div style={{ display: 'flex', alignItems: mobile ? 'flex-start' : 'center', justifyContent: 'space-between', marginBottom: 14, gap: 10, flexDirection: mobile ? 'column' : 'row' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                   <span style={{ fontSize: 13, fontFamily: 'var(--ol-font-mono)', color: 'var(--ol-ink-3)' }}>{formatTime(item.createdAt)}</span>
                   <Pill size="sm" tone="default">{MODE_LABEL[item.mode]}</Pill>
                   <span style={{ fontSize: 11, color: 'var(--ol-ink-4)' }}>{formatDuration(item.durationMs, t)}</span>
                 </div>
-                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                <div style={{ display: 'flex', gap: 6 }}>
                   <Btn icon={justCopied ? 'check' : 'copy'} variant="ghost" size="sm" onClick={() => void onCopy()}>{justCopied ? t('common.copied') : t('common.copy')}</Btn>
-                  {/* issue #613：失败条目（有错误码）且录音仍在时，提供「重新转录」。 */}
-                  {item.errorCode && item.hasAudioRecording && !audioMissingIds.has(item.id) && (
-                    <Btn
-                      icon="refresh"
-                      variant="ghost"
-                      size="sm"
-                      disabled={retranscribingId === item.id}
-                      onClick={() => void onRetranscribe()}
-                    >
-                      {retranscribingId === item.id ? t('history.retranscribing') : t('history.retranscribe')}
-                    </Btn>
-                  )}
                   {item.hasAudioRecording && !audioMissingIds.has(item.id) && (
                     <Btn icon="download" variant="ghost" size="sm" onClick={() => void onExportAudio()}>{t('history.exportRecording')}</Btn>
                   )}
@@ -362,14 +278,14 @@ export function History() {
                   key={item.id}
                 />
               )}
-              <div style={{ display: 'grid', gridTemplateColumns: mobile ? '1fr' : '1fr 1fr', gap: 12 }}>
-                <div style={{ padding: 14, border: '0.5px solid var(--ol-line)', borderRadius: 'var(--ol-r-md)', background: 'var(--ol-surface-2)' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                <div style={{ padding: 14, border: '0.5px solid var(--ol-line)', borderRadius: 10, background: 'var(--ol-surface-2)' }}>
                   <Pill size="sm" tone="outline" style={{ marginBottom: 10 }}>{t('history.rawLabel')}</Pill>
                   <p style={{ margin: 0, fontSize: 13, lineHeight: 1.7, color: 'var(--ol-ink-2)', whiteSpace: 'pre-wrap' }}>
                     {item.rawTranscript || t('history.rawEmpty')}
                   </p>
                 </div>
-                <div style={{ padding: 14, border: '0.5px solid var(--ol-blue)', borderRadius: 'var(--ol-r-md)', background: 'var(--ol-blue-soft)' }}>
+                <div style={{ padding: 14, border: '0.5px solid var(--ol-blue)', borderRadius: 10, background: 'var(--ol-blue-soft)' }}>
                   <Pill size="sm" tone="blue" style={{ marginBottom: 10 }}>{MODE_LABEL[item.mode]}</Pill>
                   <p style={{ margin: 0, fontSize: 13, lineHeight: 1.7, color: 'var(--ol-ink)', whiteSpace: 'pre-line' }}>
                     {item.finalText}

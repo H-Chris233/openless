@@ -41,7 +41,7 @@ function AudioBars({ level }: AudioBarsProps) {
             display: 'inline-block',
             width: 3,
             height: base + (max - base) * visualVoice * env,
-            borderRadius: 'var(--ol-pill-radius)',
+            borderRadius: 999,
             background: 'var(--ol-blue)',
             opacity: 0.82,
             transformOrigin: 'center',
@@ -113,12 +113,12 @@ function CircleButton({ variant, enabled, onClick }: CircleButtonProps) {
       style={{
         width: 28,
         height: 28,
-        borderRadius: 'var(--ol-pill-radius)',
-        background: isCancel ? 'var(--ol-capsule-cancel-bg)' : 'var(--ol-capsule-confirm-bg)',
+        borderRadius: 999,
+        background: isCancel ? 'rgba(255, 255, 255, 0.55)' : 'rgba(255, 255, 255, 0.92)',
         backdropFilter: useBackdrop ? 'blur(12px) saturate(160%)' : 'none',
         WebkitBackdropFilter: useBackdrop ? 'blur(12px) saturate(160%)' : 'none',
-        color: isCancel ? 'var(--ol-capsule-cancel-ink)' : 'var(--ol-capsule-confirm-ink)',
-        border: '0.8px solid var(--ol-glass-border)',
+        color: 'var(--ol-ink)',
+        border: '0.8px solid rgba(0, 0, 0, 0.08)',
         display: 'inline-flex',
         alignItems: 'center',
         justifyContent: 'center',
@@ -265,11 +265,11 @@ function Pill({ os, state, level, insertedChars, message, operating, onCancel, o
         width: metrics.width,
         height: metrics.height,
         boxSizing: metrics.boxSizing,
-        borderRadius: 'var(--ol-pill-radius)',
-        border: '1px solid var(--ol-glass-border)',
+        borderRadius: 999,
+        border: '1px solid rgba(255, 255, 255, 0.55)',
         boxShadow: os === 'win'
-          ? `0 10px 24px -14px rgba(0, 0, 0, ${(0.24 + ambient * 0.06).toFixed(3)}), var(--ol-pill-shadow)`
-          : `0 18px 50px -10px rgba(0, 0, 0, ${shadowAlpha.toFixed(3)}), var(--ol-pill-shadow)`,
+          ? `0 10px 24px -14px rgba(0, 0, 0, ${(0.24 + ambient * 0.06).toFixed(3)}), 0 0 0 0.5px rgba(0, 0, 0, 0.08), inset 0 1px 0 0 rgba(255, 255, 255, 0.8)`
+          : `0 18px 50px -10px rgba(0, 0, 0, ${shadowAlpha.toFixed(3)}), 0 0 0 0.5px rgba(0, 0, 0, 0.08), inset 0 1px 0 0 rgba(255, 255, 255, 0.8)`,
         color: 'var(--ol-ink)',
         fontFamily: 'var(--ol-font-sans)',
         transform: `scale(${scale.toFixed(4)})`,
@@ -446,11 +446,11 @@ export function Capsule() {
             alignItems: 'center',
             gap: 5,
             padding: '3px 10px',
-            borderRadius: 'var(--ol-pill-radius)',
+            borderRadius: 999,
             fontSize: 10.5,
             fontWeight: 600,
             color: 'var(--ol-blue)',
-            background: 'var(--ol-glass-bg-strong)',
+            background: 'rgba(255, 255, 255, 0.78)',
             backdropFilter: 'blur(20px) saturate(180%)',
             WebkitBackdropFilter: 'blur(20px) saturate(180%)',
             border: '0.5px solid rgba(37, 99, 235, 0.25)',
@@ -465,7 +465,7 @@ export function Capsule() {
             willChange: 'opacity, transform',
           }}
         >
-          <span style={{ width: 5, height: 5, borderRadius: 'var(--ol-pill-radius)', background: 'var(--ol-blue)' }} />
+          <span style={{ width: 5, height: 5, borderRadius: 999, background: 'var(--ol-blue)' }} />
           {t('capsule.translating')}
         </div>
       </div>

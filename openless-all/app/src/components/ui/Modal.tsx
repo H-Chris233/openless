@@ -22,7 +22,7 @@ export function Modal({ children, onClose, zIndex = 50, width = 'min(560px, 100%
       style={{
         position: 'fixed',
         inset: 0,
-        background: 'var(--ol-overlay-bg)',
+        background: 'rgba(0,0,0,0.22)',
         display: 'grid',
         placeItems: 'center',
         zIndex,
@@ -36,10 +36,10 @@ export function Modal({ children, onClose, zIndex = 50, width = 'min(560px, 100%
           width,
           maxHeight: '85vh',
           overflow: 'auto',
-          borderRadius: 'var(--ol-modal-radius)',
-          background: 'var(--ol-card-bg)',
-          border: '0.5px solid var(--ol-card-border)',
-          boxShadow: 'var(--ol-shadow-lg)',
+          borderRadius: 16,
+          background: 'var(--ol-surface)',
+          border: '0.5px solid var(--ol-line-strong)',
+          boxShadow: '0 18px 42px rgba(0,0,0,0.18)',
           padding: 22,
           animation: 'ol-modal-card-in 0.24s var(--ol-motion-spring)',
         }}

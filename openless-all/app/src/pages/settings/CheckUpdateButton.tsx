@@ -70,9 +70,9 @@ export function CheckUpdateButton({ channel }: { channel: UpdateChannel }) {
 }
 
 const checkBtnStyle: CSSProperties = {
-  padding: '5px 10px', fontSize: 12, borderRadius: 'var(--ol-r-sm)',
+  padding: '5px 10px', fontSize: 12, borderRadius: 6,
   border: '0.5px solid var(--ol-line-strong)',
-  background: 'var(--ol-surface-solid)',
+  background: '#fff',
   cursor: 'default', fontFamily: 'inherit',
   display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6,
   minWidth: 84,

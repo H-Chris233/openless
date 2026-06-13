@@ -279,7 +279,7 @@ export function Vocab() {
                 onClick={() => togglePreset(p.id)}
                 style={{
                   border: '0.5px solid var(--ol-line-strong)',
-                  borderRadius: 'var(--ol-pill-radius)',
+                  borderRadius: 999,
                   padding: '4px 10px',
                   fontSize: 12,
                   background: selectedPresetIds.includes(p.id) ? 'var(--ol-blue-soft)' : 'var(--ol-surface-2)',
@@ -322,14 +322,14 @@ export function Vocab() {
                 value={rulePatternDraft}
                 onChange={e => setRulePatternDraft(e.target.value)}
                 placeholder={t('vocab.corrections.patternPlaceholder')}
-                style={{ height: 32, padding: '0 10px', border: '0.5px solid var(--ol-line-strong)', borderRadius: 'var(--ol-control-radius)', background: 'var(--ol-surface-2)' }}
+                style={{ height: 32, padding: '0 10px', border: '0.5px solid var(--ol-line-strong)', borderRadius: 8, background: 'var(--ol-surface-2)' }}
               />
               <span style={{ color: 'var(--ol-ink-4)', fontSize: 12 }}>→</span>
               <input
                 value={ruleReplacementDraft}
                 onChange={e => setRuleReplacementDraft(e.target.value)}
                 placeholder={t('vocab.corrections.replacementPlaceholder')}
-                style={{ height: 32, padding: '0 10px', border: '0.5px solid var(--ol-line-strong)', borderRadius: 'var(--ol-control-radius)', background: 'var(--ol-surface-2)' }}
+                style={{ height: 32, padding: '0 10px', border: '0.5px solid var(--ol-line-strong)', borderRadius: 8, background: 'var(--ol-surface-2)' }}
               />
               <Btn size="sm" variant="primary" onClick={() => void onAddCorrectionRule()}>{t('common.add')}</Btn>
             </div>
@@ -362,7 +362,7 @@ export function Vocab() {
               style={{
                 flex: 1, height: 36, padding: '0 12px',
                 border: '0.5px solid var(--ol-line-strong)',
-                borderRadius: 'var(--ol-control-radius)', fontSize: 13,
+                borderRadius: 8, fontSize: 13,
                 fontFamily: 'inherit', outline: 'none',
                 background: 'var(--ol-surface-2)',
                 transition: 'border-color 0.16s var(--ol-motion-quick), box-shadow 0.18s var(--ol-motion-soft), background 0.16s var(--ol-motion-quick)',
@@ -412,7 +412,7 @@ function CorrectionRuleChip({ rule, onToggle, onRemove }: CorrectionRuleChipProp
       style={{
         display: 'inline-flex', alignItems: 'center', gap: 6,
         padding: '5px 8px 5px 10px',
-        borderRadius: 'var(--ol-pill-radius)',
+        borderRadius: 999,
         border: '0.5px solid var(--ol-line-strong)',
         background: enabled ? 'var(--ol-surface)' : 'var(--ol-surface-2)',
         opacity: enabled ? 1 : 0.55,
@@ -430,7 +430,7 @@ function CorrectionRuleChip({ rule, onToggle, onRemove }: CorrectionRuleChipProp
       <button
         onClick={onRemove}
         aria-label={t('vocab.corrections.removeAria')}
-        style={{ width: 18, height: 18, borderRadius: 'var(--ol-pill-radius)', border: 0, background: 'rgba(0,0,0,0.06)', color: 'var(--ol-ink-4)', cursor: 'default' }}
+        style={{ width: 18, height: 18, borderRadius: 999, border: 0, background: 'rgba(0,0,0,0.06)', color: 'var(--ol-ink-4)', cursor: 'default' }}
       >
         ×
       </button>
@@ -451,12 +451,12 @@ function VocabChip({ entry, onRemove, onToggle }: VocabChipProps) {
     <span
       style={{
         // 父 flex 容器 minHeight: 80 会让 flex item 在 align-self 默认 stretch 下被拉到
-        // 80px 高，chip borderRadius: 'var(--ol-pill-radius)' 把高度变大渲染成"超大椭圆"。alignSelf:flex-start
+        // 80px 高，chip borderRadius: 999 把高度变大渲染成"超大椭圆"。alignSelf:flex-start
         // 阻止拉伸，chip 始终保持 content 高度。
         alignSelf: 'flex-start',
         display: 'inline-flex', alignItems: 'center', gap: 6,
         padding: '5px 10px 5px 12px',
-        borderRadius: 'var(--ol-pill-radius)',
+        borderRadius: 999,
         border: '0.5px solid var(--ol-line-strong)',
         background: enabled ? (entry.hits > 0 ? 'var(--ol-blue-soft)' : 'var(--ol-surface)') : 'var(--ol-surface-2)',
         opacity: enabled ? 1 : 0.55,
@@ -476,10 +476,10 @@ function VocabChip({ entry, onRemove, onToggle }: VocabChipProps) {
       <span
         style={{
           minWidth: 18, height: 18, padding: '0 5px',
-          borderRadius: 'var(--ol-pill-radius)', fontSize: 10, fontWeight: 600,
+          borderRadius: 999, fontSize: 10, fontWeight: 600,
           display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-          background: entry.hits > 0 && enabled ? 'var(--ol-accent-solid-bg)' : 'rgba(0,0,0,0.06)',
-          color: entry.hits > 0 && enabled ? 'var(--ol-accent-solid-ink)' : 'var(--ol-ink-4)',
+          background: entry.hits > 0 && enabled ? 'var(--ol-blue)' : 'rgba(0,0,0,0.06)',
+          color: entry.hits > 0 && enabled ? '#fff' : 'var(--ol-ink-4)',
           fontFamily: 'var(--ol-font-sans)',
         }}
       >{entry.hits}</span>
@@ -487,7 +487,7 @@ function VocabChip({ entry, onRemove, onToggle }: VocabChipProps) {
         onClick={onRemove}
         aria-label={t('vocab.removeAria')}
         style={{
-          width: 14, height: 14, padding: 0, border: 0, borderRadius: 'var(--ol-pill-radius)',
+          width: 14, height: 14, padding: 0, border: 0, borderRadius: 999,
           background: 'transparent', color: 'var(--ol-ink-4)',
           display: 'inline-flex', alignItems: 'center', justifyContent: 'center', cursor: 'default',
         }}

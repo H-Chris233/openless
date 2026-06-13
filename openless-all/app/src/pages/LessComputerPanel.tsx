@@ -414,11 +414,11 @@ const shellStyle: CSSProperties = {
   height: '100vh',
   display: 'flex',
   flexDirection: 'column',
-  borderRadius: 'var(--ol-bubble-radius)',
+  borderRadius: 14,
   overflow: 'hidden',
-  border: '0.5px solid var(--ol-line-strong)',
-  background: 'var(--ol-panel-bg)',
-  boxShadow: 'var(--ol-shadow-lg)',
+  border: '0.5px solid rgba(0, 0, 0, 0.12)',
+  background: 'rgba(246, 247, 250, 0.88)',
+  boxShadow: '0 18px 44px -18px rgba(15,17,22,.28), 0 0 0 0.5px rgba(255,255,255,.7) inset',
   fontFamily: 'var(--ol-font-sans)',
   color: 'var(--ol-ink)',
   isolation: 'isolate',
@@ -430,8 +430,9 @@ const toolbarStyle: CSSProperties = {
   alignItems: 'center',
   padding: '0 8px',
   borderBottom: '0.5px solid rgba(0, 0, 0, 0.08)',
-  background: 'var(--ol-panel-bg)',
-  boxShadow: 'var(--ol-shadow-sm)',
+  background:
+    'linear-gradient(180deg, rgba(255,255,255,0.74), rgba(238,240,245,0.58))',
+  boxShadow: '0 1px 0 rgba(255,255,255,.55) inset',
   backdropFilter: 'blur(18px) saturate(150%)',
   WebkitBackdropFilter: 'blur(18px) saturate(150%)',
   flexShrink: 0,
@@ -443,7 +444,7 @@ const closeBtnStyle: CSSProperties = {
   width: 22,
   height: 22,
   border: 0,
-  borderRadius: 'var(--ol-r-sm)',
+  borderRadius: 6,
   display: 'inline-flex',
   alignItems: 'center',
   justifyContent: 'center',
@@ -478,10 +479,10 @@ const roleLabelStyle: CSSProperties = {
 const userBubbleStyle: CSSProperties = {
   maxWidth: '85%',
   padding: '8px 12px',
-  borderRadius: 'var(--ol-bubble-radius)',
+  borderRadius: 14,
   borderBottomRightRadius: 4,
-  background: 'var(--ol-accent-solid-bg)',
-  color: 'var(--ol-accent-solid-ink)',
+  background: 'var(--ol-blue)',
+  color: '#fff',
   fontSize: 13,
   lineHeight: 1.55,
   wordBreak: 'break-word',
@@ -490,7 +491,7 @@ const userBubbleStyle: CSSProperties = {
 const assistantBubbleStyle: CSSProperties = {
   maxWidth: '92%',
   padding: '8px 12px',
-  borderRadius: 'var(--ol-bubble-radius)',
+  borderRadius: 14,
   borderBottomLeftRadius: 4,
   background: 'rgba(0,0,0,0.04)',
   fontSize: 13,
@@ -518,7 +519,7 @@ const toolChipStyle: CSSProperties = {
   color: 'var(--ol-ink-2)',
   background: 'rgba(0,0,0,0.045)',
   border: '0.5px solid rgba(0,0,0,0.06)',
-  borderRadius: 'var(--ol-control-radius)',
+  borderRadius: 8,
   padding: '4px 8px',
 };
 
@@ -542,7 +543,7 @@ const approvalCardStyle: CSSProperties = {
   flexDirection: 'column',
   gap: 6,
   padding: '10px 12px',
-  borderRadius: 'var(--ol-r-lg)',
+  borderRadius: 12,
   background: 'rgba(220,38,38,0.05)',
   border: '0.5px solid rgba(220,38,38,0.20)',
 };
@@ -552,7 +553,7 @@ const approvalCmdStyle: CSSProperties = {
   fontSize: 11.5,
   color: 'var(--ol-ink)',
   background: 'rgba(0,0,0,0.05)',
-  borderRadius: 'var(--ol-r-sm)',
+  borderRadius: 6,
   padding: '5px 8px',
   wordBreak: 'break-all',
 };
@@ -563,25 +564,25 @@ const approvalRerunWarningStyle: CSSProperties = {
   color: 'rgb(180,83,9)',
   background: 'rgba(245,158,11,0.10)',
   border: '0.5px solid rgba(245,158,11,0.25)',
-  borderRadius: 'var(--ol-r-sm)',
+  borderRadius: 6,
   padding: '5px 8px',
 };
 
 const approveBtnStyle: CSSProperties = {
   flex: 1,
   border: 0,
-  borderRadius: 'var(--ol-control-radius)',
+  borderRadius: 8,
   padding: '6px 10px',
   fontSize: 12,
   fontWeight: 600,
   cursor: 'default',
-  background: 'var(--ol-accent-solid-bg)',
-  color: 'var(--ol-accent-solid-ink)',
+  background: 'var(--ol-blue)',
+  color: '#fff',
 };
 
 const denyBtnStyle: CSSProperties = {
   flex: 1,
-  borderRadius: 'var(--ol-control-radius)',
+  borderRadius: 8,
   padding: '6px 10px',
   fontSize: 12,
   fontWeight: 600,
@@ -593,7 +594,7 @@ const denyBtnStyle: CSSProperties = {
 
 const errorRowStyle: CSSProperties = {
   padding: '8px 12px',
-  borderRadius: 'var(--ol-r-md)',
+  borderRadius: 10,
   background: 'rgba(220,38,38,0.06)',
   border: '0.5px solid rgba(220,38,38,0.18)',
 };
@@ -632,7 +633,7 @@ const globalCss = `
                       padding: 1px 5px; border-radius: 4px;
                       background: rgba(0,0,0,0.05); }
 .lc-answer pre      { margin: 0 0 6px; padding: 8px 10px;
-                      border-radius: var(--ol-control-radius); background: rgba(0,0,0,0.05);
+                      border-radius: 8px; background: rgba(0,0,0,0.05);
                       overflow-x: auto; }
 .lc-answer pre code { padding: 0; background: transparent; }
 .lc-answer a        { color: var(--ol-blue); text-decoration: none; }

@@ -924,14 +924,6 @@ export const zhTW: typeof zhCN = {
       ko: '한국어 (Beta)',
       restartHint: '部分原生菜單（系統托盤等）可能需要重啓 App 纔會切換。',
     },
-    appearance: {
-      title: '外觀',
-      desc: '選擇淺色或深色模式，或跟隨系統設置。',
-      label: '主題',
-      followSystem: '跟隨系統',
-      light: '淺色',
-      dark: '深色',
-    },
     remoteInput: {
       title: '遠端輸入',
       enableLabel: '啟用遠端輸入',

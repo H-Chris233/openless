@@ -128,10 +128,10 @@ export function ShortcutRecorder({
   const recordButtonStyle: CSSProperties = {
     fontSize: 12,
     padding: '5px 14px',
-    background: recording ? 'rgba(37,99,235,0.12)' : 'var(--ol-accent-solid-bg)',
-    color: recording ? 'var(--ol-blue)' : 'var(--ol-accent-solid-ink)',
+    background: recording ? 'rgba(37,99,235,0.12)' : 'var(--ol-blue)',
+    color: recording ? 'var(--ol-blue)' : '#fff',
     border: 0,
-    borderRadius: 'var(--ol-r-sm)',
+    borderRadius: 6,
     fontFamily: 'inherit',
     fontWeight: 500,
     cursor: recording || disabled ? 'default' : 'pointer',
@@ -144,7 +144,7 @@ export function ShortcutRecorder({
     background: 'transparent',
     color: 'var(--ol-ink-4)',
     border: '0.5px solid var(--ol-line-strong)',
-    borderRadius: 'var(--ol-r-sm)',
+    borderRadius: 6,
     fontFamily: 'inherit',
     fontWeight: 500,
     cursor: recording ? 'default' : 'pointer',
@@ -160,7 +160,7 @@ export function ShortcutRecorder({
   return (
     <div style={rootStyle}>
       <div style={recorderRowStyle}>
-        <span style={{ padding: '4px 10px', borderRadius: 'var(--ol-r-sm)', background: 'rgba(0,0,0,0.06)', fontSize: 13, fontFamily: 'var(--ol-font-mono)', fontWeight: 500, color: 'var(--ol-ink)' }}>
+        <span style={{ padding: '4px 10px', borderRadius: 6, background: 'rgba(0,0,0,0.06)', fontSize: 13, fontFamily: 'var(--ol-font-mono)', fontWeight: 500, color: 'var(--ol-ink)' }}>
           {formatComboLabel(value)}
         </span>
         <div style={controlsGroupStyle}>
@@ -195,7 +195,7 @@ export function ShortcutRecorder({
           tabIndex={-1}
           onKeyDown={onKeyDown}
           onKeyUp={onKeyUp}
-          style={{ padding: '8px 12px', borderRadius: 'var(--ol-control-radius)', background: 'rgba(37,99,235,0.06)', border: '1px solid rgba(37,99,235,0.2)', fontSize: 12, color: 'var(--ol-blue)', outline: 'none' }}
+          style={{ padding: '8px 12px', borderRadius: 8, background: 'rgba(37,99,235,0.06)', border: '1px solid rgba(37,99,235,0.2)', fontSize: 12, color: 'var(--ol-blue)', outline: 'none' }}
           ref={el => el?.focus()}
         >
           {t('settings.recording.comboRecordHint')}

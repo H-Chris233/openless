@@ -31,7 +31,7 @@ const consoleStyle: CSSProperties = {
   minHeight: 96,
   maxHeight: 260,
   overflow: 'auto',
-  borderRadius: 'var(--ol-r-md)',
+  borderRadius: 10,
   background: '#0f1117',
   color: '#d7dbe0',
   fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',

@@ -750,7 +750,7 @@ export const en: typeof zhCN = {
       volcengineMappingNote: 'Secret Key is not required right now. Resource ID defaults to volc.seedasr.sauc.duration.',
       localAsrActiveNotice: 'Local ASR ({{name}}) is currently active. Switch or disable it from the Advanced tab.',
       localAsrTakeoverHint: 'Once "{{name}}" is enabled, the ASR provider will be taken over.',
-      asrProviderTakenOver: 'ASR provider taken over',
+      asrProviderTakenOver: 'A local engine is active. Pick another provider in the dropdown above to switch (the local engine stops automatically); manage local models under Advanced → Local models.',
       localAsrHint: 'Runs on this machine, no API key needed. Download the model from HuggingFace.',
       foundryLocalAsrHint: 'Runs on this device, no ASR API key needed. First use downloads runtime components and model.',
       localAsrPerformanceWarning: 'Local inference is slower than cloud ASR with potentially lower Chinese accuracy. Best for offline or privacy-sensitive use.',
@@ -957,14 +957,6 @@ export const en: typeof zhCN = {
       ja: '日本語 (Beta)',
       ko: '한국어 (Beta)',
       restartHint: 'Some native menus (system tray, etc.) may require an app restart to fully switch.',
-    },
-    appearance: {
-      title: 'Appearance',
-      desc: 'Choose light or dark mode, or follow your system setting.',
-      label: 'Theme',
-      followSystem: 'Follow system',
-      light: 'Light',
-      dark: 'Dark',
     },
     remoteInput: {
       title: 'Remote Input',

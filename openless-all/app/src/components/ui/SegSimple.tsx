@@ -1,41 +1,32 @@
 // SegSimple — segmented control used in the Settings modal sub-sections.
 
-export type SegOption = { value: string; label: string };
+import { useState } from 'react';
 
 interface SegSimpleProps {
-  options: SegOption[];
-  value: string;
-  onChange?: (value: string) => void;
+  options: string[];
+  active: string;
 }
 
-export function SegSimple({ options, value, onChange }: SegSimpleProps) {
+export function SegSimple({ options, active }: SegSimpleProps) {
+  const [v, setV] = useState(active);
   return (
-    <div
-      role="radiogroup"
-      style={{ display: 'inline-flex', padding: 2, borderRadius: 'var(--ol-control-radius)', background: 'var(--ol-segmented-bg)' }}
-    >
-      {options.map((o) => {
-        const selected = value === o.value;
-        return (
+    <div style={{ display: 'inline-flex', padding: 2, borderRadius: 8, background: 'rgba(0,0,0,0.05)' }}>
+      {options.map((o) => (
         <button
-          key={o.value}
-          type="button"
-          role="radio"
-          aria-checked={selected}
-          onClick={() => onChange?.(o.value)}
+          key={o}
+          onClick={() => setV(o)}
           style={{
-            padding: '5px 12px', fontSize: 12, fontWeight: 500, border: 0, borderRadius: 'var(--ol-r-sm)',
+            padding: '5px 12px', fontSize: 12, fontWeight: 500, border: 0, borderRadius: 6,
             fontFamily: 'inherit',
-            background: selected ? 'var(--ol-segmented-active-bg)' : 'transparent',
-            color: selected ? 'var(--ol-ink)' : 'var(--ol-ink-3)',
-            boxShadow: selected ? 'var(--ol-segmented-active-shadow)' : 'none',
+            background: v === o ? '#fff' : 'transparent',
+            color: v === o ? 'var(--ol-ink)' : 'var(--ol-ink-3)',
+            boxShadow: v === o ? '0 1px 2px rgba(0,0,0,.08)' : 'none',
             cursor: 'default',
           }}
         >
-          {o.label}
+          {o}
         </button>
-        );
-      })}
+      ))}
     </div>
   );
 }

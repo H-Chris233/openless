@@ -124,7 +124,7 @@ export function GithubLoginModal({ onClose, onSuccess }: GithubLoginModalProps) 
           title={t('common.close')}
           onClick={close}
           style={{
-            width: 28, height: 28, borderRadius: 'var(--ol-control-radius)',
+            width: 28, height: 28, borderRadius: 8,
             display: 'inline-grid', placeItems: 'center',
             border: '0.5px solid var(--ol-line-strong)',
             background: 'var(--ol-surface)',
@@ -150,7 +150,7 @@ export function GithubLoginModal({ onClose, onSuccess }: GithubLoginModalProps) 
             </div>
             <div style={{
               display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12,
-              padding: 18, borderRadius: 'var(--ol-r-lg)',
+              padding: 18, borderRadius: 12,
               border: '0.5px solid var(--ol-line-strong)',
               background: 'var(--ol-surface-2)',
             }}>
@@ -174,7 +174,7 @@ export function GithubLoginModal({ onClose, onSuccess }: GithubLoginModalProps) 
             </div>
             <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', textAlign: 'center', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
               <span style={{
-                display: 'inline-block', width: 8, height: 8, borderRadius: 'var(--ol-pill-radius)',
+                display: 'inline-block', width: 8, height: 8, borderRadius: 999,
                 background: 'var(--ol-blue)', animation: 'ol-pulse 1.4s ease-in-out infinite',
               }} />
               {t('marketplace.oauth.waiting')}
@@ -197,7 +197,7 @@ export function GithubLoginModal({ onClose, onSuccess }: GithubLoginModalProps) 
         {phase.kind === 'error' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             <div style={{
-              padding: 12, borderRadius: 'var(--ol-r-md)',
+              padding: 12, borderRadius: 10,
               border: '0.5px solid rgba(239,68,68,0.3)',
               background: 'rgba(239,68,68,0.06)',
               color: '#b91c1c',

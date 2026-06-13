@@ -115,7 +115,7 @@ export function RemoteInputSection() {
 
   const smallBtn: CSSProperties = {
     padding: '4px 10px',
-    borderRadius: 'var(--ol-control-radius)',
+    borderRadius: 8,
     fontSize: 12,
     cursor: 'pointer',
     border: '0.5px solid var(--ol-line-strong)',
@@ -161,13 +161,13 @@ export function RemoteInputSection() {
               }
               style={{
                 padding: '5px 12px',
-                borderRadius: 'var(--ol-control-radius)',
+                borderRadius: 8,
                 fontSize: 12.5,
                 cursor: 'pointer',
                 border: '0.5px solid var(--ol-line-strong)',
                 background:
-                  mode === m ? 'var(--ol-accent-solid-bg)' : 'var(--ol-surface-2)',
-                color: mode === m ? 'var(--ol-accent-solid-ink)' : 'var(--ol-ink)',
+                  mode === m ? 'var(--ol-blue)' : 'var(--ol-surface-2)',
+                color: mode === m ? '#fff' : 'var(--ol-ink)',
               }}
             >
               {t(
