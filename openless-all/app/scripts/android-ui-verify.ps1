@@ -58,7 +58,11 @@ if (-not $apk) {
 
 Write-Host "Installing $($apk.FullName) ..."
 adb logcat -c
-adb install -r $apk.FullName
+adb shell pm uninstall --user 0 com.openless.app 2>$null
+if ($LASTEXITCODE -ne 0) {
+    adb uninstall com.openless.app 2>$null
+}
+adb install $apk.FullName
 
 Write-Host "Starting MainActivity ..."
 adb shell am start -n com.openless.app/.MainActivity
@@ -73,9 +77,11 @@ adb shell dumpsys package com.openless.app | Set-Content -Path (Join-Path $Proje
 
 function Capture-Screen([string]$label) {
     $out = Join-Path $shotDir "openless-screenshot-$label-$stamp.png"
-    $bytes = adb exec-out screencap -p
-  if ($bytes) {
-        [System.IO.File]::WriteAllBytes($out, $bytes)
+    $tmp = Join-Path $env:TEMP "openless-screencap-$label.png"
+    adb shell screencap -p /sdcard/openless-ui-$label.png
+    adb pull /sdcard/openless-ui-$label.png $tmp | Out-Null
+    if (Test-Path $tmp) {
+        Move-Item -Force $tmp $out
         Write-Host "Screenshot: $out"
     }
 }
