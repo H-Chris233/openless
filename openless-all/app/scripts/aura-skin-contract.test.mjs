@@ -3,6 +3,12 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 
+// AURA 界面大改已回退到 beta-3 外观（commit 5671805），随之删除了 themeMode.ts /
+// ThemeSection、solid-button token（--ol-*-solid-*）与 .ol-aura-* / .ol-app-shell-bg
+// 等 AURA 专属皮肤类。本契约相应精简：只保留回退后仍存在、且仍在守护的护栏 ——
+// WCAG 对比度、Style 页主题 token，以及「禁止硬编码白底 / 坏配色组合 / 引号包裹的
+// CSS 变量」的全量源码扫描（commit 760f662 修复暗色白底就依赖这条）。
+
 const root = new URL('../', import.meta.url);
 
 async function read(relPath) {
@@ -16,7 +22,7 @@ function escapeRegExp(value) {
 function extractCssBlock(css, selector) {
   const escapedSelector = escapeRegExp(selector);
   const match = css.match(new RegExp(`${escapedSelector}\\s*\\{([\\s\\S]*?)\\n\\}`));
-  assert.ok(match, `tokens.css must contain ${selector} block`);
+  assert.ok(match, `${selector} block must exist`);
   return match[1];
 }
 
@@ -117,17 +123,6 @@ function contrastRatioOverBackground(foreground, background) {
   return contrastRatio(effectiveFg, background);
 }
 
-function assertSolidContrast(tokens, label, bgToken, inkToken, minRatio = 4.5) {
-  const bg = resolveTokenValue(bgToken, tokens);
-  const ink = resolveTokenValue(inkToken, tokens);
-  const ratio = contrastRatio(ink, bg);
-  assert.ok(
-    ratio >= minRatio,
-    `${label}: ${inkToken} on ${bgToken} must meet WCAG AA (${ratio.toFixed(2)}:1 < ${minRatio}:1)`,
-  );
-  return ratio;
-}
-
 function assertMutedContrast(tokens, label, bgToken, inkToken, minRatio = 4.5) {
   const bg = resolveTokenValue(bgToken, tokens);
   const ink = resolveTokenValue(inkToken, tokens);
@@ -137,17 +132,6 @@ function assertMutedContrast(tokens, label, bgToken, inkToken, minRatio = 4.5) {
     `${label}: ${inkToken} on ${bgToken} must meet WCAG AA (${ratio.toFixed(2)}:1 < ${minRatio}:1)`,
   );
   return ratio;
-}
-
-function assertUsesClassName(source, className, message) {
-  const escapedClassName = escapeRegExp(className);
-  const patterns = [
-    new RegExp(`className\\s*=\\s*(?:\\{\\s*)?"(?:[^"]*\\s)?${escapedClassName}(?:\\s[^"]*)?"(?:\\s*\\})?`),
-    new RegExp(`className\\s*=\\s*(?:\\{\\s*)?'(?:[^']*\\s)?${escapedClassName}(?:\\s[^']*)?'(?:\\s*\\})?`),
-    new RegExp(`className\\s*=\\s*(?:\\{\\s*)?\`(?:[^\`]*\\s)?${escapedClassName}(?:\\s[^\`]*)?\`(?:\\s*\\})?`),
-  ];
-
-  assert.ok(patterns.some((pattern) => pattern.test(source)), message);
 }
 
 const srcRoot = fileURLToPath(new URL('src/', root));
@@ -167,243 +151,56 @@ async function walkSourceFiles(dirPath, files = []) {
   return files;
 }
 
-assert.throws(
-  () => assertUsesClassName('<div>ol-app-shell-bg</div>', 'ol-app-shell-bg', 'sample must require className usage'),
-  /sample must require className usage/,
-);
-assert.throws(
-  () =>
-    assertUsesClassName(
-      '<div className="foo-ol-app-shell-bg-bar" />',
-      'ol-app-shell-bg',
-      'sample must require an exact class token',
-    ),
-  /sample must require an exact class token/,
-);
-assertUsesClassName(
-  '<div className="foo ol-app-shell-bg bar" />',
-  'ol-app-shell-bg',
-  'sample should accept className usage',
-);
-
-const [tokens, globalCss, shell, settingsModal, overview, settingsTabs, themeMode, stylePage, sourceFiles, remoteStyle] = await Promise.all([
+const [tokens, globalCss, stylePage, sourceFiles, remoteStyle] = await Promise.all([
   read('src/styles/tokens.css'),
   read('src/styles/global.css'),
-  read('src/components/FloatingShell.tsx'),
-  read('src/components/SettingsModal.tsx'),
-  read('src/pages/Overview.tsx'),
-  read('src/pages/settings/tabs.tsx'),
-  read('src/lib/themeMode.ts'),
   read('src/pages/Style.tsx'),
   walkSourceFiles(srcRoot),
   read('src-tauri/src/remote_server/assets/style.css'),
 ]);
 
+// 回退后仍保留的设计 token。
 assert.match(tokens, /--ol-shell-radius:/, 'tokens.css must define --ol-shell-radius');
 assert.match(tokens, /--ol-panel-radius:/, 'tokens.css must define --ol-panel-radius');
 assert.match(tokens, /--ol-aura-shadow:/, 'tokens.css must define --ol-aura-shadow');
 assert.match(tokens, /--ol-font-display:/, 'tokens.css must define --ol-font-display');
 assert.match(tokens, /--ol-on-accent:/, 'tokens.css must define --ol-on-accent');
-assert.match(tokens, /--ol-primary-solid-bg:/, 'tokens.css must define --ol-primary-solid-bg');
-assert.match(tokens, /--ol-primary-solid-ink:/, 'tokens.css must define --ol-primary-solid-ink');
 assert.match(tokens, /--ol-control-radius:/, 'tokens.css must define --ol-control-radius');
-assert.match(tokens, /--ol-accent-solid-bg:/, 'tokens.css must define --ol-accent-solid-bg');
-assert.match(tokens, /--ol-accent-solid-bg-hover:/, 'tokens.css must define --ol-accent-solid-bg-hover');
-assert.match(tokens, /--ol-accent-solid-ink:/, 'tokens.css must define --ol-accent-solid-ink');
-assert.match(tokens, /--ol-danger-solid-bg:/, 'tokens.css must define --ol-danger-solid-bg');
-assert.match(tokens, /--ol-danger-solid-ink:/, 'tokens.css must define --ol-danger-solid-ink');
-
-assert.match(
-  tokens,
-  /\[data-ol-theme='dark'\][\s\S]*--ol-accent-solid-bg:/,
-  'tokens.css must define --ol-accent-solid-bg in dark theme',
-);
-assert.match(
-  tokens,
-  /\[data-ol-theme='dark'\][\s\S]*--ol-accent-solid-bg-hover:/,
-  'tokens.css must define --ol-accent-solid-bg-hover in dark theme',
-);
-assert.match(
-  tokens,
-  /\[data-ol-theme='dark'\][\s\S]*--ol-accent-solid-ink:/,
-  'tokens.css must define --ol-accent-solid-ink in dark theme',
-);
-assert.match(
-  tokens,
-  /\[data-ol-theme='dark'\][\s\S]*--ol-danger-solid-bg:/,
-  'tokens.css must define --ol-danger-solid-bg in dark theme',
-);
-assert.match(
-  tokens,
-  /\[data-ol-theme='dark'\][\s\S]*--ol-danger-solid-ink:/,
-  'tokens.css must define --ol-danger-solid-ink in dark theme',
-);
-
-assert.match(
-  tokens,
-  /\[data-ol-theme='dark'\][\s\S]*--ol-primary-solid-bg:/,
-  'tokens.css must define --ol-primary-solid-bg in dark theme',
-);
-assert.match(
-  tokens,
-  /\[data-ol-theme='dark'\][\s\S]*--ol-primary-solid-ink:/,
-  'tokens.css must define --ol-primary-solid-ink in dark theme',
-);
 
 const lightTokens = parseCustomProperties(extractCssBlock(tokens, ':root'));
-const darkTokens = parseCustomProperties(extractCssBlock(tokens, "[data-ol-theme='dark']"));
 
-const contrastPairs = [
-  {
-    label: 'light accent-solid',
-    tokens: lightTokens,
-    bg: '--ol-accent-solid-bg',
-    ink: '--ol-accent-solid-ink',
-  },
-  {
-    label: 'light primary-solid',
-    tokens: lightTokens,
-    bg: '--ol-primary-solid-bg',
-    ink: '--ol-primary-solid-ink',
-  },
-  {
-    label: 'dark accent-solid',
-    tokens: darkTokens,
-    bg: '--ol-accent-solid-bg',
-    ink: '--ol-accent-solid-ink',
-  },
-  {
-    label: 'dark primary-solid',
-    tokens: darkTokens,
-    bg: '--ol-primary-solid-bg',
-    ink: '--ol-primary-solid-ink',
-  },
-  {
-    label: 'light danger-solid',
-    tokens: lightTokens,
-    bg: '--ol-danger-solid-bg',
-    ink: '--ol-danger-solid-ink',
-  },
-  {
-    label: 'dark danger-solid',
-    tokens: darkTokens,
-    bg: '--ol-danger-solid-bg',
-    ink: '--ol-danger-solid-ink',
-  },
-];
-
-const contrastRatios = {};
-for (const pair of contrastPairs) {
-  contrastRatios[pair.label] = assertSolidContrast(pair.tokens, pair.label, pair.bg, pair.ink);
-}
-
+// 弱化文字（ink-4）在浅色 surface 上仍要满足 WCAG AA。
 const mutedContrastPairs = [
-  {
-    label: 'light ink-4 on surface',
-    tokens: lightTokens,
-    bg: '--ol-surface',
-    ink: '--ol-ink-4',
-  },
-  {
-    label: 'light ink-4 on surface-2',
-    tokens: lightTokens,
-    bg: '--ol-surface-2',
-    ink: '--ol-ink-4',
-  },
+  { label: 'light ink-4 on surface', tokens: lightTokens, bg: '--ol-surface', ink: '--ol-ink-4' },
+  { label: 'light ink-4 on surface-2', tokens: lightTokens, bg: '--ol-surface-2', ink: '--ol-ink-4' },
 ];
-
 const mutedContrastRatios = {};
 for (const pair of mutedContrastPairs) {
   mutedContrastRatios[pair.label] = assertMutedContrast(pair.tokens, pair.label, pair.bg, pair.ink);
 }
 
 const remoteTokens = parseCustomProperties(extractCssBlock(remoteStyle, ':root'));
-
 const remoteMutedContrastPairs = [
-  {
-    label: 'remote ink-4 on surface',
-    tokens: remoteTokens,
-    bg: '--surface',
-    ink: '--ink-4',
-  },
-  {
-    label: 'remote ink-4 on surface-2',
-    tokens: remoteTokens,
-    bg: '--surface-2',
-    ink: '--ink-4',
-  },
+  { label: 'remote ink-4 on surface', tokens: remoteTokens, bg: '--surface', ink: '--ink-4' },
+  { label: 'remote ink-4 on surface-2', tokens: remoteTokens, bg: '--surface-2', ink: '--ink-4' },
 ];
-
 const remoteMutedContrastRatios = {};
 for (const pair of remoteMutedContrastPairs) {
   remoteMutedContrastRatios[pair.label] = assertMutedContrast(pair.tokens, pair.label, pair.bg, pair.ink);
 }
 
-const olFrostBlock = extractCssBlock(globalCss, '.ol-frost');
-assert.doesNotMatch(
-  olFrostBlock,
-  /rgba\(\s*255\s*,\s*255\s*,\s*255/i,
-  '.ol-frost in global.css must not hardcode white rgba background gradients',
-);
-assert.match(globalCss, /background:\s*var\(--ol-frost-bg\)/, '.ol-frost must use --ol-frost-bg token');
-
-assert.match(
-  tokens,
-  /\[data-ol-theme='dark'\][\s\S]*--ol-input-ink:/,
-  'tokens.css must define --ol-input-ink in dark theme',
-);
-assert.match(
-  tokens,
-  /\[data-ol-theme='dark'\][\s\S]*--ol-capsule-confirm-bg:/,
-  'tokens.css must define --ol-capsule-confirm-bg in dark theme',
-);
-assert.match(
-  tokens,
-  /\[data-ol-theme='dark'\][\s\S]*--ol-capsule-confirm-ink:/,
-  'tokens.css must define --ol-capsule-confirm-ink in dark theme',
-);
-
-assert.match(globalCss, /\.ol-app-shell-bg\b/, 'global.css must expose .ol-app-shell-bg');
-assert.match(globalCss, /\.ol-aura-panel\b/, 'global.css must expose .ol-aura-panel');
+// 回退后保持静态磨砂：不得引入动画 halo。
+// 注：原 “.ol-frost 不得硬编码白底” 是 dark-mode 护栏，但 AURA 回退删掉了主题切换
+// （themeMode.ts），当前应用是 light-only、dark token 休眠，beta-3 的白色磨砂是预期外观，
+// 故该护栏暂时移除；若日后恢复 dark-mode 切换，应连同 --ol-frost-bg token 一起加回。
 assert.doesNotMatch(globalCss, /@keyframes ol-aura-halo/, 'global.css must not add an animated halo');
-assert.match(globalCss, /\.ol-aura-card\b/, 'global.css must expose .ol-aura-card');
-assert.match(
-  globalCss,
-  /\.ol-aura-settings\[data-ol-mobile="true"\]/,
-  'global.css must scope mobile settings radius to the settings element itself',
-);
 
-assertUsesClassName(shell, 'ol-app-shell-bg', 'FloatingShell must use the app shell background class');
-assertUsesClassName(shell, 'ol-aura-sidebar', 'FloatingShell must expose an Aura sidebar hook');
-assertUsesClassName(shell, 'ol-aura-panel', 'FloatingShell must expose an Aura panel hook');
-
-assertUsesClassName(settingsModal, 'ol-aura-settings', 'SettingsModal must expose an Aura settings wrapper');
-assertUsesClassName(overview, 'ol-overview-hero', 'Overview must expose a high-visibility overview surface hook');
-
-assert.match(
-  settingsTabs,
-  /import\s+\{[^}]*ThemeSection[^}]*\}\s+from\s+['"]\.\/ThemeSection['"]/,
-  'tabs.tsx GeneralTab must import ThemeSection',
-);
-assert.match(settingsTabs, /<ThemeSection\s*\/?>/, 'tabs.tsx GeneralTab must render ThemeSection');
-
-assert.match(
-  themeMode,
-  /prefers-color-scheme:\s*dark/,
-  'themeMode.ts must listen for prefers-color-scheme: dark',
-);
-assert.match(
-  themeMode,
-  /data-ol-theme|olTheme|dataset\.olTheme/,
-  'themeMode.ts must apply theme via data-ol-theme / dataset.olTheme',
-);
-
+// Style 页必须走主题 token、不得硬编码浅色卡片底色（回退后暗色白底的根源，commit 760f662）。
 const forbiddenStyleCardLightBackgrounds = [
   /rgba\(\s*255\s*,\s*255\s*,\s*255/i,
   /rgba\(\s*248\s*,\s*250\s*,\s*252/i,
   /rgba\(\s*239\s*,\s*246\s*,\s*255/i,
 ];
-
 for (const pattern of forbiddenStyleCardLightBackgrounds) {
   assert.doesNotMatch(
     stylePage,
@@ -411,23 +208,12 @@ for (const pattern of forbiddenStyleCardLightBackgrounds) {
     'Style.tsx must not hardcode light style-card backgrounds (use --ol-style-* tokens)',
   );
 }
+assert.match(stylePage, /--ol-style-card-bg/, 'Style.tsx must reference --ol-style-card-bg for style pack surfaces');
+assert.match(stylePage, /--ol-style-card-ink/, 'Style.tsx must reference --ol-style-card-ink for style pack text');
+assert.match(stylePage, /--ol-style-subtle-bg/, 'Style.tsx must reference --ol-style-subtle-bg for editor subtle surfaces');
 
-assert.match(
-  stylePage,
-  /--ol-style-card-bg/,
-  'Style.tsx must reference --ol-style-card-bg for style pack surfaces',
-);
-assert.match(
-  stylePage,
-  /--ol-style-card-ink/,
-  'Style.tsx must reference --ol-style-card-ink for style pack text',
-);
-assert.match(
-  stylePage,
-  /--ol-style-subtle-bg/,
-  'Style.tsx must reference --ol-style-subtle-bg for editor subtle surfaces',
-);
-
+// 全量源码扫描：注入 CSS 字符串里禁止用引号包裹的 var()；禁止把 --ol-ink 当实心底色；
+// 禁止 --ol-blue / --ol-err 与 --ol-on-accent / --ol-accent-solid-ink 的低对比组合。
 const illegalCssStringPatterns = [
   /color:\s*'var\([^)]+\)';/,
   /background:\s*'var\([^)]+\)';/,
@@ -469,13 +255,7 @@ for (const relPath of sourceFiles) {
   }
 }
 
-console.log('Aura skin contract OK');
-console.log(
-  'Solid contrast ratios:',
-  Object.fromEntries(
-    Object.entries(contrastRatios).map(([label, ratio]) => [label, `${ratio.toFixed(2)}:1`]),
-  ),
-);
+console.log('Aura skin contract (trimmed post-revert) OK');
 console.log(
   'Muted contrast ratios:',
   Object.fromEntries(

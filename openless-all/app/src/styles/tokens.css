@@ -33,7 +33,9 @@
   --ol-ink: #0a0a0b;
   --ol-ink-2: #2a2a2d;
   --ol-ink-3: rgba(10, 10, 11, 0.62);
-  --ol-ink-4: rgba(10, 10, 11, 0.42);
+  /* AA 修复：AURA 回退把 alpha 从 0.58 降到 0.42，浅色 surface 上的弱化文字跌到
+     2.88:1（< WCAG AA 4.5:1）。恢复回退前的 0.58（≈5.1:1，仍比 --ol-ink-3 浅）。 */
+  --ol-ink-4: rgba(10, 10, 11, 0.58);
   --ol-ink-5: rgba(10, 10, 11, 0.24);
 
   /* Blue accent */
