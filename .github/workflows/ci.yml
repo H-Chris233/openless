@@ -52,6 +52,12 @@ jobs:
           echo "AR_aarch64_linux_android=$prebuilt/bin/llvm-ar" >> "$GITHUB_ENV"
           echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$prebuilt/bin/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: openless-all/app/package-lock.json
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
@@ -60,6 +66,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential curl file libssl-dev wget
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build frontend (tsc + vite)
+        # generate_context! requires frontendDist (../dist) to exist on Android too.
+        run: npm run build
 
       - name: Check Tauri backend (Android target)
         run: cargo check --manifest-path src-tauri/Cargo.toml --target aarch64-linux-android
