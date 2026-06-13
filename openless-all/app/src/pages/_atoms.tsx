@@ -4,7 +4,6 @@
 
 import { useState, type CSSProperties, type ReactNode } from 'react';
 import { Icon } from '../components/Icon';
-import { useMobileLayout } from '../lib/useMobileLayout';
 
 interface PageHeaderProps {
   kicker?: string;
@@ -15,57 +14,19 @@ interface PageHeaderProps {
 }
 
 export function PageHeader({ kicker, title, desc, right, titleRight }: PageHeaderProps) {
-  const mobile = useMobileLayout();
   return (
-    <div
-      style={{
-        display: 'flex',
-        flexDirection: mobile ? 'column' : 'row',
-        alignItems: mobile ? 'stretch' : 'flex-start',
-        justifyContent: 'space-between',
-        gap: mobile ? 12 : 24,
-        marginBottom: mobile ? 18 : 28,
-      }}
-    >
+    <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 24, marginBottom: 24 }}>
       <div style={{ minWidth: 0 }}>
         {kicker && (
-          <div
-            style={{
-              fontSize: mobile ? 10 : 11,
-              fontWeight: 600,
-              letterSpacing: '.14em',
-              textTransform: 'uppercase',
-              color: 'var(--ol-ink-4)',
-              marginBottom: 10,
-              fontFamily: 'var(--ol-font-mono)',
-            }}
-          >
-            {kicker}
-          </div>
+          <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: '.08em', textTransform: 'uppercase', color: 'var(--ol-ink-4)', marginBottom: 8 }}>{kicker}</div>
         )}
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-          <h1
-            style={{
-              margin: 0,
-              fontSize: mobile ? 28 : 34,
-              fontWeight: 600,
-              letterSpacing: '-0.03em',
-              color: 'var(--ol-ink)',
-              fontFamily: 'var(--ol-font-display)',
-              lineHeight: mobile ? 1.08 : undefined,
-            }}
-          >
-            {title}
-          </h1>
+          <h1 style={{ margin: 0, fontSize: 26, fontWeight: 600, letterSpacing: '-0.02em', color: 'var(--ol-ink)' }}>{title}</h1>
           {titleRight}
         </div>
-        {desc && <p style={{ margin: mobile ? '8px 0 0' : '10px 0 0', fontSize: mobile ? 12.5 : 13.5, color: 'var(--ol-ink-3)', maxWidth: 680, lineHeight: 1.6 }}>{desc}</p>}
+        {desc && <p style={{ margin: '8px 0 0', fontSize: 13, color: 'var(--ol-ink-3)', maxWidth: 640, lineHeight: 1.55 }}>{desc}</p>}
       </div>
-      {right && (
-        <div style={{ display: 'flex', justifyContent: mobile ? 'flex-start' : 'flex-end', flexWrap: 'wrap', gap: 8 }}>
-          {right}
-        </div>
-      )}
+      {right}
     </div>
   );
 }
@@ -81,16 +42,15 @@ interface CardProps {
 export function Card({ children, style, padding = 18, glassy = false, className }: CardProps) {
   return (
     <div
-      className={['ol-aura-card', className].filter(Boolean).join(' ')}
+      className={className}
       style={{
-        ...(glassy ? {
-          background: 'var(--ol-panel-bg)',
-          backdropFilter: 'blur(var(--ol-aura-glass-blur)) saturate(150%)',
-          WebkitBackdropFilter: 'blur(var(--ol-aura-glass-blur)) saturate(150%)',
-          border: '1px solid var(--ol-panel-border)',
-          boxShadow: 'var(--ol-panel-shadow)',
-        } : undefined),
+        background: glassy ? 'rgba(255,255,255,0.55)' : 'var(--ol-surface)',
+        backdropFilter: glassy ? 'blur(20px) saturate(160%)' : undefined,
+        WebkitBackdropFilter: glassy ? 'blur(20px) saturate(160%)' : undefined,
+        border: '0.5px solid var(--ol-line)',
+        borderRadius: 'var(--ol-r-lg)',
         padding,
+        boxShadow: 'var(--ol-shadow-sm)',
         ...style,
       }}
     >
@@ -111,16 +71,16 @@ interface PillProps {
 
 export function Pill({ children, tone = 'default', size = 'md', style }: PillProps) {
   const tones: Record<PillTone, { bg: string; color: string; bd: string }> = {
-    default: { bg: 'var(--ol-pill-bg)',      color: 'var(--ol-ink-2)',     bd: 'var(--ol-pill-border)' },
-    blue:    { bg: 'var(--ol-pill-blue-bg)', color: 'var(--ol-blue)',      bd: 'var(--ol-pill-blue-border)' },
-    ok:      { bg: 'var(--ol-pill-ok-bg)',   color: 'var(--ol-ok)',        bd: 'var(--ol-pill-ok-border)' },
-    outline: { bg: 'var(--ol-pill-bg)',      color: 'var(--ol-ink-3)',     bd: 'var(--ol-pill-border)' },
-    dark:    { bg: 'var(--ol-pill-dark-bg)', color: 'var(--ol-on-accent)', bd: 'var(--ol-pill-dark-border)' },
+    default: { bg: 'rgba(0,0,0,0.05)',   color: 'var(--ol-ink-2)',  bd: 'transparent' },
+    blue:    { bg: 'var(--ol-blue-soft)',color: 'var(--ol-blue)',   bd: 'transparent' },
+    ok:      { bg: 'var(--ol-ok-soft)',  color: 'var(--ol-ok)',     bd: 'transparent' },
+    outline: { bg: 'transparent',        color: 'var(--ol-ink-3)',  bd: 'var(--ol-line-strong)' },
+    dark:    { bg: 'var(--ol-ink)',      color: '#fff',             bd: 'transparent' },
   };
   const t = tones[tone];
   const sz = size === 'sm'
-    ? { padding: '3px 10px', fontSize: 11 }
-    : { padding: '5px 12px', fontSize: 11.5 };
+    ? { padding: '2px 8px', fontSize: 10.5 }
+    : { padding: '4px 10px', fontSize: 11.5 };
   return (
     <span
       style={{
@@ -128,13 +88,8 @@ export function Pill({ children, tone = 'default', size = 'md', style }: PillPro
         borderRadius: 999,
         background: t.bg,
         color: t.color,
-        border: `1px solid ${t.bd}`,
-        boxShadow: tone === 'dark' ? 'var(--ol-pill-dark-shadow)' : 'var(--ol-pill-shadow)',
-        backdropFilter: 'blur(16px) saturate(145%)',
-        WebkitBackdropFilter: 'blur(16px) saturate(145%)',
-        fontWeight: 600,
-        letterSpacing: '.01em',
-        lineHeight: 1.2,
+        border: t.bd === 'transparent' ? '0.5px solid transparent' : `0.5px solid ${t.bd}`,
+        fontWeight: 500,
         whiteSpace: 'nowrap',
         flexShrink: 0,
         ...sz,
@@ -161,10 +116,10 @@ interface BtnProps {
 
 export function Btn({ children, variant = 'ghost', size = 'md', icon, style, onClick, disabled = false }: BtnProps) {
   const variants: Record<BtnVariant, { bg: string; color: string; bd: string; sh: string }> = {
-    primary: { bg: 'linear-gradient(180deg, #141821, #0d1016)', color: 'var(--ol-on-accent)', bd: 'transparent', sh: '0 14px 32px -22px rgba(15,23,42,0.55)' },
-    blue:    { bg: 'linear-gradient(180deg, var(--ol-accent-solid-bg), var(--ol-accent-solid-bg-hover))', color: 'var(--ol-accent-solid-ink)', bd: 'transparent', sh: '0 14px 32px -22px rgba(37,99,235,.45)' },
-    ghost:   { bg: 'var(--ol-control-muted)', color: 'var(--ol-ink-2)', bd: 'var(--ol-control-border)', sh: 'var(--ol-control-shadow)' },
-    soft:    { bg: 'var(--ol-control-muted-strong)', color: 'var(--ol-ink-2)', bd: 'transparent', sh: 'var(--ol-control-shadow)' },
+    primary: { bg: 'var(--ol-ink)',     color: '#fff',                bd: 'transparent', sh: '0 1px 2px rgba(0,0,0,.08)' },
+    blue:    { bg: 'var(--ol-blue)',    color: '#fff',                bd: 'transparent', sh: '0 1px 2px rgba(37,99,235,.18)' },
+    ghost:   { bg: 'transparent',       color: 'var(--ol-ink-2)',     bd: 'var(--ol-line-strong)', sh: 'none' },
+    soft:    { bg: 'rgba(0,0,0,0.04)',  color: 'var(--ol-ink-2)',     bd: 'transparent', sh: 'none' },
   };
   const v = variants[variant];
   const sizes: Record<BtnSize, { padding: string; fontSize: number }> = {
@@ -179,7 +134,7 @@ export function Btn({ children, variant = 'ghost', size = 'md', icon, style, onC
         display: 'inline-flex', alignItems: 'center', gap: 6,
         background: v.bg, color: v.color,
         border: v.bd === 'transparent' ? '0.5px solid transparent' : `0.5px solid ${v.bd}`,
-        borderRadius: 999,
+        borderRadius: 8,
         boxShadow: v.sh,
         fontFamily: 'inherit', fontWeight: 500,
         cursor: disabled ? 'not-allowed' : 'pointer',
@@ -222,10 +177,10 @@ export function Collapsible({ title, desc, defaultOpen = false, embedded = false
     <div
       style={{
         borderBottom: embedded ? '0.5px solid var(--ol-line)' : undefined,
-        border: embedded ? undefined : '1px solid var(--ol-card-border)',
-        borderRadius: embedded ? 0 : 'var(--ol-card-radius)',
-        background: embedded ? 'transparent' : 'var(--ol-card-bg)',
-        boxShadow: embedded ? 'none' : 'var(--ol-card-shadow)',
+        border: embedded ? undefined : '0.5px solid var(--ol-line)',
+        borderRadius: embedded ? 0 : 'var(--ol-r-lg)',
+        background: embedded ? 'transparent' : 'var(--ol-surface)',
+        boxShadow: embedded ? 'none' : 'var(--ol-shadow-sm)',
         overflow: 'hidden',
         // 父级 flex column 带 minHeight:0 + overflow:auto 时，所有 flex 子项默认
         // shrink:1，会把 header 按钮也压成一条线。锁住不压缩，溢出走父容器滚动。

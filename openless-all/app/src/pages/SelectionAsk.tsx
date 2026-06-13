@@ -100,7 +100,7 @@ export function SelectionAsk() {
             alignItems: 'center',
             gap: 12,
             padding: '8px 14px',
-            borderRadius: 'var(--ol-r-md)',
+            borderRadius: 10,
             background: 'rgba(0,0,0,0.04)',
             border: '0.5px solid var(--ol-line)',
           }}
@@ -116,7 +116,7 @@ export function SelectionAsk() {
               position: 'relative',
               width: 36,
               height: 20,
-              borderRadius: 'var(--ol-pill-radius)',
+              borderRadius: 999,
               border: 0,
               background: prefs.qaSaveHistory ? 'var(--ol-blue)' : 'rgba(0,0,0,0.18)',
               cursor: saving ? 'not-allowed' : 'default',
@@ -132,8 +132,8 @@ export function SelectionAsk() {
                 left: prefs.qaSaveHistory ? 18 : 2,
                 width: 16,
                 height: 16,
-                borderRadius: 'var(--ol-pill-radius)',
-                background: 'var(--ol-control-solid)',
+                borderRadius: 999,
+                background: '#fff',
                 boxShadow: '0 1px 2px rgba(0,0,0,.2)',
                 transition: 'left .16s var(--ol-motion-spring)',
               }}

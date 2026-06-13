@@ -29,7 +29,6 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import { Icon } from '../Icon';
-import { useMobileLayout } from '../../lib/useMobileLayout';
 
 export interface SelectOption {
   value: string;
@@ -60,7 +59,7 @@ const DEFAULT_TRIGGER_STYLE: CSSProperties = {
   height: 32,
   fontSize: 12.5,
   fontFamily: 'inherit',
-  borderRadius: 'var(--ol-control-radius)',
+  borderRadius: 8,
   border: '0.5px solid var(--ol-line-strong)',
   background: 'var(--ol-surface-2)',
   color: 'var(--ol-ink)',
@@ -82,7 +81,6 @@ export function SelectLite({
   ariaLabel,
   onOpenChange,
 }: SelectLiteProps) {
-  const mobile = useMobileLayout();
   const [open, setOpen] = useState(false);
   // leaving 让 popover 在卸载前播完 exit keyframe（用户报"没有收缩动画"——之前直接 unmount）
   const [leaving, setLeaving] = useState(false);
@@ -266,14 +264,6 @@ export function SelectLite({
   const triggerStyle: CSSProperties = {
     ...DEFAULT_TRIGGER_STYLE,
     ...style,
-    boxSizing: 'border-box',
-    ...(mobile
-      ? {
-          width: style?.width ?? '100%',
-          minWidth: 0,
-          maxWidth: '100%',
-        }
-      : null),
     opacity: disabled ? 0.5 : 1,
     cursor: disabled ? 'not-allowed' : 'default',
   };
@@ -322,12 +312,12 @@ export function SelectLite({
             maxHeight: 280,
             overflowY: 'auto',
             padding: 4,
-            borderRadius: 'var(--ol-r-md)',
-            border: '0.5px solid var(--ol-line-strong)',
-            background: 'var(--ol-glass-bg-strong)',
-            backdropFilter: 'blur(var(--ol-glass-blur)) saturate(180%)',
-            WebkitBackdropFilter: 'blur(var(--ol-glass-blur)) saturate(180%)',
-            boxShadow: 'var(--ol-shadow-md)',
+            borderRadius: 10,
+            border: '0.5px solid rgba(0, 0, 0, 0.10)',
+            background: 'rgba(252, 252, 254, 0.94)',
+            backdropFilter: 'blur(20px) saturate(180%)',
+            WebkitBackdropFilter: 'blur(20px) saturate(180%)',
+            boxShadow: '0 12px 30px -10px rgba(15, 17, 22, 0.25), 0 0 0 0.5px rgba(0, 0, 0, 0.06)',
             zIndex: 9999,
             fontFamily: 'inherit',
             fontSize: 12.5,
@@ -357,11 +347,11 @@ export function SelectLite({
                   alignItems: 'center',
                   gap: 8,
                   padding: '7px 10px',
-                  borderRadius: 'var(--ol-r-sm)',
+                  borderRadius: 6,
                   cursor: option.disabled ? 'not-allowed' : 'default',
                   opacity: option.disabled ? 0.45 : 1,
                   background: isHighlighted && !option.disabled
-                    ? 'var(--ol-blue-soft)'
+                    ? 'rgba(37, 99, 235, 0.10)'
                     : 'transparent',
                   color: isSelected ? 'var(--ol-blue)' : 'var(--ol-ink)',
                   fontWeight: isSelected ? 600 : 500,

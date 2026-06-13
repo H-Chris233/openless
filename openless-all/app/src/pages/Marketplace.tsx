@@ -426,7 +426,7 @@ export function Marketplace() {
               title={currentLogin ? t('marketplace.myPacks.buttonTitle', { login: currentLogin }) : t('marketplace.myPacks.buttonTitleEmpty')}
               style={{
                 display: 'inline-flex', alignItems: 'center', gap: 8,
-                height: 30, padding: '0 12px', borderRadius: 'var(--ol-control-radius)',
+                height: 30, padding: '0 12px', borderRadius: 9,
                 border: '0.5px solid var(--ol-line-strong)',
                 background: 'var(--ol-surface)',
                 color: 'var(--ol-ink-2)',
@@ -436,7 +436,7 @@ export function Marketplace() {
               }}
             >
               <span style={{
-                width: 18, height: 18, borderRadius: 'var(--ol-pill-radius)',
+                width: 18, height: 18, borderRadius: 999,
                 display: 'inline-grid', placeItems: 'center',
                 background: 'rgba(15,23,42,0.06)',
                 fontSize: 10, fontWeight: 750,
@@ -469,7 +469,7 @@ export function Marketplace() {
             gap: 6,
             padding: '6px 10px',
             border: '0.5px solid var(--ol-line-strong)',
-            borderRadius: 'var(--ol-r-md)',
+            borderRadius: 10,
             background: 'var(--ol-surface)',
           }}
         >
@@ -498,7 +498,7 @@ export function Marketplace() {
                 padding: '6px 10px',
                 fontSize: 12,
                 border: '0.5px solid var(--ol-line-strong)',
-                borderRadius: 'var(--ol-control-radius)',
+                borderRadius: 8,
                 cursor: 'pointer',
                 background: sort === p.id ? 'var(--ol-blue-soft)' : 'var(--ol-surface)',
                 color: sort === p.id ? 'var(--ol-blue)' : 'var(--ol-ink-2)',
@@ -567,7 +567,7 @@ export function Marketplace() {
                 style={{
                   textAlign: 'left',
                   padding: 14,
-                  borderRadius: 'var(--ol-r-lg)',
+                  borderRadius: 12,
                   border: '0.5px solid var(--ol-line-strong)',
                   background: 'var(--ol-surface)',
                   cursor: 'pointer',
@@ -644,7 +644,7 @@ export function Marketplace() {
                 style={{
                   padding: 12,
                   border: '0.5px solid var(--ol-line)',
-                  borderRadius: 'var(--ol-r-md)',
+                  borderRadius: 10,
                   background: 'var(--ol-surface-2)',
                   marginBottom: 14,
                   maxHeight: 280,
@@ -679,7 +679,7 @@ export function Marketplace() {
                       border: 'none',
                       cursor: 'pointer',
                       padding: '4px 8px',
-                      borderRadius: 'var(--ol-control-radius)',
+                      borderRadius: 8,
                       fontSize: 12,
                       fontWeight: 500,
                       color: 'var(--ol-ink-2)'
@@ -744,7 +744,7 @@ export function Marketplace() {
                       textAlign: 'left',
                       padding: 10,
                       border: selected ? '1px solid var(--ol-blue)' : '0.5px solid var(--ol-line-strong)',
-                      borderRadius: 'var(--ol-control-radius)',
+                      borderRadius: 8,
                       background: selected ? 'var(--ol-blue-soft)' : 'var(--ol-surface)',
                       cursor: 'pointer',
                       display: 'flex',
@@ -755,11 +755,11 @@ export function Marketplace() {
                     {/* 选中圈：未选空圆，选中蓝实心 + 白勾 */}
                     <span style={{
                       flexShrink: 0,
-                      width: 18, height: 18, borderRadius: 'var(--ol-pill-radius)',
-                      border: selected ? '1px solid var(--ol-accent-solid-bg)' : '1px solid var(--ol-line-strong)',
-                      background: selected ? 'var(--ol-accent-solid-bg)' : 'transparent',
+                      width: 18, height: 18, borderRadius: 999,
+                      border: selected ? '1px solid var(--ol-blue)' : '1px solid var(--ol-line-strong)',
+                      background: selected ? 'var(--ol-blue)' : 'transparent',
                       display: 'inline-grid', placeItems: 'center',
-                      color: 'var(--ol-accent-solid-ink)', fontSize: 11, fontWeight: 700,
+                      color: '#fff', fontSize: 11, fontWeight: 700,
                       transition: 'background 0.12s, border-color 0.12s',
                     }}>
                       {selected && '✓'}
@@ -814,7 +814,7 @@ export function Marketplace() {
                 gap: 6,
                 padding: '6px 10px',
                 border: '0.5px solid var(--ol-line-strong)',
-                borderRadius: 'var(--ol-r-md)',
+                borderRadius: 10,
                 background: 'var(--ol-surface)',
               }}
             >
@@ -843,7 +843,7 @@ export function Marketplace() {
               onClick={() => setShowLogin(true)}
               style={{
                 display: 'inline-flex', alignItems: 'center', gap: 6,
-                padding: '5px 10px', borderRadius: 'var(--ol-control-radius)',
+                padding: '5px 10px', borderRadius: 9,
                 border: '0.5px solid var(--ol-line-strong)',
                 background: currentLogin ? 'var(--ol-blue-soft)' : 'var(--ol-surface)',
                 color: currentLogin ? 'var(--ol-blue)' : 'var(--ol-ink-3)',
@@ -853,7 +853,7 @@ export function Marketplace() {
               }}
             >
               <span style={{
-                width: 18, height: 18, borderRadius: 'var(--ol-pill-radius)',
+                width: 18, height: 18, borderRadius: 999,
                 display: 'inline-grid', placeItems: 'center',
                 background: currentLogin ? 'rgba(37,99,235,0.14)' : 'rgba(15,23,42,0.06)',
                 fontSize: 10, fontWeight: 750,
@@ -869,7 +869,7 @@ export function Marketplace() {
               title={t('common.close')}
               onClick={() => setShowMyPacks(false)}
               style={{
-                width: 30, height: 30, borderRadius: 'var(--ol-control-radius)',
+                width: 30, height: 30, borderRadius: 9,
                 display: 'inline-grid', placeItems: 'center',
                 border: '0.5px solid var(--ol-line-strong)',
                 background: 'var(--ol-surface)',
@@ -965,7 +965,7 @@ export function Marketplace() {
                   key={pack.id}
                   style={{
                     padding: 14,
-                    borderRadius: 'var(--ol-r-lg)',
+                    borderRadius: 12,
                     border: '0.5px solid var(--ol-line-strong)',
                     background: 'var(--ol-surface)',
                     display: 'flex',

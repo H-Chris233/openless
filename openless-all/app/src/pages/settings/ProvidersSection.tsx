@@ -200,13 +200,14 @@ export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
   const [llmModelRevision, setLlmModelRevision] = useState(0);
   const [asrModelRevision, setAsrModelRevision] = useState(0);
   const os = detectOS();
-  // 主 ASR 下拉只列云端选项；本地推理（local-qwen3 / foundry-local-whisper /
-  // sherpa-onnx-local / apple-speech）移到「高级 → 本地模型」，防止新手误开 CPU 推理。
+  // 本地重引擎（qwen3 / sherpa / foundry）仍只在「高级 → 本地模型」里启用，
+  // 防止新手在主下拉误开 CPU 推理。Apple 语音是系统自带、零凭据、轻量，
+  // 在 macOS 上直接作为常规选项放进主下拉，方便随时选用 / 切走。
   const visibleAsrPresets = ASR_PRESETS.filter(
     p => p.id !== 'foundry-local-whisper'
       && p.id !== 'local-qwen3'
       && p.id !== 'sherpa-onnx-local'
-      && p.id !== 'apple-speech',
+      && (p.id !== 'apple-speech' || os === 'mac'),
   );
 
   useEffect(() => {
@@ -399,50 +400,44 @@ export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
             未激活时不显示提示。 */}
         <SettingRow label={t('settings.providers.providerLabel')}>
           {(() => {
-            const isLocked =
-              committedAsrProvider === 'local-qwen3' ||
-              committedAsrProvider === 'foundry-local-whisper' ||
-              committedAsrProvider === 'sherpa-onnx-local' ||
-              committedAsrProvider === 'apple-speech';
-            const selectedValue: AsrPresetId = isLocked ? committedAsrProvider : asrProvider;
-            // 跨机器同步异常兜底：committed 是本地但不在 visibleAsrPresets 里时，受控
-            // select 会回退到首项造成假象 —— 补一个 disabled option 让 select 找到当前值。
-            const anomalousLocal: AsrPresetId | null =
-              isLocked && !visibleAsrPresets.some(p => p.id === committedAsrProvider)
+            // 本地引擎激活时不再「接管 / 锁死」下拉——下拉始终可用，用户在本页就能直接
+            // 切到其它供应商；切走后端 active 即自动停用本地引擎，不必再进「高级」手动关。
+            // 重引擎（qwen3 / sherpa / foundry）当前激活但不在主下拉里时，补一个可选 option
+            // 让 select 显示当前值并允许切走。Apple 语音在 macOS 已是常规可选项。
+            const hiddenLocalActive: AsrPresetId | null =
+              !visibleAsrPresets.some(p => p.id === committedAsrProvider)
                 ? committedAsrProvider
                 : null;
-            const anomalousNameKey = anomalousLocal === 'local-qwen3'
+            const hiddenLocalNameKey = hiddenLocalActive === 'local-qwen3'
               ? 'asrLocalQwen3'
-              : anomalousLocal === 'foundry-local-whisper'
+              : hiddenLocalActive === 'foundry-local-whisper'
                 ? 'asrFoundryLocalWhisper'
-                : anomalousLocal === 'sherpa-onnx-local'
+                : hiddenLocalActive === 'sherpa-onnx-local'
                   ? 'asrSherpaOnnxLocal'
-                  : anomalousLocal === 'apple-speech'
+                  : hiddenLocalActive === 'apple-speech'
                     ? 'asrAppleSpeech'
                     : null;
             return (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: mobile ? 'stretch' : 'flex-start', minWidth: 0, width: '100%', maxWidth: '100%' }}>
                 <SelectLite
-                  value={selectedValue}
-                  disabled={isLocked}
+                  value={asrProvider}
                   onChange={next => onAsrProviderChange(next as AsrPresetId)}
                   options={[
                     ...visibleAsrPresets.map(p => ({
                       value: p.id,
                       label: t(`settings.providers.presets.${p.nameKey}`),
                     })),
-                    ...(anomalousLocal && anomalousNameKey
+                    ...(hiddenLocalActive && hiddenLocalNameKey
                       ? [{
-                          value: anomalousLocal,
-                          label: t(`settings.providers.presets.${anomalousNameKey}`),
-                          disabled: true,
+                          value: hiddenLocalActive,
+                          label: t(`settings.providers.presets.${hiddenLocalNameKey}`),
                         }]
                       : []),
                   ]}
                   ariaLabel={t('settings.providers.providerLabel')}
                   style={{ ...inputStyle, width: '100%', maxWidth: mobile ? '100%' : 200 }}
                 />
-                {isLocked && (
+                {hiddenLocalActive && (
                   <div style={{ fontSize: 11, color: 'var(--ol-ink-4)', lineHeight: 1.5 }}>
                     {t('settings.providers.asrProviderTakenOver')}
                   </div>
@@ -834,7 +829,7 @@ function CredentialField({ label, account, placeholder, mono, mask, defaultValue
 const miniBtnStyle: CSSProperties = {
   height: 32, padding: '0 12px',
   border: '0.5px solid var(--ol-line-strong)',
-  borderRadius: 'var(--ol-control-radius)', background: 'var(--ol-surface)',
+  borderRadius: 8, background: 'var(--ol-surface)',
   boxShadow: '0 1px 2px rgba(0,0,0,0.04), 0 0 0 0.5px rgba(255,255,255,0.2) inset',
   color: 'var(--ol-ink-2)', cursor: 'default', flexShrink: 0,
   fontSize: 12.5, fontWeight: 500, letterSpacing: '0.01em',
@@ -844,7 +839,7 @@ const miniBtnStyle: CSSProperties = {
 const iconBtnStyle: CSSProperties = {
   width: 32, height: 32,
   border: '0.5px solid var(--ol-line-strong)',
-  borderRadius: 'var(--ol-control-radius)', background: 'var(--ol-surface)',
+  borderRadius: 8, background: 'var(--ol-surface)',
   boxShadow: '0 1px 2px rgba(0,0,0,0.04), 0 0 0 0.5px rgba(255,255,255,0.2) inset',
   display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
   color: 'var(--ol-ink-3)', cursor: 'default', flexShrink: 0,

@@ -120,21 +120,3 @@ export async function getPlatformCapabilities(): Promise<PlatformCapabilities> {
 export function getCachedPlatformCapabilities(): PlatformCapabilities | null {
   return cachedCapabilities;
 }
-
-/** Win11 原生标题栏暗色同步；非 Windows / 非 Tauri 为 no-op。 */
-export async function syncWindowsCaptionTheme(dark: boolean): Promise<void> {
-  if (typeof window === 'undefined') return;
-  if (detectOS() !== 'win') return;
-
-  const isTauri =
-    globalThis.window !== undefined &&
-    '__TAURI_INTERNALS__' in globalThis.window;
-  if (!isTauri) return;
-
-  try {
-    const { invoke } = await import('@tauri-apps/api/core');
-    await invoke('set_windows_caption_theme', { dark });
-  } catch (err) {
-    console.warn('[platform] set_windows_caption_theme failed', err);
-  }
-}

@@ -748,7 +748,7 @@ export const zhCN = {
       volcengineMappingNote: 'Secret Key 当前无需填写。Resource ID 默认使用 volc.seedasr.sauc.duration。',
       localAsrActiveNotice: '当前已启用「{{name}}」，可在「高级」中切换或禁用。',
       localAsrTakeoverHint: '启动「{{name}}」后，ASR 提供商将被接管。',
-      asrProviderTakenOver: 'ASR 提供商已被接管',
+      asrProviderTakenOver: '当前用的是本地引擎，在上方下拉直接选其它供应商即可切换（本地引擎会自动停用）；本地模型在「高级 → 本地模型」里管理。',
       localAsrHint: '在本机运行，无需 API Key。从 HuggingFace 下载模型即可使用。',
       foundryLocalAsrHint: '在本机运行，无需 ASR API Key。首次使用需下载运行组件和模型。',
       localAsrPerformanceWarning: '本地推理比云端慢，中文准确率可能更低。适合离线或隐私敏感场景。',
@@ -955,14 +955,6 @@ export const zhCN = {
       ja: '日本語 (Beta)',
       ko: '한국어 (Beta)',
       restartHint: '部分原生菜单（系统托盘等）可能需要重启 App 才会切换。',
-    },
-    appearance: {
-      title: '外观',
-      desc: '选择浅色或深色模式，或跟随系统设置。',
-      label: '主题',
-      followSystem: '跟随系统',
-      light: '浅色',
-      dark: '深色',
     },
     remoteInput: {
       title: '远程输入',

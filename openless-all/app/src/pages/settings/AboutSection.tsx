@@ -95,7 +95,7 @@ export function AboutSection() {
           <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
             <kbd style={{
               padding: '4px 10px', fontSize: 12, fontFamily: 'var(--ol-font-mono)',
-              borderRadius: 'var(--ol-r-sm)', background: 'var(--ol-surface-2)',
+              borderRadius: 6, background: 'var(--ol-surface-2)',
               border: '0.5px solid var(--ol-line-strong)',
               boxShadow: '0 1px 0 rgba(0,0,0,0.04)',
               color: 'var(--ol-ink-2)',
@@ -112,9 +112,9 @@ export function AboutSection() {
 }
 
 const btnGhost: CSSProperties = {
-  padding: '5px 10px', fontSize: 12, borderRadius: 'var(--ol-r-sm)',
+  padding: '5px 10px', fontSize: 12, borderRadius: 6,
   border: '0.5px solid var(--ol-line-strong)',
-  background: 'var(--ol-surface-solid)', color: 'var(--ol-ink-2)',
+  background: '#fff', color: 'var(--ol-ink-2)',
   cursor: 'default', fontFamily: 'inherit',
   maxWidth: '100%',
   transition: 'background 0.16s var(--ol-motion-quick), border-color 0.16s var(--ol-motion-quick)',
