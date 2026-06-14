@@ -389,7 +389,13 @@ fn run_desktop() {
     }
     let local_asr_download_manager = Arc::new(asr::local::DownloadManager::new());
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // macOS：胶囊要叠到别的 app 的全屏 Space 之上，必须是「非激活 NSPanel」(普通
+    // NSWindow 即便设 collectionBehavior 也做不到 —— tauri#9556 / #11488)。下面 setup 里
+    // 的 capsule.to_panel() 依赖本插件注册的 panel 注册表；插件仅 macOS。
+    #[cfg(target_os = "macos")]
+    let builder = builder.plugin(tauri_nspanel::init());
+    builder
         // 单实例锁：第二个进程启动时立即退出，激活信号转给已运行实例的主窗口。
         // 否则两份 OpenLess（如 /Applications/ + dev build）会各自抓全局热键，
         // 导致按一次键、两个进程同时跑流水线、文本被插入两遍。见 issue #50。
@@ -448,6 +454,28 @@ fn run_desktop() {
             // Capsule 启动时定位到屏幕底部居中并隐藏；coordinator 按需显示。
             // 与 Swift `CapsuleWindowController.repositionToBottomCenter` 同语义。
             if let Some(capsule) = app.get_webview_window("capsule") {
+                // macOS：转成「非激活 NSPanel」，否则胶囊叠不到别的 app 的全屏之上
+                // （普通 NSWindow 只靠 collectionBehavior 做不到 —— tauri#9556 / #11488）。
+                #[cfg(target_os = "macos")]
+                {
+                    use tauri_nspanel::cocoa::appkit::NSWindowCollectionBehavior;
+                    use tauri_nspanel::WebviewWindowExt;
+                    match capsule.to_panel() {
+                        Ok(panel) => {
+                            // 非激活：显示/点击都不激活本 app、不切走当前(含全屏)Space。
+                            const NS_NONACTIVATING_PANEL_MASK: i32 = 1 << 7;
+                            panel.set_style_mask(NS_NONACTIVATING_PANEL_MASK);
+                            // 抬到菜单栏(24)之上。
+                            panel.set_level(25);
+                            // 加入所有 Space + 作为辅助窗口出现在全屏 app 的 Space 上。
+                            panel.set_collection_behaviour(
+                                NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenAuxiliary
+                                    | NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces,
+                            );
+                        }
+                        Err(e) => log::warn!("[capsule] to_panel failed: {e:?}"),
+                    }
+                }
                 if let Err(e) = position_capsule_bottom_center(&capsule, false) {
                     log::warn!("[capsule] position failed: {e}");
                 }

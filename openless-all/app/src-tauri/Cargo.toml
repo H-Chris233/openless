@@ -108,6 +108,10 @@ objc2-foundation = "0.2"
 objc2-app-kit = "0.2"
 # qwen-asr 用 malloc 分配返回字符串，必须用 C `free()` 释放。
 libc = "0.2"
+# 把胶囊窗口转成「非激活 NSPanel」，使其能叠在别的 app 的全屏 Space 之上。
+# 普通 NSWindow 即便设了 collectionBehavior 也做不到（tauri#9556 / #11488）—— 必须是
+# NSPanel。该插件做窗口 NSWindow→NSPanel subclass 转换；仅 macOS。
+tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 foundry-local-sdk = { version = "1.1.0", features = ["winml"] }
