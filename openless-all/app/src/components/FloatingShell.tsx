@@ -4,7 +4,7 @@
 //
 // Ported verbatim from design_handoff_openless/variants.jsx::FloatingShell.
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentType } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentType, type CSSProperties } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Icon } from './Icon';
 import { WindowChrome, detectOS, type OS } from './WindowChrome';
@@ -32,7 +32,11 @@ import {
   shouldShowProviderSetupPrompt,
 } from '../lib/providerSetup';
 import { type SettingsSectionId } from './SettingsModal';
+import { MobileMoreSheet } from './MobileMoreSheet';
+import { useMobileLayout } from '../lib/useMobileLayout';
 import { useAppState, type AppTab } from '../state/useAppState';
+
+const MORE_TAB_IDS: AppTab[] = ['vocab', 'translation', 'selectionAsk'];
 
 interface NavItem {
   id: AppTab;
@@ -67,10 +71,12 @@ export function FloatingShell({ os: osProp, initialTab = 'overview', initialSett
 
 function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initialTab: AppTab; initialSettings: boolean }) {
   const { t } = useTranslation();
+  const mobile = useMobileLayout();
   const { currentTab, setCurrentTab, settingsOpen, setSettingsOpen } = useAppState(initialTab, initialSettings);
   const [settingsInitialSection, setSettingsInitialSection] = useState<SettingsSectionId | undefined>();
   const [providerPromptOpen, setProviderPromptOpen] = useState(false);
   const [hotkeyModePromptOpen, setHotkeyModePromptOpen] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
 
   // tab 切换的 cross-fade：旧页 blur+fade out（180ms），结束后挂载新页（走 ol-page-slide enter）。
   // displayTab 是实际渲染的 tab，currentTab 是用户点中的目标 tab。
@@ -155,6 +161,7 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
   const openSettings = (section?: SettingsSectionId) => {
     setSettingsInitialSection(section);
     setSettingsOpen(true);
+    setMoreOpen(false);
   };
 
   // ⌘, 打开设置页面
@@ -180,8 +187,22 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
     openSettings('general');
   };
 
+  const mobileTitle = settingsOpen
+    ? t('shell.footer.settings')
+    : (NAV.find(n => n.id === currentTab)?.name ?? t('nav.overview'));
+  const moreTabActive = MORE_TAB_IDS.includes(currentTab);
+  const useOpaqueMain = mobile || os === 'linux';
+
   return (
-    <div style={{ flex: 1, position: 'relative', display: 'flex', flexDirection: 'column', minHeight: 0, paddingTop: os === 'mac' ? 28 : 0 }}>
+    <div style={{ flex: 1, position: 'relative', display: 'flex', flexDirection: 'column', minHeight: 0, paddingTop: mobile ? 0 : os === 'mac' ? 28 : 0 }}>
+
+      {mobile && (
+        <MobileTopBar
+          title={mobileTitle}
+          onOpenSettings={() => openSettings()}
+          settingsActive={settingsOpen}
+        />
+      )}
 
       {/* Main shell — flush with the frosted backplate (no separate float). */}
       <div
@@ -194,7 +215,8 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
           zIndex: 1,
         }}>
 
-        {/* Sidebar — 透明地坐在外层磨砂底板上，让 LOGO/导航/快捷键/BETA/footer 共用同一片磨砂玻璃 */}
+        {/* Sidebar — desktop / wide only */}
+        {!mobile && (
         <aside
           style={{
             width: 188,
@@ -319,21 +341,21 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
             </button>
           </div>
         </aside>
+        )}
 
-        {/* Main content — Linux 禁用透明窗口后使用不透明面；其他平台保留玻璃层。
-            悬浮台到右边 / 下边的间距相等（都 8px），左侧贴 sidebar（0）。 */}
-        <div style={{ flex: 1, minWidth: 0, padding: '4px 8px 8px 0', display: 'flex' }}>
+        {/* Main content — Linux 禁用透明窗口后使用不透明面；mobile 全宽无玻璃层。 */}
+        <div style={{ flex: 1, minWidth: 0, padding: mobile ? 0 : '4px 8px 8px 0', display: 'flex' }}>
           <main
             className="ol-console-main"
             style={{
               flex: 1, minWidth: 0,
               overflow: 'hidden',
-              background: os === 'linux' ? 'var(--ol-surface)' : 'rgba(255, 255, 255, 0.62)',
-              backdropFilter: os === 'linux' ? 'none' : 'blur(18px) saturate(170%)',
-              WebkitBackdropFilter: os === 'linux' ? 'none' : 'blur(18px) saturate(170%)',
-              borderRadius: 'var(--ol-window-console-radius)',
-              border: '0.5px solid rgba(0,0,0,0.06)',
-              boxShadow: '0 1px 0 rgba(255,255,255,0.8) inset, 0 8px 24px -12px rgba(15,17,22,0.10), 0 2px 6px -2px rgba(15,17,22,0.06)',
+              background: useOpaqueMain ? 'var(--ol-surface)' : 'rgba(255, 255, 255, 0.62)',
+              backdropFilter: useOpaqueMain ? 'none' : 'blur(18px) saturate(170%)',
+              WebkitBackdropFilter: useOpaqueMain ? 'none' : 'blur(18px) saturate(170%)',
+              borderRadius: mobile ? 0 : 'var(--ol-window-console-radius)',
+              border: mobile ? 'none' : '0.5px solid rgba(0,0,0,0.06)',
+              boxShadow: mobile ? 'none' : '0 1px 0 rgba(255,255,255,0.8) inset, 0 8px 24px -12px rgba(15,17,22,0.10), 0 2px 6px -2px rgba(15,17,22,0.06)',
               display: 'flex',
               flexDirection: 'column',
             }}
@@ -358,15 +380,20 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
               style={{
                 flex: 1, minHeight: 0,
                 overflow: 'auto',
-                padding: '24px 28px 32px',
+                padding: mobile
+                  ? '16px 16px calc(16px + env(safe-area-inset-bottom, 0px) + 56px)'
+                  : '24px 28px 32px',
                 // position:relative 让页面里的"已保存"toast 用 absolute top:16 right:16
                 // 锚到这块控制台卡的右上角，而不是横在页头变成长横幅。
                 position: 'relative',
-                // 苹果"spring out"风格的曲线：开始快、收尾顺滑，符合人体直觉
-                animation: tabPhase === 'exiting'
-                  ? 'ol-page-fadeout 0.18s var(--ol-motion-soft) forwards'
-                  : 'ol-page-slide 0.34s var(--ol-motion-spring) both',
-                willChange: 'opacity, transform, filter',
+                animation: mobile
+                  ? (tabPhase === 'exiting'
+                    ? 'ol-page-fadeout-mobile 0.18s var(--ol-motion-soft) forwards'
+                    : 'ol-page-fade-mobile 0.22s var(--ol-motion-soft) both')
+                  : (tabPhase === 'exiting'
+                    ? 'ol-page-fadeout 0.18s var(--ol-motion-soft) forwards'
+                    : 'ol-page-slide 0.34s var(--ol-motion-spring) both'),
+                willChange: mobile ? 'opacity' : 'opacity, transform, filter',
                 display: 'flex',
                 flexDirection: 'column',
               }}
@@ -380,6 +407,29 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
           </main>
         </div>
       </div>
+
+      {mobile && (
+        <>
+          <MobileBottomNav
+            currentTab={currentTab}
+            moreOpen={moreOpen}
+            moreTabActive={moreTabActive}
+            settingsOpen={settingsOpen}
+            onSelectTab={id => {
+              setMoreOpen(false);
+              setCurrentTab(id);
+            }}
+            onOpenMore={() => setMoreOpen(true)}
+          />
+          <MobileMoreSheet
+            open={moreOpen}
+            currentTab={currentTab}
+            onClose={() => setMoreOpen(false)}
+            onSelectTab={setCurrentTab}
+            onOpenSettings={() => openSettings()}
+          />
+        </>
+      )}
 
       {/* Settings modal — rendered inside this window */}
       {settingsOpen &&
@@ -432,6 +482,22 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
           from { opacity: 1; filter: blur(0); }
           to   { opacity: 0; filter: blur(8px); }
         }
+        @keyframes ol-page-fade-mobile {
+          from { opacity: 0; }
+          to   { opacity: 1; }
+        }
+        @keyframes ol-page-fadeout-mobile {
+          from { opacity: 1; }
+          to   { opacity: 0; }
+        }
+        @keyframes ol-mobile-sheet-backdrop {
+          from { opacity: 0; }
+          to   { opacity: 1; }
+        }
+        @keyframes ol-mobile-sheet-up {
+          from { opacity: 0; transform: translate3d(0, 12px, 0); }
+          to   { opacity: 1; transform: translate3d(0, 0, 0); }
+        }
         @keyframes ol-prompt-fade {
           from { opacity: 0; backdrop-filter: blur(0); -webkit-backdrop-filter: blur(0); }
           to   { opacity: 1; backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
@@ -444,6 +510,159 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
     </div>
   );
 }
+
+const MOBILE_BOTTOM_TABS: Array<{ id: AppTab; icon: string }> = [
+  { id: 'overview', icon: 'overview' },
+  { id: 'history', icon: 'history' },
+  { id: 'style', icon: 'style' },
+];
+
+function MobileTopBar({
+  title,
+  onOpenSettings,
+  settingsActive,
+}: {
+  title: string;
+  onOpenSettings: () => void;
+  settingsActive: boolean;
+}) {
+  const { t } = useTranslation();
+  return (
+    <header
+      style={{
+        flexShrink: 0,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: 12,
+        padding: 'calc(10px + env(safe-area-inset-top, 0px)) 14px 10px',
+        borderBottom: '0.5px solid var(--ol-line-soft)',
+        background: 'var(--ol-surface)',
+        zIndex: 2,
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+        <img
+          src="AppIcon.png"
+          alt=""
+          style={{ width: 22, height: 22, borderRadius: 5, flexShrink: 0 }}
+        />
+        <span
+          style={{
+            fontSize: 16,
+            fontWeight: 600,
+            letterSpacing: '-0.02em',
+            color: 'var(--ol-ink)',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {title}
+        </span>
+      </div>
+      <button
+        type="button"
+        onClick={onOpenSettings}
+        aria-label={t('shell.footer.settings')}
+        className={settingsActive ? 'ol-nav-btn ol-nav-btn-active' : 'ol-nav-btn'}
+        style={{
+          width: 36,
+          height: 36,
+          flexShrink: 0,
+          border: 0,
+          borderRadius: 10,
+          background: settingsActive ? 'var(--ol-surface-2)' : 'transparent',
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          cursor: 'default',
+        }}
+      >
+        <Icon name="settings" size={18} />
+      </button>
+    </header>
+  );
+}
+
+function MobileBottomNav({
+  currentTab,
+  moreOpen,
+  moreTabActive,
+  settingsOpen,
+  onSelectTab,
+  onOpenMore,
+}: {
+  currentTab: AppTab;
+  moreOpen: boolean;
+  moreTabActive: boolean;
+  settingsOpen: boolean;
+  onSelectTab: (tab: AppTab) => void;
+  onOpenMore: () => void;
+}) {
+  const { t } = useTranslation();
+  const moreActive = moreOpen || moreTabActive;
+
+  return (
+    <nav
+      style={{
+        position: 'absolute',
+        left: 0,
+        right: 0,
+        bottom: 0,
+        zIndex: 55,
+        display: 'flex',
+        alignItems: 'stretch',
+        justifyContent: 'space-around',
+        gap: 4,
+        padding: '6px 8px calc(6px + env(safe-area-inset-bottom, 0px))',
+        borderTop: '0.5px solid var(--ol-line-soft)',
+        background: 'var(--ol-surface)',
+      }}
+    >
+      {MOBILE_BOTTOM_TABS.map(tab => {
+        const active = !settingsOpen && currentTab === tab.id;
+        return (
+          <button
+            key={tab.id}
+            type="button"
+            onClick={() => onSelectTab(tab.id)}
+            className={active ? 'ol-nav-btn ol-nav-btn-active' : 'ol-nav-btn'}
+            style={mobileNavBtnStyle}
+          >
+            <Icon name={tab.icon} size={18} />
+            <span style={{ fontSize: 10.5, fontWeight: active ? 600 : 500 }}>{t(`nav.${tab.id}`)}</span>
+          </button>
+        );
+      })}
+      <button
+        type="button"
+        onClick={onOpenMore}
+        className={moreActive ? 'ol-nav-btn ol-nav-btn-active' : 'ol-nav-btn'}
+        style={mobileNavBtnStyle}
+      >
+        <Icon name="more" size={18} />
+        <span style={{ fontSize: 10.5, fontWeight: moreActive ? 600 : 500 }}>{t('nav.more')}</span>
+      </button>
+    </nav>
+  );
+}
+
+const mobileNavBtnStyle: CSSProperties = {
+  flex: 1,
+  minWidth: 0,
+  display: 'flex',
+  flexDirection: 'column',
+  alignItems: 'center',
+  justifyContent: 'center',
+  gap: 4,
+  padding: '6px 4px',
+  border: 0,
+  borderRadius: 10,
+  background: 'transparent',
+  fontFamily: 'inherit',
+  cursor: 'default',
+};
 
 function ProviderSetupPrompt({ onLater, onOpenSettings }: { onLater: () => void; onOpenSettings: () => void }) {
   const { t } = useTranslation();

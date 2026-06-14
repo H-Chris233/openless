@@ -46,7 +46,7 @@ export function WindowChrome({
     radial-gradient(100% 70% at 100% 100%, rgba(37,99,235,0.07) 0%, rgba(37,99,235,0) 55%),
     linear-gradient(180deg, rgba(245,245,247,0.92) 0%, rgba(232,232,236,0.92) 100%)
   `;
-  const useSolidSurface = os === 'linux';
+  const useSolidSurface = os === 'linux' || os === 'android';
 
   return (
     <div

@@ -7,12 +7,13 @@
 // 设计原则：每个可见控件都必须可用。没有后端支撑的占位（账号 / 主题切换 等）
 // 不在此弹窗出现。
 
-import { useLayoutEffect, useRef, useState } from 'react';
+import { useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Icon } from './Icon';
 import { SavedToast } from './SavedToast';
 import { useSavedToastListener } from '../lib/savedEvent';
 import { openExternal } from '../lib/ipc';
+import { useMobileLayout } from '../lib/useMobileLayout';
 import type { OS } from './WindowChrome';
 import { GeneralTab, ServicesTab, PrivacyTab, AdvancedTab } from '../pages/settings/tabs';
 import { AboutSection } from '../pages/settings/AboutSection';
@@ -56,47 +57,97 @@ const LINK_ITEMS: ModalNavItem[] = [
 
 export function SettingsModal({ os: _os, onClose, initialSettingsSection }: SettingsModalProps) {
   const { t } = useTranslation();
+  const mobile = useMobileLayout();
   const [section, setSection] = useState<SettingsSectionId>(initialSettingsSection ?? 'general');
   const savedToast = useSavedToastListener();
 
-  // 与 sidebar nav 一致的滑动指示器：仅 tab 组有 pill；外链组永远不画 pill。
+  // 与 sidebar nav 一致的滑动指示器：仅 tab 组有 pill；外链组永远不画 pill（desktop）。
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const [pillRect, setPillRect] = useState<{ top: number; height: number } | null>(null);
   useLayoutEffect(() => {
+    if (mobile) {
+      setPillRect(null);
+      return;
+    }
     const idx = TAB_ITEMS.findIndex(it => it.id === section);
     const el = tabRefs.current[idx];
     if (!el) return;
     setPillRect({ top: el.offsetTop, height: el.offsetHeight });
-  }, [section]);
+  }, [section, mobile]);
 
   return (
     <div
-      onClick={onClose}
+      onClick={mobile ? undefined : onClose}
       style={{
-        position: 'absolute', inset: 0,
-        background: 'rgba(15,17,22,0.32)',
-        backdropFilter: 'blur(8px) saturate(140%)',
-        WebkitBackdropFilter: 'blur(8px) saturate(140%)',
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        padding: 28,
+        position: mobile ? 'fixed' : 'absolute',
+        inset: 0,
+        background: mobile ? 'var(--ol-surface)' : 'rgba(15,17,22,0.32)',
+        backdropFilter: mobile ? 'none' : 'blur(8px) saturate(140%)',
+        WebkitBackdropFilter: mobile ? 'none' : 'blur(8px) saturate(140%)',
+        display: 'flex',
+        alignItems: mobile ? 'stretch' : 'center',
+        justifyContent: mobile ? 'stretch' : 'center',
+        padding: mobile ? 0 : 28,
         zIndex: 50,
-        animation: 'ol-modal-backdrop-in 0.18s var(--ol-motion-soft)',
+        animation: mobile ? undefined : 'ol-modal-backdrop-in 0.18s var(--ol-motion-soft)',
       }}>
 
       <div
         onClick={(e) => e.stopPropagation()}
         style={{
-          width: '100%', maxWidth: 880, height: '100%', maxHeight: 600,
+          width: '100%',
+          maxWidth: mobile ? undefined : 880,
+          height: '100%',
+          maxHeight: mobile ? undefined : 600,
           background: 'var(--ol-surface)',
-          borderRadius: 14,
-          border: '0.5px solid rgba(0,0,0,.08)',
-          boxShadow: '0 30px 80px -20px rgba(15,17,22,.35), 0 0 0 0.5px rgba(0,0,0,.06)',
-          display: 'flex', overflow: 'hidden',
-          animation: 'ol-modal-card-in 0.24s var(--ol-motion-spring)',
+          borderRadius: mobile ? 0 : 14,
+          border: mobile ? 'none' : '0.5px solid rgba(0,0,0,.08)',
+          boxShadow: mobile ? 'none' : '0 30px 80px -20px rgba(15,17,22,.35), 0 0 0 0.5px rgba(0,0,0,.06)',
+          display: 'flex',
+          flexDirection: mobile ? 'column' : 'row',
+          overflow: 'hidden',
+          animation: mobile ? undefined : 'ol-modal-card-in 0.24s var(--ol-motion-spring)',
           position: 'relative',
         }}>
 
-        {/* ─── 单层侧栏 ────────────────────────────────────────────── */}
+        {mobile ? (
+          <div style={{
+            flexShrink: 0,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            padding: 'calc(10px + env(safe-area-inset-top, 0px)) 12px 10px',
+            borderBottom: '0.5px solid var(--ol-line-soft)',
+          }}>
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label={t('common.close')}
+              style={mobileHeaderBtnStyle}
+            >
+              <Icon name="close" size={16} />
+            </button>
+            <div
+              className="ol-thinscroll"
+              style={{ flex: 1, minWidth: 0, display: 'flex', gap: 6, overflowX: 'auto', paddingBottom: 2 }}
+            >
+              {TAB_ITEMS.map(it => {
+                const active = section === it.id;
+                return (
+                  <button
+                    key={it.id}
+                    type="button"
+                    onClick={() => setSection(it.id as SettingsSectionId)}
+                    className={active ? 'ol-nav-btn ol-nav-btn-active' : 'ol-nav-btn'}
+                    style={mobileTabChipStyle(active)}
+                  >
+                    {t(`modal.sections.${it.id}`)}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ) : (
         <aside
           style={{
             width: 200, flexShrink: 0,
@@ -157,18 +208,17 @@ export function SettingsModal({ os: _os, onClose, initialSettingsSection }: Sett
             ))}
           </div>
         </aside>
+        )}
 
-        {/* ─── 内容区 ──────────────────────────────────────────────
-            父容器 overflow:hidden + 列向 flex；关闭按钮、section 标题固定在头部，
-            只有最里层的 scroll wrapper 真正滚动。 */}
+        {/* ─── 内容区 ────────────────────────────────────────────── */}
         <div style={{ flex: 1, minWidth: 0, overflow: 'hidden', position: 'relative', display: 'flex', flexDirection: 'column' }}>
-          {/* "已保存" toast：right:54 避开 28×28 关闭按钮 + 12px gap。 */}
           <SavedToast
             saveState={savedToast.state}
             message={savedToast.message}
             slideFrom="top"
-            offsetStyle={{ position: 'absolute', top: 16, right: 54 }}
+            offsetStyle={{ position: 'absolute', top: mobile ? 12 : 16, right: mobile ? 14 : 54 }}
           />
+          {!mobile && (
           <button
             onClick={onClose}
             style={{
@@ -184,14 +234,22 @@ export function SettingsModal({ os: _os, onClose, initialSettingsSection }: Sett
             title={t('common.close')}>
             <Icon name="close" size={14} />
           </button>
+          )}
 
+          {!mobile && (
           <h2 style={{ margin: 0, padding: '22px 28px 8px', fontSize: 22, fontWeight: 600, letterSpacing: '-0.02em', flexShrink: 0 }}>
             {t(`modal.sections.${section}`)}
           </h2>
+          )}
 
           <div
             className="ol-thinscroll"
-            style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '10px 28px 28px' }}>
+            style={{
+              flex: 1,
+              minHeight: 0,
+              overflow: 'auto',
+              padding: mobile ? '12px 16px calc(16px + env(safe-area-inset-bottom, 0px))' : '10px 28px 28px',
+            }}>
             {/* key=section 让切 tab 时整块重挂载，ol-tab-fade 轻微淡入。 */}
             <div
               key={section}
@@ -202,11 +260,57 @@ export function SettingsModal({ os: _os, onClose, initialSettingsSection }: Sett
               {section === 'advanced' && <AdvancedTab />}
               {section === 'about' && <AboutSection />}
             </div>
+            {mobile && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 20, paddingTop: 16, borderTop: '0.5px solid var(--ol-line-soft)' }}>
+                {LINK_ITEMS.map(it => (
+                  <button
+                    key={it.id}
+                    type="button"
+                    onClick={() => { if (it.href) void openExternal(it.href); }}
+                    className="ol-nav-btn"
+                    style={navBtnStyle}
+                  >
+                    <Icon name={it.icon} size={14} />
+                    <span style={{ flex: 1 }}>{t(`modal.sections.${it.id}`)}</span>
+                    <Icon name="external" size={11} />
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       </div>
     </div>
   );
+}
+
+const mobileHeaderBtnStyle: CSSProperties = {
+  width: 36,
+  height: 36,
+  flexShrink: 0,
+  border: 0,
+  borderRadius: 10,
+  background: 'transparent',
+  color: 'var(--ol-ink-3)',
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  cursor: 'default',
+};
+
+function mobileTabChipStyle(active: boolean): CSSProperties {
+  return {
+    flexShrink: 0,
+    padding: '6px 12px',
+    borderRadius: 999,
+    border: active ? '0.5px solid var(--ol-ink)' : '0.5px solid var(--ol-line-strong)',
+    background: active ? 'var(--ol-ink)' : 'transparent',
+    color: active ? '#fff' : 'var(--ol-ink-3)',
+    fontFamily: 'inherit',
+    fontSize: 12,
+    fontWeight: active ? 600 : 500,
+    cursor: 'default',
+  };
 }
 
 const navBtnStyle = {

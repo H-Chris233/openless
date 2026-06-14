@@ -7,6 +7,7 @@ import { Icon } from '../components/Icon';
 import { detectOS } from '../components/WindowChrome';
 import { formatComboLabel } from '../lib/hotkey';
 import { clearHistory, deleteHistoryEntry, listHistory, readAudioRecording } from '../lib/ipc';
+import { useMobileLayout } from '../lib/useMobileLayout';
 import type { DictationSession, PolishMode } from '../lib/types';
 import { useHotkeySettings } from '../state/HotkeySettingsContext';
 import { Btn, Card, PageHeader, Pill } from './_atoms';
@@ -59,6 +60,8 @@ export function History() {
     });
   }, []);
   const { prefs } = useHotkeySettings();
+  const mobile = useMobileLayout();
+  const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -176,7 +179,8 @@ export function History() {
           </div>
         }
       />
-      <div style={{ display: 'grid', gridTemplateColumns: '300px 1fr', gap: 14, flex: 1, minHeight: 0 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: mobile ? '1fr' : '300px 1fr', gap: 14, flex: 1, minHeight: 0 }}>
+        {( !mobile || !mobileDetailOpen) && (
         <Card padding={0} style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
           <div style={{ padding: '12px 14px', borderBottom: '0.5px solid var(--ol-line)' }}>
             <div style={{
@@ -226,7 +230,10 @@ export function History() {
             {!loadError && filtered.map(s => (
               <button
                 key={s.id}
-                onClick={() => setSelectedId(s.id)}
+                onClick={() => {
+                  setSelectedId(s.id);
+                  if (mobile) setMobileDetailOpen(true);
+                }}
                 style={{
                   width: '100%', padding: '10px 12px', textAlign: 'left',
                   display: 'flex', flexDirection: 'column', gap: 4,
@@ -253,11 +260,20 @@ export function History() {
             ))}
           </div>
         </Card>
+        )}
 
+        {(!mobile || mobileDetailOpen) && (
         <Card padding={20} className="ol-thinscroll" style={{ overflow: 'auto' }}>
           {item ? (
             <>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
+              {mobile && (
+                <div style={{ marginBottom: 12 }}>
+                  <Btn icon="chevLeft" variant="ghost" size="sm" onClick={() => setMobileDetailOpen(false)}>
+                    {t('history.backToList')}
+                  </Btn>
+                </div>
+              )}
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14, flexWrap: 'wrap', gap: 8 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                   <span style={{ fontSize: 13, fontFamily: 'var(--ol-font-mono)', color: 'var(--ol-ink-3)' }}>{formatTime(item.createdAt)}</span>
                   <Pill size="sm" tone="default">{MODE_LABEL[item.mode]}</Pill>
@@ -278,7 +294,7 @@ export function History() {
                   key={item.id}
                 />
               )}
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: mobile ? '1fr' : '1fr 1fr', gap: 12 }}>
                 <div style={{ padding: 14, border: '0.5px solid var(--ol-line)', borderRadius: 10, background: 'var(--ol-surface-2)' }}>
                   <Pill size="sm" tone="outline" style={{ marginBottom: 10 }}>{t('history.rawLabel')}</Pill>
                   <p style={{ margin: 0, fontSize: 13, lineHeight: 1.7, color: 'var(--ol-ink-2)', whiteSpace: 'pre-wrap' }}>
@@ -315,6 +331,7 @@ export function History() {
             </div>
           )}
         </Card>
+        )}
       </div>
     </div>
   );
