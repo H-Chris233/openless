@@ -25,6 +25,7 @@ const KOTLIN_FILES = [
   'OpenLessAccessibilityService.kt',
   'OpenLessAccessibilityCommandReceiver.kt',
   'OverlayPermissionActivity.kt',
+  'OpenLessUpdateInstaller.kt',
 ];
 
 const XML_FILES = [

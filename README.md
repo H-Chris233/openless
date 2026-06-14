@@ -215,12 +215,14 @@ Go to [Releases](../../releases) and download:
   xattr -cr /Applications/OpenLess.app
   ```
 - **Windows**: `OpenLess_<version>_x64-setup.exe` — run the installer.
-- **Android debug APK**: choose exactly one split APK for your device:
-  - `OpenLess-android-debug-arm64-v8a-*.apk` for most modern Android phones.
-  - `OpenLess-android-debug-armeabi-v7a-*.apk` for older 32-bit ARM phones.
-  - `OpenLess-android-debug-x86_64-*.apk` for most 64-bit Android emulator images.
-  - `OpenLess-android-debug-x86-*.apk` for older 32-bit x86 emulator images.
-  - If unsure, run `adb shell getprop ro.product.cpu.abi` and download the APK matching that ABI. Do not install the x86 builds on a normal ARM phone.
+- **Android** (release APKs on GitHub Release; debug APKs via Actions artifacts):
+  - **Phones (recommended)**: `OpenLess_<version>_arm64-v8a.apk`
+  - **Older 32-bit ARM**: `OpenLess_<version>_armeabi-v7a.apk`
+  - **64-bit emulator**: `OpenLess_<version>_x86_64.apk`
+  - **32-bit emulator**: `OpenLess_<version>_x86.apk`
+  - In-app updates (Settings → About) use `latest-android-{arch}.json` manifests; Beta users join Beta in Advanced settings.
+  - Debug smoke builds: `OpenLess-android-debug-{abi}-*.apk` from workflow_dispatch artifacts.
+  - If unsure, run `adb shell getprop ro.product.cpu.abi` and pick the matching APK.
 - **macOS (Homebrew)**:
   ```bash
   brew tap appergb/openless https://github.com/appergb/openless

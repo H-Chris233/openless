@@ -3,6 +3,8 @@
 pub mod accessibility;
 #[cfg(target_os = "android")]
 pub mod insert;
+#[cfg(target_os = "android")]
+pub mod updater;
 pub mod jni;
 pub mod native_bridge;
 pub mod overlay;

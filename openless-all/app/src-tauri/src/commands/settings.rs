@@ -364,15 +364,16 @@ fn extract_between(haystack: &str, open: &str, close: &str) -> Option<String> {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg(not(mobile))]
 pub struct AppUpdateMetadata {
+    #[cfg(not(mobile))]
     pub rid: tauri::ResourceId,
+    #[cfg(mobile)]
+    pub rid: u32,
     pub current_version: String,
     pub version: String,
     pub date: Option<String>,
     pub body: Option<String>,
-    /// 原始 manifest JSON——`new Update(metadata)` 在 JS 那边会校验它存在；
-    /// 我们透传 plugin 自己 check 时拿到的字段。
+    /// 原始 manifest JSON——桌面 `new Update(metadata)` / Android 自定义安装路径共用。
     pub raw_json: serde_json::Value,
 }
 
@@ -443,4 +444,42 @@ async fn resolve_beta_manifest_endpoints() -> Result<Vec<url::Url>, String> {
     let mirror_url = url::Url::parse(&mirror).map_err(|e| format!("parse beta mirror url: {e}"))?;
     let direct_url = url::Url::parse(&direct).map_err(|e| format!("parse beta direct url: {e}"))?;
     Ok(vec![mirror_url, direct_url])
+}
+
+#[cfg(mobile)]
+#[tauri::command]
+pub async fn app_check_update_with_channel(
+    coord: CoordinatorState<'_>,
+    _timeout_ms: Option<u64>,
+    channel: Option<UpdateChannel>,
+) -> Result<Option<AppUpdateMetadata>, String> {
+    #[cfg(target_os = "android")]
+    {
+        let channel = channel.unwrap_or_else(|| coord.prefs().get().update_channel);
+        return crate::android::updater::check_update(channel).await;
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (coord, channel);
+        Err("应用内更新仅支持 Android".to_string())
+    }
+}
+
+#[cfg(mobile)]
+#[tauri::command]
+pub async fn app_download_and_install_android_update(
+    app: AppHandle,
+    url: String,
+    signature: String,
+    version: String,
+) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        return crate::android::updater::download_and_install(app, url, signature, version).await;
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, url, signature, version);
+        Err("应用内更新仅支持 Android".to_string())
+    }
 }

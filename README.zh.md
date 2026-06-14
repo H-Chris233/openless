@@ -215,6 +215,14 @@ OpenLess 只做一件事:**把语音变成可用的书面文字(尤其是 AI 提
   xattr -cr /Applications/OpenLess.app
   ```
 - **Windows**:`OpenLess_<version>_x64-setup.exe`——运行安装程序。
+- **Android**（GitHub Release 提供 release APK；Actions artifact 提供 debug 冒烟包）:
+  - **真机推荐**:`OpenLess_<version>_arm64-v8a.apk`
+  - **旧款 32 位 ARM**:`OpenLess_<version>_armeabi-v7a.apk`
+  - **64 位模拟器**:`OpenLess_<version>_x86_64.apk`
+  - **32 位模拟器**:`OpenLess_<version>_x86.apk`
+  - 应用内更新（设置 → 关于）读取 `latest-android-{arch}.json`；Beta 用户在高级设置加入 Beta 渠道。
+  - 调试包:`OpenLess-android-debug-{abi}-*.apk`（workflow_dispatch 产物）。
+  - 不确定时执行 `adb shell getprop ro.product.cpu.abi`，下载对应 ABI 的包。
 - **macOS(Homebrew)**:
   ```bash
   brew tap appergb/openless https://github.com/appergb/openless
@@ -391,23 +399,30 @@ OpenLess 提供两个发布频道。分支名即频道名(见[贡献流程](#贡
 - 运行 `INSTALL=0 ./scripts/build-mac.sh`,确认 `.app` 能启动。
 - 在干净的机器上做冒烟测试:权限流程、快捷键、录音、ASR、润色、插入,以及剪贴板回退。
 - 确认 `TAURI_SIGNING_PRIVATE_KEY` 以及(macOS 所需的)Apple 签名 / 公证密钥已在仓库中配置。
+- Android tag 发版还需配置:`ANDROID_KEYSTORE_BASE64`、`ANDROID_KEYSTORE_PASSWORD`、`ANDROID_KEY_ALIAS`、`ANDROID_KEY_PASSWORD`（release APK 签名；minisign 仍用 `TAURI_SIGNING_PRIVATE_KEY`）。
 
 ### Beta 频道 — `v<v>-beta-tauri`
 
 1. 通过 PR 评审把改动落到 `beta` 分支。
 2. **在 `beta` 上**推送标签:`git tag v<v>-beta-tauri && git push origin v<v>-beta-tauri`。
-3. CI 会把该 GitHub Release 标记为 `Pre-release`,并仅上传 `latest-{tgt}-{arch}-beta.json` 更新清单。Stable 用户的 `releases/latest` 跳转不受影响。
+3. CI 会把该 GitHub Release 标记为 `Pre-release`,并上传 `latest-{tgt}-{arch}-beta.json` 与 `latest-android-{arch}-beta.json` 更新清单。Stable 用户的 `releases/latest` 跳转不受影响。
 4. 在合适的渠道(issue 讨论串、QQ 群)公告:可选加入的 Beta 用户可从 设置 → 关于 → 加入 Beta 频道 获取。
 
 ### Stable 频道 — `v<v>-tauri`
 
 1. 在 Beta 发布充分沉淀后,将 `beta → main` 合并(或直接运行一次最终的双平台冒烟构建)。
 2. **在 `main` 上**推送标签:`git tag v<v>-tauri && git push origin v<v>-tauri`。
-3. CI 发布一个正常的 GitHub Release,并上传 `latest-{tgt}-{arch}.json`(无 `-beta` 后缀)。所有 Stable 用户都会通过应用内更新器获得更新。
+3. CI 发布一个正常的 GitHub Release,并上传 `latest-{tgt}-{arch}.json` 与 `latest-android-{arch}.json`(无 `-beta` 后缀)。所有 Stable 用户都会通过应用内更新器获得更新。
 
 ### 发布后验证(始终执行)
 
-执行 [`CLAUDE.md` → Branch & release-channel workflow → Channel distribution](CLAUDE.md) 中的 5 步清单:页面状态(pre-release 标记)、资产文件名的频道正确性、Stable 用户流程、Beta 可选加入流程,以及原始端点的合理性检查。
+执行 [`CLAUDE.md` → Branch & release-channel workflow → Channel distribution](CLAUDE.md) 中的 5 步清单,并额外核对 Android:
+
+1. Release 页面含 `latest-android-aarch64.json`（Stable 无 `-beta` 后缀混用）。
+2. Beta pre-release 含 `latest-android-aarch64-beta.json`,URL 指向具体 tag。
+3. 真机:设置 → 关于 → 检查更新 → 下载 → 系统安装器 → 版本号递增。
+4. Beta 开关:高级 → 加入 Beta → 手动/自动检查 Beta manifest。
+5. 原始端点与 mirror 端点均可访问。
 
 ## 致谢
 

@@ -11,6 +11,7 @@ ChatGPT Image*.jpg
 # Local config / secrets
 *.env
 config.local.json
+.local-secrets/
 # Tauri updater 签名私钥（绝不上传 — 公钥在 tauri.conf.json，私钥放 GitHub Secret）
 *.key
 *.key.pub

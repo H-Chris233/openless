@@ -2410,7 +2410,7 @@ impl PlatformCapabilities {
                 supports_tray: false,
                 supports_local_asr: false,
                 supports_in_app_dictation: true,
-                supports_auto_update: false,
+                supports_auto_update: true,
             }
         }
 

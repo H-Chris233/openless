@@ -68,7 +68,7 @@ export function inferPlatformCapabilities(): PlatformCapabilities {
       supportsImeInput: false,
       supportsLocalAsr: false,
       supportsInAppDictation: true,
-      supportsAutoUpdate: false,
+      supportsAutoUpdate: true,
     };
   }
 
