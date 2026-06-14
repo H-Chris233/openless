@@ -97,7 +97,7 @@ interface CenterTextProps {
   color?: string;
 }
 
-function CenterText({ os, kind, text, color = 'var(--ol-ink-3)' }: CenterTextProps) {
+function CenterText({ os, kind, text, color = 'var(--ol-capsule-center-ink)' }: CenterTextProps) {
   const metrics = getCapsulePillMetrics(os);
   const layout = getCapsuleMessageLayout(os, kind);
   return (
@@ -133,8 +133,6 @@ interface CircleButtonProps {
 function CircleButton({ variant, enabled, onClick }: CircleButtonProps) {
   const { t } = useTranslation();
   const isCancel = variant === 'cancel';
-  // confirm 是主操作锚点，纯白；cancel 半透 + 自带 backdrop blur 跟 pill 拉开层级。
-  const useBackdrop = isCancel;
   return (
     <button
       onClick={enabled ? onClick : undefined}
@@ -148,11 +146,9 @@ function CircleButton({ variant, enabled, onClick }: CircleButtonProps) {
         width: 28,
         height: 28,
         borderRadius: 999,
-        background: isCancel ? 'rgba(255, 255, 255, 0.55)' : 'rgba(255, 255, 255, 0.92)',
-        backdropFilter: useBackdrop ? 'blur(12px) saturate(160%)' : 'none',
-        WebkitBackdropFilter: useBackdrop ? 'blur(12px) saturate(160%)' : 'none',
-        color: 'var(--ol-ink)',
-        border: '0.8px solid rgba(0, 0, 0, 0.08)',
+        background: isCancel ? 'var(--ol-capsule-btn-bg)' : 'var(--ol-capsule-btn-bg-confirm)',
+        color: 'var(--ol-capsule-btn-ink)',
+        border: '0.8px solid var(--ol-capsule-btn-border)',
         display: 'inline-flex',
         alignItems: 'center',
         justifyContent: 'center',
@@ -289,7 +285,7 @@ function Pill({ os, state, level, insertedChars, message, operating, onCancel, o
     // 非 Linux 走假毛玻璃；Linux 禁用透明窗口后由 .ol-frost 平台规则退成不透明面。
     // 不写 backdrop-filter —— webview 模糊不了透明窗口背后的桌面（Tauri 上游限制）。
     <div
-      className="ol-frost"
+      className="ol-frost ol-capsule-pill"
       style={{
         display: 'inline-flex',
         alignItems: 'center',
@@ -300,11 +296,9 @@ function Pill({ os, state, level, insertedChars, message, operating, onCancel, o
         height: metrics.height,
         boxSizing: metrics.boxSizing,
         borderRadius: 999,
-        border: '1px solid rgba(255, 255, 255, 0.55)',
-        boxShadow: os === 'win'
-          ? `0 10px 24px -14px rgba(0, 0, 0, ${(0.24 + ambient * 0.06).toFixed(3)}), 0 0 0 0.5px rgba(0, 0, 0, 0.08), inset 0 1px 0 0 rgba(255, 255, 255, 0.8)`
-          : `0 18px 50px -10px rgba(0, 0, 0, ${shadowAlpha.toFixed(3)}), 0 0 0 0.5px rgba(0, 0, 0, 0.08), inset 0 1px 0 0 rgba(255, 255, 255, 0.8)`,
-        color: 'var(--ol-ink)',
+        border: '1px solid var(--ol-capsule-pill-border)',
+        boxShadow: `${os === 'win' ? `0 10px 24px -14px rgba(0, 0, 0, ${(0.24 + ambient * 0.06).toFixed(3)})` : `0 18px 50px -10px rgba(0, 0, 0, ${shadowAlpha.toFixed(3)})`}, 0 0 0 0.5px rgba(0, 0, 0, 0.24), var(--ol-capsule-pill-inset)`,
+        color: 'var(--ol-capsule-center-ink)',
         fontFamily: 'var(--ol-font-sans)',
         transform: `scale(${scale.toFixed(4)})`,
         transformOrigin: 'center',
@@ -484,10 +478,10 @@ export function Capsule() {
             fontSize: 10.5,
             fontWeight: 600,
             color: 'var(--ol-blue)',
-            background: 'rgba(255, 255, 255, 0.78)',
+            background: 'var(--ol-capsule-badge-bg)',
             backdropFilter: 'blur(20px) saturate(180%)',
             WebkitBackdropFilter: 'blur(20px) saturate(180%)',
-            border: '0.5px solid rgba(37, 99, 235, 0.25)',
+            border: '0.5px solid var(--ol-capsule-badge-border)',
             boxShadow: '0 4px 12px -4px rgba(37, 99, 235, 0.25), 0 0 0 0.5px rgba(0,0,0,0.04)',
             letterSpacing: '0.02em',
             whiteSpace: 'nowrap',

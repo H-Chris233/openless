@@ -128,6 +128,37 @@ export function Toggle({
     )
 }
 
+export function chipSelectedStyle(selected: boolean): CSSProperties {
+    return {
+        background: selected ? "var(--ol-pill-selected-bg)" : "transparent",
+        border: selected
+            ? "0.5px solid var(--ol-pill-selected-border)"
+            : "0.5px solid var(--ol-line-strong)",
+        color: selected ? "var(--ol-pill-selected-ink)" : "var(--ol-ink-3)",
+    }
+}
+
+export const btnGhostStyle: CSSProperties = {
+    padding: "5px 10px",
+    fontSize: 12,
+    borderRadius: 6,
+    border: "0.5px solid var(--ol-line-strong)",
+    background: "var(--ol-control-solid)",
+    color: "var(--ol-ink-2)",
+    cursor: "default",
+    fontFamily: "inherit",
+    maxWidth: "100%",
+    transition:
+        "background 0.16s var(--ol-motion-quick), border-color 0.16s var(--ol-motion-quick)",
+}
+
+export const segmentedTrackStyle: CSSProperties = {
+    display: "inline-flex",
+    padding: 2,
+    borderRadius: 8,
+    background: "var(--ol-segmented-bg)",
+}
+
 export const inputStyle: CSSProperties = {
     flex: 1,
     height: 32,
