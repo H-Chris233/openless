@@ -1,8 +1,5 @@
-import { useEffect, useState } from 'react';
-import { AutoUpdateGate } from './components/AutoUpdateGate';
+import { lazy, Suspense, useEffect, useState } from 'react';
 import { Capsule } from './components/Capsule';
-import { FloatingShell } from './components/FloatingShell';
-import { Onboarding } from './components/Onboarding';
 import { detectOS, type OS } from './components/WindowChrome';
 import {
   checkAccessibilityPermission,
@@ -19,10 +16,29 @@ import {
   isWindowHotkeyKeyboardCandidate,
   windowMouseHotkeyCode,
 } from './lib/windowHotkeyFallback';
-import { QaPanel } from './pages/QaPanel';
-import { LessComputerPanel } from './pages/LessComputerPanel';
-import { LessComputerGlow } from './pages/LessComputerGlow';
 import { HotkeySettingsProvider } from './state/HotkeySettingsContext';
+
+// 各窗口/重页面懒加载,让每个 webview 只下载并解析自己用到的那部分代码。原本所有窗口
+// (主设置 / 胶囊 / QA / Less Computer / glow)共用一个打包产物,导致 5 个常驻 WebKit
+// 进程都把整套设置 UI(FloatingShell + Style/Marketplace/LocalAsr…)和聊天面板加载进来,
+// 常驻内存离谱。拆开后胶囊/glow 这类轻窗口不再加载设置/聊天代码。胶囊保持 eager:
+// 它是听写实时反馈、对首帧延迟敏感,且体积很小。
+const AutoUpdateGate = lazy(() =>
+  import('./components/AutoUpdateGate').then(m => ({ default: m.AutoUpdateGate })),
+);
+const FloatingShell = lazy(() =>
+  import('./components/FloatingShell').then(m => ({ default: m.FloatingShell })),
+);
+const Onboarding = lazy(() =>
+  import('./components/Onboarding').then(m => ({ default: m.Onboarding })),
+);
+const QaPanel = lazy(() => import('./pages/QaPanel').then(m => ({ default: m.QaPanel })));
+const LessComputerPanel = lazy(() =>
+  import('./pages/LessComputerPanel').then(m => ({ default: m.LessComputerPanel })),
+);
+const LessComputerGlow = lazy(() =>
+  import('./pages/LessComputerGlow').then(m => ({ default: m.LessComputerGlow })),
+);
 
 interface AppProps {
   isCapsule: boolean;
@@ -40,13 +56,25 @@ export function App({ isCapsule, isQa, isLessComputer, isLessComputerGlow, force
     return <Capsule />;
   }
   if (isQa) {
-    return <QaPanel />;
+    return (
+      <Suspense fallback={null}>
+        <QaPanel />
+      </Suspense>
+    );
   }
   if (isLessComputer) {
-    return <LessComputerPanel />;
+    return (
+      <Suspense fallback={null}>
+        <LessComputerPanel />
+      </Suspense>
+    );
   }
   if (isLessComputerGlow) {
-    return <LessComputerGlow />;
+    return (
+      <Suspense fallback={null}>
+        <LessComputerGlow />
+      </Suspense>
+    );
   }
 
   const os = forcedOs ?? detectOS();
@@ -255,26 +283,28 @@ export function App({ isCapsule, isQa, isLessComputer, isLessComputerGlow, force
   }, [os]);
 
   return (
-    <HotkeySettingsProvider>
-      {platformCaps?.platform === 'android' && (
-        <div style={{ display: mobileQaOpen ? 'block' : 'none', height: '100%' }}>
-          <QaPanel
-            embedded
-            onRequestClose={() => {
-              setMobileQaOpen(false);
-              if (window.history.state?.openlessQa === true) {
-                window.history.back();
-              }
-            }}
-          />
-        </div>
-      )}
-      {!mobileQaOpen && (gate === 'onboarding' ? (
-        <Onboarding onComplete={completeOnboarding} />
-      ) : (
-        <FloatingShell os={os} />
-      ))}
-      {gate === 'ready' && platformCaps?.supportsAutoUpdate === true && <AutoUpdateGate />}
-    </HotkeySettingsProvider>
+    <Suspense fallback={null}>
+      <HotkeySettingsProvider>
+        {platformCaps?.platform === 'android' && (
+          <div style={{ display: mobileQaOpen ? 'block' : 'none', height: '100%' }}>
+            <QaPanel
+              embedded
+              onRequestClose={() => {
+                setMobileQaOpen(false);
+                if (window.history.state?.openlessQa === true) {
+                  window.history.back();
+                }
+              }}
+            />
+          </div>
+        )}
+        {!mobileQaOpen && (gate === 'onboarding' ? (
+          <Onboarding onComplete={completeOnboarding} />
+        ) : (
+          <FloatingShell os={os} />
+        ))}
+        {gate === 'ready' && platformCaps?.supportsAutoUpdate === true && <AutoUpdateGate />}
+      </HotkeySettingsProvider>
+    </Suspense>
   );
 }
