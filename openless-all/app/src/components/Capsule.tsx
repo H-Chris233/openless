@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { detectOS, type OS } from './WindowChrome';
 import {
@@ -130,7 +130,9 @@ interface CircleButtonProps {
   onClick: () => void;
 }
 
-function CircleButton({ variant, enabled, onClick }: CircleButtonProps) {
+// memo:录音时 level 每帧(~60Hz)变化会重渲 Pill;cancel/confirm 两个 SVG 按钮跟
+// level 无关,memo + 稳定的 onClick 让它们在录音期间跳过重渲(只剩音量条真正更新)。
+const CircleButton = memo(function CircleButton({ variant, enabled, onClick }: CircleButtonProps) {
   const { t } = useTranslation();
   const isCancel = variant === 'cancel';
   return (
@@ -172,7 +174,7 @@ function CircleButton({ variant, enabled, onClick }: CircleButtonProps) {
       )}
     </button>
   );
-}
+});
 
 interface PillProps {
   os: OS;
@@ -187,8 +189,8 @@ interface PillProps {
 
 function Pill({ os, state, level, insertedChars, message, operating, onCancel, onConfirm }: PillProps) {
   const { t } = useTranslation();
-  const metrics = getCapsulePillMetrics(os);
-  const processingLayout = getCapsuleMessageLayout(os, 'processing');
+  const metrics = useMemo(() => getCapsulePillMetrics(os), [os]);
+  const processingLayout = useMemo(() => getCapsuleMessageLayout(os, 'processing'), [os]);
   const cancelEnabled = state === 'recording' || state === 'transcribing' || state === 'polishing';
   const confirmEnabled = state === 'recording';
 
@@ -402,13 +404,13 @@ export function Capsule() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state]);
 
-  const onCancel = () => {
+  const onCancel = useCallback(() => {
     void invokeOrMock<void>('cancel_dictation', undefined, () => undefined);
-  };
+  }, []);
 
-  const onConfirm = () => {
+  const onConfirm = useCallback(() => {
     void invokeOrMock<void>('stop_dictation', undefined, () => undefined);
-  };
+  }, []);
 
   // 真正卸载：state 已是 idle，且不在离场动画中。
   if (state === 'idle' && !leaving) {
