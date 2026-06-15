@@ -103,8 +103,11 @@ use tauri::menu::{
 use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
 use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, PhysicalPosition, PhysicalSize,
-    RunEvent, Runtime, WebviewUrl, WebviewWindowBuilder,
+    RunEvent, Runtime,
 };
+// 桌面专用：移动端 WebviewWindowBuilder 没有 decorations/shadow 等方法，懒创建只在桌面用。
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+use tauri::{WebviewUrl, WebviewWindowBuilder};
 
 use crate::types::PolishMode;
 
@@ -1937,6 +1940,7 @@ fn make_qa_window_draggable_macos<R: tauri::Runtime>(window: &tauri::WebviewWind
 /// 块逐项一致（"center": false ⇒ **不**调 .center()；"focus": false ⇒ focused(false)）。
 /// 关键：make_qa_window_draggable_macos 原先只在启动时设一次，这里创建时必须补回，否则
 /// 懒创建的 QA 窗口在 macOS 上拖不动。
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn ensure_qa_window<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<tauri::WebviewWindow<R>> {
     if let Some(w) = app.get_webview_window("qa") {
         return Some(w);
@@ -1965,6 +1969,13 @@ fn ensure_qa_window<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<tauri::Webv
             None
         }
     }
+}
+
+// 移动端 QA 路由到 main 窗口（show_qa_window 在 Android 早返回）；Android 的
+// WebviewWindowBuilder 没有桌面方法，这里只占位返回已有窗口（编译用，运行时不达）。
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn ensure_qa_window<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<tauri::WebviewWindow<R>> {
+    app.get_webview_window("qa")
 }
 
 /// 懒创建 Less Computer 浮窗（macOS only）。配置与原 tauri.conf 的 less-computer 块一致。
