@@ -2406,6 +2406,16 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
     ) {
         log::error!("[coord] history append failed: {e}");
     }
+
+    // 远程输入：把本次最终文字回传给手机端。remote_server 的 WS handler 订阅了
+    // "remote:result"（mod.rs:614），但此前全仓从未 emit，导致手机结果区永远空（#691）。
+    // 与上面的 vocab:updated 同模式：无手机连接时无人转发 = 无害空操作。
+    if !polished.trim().is_empty() {
+        if let Some(app) = inner.app.lock().clone() {
+            let _ = app.emit("remote:result", polished.clone());
+        }
+    }
+
     let done_message = if tsf_required_insert_failed {
         Some("TSF 未上屏，已禁止非 TSF 兜底".to_string())
     } else {
@@ -2505,6 +2515,12 @@ fn append_typed_prefix(target: &mut String, delta: &str, typed_chars: usize) -> 
     appended
 }
 
+/// 多轮上下文最多回看的历史轮数。时间窗口（polish_context_window_minutes）只限"多久内"，
+/// 不限"多少条"——5 分钟内堆积几十条历史时，全部前置进 LLM 会让输入 token 暴涨、首字延迟
+/// （TTFT）显著变长，影响全体用户（#678）。取最近 2 轮即可保留代词/续写所需的对话连续性，
+/// 同时把上下文 token 控制在常数量级。sessions 为 newest-first，`.take` 即取最近若干轮。
+const MAX_POLISH_CONTEXT_TURNS: usize = 2;
+
 fn eligible_polish_context_turns(
     sessions: Vec<DictationSession>,
     active_style_pack_id: &str,
@@ -2533,6 +2549,8 @@ fn eligible_polish_context_turns(
                 Some((s.raw_transcript, s.final_text))
             }
         })
+        // 限制条数：sessions newest-first，过滤后取最近 MAX_POLISH_CONTEXT_TURNS 轮（#678）。
+        .take(MAX_POLISH_CONTEXT_TURNS)
         .collect()
 }
 
@@ -2583,6 +2601,28 @@ mod tests {
             translation_active,
             polish_source: polish_source.map(str::to_string),
         }
+    }
+
+    #[test]
+    fn polish_context_caps_at_max_turns_keeping_most_recent() {
+        // sessions newest-first：超过上限时只保留最近 MAX_POLISH_CONTEXT_TURNS 轮（#678）。
+        let sessions = vec![
+            history_session("t1", "raw1", "final1", Some("pack.id"), false, None),
+            history_session("t2", "raw2", "final2", Some("pack.id"), false, None),
+            history_session("t3", "raw3", "final3", Some("pack.id"), false, None),
+            history_session("t4", "raw4", "final4", Some("pack.id"), false, None),
+        ];
+
+        let turns = eligible_polish_context_turns(sessions, "pack.id", false);
+
+        assert_eq!(turns.len(), super::MAX_POLISH_CONTEXT_TURNS);
+        assert_eq!(
+            turns,
+            vec![
+                ("raw1".to_string(), "final1".to_string()),
+                ("raw2".to_string(), "final2".to_string()),
+            ]
+        );
     }
 
     #[test]

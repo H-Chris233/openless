@@ -210,16 +210,12 @@ export function Style() {
   }, []);
 
   const selectedPack = packs.find(pack => pack.id === selectedId) ?? null;
-  const activePack = packs.find(pack => pack.active) ?? null;
   const rawPack = packs.find(pack => pack.id === BUILTIN_RAW_ID) ?? null;
   const otherBuiltinPacks = packs
     .filter(pack => pack.kind === 'builtin' && pack.id !== BUILTIN_RAW_ID)
     .sort((a, b) => BUILTIN_BODY_ORDER.indexOf(a.id) - BUILTIN_BODY_ORDER.indexOf(b.id));
   const importedPacks = packs.filter(pack => pack.kind === 'imported');
   const bodyPacks = [...otherBuiltinPacks, ...importedPacks];
-  const builtinCount = packs.filter(pack => pack.kind === 'builtin').length;
-  const importedCount = packs.filter(pack => pack.kind === 'imported').length;
-  const enabledCount = packs.filter(pack => pack.enabled).length;
 
   useEffect(() => {
     if (!selectedPack) {

@@ -29,6 +29,9 @@ pub fn set_qa_hotkey(
         if let Some(open_app) = prefs.open_app_hotkey.as_ref() {
             reject_qa_open_app_hotkey_overlap(binding, open_app)?;
         }
+        if let Some(less_computer) = prefs.coding_agent_voice_hotkey.as_ref() {
+            reject_qa_less_computer_hotkey_overlap(binding, less_computer)?;
+        }
     }
     prefs.qa_hotkey = binding;
     coord.prefs().set(prefs).map_err(|e| e.to_string())?;

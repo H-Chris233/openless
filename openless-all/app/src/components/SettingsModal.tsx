@@ -93,7 +93,7 @@ export function SettingsModal({ os: _os, onClose, initialSettingsSection }: Sett
       }}>
 
       <div
-        className="ol-aura-settings"
+        className="ol-settings-surface"
         data-ol-mobile={mobile ? 'true' : undefined}
         onClick={(e) => e.stopPropagation()}
         style={{

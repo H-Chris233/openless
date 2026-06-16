@@ -1,4 +1,4 @@
-/* OpenLess design tokens with Aura-specific extensions. */
+/* OpenLess design tokens. */
 
 :root {
   /* QaPanel（划词追问）保留新代码引用的 6 个 solid/radius token —— 旧 UI 回退后
@@ -30,22 +30,15 @@
   --ol-line-strong: rgba(0, 0, 0, 0.14);
   --ol-line-soft: rgba(0, 0, 0, 0.05);
 
-  /* Aura palette */
   --ol-bg-base: #f3f4f6;
   --ol-bg-elevated: #fbfbfc;
-  --ol-aura-surface: rgba(255, 255, 255, 0.72);
-  --ol-aura-surface-2: rgba(255, 255, 255, 0.88);
-  --ol-aura-surface-solid: #ffffff;
-  --ol-aura-line: rgba(15, 23, 42, 0.08);
-  --ol-aura-line-strong: rgba(15, 23, 42, 0.14);
-  --ol-aura-line-soft: rgba(255, 255, 255, 0.55);
 
   /* Ink */
   --ol-ink: #0a0a0b;
   --ol-ink-2: #2a2a2d;
   --ol-ink-3: rgba(10, 10, 11, 0.62);
-  /* AA 修复：AURA 回退把 alpha 从 0.58 降到 0.42，浅色 surface 上的弱化文字跌到
-     2.88:1（< WCAG AA 4.5:1）。恢复回退前的 0.58（≈5.1:1，仍比 --ol-ink-3 浅）。 */
+  /* AA 修复：曾把 alpha 从 0.58 降到 0.42，浅色 surface 上的弱化文字跌到
+     2.88:1（< WCAG AA 4.5:1）。恢复为 0.58（≈5.1:1，仍比 --ol-ink-3 浅）。 */
   --ol-ink-4: rgba(10, 10, 11, 0.58);
   --ol-ink-5: rgba(10, 10, 11, 0.24);
 
@@ -63,10 +56,6 @@
   --ol-glass-blur: 20px;
   --ol-glass-blur-strong: 36px;
 
-  /* Aura glass */
-  --ol-aura-glass-border: rgba(255, 255, 255, 0.58);
-  --ol-aura-glass-blur: 24px;
-
   /* Frost grain texture used by the .ol-frost helpers in global.css. */
   --ol-frost-grain: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='100'%20height='100'%3E%3Cfilter%20id='g'%3E%3CfeTurbulence%20type='fractalNoise'%20baseFrequency='0.95'%20numOctaves='1'%20stitchTiles='stitch'/%3E%3CfeColorMatrix%20type='matrix'%20values='0.34%200.34%200.34%200%200%200.34%200.34%200.34%200%200%200.34%200.34%200.34%200%200%200%200%200%200%201'/%3E%3C/filter%3E%3Crect%20width='100'%20height='100'%20filter='url(%23g)'/%3E%3C/svg%3E");
 
@@ -80,8 +69,6 @@
   --ol-shadow-md: 0 1px 2px rgba(15, 17, 22, 0.05), 0 6px 24px -12px rgba(15, 17, 22, 0.10), 0 0 0 0.5px rgba(0, 0, 0, 0.04);
   --ol-shadow-lg: 0 20px 60px -20px rgba(15, 17, 22, 0.18), 0 8px 32px -16px rgba(15, 17, 22, 0.10), 0 0 0 0.5px rgba(0, 0, 0, 0.06);
   --ol-shadow-xl: 0 40px 120px -40px rgba(15, 17, 22, 0.30), 0 24px 60px -24px rgba(15, 17, 22, 0.15), 0 0 0 0.5px rgba(0, 0, 0, 0.06);
-  --ol-aura-shadow: 0 24px 80px -32px rgba(15, 23, 42, 0.24), 0 12px 36px -18px rgba(15, 23, 42, 0.12);
-  --ol-aura-shadow-soft: 0 10px 30px -18px rgba(15, 23, 42, 0.16), 0 0 0 0.5px rgba(255, 255, 255, 0.55) inset;
 
   /* Radii */
   --ol-shell-radius: 32px;
@@ -120,12 +107,15 @@
   --ol-linux-titlebar-bg: rgba(245, 245, 247, 0.85);
   --ol-linux-titlebar-border: rgba(0, 0, 0, 0.08);
 
-  --ol-panel-bg: var(--ol-aura-surface);
-  --ol-panel-border: var(--ol-aura-glass-border);
-  --ol-panel-shadow: var(--ol-aura-shadow);
+  --ol-panel-bg: rgba(255, 255, 255, 0.72);
+  --ol-panel-border: rgba(255, 255, 255, 0.58);
+  --ol-panel-shadow: 0 24px 80px -32px rgba(15, 23, 42, 0.24), 0 12px 36px -18px rgba(15, 23, 42, 0.12);
   --ol-card-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(252, 252, 253, 0.82));
   --ol-card-border: rgba(255, 255, 255, 0.74);
-  --ol-card-shadow: var(--ol-aura-shadow-soft);
+  --ol-card-shadow: 0 10px 30px -18px rgba(15, 23, 42, 0.16), 0 0 0 0.5px rgba(255, 255, 255, 0.55) inset;
+  /* 玻璃面板背景（半透明，配 backdrop-filter）；FloatingShell 主区非不透明分支用，
+     light/dark 取值不同需保持主题感知。 */
+  --ol-panel-glass-bg: rgba(255, 255, 255, 0.72);
 
   --ol-sidebar-bg: linear-gradient(180deg, rgba(255,255,255,0.34), rgba(255,255,255,0.12));
   --ol-sidebar-border: rgba(255,255,255,0.38);
@@ -252,12 +242,8 @@
 
   --ol-bg-base: #0a0d12;
   --ol-bg-elevated: #10151d;
-  --ol-aura-surface: rgba(17, 23, 31, 0.76);
-  --ol-aura-surface-2: rgba(22, 29, 39, 0.88);
-  --ol-aura-surface-solid: #171d26;
-  --ol-aura-line: rgba(255, 255, 255, 0.10);
-  --ol-aura-line-strong: rgba(255, 255, 255, 0.16);
-  --ol-aura-line-soft: rgba(255, 255, 255, 0.08);
+  /* 玻璃面板背景暗色取值。 */
+  --ol-panel-glass-bg: rgba(17, 23, 31, 0.76);
 
   --ol-ink: #f4f7fb;
   --ol-ink-2: #d8dfeb;
@@ -274,14 +260,11 @@
   --ol-glass-bg: rgba(15, 19, 27, 0.68);
   --ol-glass-bg-strong: rgba(17, 22, 30, 0.84);
   --ol-glass-border: rgba(255, 255, 255, 0.10);
-  --ol-aura-glass-border: rgba(255, 255, 255, 0.10);
 
   --ol-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.34), 0 0 0 0.5px rgba(255, 255, 255, 0.04);
   --ol-shadow-md: 0 10px 30px -20px rgba(0, 0, 0, 0.42), 0 0 0 0.5px rgba(255, 255, 255, 0.05);
   --ol-shadow-lg: 0 24px 72px -32px rgba(0, 0, 0, 0.58), 0 0 0 0.5px rgba(255, 255, 255, 0.05);
   --ol-shadow-xl: 0 48px 120px -52px rgba(0, 0, 0, 0.72), 0 0 0 0.5px rgba(255, 255, 255, 0.06);
-  --ol-aura-shadow: 0 28px 90px -44px rgba(0, 0, 0, 0.72), 0 12px 36px -24px rgba(2, 8, 20, 0.48);
-  --ol-aura-shadow-soft: 0 18px 40px -28px rgba(0, 0, 0, 0.62), 0 0 0 0.5px rgba(255, 255, 255, 0.06) inset;
 
   --ol-ok: #4ade80;
   --ol-ok-soft: rgba(74, 222, 128, 0.14);

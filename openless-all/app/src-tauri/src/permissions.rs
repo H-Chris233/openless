@@ -467,8 +467,3 @@ pub use platform::windows_microphone_access_explicitly_denied;
 pub fn windows_microphone_access_explicitly_denied() -> bool {
     false
 }
-
-/// 兼容老调用：startup 时主动弹 Accessibility 框。
-pub fn request_accessibility_with_prompt(_prompt: bool) -> bool {
-    matches!(request_accessibility(), PermissionStatus::Granted)
-}

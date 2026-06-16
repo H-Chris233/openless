@@ -1,7 +1,7 @@
 // History.tsx — 接 Tauri 后端 list_history / delete_history_entry / clear_history。
 // 真实数据来自 ~/Library/Application Support/OpenLess/history.json。
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Icon } from '../components/Icon';
 import { detectOS } from '../components/WindowChrome';
@@ -40,6 +40,8 @@ export function History() {
   const FILTERS = useFilters();
   const MODE_LABEL = useModeLabel();
   const [filter, setFilter] = useState<'all' | PolishMode>('all');
+  const [query, setQuery] = useState('');
+  const [debouncedQuery, setDebouncedQuery] = useState('');
   const [items, setItems] = useState<DictationSession[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -84,10 +86,39 @@ export function History() {
     void refresh();
   }, [refresh]);
 
-  const filtered = useMemo(
-    () => (filter === 'all' ? items : items.filter(s => s.mode === filter)),
-    [items, filter],
-  );
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const searchShortcut = os === 'mac' ? '⌘K' : 'Ctrl+K';
+
+  // 搜索词防抖：随输入实时更新 query，300ms 后落到 debouncedQuery 再过滤，
+  // 避免每个按键都重算整张列表（与 Marketplace 同模式）。
+  useEffect(() => {
+    const id = window.setTimeout(() => setDebouncedQuery(query), 300);
+    return () => window.clearTimeout(id);
+  }, [query]);
+
+  // ⌘K / Ctrl+K 聚焦搜索框（设计稿提示的快捷键）。
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
+
+  const filtered = useMemo(() => {
+    const byMode = filter === 'all' ? items : items.filter(s => s.mode === filter);
+    const q = debouncedQuery.trim().toLowerCase();
+    if (!q) return byMode;
+    // 按原始转写 + 润色后文本匹配关键词，覆盖用户能想起的两种内容。
+    return byMode.filter(
+      s =>
+        s.rawTranscript.toLowerCase().includes(q) ||
+        s.finalText.toLowerCase().includes(q),
+    );
+  }, [items, filter, debouncedQuery]);
   const item = useMemo(
     () => filtered.find(s => s.id === selectedId) || filtered[0],
     [filtered, selectedId],
@@ -191,7 +222,22 @@ export function History() {
               background: 'var(--ol-surface-2)', color: 'var(--ol-ink-3)',
             }}>
               <Icon name="search" size={12} />
-              <span style={{ flex: 1 }}>{t('history.summary', { total: items.length, shown: filtered.length })}</span>
+              <input
+                ref={searchInputRef}
+                type="search"
+                value={query}
+                onChange={e => setQuery(e.target.value)}
+                placeholder={t('history.searchPlaceholder', { shortcut: searchShortcut })}
+                aria-label={t('history.searchPlaceholder', { shortcut: searchShortcut })}
+                style={{
+                  flex: 1, minWidth: 0,
+                  outline: 'none', border: 0, background: 'transparent',
+                  fontSize: 12, color: 'var(--ol-ink-1)', fontFamily: 'inherit',
+                }}
+              />
+            </div>
+            <div style={{ marginTop: 6, fontSize: 11, color: 'var(--ol-ink-4)' }}>
+              {t('history.summary', { total: items.length, shown: filtered.length })}
             </div>
             <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 10 }}>
               {FILTERS.map(f => (
@@ -223,7 +269,9 @@ export function History() {
             )}
             {!loading && !loadError && filtered.length === 0 && (
               <div style={{ padding: 16, fontSize: 12, color: 'var(--ol-ink-4)' }}>
-                {t('history.empty', { trigger: prefs ? formatComboLabel(prefs.dictationHotkey) : '' })}
+                {debouncedQuery.trim()
+                  ? t('history.searchNoMatch', { query: debouncedQuery.trim() })
+                  : t('history.empty', { trigger: prefs ? formatComboLabel(prefs.dictationHotkey) : '' })}
               </div>
             )}
             {!loadError && filtered.map(s => (

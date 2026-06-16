@@ -234,10 +234,6 @@ impl StyleSystemPrompts {
         }
     }
 
-    pub fn is_default_for_mode(&self, mode: PolishMode) -> bool {
-        self.for_mode(mode) == StyleSystemPrompts::default().for_mode(mode)
-    }
-
     pub fn with_legacy_custom_prompts(mut self, legacy: &CustomStylePrompts) -> Self {
         const LEGACY_CUSTOM_PROMPT_MARKER: &str = "\n\n# 用户自定义附加要求\n";
         for mode in [

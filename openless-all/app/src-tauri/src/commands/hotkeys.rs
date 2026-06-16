@@ -23,6 +23,9 @@ pub fn set_dictation_hotkey(
     if let Some(open_app) = prefs.open_app_hotkey.as_ref() {
         reject_dictation_open_app_hotkey_overlap(&binding, open_app)?;
     }
+    if let Some(less_computer) = prefs.coding_agent_voice_hotkey.as_ref() {
+        reject_dictation_less_computer_hotkey_overlap(&binding, less_computer)?;
+    }
     prefs.dictation_hotkey = binding;
     sync_dictation_hotkey_legacy_fields(&mut prefs);
     coord.prefs().set(prefs).map_err(|e| e.to_string())?;
@@ -47,6 +50,9 @@ pub fn set_translation_hotkey(
     }
     if let Some(open_app) = previous.open_app_hotkey.as_ref() {
         reject_translation_open_app_hotkey_overlap(&binding, open_app)?;
+    }
+    if let Some(less_computer) = previous.coding_agent_voice_hotkey.as_ref() {
+        reject_translation_less_computer_hotkey_overlap(&binding, less_computer)?;
     }
     let mut prefs = previous.clone();
     prefs.translation_hotkey = binding;
@@ -82,6 +88,9 @@ pub fn set_switch_style_hotkey(
         if let Some(open_app) = prefs.open_app_hotkey.as_ref() {
             reject_switch_style_open_app_hotkey_overlap(binding, open_app)?;
         }
+        if let Some(less_computer) = prefs.coding_agent_voice_hotkey.as_ref() {
+            reject_less_computer_switch_style_hotkey_overlap(less_computer, binding)?;
+        }
     }
     prefs.switch_style_hotkey = binding;
     coord.prefs().set(prefs).map_err(|e| e.to_string())?;
@@ -108,6 +117,9 @@ pub fn set_open_app_hotkey(
         }
         if let Some(switch_style) = prefs.switch_style_hotkey.as_ref() {
             reject_switch_style_open_app_hotkey_overlap(switch_style, binding)?;
+        }
+        if let Some(less_computer) = prefs.coding_agent_voice_hotkey.as_ref() {
+            reject_less_computer_open_app_hotkey_overlap(less_computer, binding)?;
         }
     }
     prefs.open_app_hotkey = binding;
@@ -155,6 +167,9 @@ pub fn set_combo_hotkey(coord: CoordinatorState<'_>, binding: ComboBinding) -> R
     }
     if let Some(open_app) = prefs.open_app_hotkey.as_ref() {
         reject_dictation_open_app_hotkey_overlap(&shortcut, open_app)?;
+    }
+    if let Some(less_computer) = prefs.coding_agent_voice_hotkey.as_ref() {
+        reject_dictation_less_computer_hotkey_overlap(&shortcut, less_computer)?;
     }
     prefs.custom_combo_hotkey = Some(binding);
     prefs.dictation_hotkey = shortcut;
@@ -316,7 +331,7 @@ pub(crate) fn reject_qa_open_app_hotkey_overlap(
     reject_hotkey_overlap(qa, open_app, "打开应用快捷键不能和 QA 快捷键相同")
 }
 
-fn reject_qa_less_computer_hotkey_overlap(
+pub(crate) fn reject_qa_less_computer_hotkey_overlap(
     qa: &ShortcutBinding,
     less_computer: &ShortcutBinding,
 ) -> Result<(), String> {
@@ -404,5 +419,59 @@ fn shortcut_bindings_overlap(left: &ShortcutBinding, right: &ShortcutBinding) ->
             };
             left == right
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(primary: &str) -> ShortcutBinding {
+        ShortcutBinding {
+            primary: primary.into(),
+            modifiers: vec![],
+        }
+    }
+
+    /// 锁定碰撞矩阵：每个动作键与 Less Computer 键相同都必须被 reject_hotkey_collisions
+    /// 拒绝。5 个快捷 setter（set_dictation/translation/switch_style/open_app/qa_hotkey）
+    /// 此前漏校验 coding_agent_voice_hotkey，已接入对应的 less_computer 校验。
+    #[test]
+    fn each_action_hotkey_collides_with_less_computer() {
+        let lc = key("LeftControl");
+        let mut prefs = UserPreferences {
+            dictation_hotkey: key("A"),
+            translation_hotkey: key("B"),
+            qa_hotkey: Some(key("C")),
+            switch_style_hotkey: Some(key("D")),
+            open_app_hotkey: Some(key("E")),
+            coding_agent_voice_hotkey: Some(lc.clone()),
+            ..Default::default()
+        };
+        // 基线全不同 → 通过。
+        assert!(reject_hotkey_collisions(&prefs).is_ok());
+
+        prefs.dictation_hotkey = lc.clone();
+        assert!(reject_hotkey_collisions(&prefs).is_err());
+        prefs.dictation_hotkey = key("A");
+
+        prefs.translation_hotkey = lc.clone();
+        assert!(reject_hotkey_collisions(&prefs).is_err());
+        prefs.translation_hotkey = key("B");
+
+        prefs.qa_hotkey = Some(lc.clone());
+        assert!(reject_hotkey_collisions(&prefs).is_err());
+        prefs.qa_hotkey = Some(key("C"));
+
+        prefs.switch_style_hotkey = Some(lc.clone());
+        assert!(reject_hotkey_collisions(&prefs).is_err());
+        prefs.switch_style_hotkey = Some(key("D"));
+
+        prefs.open_app_hotkey = Some(lc.clone());
+        assert!(reject_hotkey_collisions(&prefs).is_err());
+        prefs.open_app_hotkey = Some(key("E"));
+
+        // 复位后再次全不同 → 通过。
+        assert!(reject_hotkey_collisions(&prefs).is_ok());
     }
 }

@@ -4,7 +4,6 @@
 //! 提示词在 `prompts` 模块中维护：使用 `# 角色 / # 任务 / # 通用规则 / # 输出 / # 示例`
 //! 段落式结构，每个 mode 有独立的 1-shot 示例。重写背景见 issue #47。
 
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
@@ -15,6 +14,11 @@ use serde_json::{json, Value};
 use thiserror::Error;
 
 use crate::types::{ChineseScriptPreference, OutputLanguagePreference, PolishMode, QaChatMessage};
+
+mod output_cleaning;
+mod prompt_compose;
+pub(crate) use output_cleaning::*;
+pub(crate) use prompt_compose::*;
 
 const DEFAULT_TEMPERATURE: f32 = 0.3;
 const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
@@ -297,10 +301,6 @@ impl OpenAICompatibleLLMProvider {
                 .unwrap_or_else(|_| reqwest::Client::new())
         });
         Self { config, client }
-    }
-
-    pub fn config(&self) -> &OpenAICompatibleConfig {
-        &self.config
     }
 
     pub async fn polish(
@@ -924,10 +924,6 @@ impl CodexOAuthLLMProvider {
         Self { config, client }
     }
 
-    pub fn config(&self) -> &CodexOAuthConfig {
-        &self.config
-    }
-
     pub async fn polish(
         &self,
         raw_text: &str,
@@ -1250,6 +1246,17 @@ pub(crate) fn http_client_builder(base_url: &str, timeout_secs: u64) -> reqwest:
     }
 }
 
+/// 判定一个「TCP 握手 / 请求写出」阶段的网络错误是否可安全重试。
+///
+/// 只对 connect / request 这两类「服务端必然没收到」的失败重试，且**必须排除超时**：
+/// reqwest 会把「请求体写出阶段超时」归类为 `is_request()`（有时同时 `is_timeout()`），
+/// 若只判 `is_connect() || is_request()` 会让这类超时先命中重试臂，重发已发出的非幂等
+/// 请求 → 重复 LLM completion + 双重计费，与本函数文档意图相悖（#680）。抽成纯函数便于
+/// 单测覆盖（reqwest::Error 无法在测试里构造任意 flag 组合）。
+fn should_retry_transient(is_connect: bool, is_request: bool, is_timeout: bool) -> bool {
+    (is_connect || is_request) && !is_timeout
+}
+
 /// 发请求 + 网络抖动 retry：**只**对 `is_connect()` / `is_request()` 这两类「服务端
 /// 必然没收到」的失败重试一次。`is_timeout()` 故意**不**重试——超时时服务端可能已经
 /// 在处理请求并扣计费（LLM completion 是非幂等动作），重试会导致重复 billing + 重复
@@ -1277,7 +1284,7 @@ async fn send_with_transient_retry(
     };
     match initial.send().await {
         Ok(r) => Ok(r),
-        Err(e) if e.is_connect() || e.is_request() => {
+        Err(e) if should_retry_transient(e.is_connect(), e.is_request(), e.is_timeout()) => {
             log::warn!(
                 "[llm] send transient failure, retry in {}ms: {}",
                 RETRY_DELAY_MS,
@@ -1656,287 +1663,6 @@ fn openai_chat_reasoning_effort(model: &str, thinking_enabled: bool) -> Option<&
     }
 }
 
-/// 把 working_languages + front_app 拼成 system prompt 头部前提：
-///     # 上下文
-///     用户的工作语言：…
-///     当前前台应用：…（请按这个 app 的常见沟通风格调整语气）
-///
-/// 两个字段都空时返回 None，调用方就不拼前缀。详见 issue #4 / #116。
-fn context_premise(
-    working_languages: &[String],
-    chinese_script_preference: ChineseScriptPreference,
-    output_language_preference: OutputLanguagePreference,
-    front_app: Option<&str>,
-) -> Option<String> {
-    let langs: Vec<&str> = working_languages
-        .iter()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .collect();
-    let app = front_app.map(str::trim).filter(|s| !s.is_empty());
-
-    let script_line = match chinese_script_preference {
-        ChineseScriptPreference::Simplified => Some(
-            "中文输出偏好：简体中文。若最终输出包含中文，请统一使用简体字形（不要混用繁体）。"
-                .to_string(),
-        ),
-        ChineseScriptPreference::Traditional => Some(
-            "中文输出偏好：繁体中文。若最终输出包含中文，请统一使用繁体字形（不要混用简体）。"
-                .to_string(),
-        ),
-        ChineseScriptPreference::Auto => None,
-    };
-
-    let output_language_line = match output_language_preference {
-        OutputLanguagePreference::ZhCn => {
-            Some("最终输出语言偏好：简体中文。若回答可用中文表达，请优先使用简体中文。".to_string())
-        }
-        OutputLanguagePreference::ZhTw => {
-            Some("最終輸出語言偏好：繁體中文。若回答可用中文表達，請優先使用繁體中文。".to_string())
-        }
-        OutputLanguagePreference::En => Some(
-            "Output language preference: English. Prefer English when producing the final answer."
-                .to_string(),
-        ),
-        OutputLanguagePreference::Ja => Some(
-            "出力言語の優先設定：日本語。最終回答は可能な限り日本語で出力してください。"
-                .to_string(),
-        ),
-        OutputLanguagePreference::Ko => {
-            Some("출력 언어 선호: 한국어. 최종 답변은 가능하면 한국어로 작성해 주세요.".to_string())
-        }
-        OutputLanguagePreference::Auto => None,
-    };
-
-    if langs.is_empty() && app.is_none() && script_line.is_none() && output_language_line.is_none()
-    {
-        return None;
-    }
-
-    let mut lines = vec!["# 上下文".to_string()];
-    if !langs.is_empty() {
-        lines.push(format!(
-            "用户的工作语言：{}。处理任何文本时请把这一前提带进考虑（识别专名、判定语气、决定写法）。",
-            langs.join("、")
-        ));
-    }
-    if let Some(name) = app {
-        lines.push(format!(
-            "当前前台应用：{name}。请按这个应用的常见沟通风格调整语气——例如邮件类 app 偏正式、聊天类 app 偏口语、IDE / 文档类 app 偏技术或结构化。\u{4E0D}主动加入与用户原意无关的客套话。"
-        ));
-    }
-    if let Some(line) = script_line {
-        lines.push(line);
-    }
-    if let Some(line) = output_language_line {
-        lines.push(line);
-    }
-    Some(lines.join("\n"))
-}
-
-/// 把 polish 输入参数装配成 `(system_prompt, user_prompt)` 二元组。
-///
-/// 抽出来是为了让 OpenAI 兼容客户端 (本文件) 和谷歌原生 Gemini 客户端
-/// (`llm_gemini.rs`) 共享同一套 prompt 装配规则——不再担心两路 LLM
-/// 在 `system_prompt` 拼接顺序、context_premise 注入时机、
-/// polish_context_instruction 追加条件上慢慢漂移。
-pub(crate) fn compose_polish_prompts(
-    raw_text: &str,
-    _mode: PolishMode,
-    hotwords: &[String],
-    style_system_prompt: &str,
-    working_languages: &[String],
-    chinese_script_preference: ChineseScriptPreference,
-    output_language_preference: OutputLanguagePreference,
-    front_app: Option<&str>,
-    has_prior_turns: bool,
-) -> (String, String) {
-    let mut system_prompt = compose_system_prompt(style_system_prompt, hotwords);
-    if let Some(premise) = context_premise(
-        working_languages,
-        chinese_script_preference,
-        output_language_preference,
-        front_app,
-    ) {
-        system_prompt = format!("{}\n\n{}", premise, system_prompt);
-    }
-    // issue #609 F-02：在 system prompt 末尾追加对抗式防御措辞，明确信封内文本是
-    // 数据而非指令。纵深防御，非硬保证。
-    system_prompt = format!(
-        "{}\n\n{}",
-        system_prompt,
-        prompts::polish_injection_defense()
-    );
-    // 多轮上下文模式：把"上一轮的指令是什么、不要复读上一轮答案"明确写进
-    // system prompt，配合 chat structure 让 LLM 自然不重复历史输出。
-    if has_prior_turns {
-        system_prompt = format!(
-            "{}\n\n{}",
-            system_prompt,
-            prompts::polish_context_instruction()
-        );
-    }
-    let user_prompt = prompts::user_prompt(raw_text);
-    (system_prompt, user_prompt)
-}
-
-/// 翻译路径的 `(system_prompt, user_prompt)` 装配——和 polish 一样供两路 LLM 客户端共用。
-/// 翻译模式以 `target_language` 为唯一输出语言约束，OutputLanguagePreference 在这里被
-/// 强制设为 Auto 以避免 UI 偏好（如 ja）与 target_language（如 en）冲突。
-pub(crate) fn assemble_polish_system_prompt(
-    style_system_prompt: &str,
-    hotwords: &[String],
-    working_languages: &[String],
-    chinese_script_preference: ChineseScriptPreference,
-    output_language_preference: OutputLanguagePreference,
-    front_app: Option<&str>,
-    has_prior_turns: bool,
-) -> PolishSystemPromptAssembly {
-    let (effective_system_prompt, _) = compose_polish_prompts(
-        "",
-        PolishMode::Light,
-        hotwords,
-        style_system_prompt,
-        working_languages,
-        chinese_script_preference,
-        output_language_preference,
-        front_app,
-        has_prior_turns,
-    );
-    let context_premise = context_premise(
-        working_languages,
-        chinese_script_preference,
-        output_language_preference,
-        front_app,
-    )
-    .unwrap_or_default();
-    let hotword_block = compose_hotword_block_preview(hotwords);
-    let history_instruction = if has_prior_turns {
-        prompts::polish_context_instruction().to_string()
-    } else {
-        String::new()
-    };
-    let includes_hotword_block = !hotword_block.is_empty();
-    let includes_context_premise = !context_premise.is_empty();
-    PolishSystemPromptAssembly {
-        context_premise,
-        hotword_block,
-        history_instruction,
-        effective_system_prompt,
-        includes_context_premise,
-        includes_hotword_block,
-        includes_history_instruction: has_prior_turns,
-    }
-}
-
-pub(crate) fn compose_translate_prompts(
-    raw_text: &str,
-    target_language: &str,
-    working_languages: &[String],
-    chinese_script_preference: ChineseScriptPreference,
-    front_app: Option<&str>,
-) -> (String, String) {
-    let mut system_prompt = prompts::translate_system_prompt(target_language);
-    if let Some(premise) = context_premise(
-        working_languages,
-        chinese_script_preference,
-        OutputLanguagePreference::Auto,
-        front_app,
-    ) {
-        system_prompt = format!("{}\n\n{}", premise, system_prompt);
-    }
-    let user_prompt = prompts::user_prompt(raw_text);
-    (system_prompt, user_prompt)
-}
-
-/// QA 划词问答的 system_prompt 装配。两路 LLM 客户端共用。
-pub(crate) fn compose_qa_system_prompt(
-    working_languages: &[String],
-    chinese_script_preference: ChineseScriptPreference,
-    output_language_preference: OutputLanguagePreference,
-    front_app: Option<&str>,
-) -> String {
-    let mut system_prompt = prompts::qa_system_prompt();
-    if let Some(premise) = context_premise(
-        working_languages,
-        chinese_script_preference,
-        output_language_preference,
-        front_app,
-    ) {
-        system_prompt = format!("{}\n\n{}", premise, system_prompt);
-    }
-    system_prompt
-}
-
-/// 构建「热词 + 错别字纠错」模块文本：agent-style 措辞，把模型当成接到一段 ASR 转写
-/// 的写作助手，明确告诉它「输入可能有错别字，按这个列表 + 上下文修正」。
-///
-/// 内置 default prompt 里的 `{{HOTWORDS}}` 占位符被这段文本替换；用户自定义 prompt
-/// 没占位符时 compose_system_prompt 兜底拼到末尾。
-///
-/// 这段文本 100% 对齐 compose_hotword_block_preview，让 Style Pack 设置页的预览跟
-/// 实际发给 LLM 的 prompt 一致。
-fn build_hotword_block(hotwords: &[String]) -> String {
-    let cleaned: Vec<String> = hotwords
-        .iter()
-        .map(|h| h.trim().to_string())
-        .filter(|h| !h.is_empty())
-        .collect();
-
-    if cleaned.is_empty() {
-        return "# 热词与纠错（系统内置）\n\
-            你接到的转写来自 ASR，可能含错别字 / 同音误识别 / 形近词。\
-            按上下文自动纠回正确字面：常见模式如「跟目录 / 根木鹿」→「根目录」、\
-            「代码厂」→「代码仓」、「编一编」→「编译」、英文短词同音（如 VIP / ZIP）按上下文判断、\
-            带次版本号产品名（GPT-5.6 不省略成 GPT-5）。\
-            人名 / 品牌名 / 含义会变化的词原样保留，不强行改字。"
-            .to_string();
-    }
-
-    let bullets = cleaned
-        .iter()
-        .map(|h| format!("- {}", h))
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!(
-        "# 热词与纠错（系统内置）\n\
-         你接到的转写来自 ASR，可能含错别字。用户希望以下写法在输出中保持准确；\
-         当转写中出现这些词的同音或形近误识别时，优先按上述写法输出，不做无关词的机械替换：\n\
-         {bullets}\n\
-         \n\
-         上面热词的纠偏指令优先于通用规则 2 的「原样保留」——当转写词是热词的同音 / 形近误识别\
-         （例：转写出「VIP」而热词里有「ZIP」），就按热词写法输出，不要因为它看起来像英文专有名词\
-         或中英混输而保留误识别结果。\n\
-         \n\
-         转写中其它 ASR 错别字按上下文自动纠回正确字面：常见模式如「跟目录 / 根木鹿」→「根目录」、\
-         英文短词同音（如 VIP / ZIP）按上下文判断、带次版本号产品名（GPT-5.6 不省略成 GPT-5）。\
-         人名 / 品牌名 / 含义会变化的词原样保留。",
-        bullets = bullets
-    )
-}
-
-/// 系统提示词组装：先把内置 default prompt 的 `{{HOTWORDS}}` 占位符替换为实际热词块；
-/// 用户自定义 prompt 没占位符时 fallback 行为：
-/// - hotwords 非空 → 末尾追加热词块（兼容历史 prompt 仍能拿到热词）
-/// - hotwords 空 → 不附加任何东西（用户决定自己 prompt 的内容，不强行注入）
-fn compose_system_prompt(style_system_prompt: &str, hotwords: &[String]) -> String {
-    let base = style_system_prompt.trim_end();
-    if base.contains(crate::types::HOTWORDS_PLACEHOLDER) {
-        let block = build_hotword_block(hotwords);
-        return base.replace(crate::types::HOTWORDS_PLACEHOLDER, &block);
-    }
-    let has_hotwords = hotwords.iter().any(|h| !h.trim().is_empty());
-    if !has_hotwords {
-        return base.to_string();
-    }
-    format!("{}\n\n{}", base, build_hotword_block(hotwords))
-}
-
-fn compose_hotword_block_preview(hotwords: &[String]) -> String {
-    // Style Pack 设置页的预览 100% 跟 system prompt 用同一段文本，避免「设置里看到一段、
-    // 实际发给 LLM 是另一段」的不一致。空热词时返回纯错别字纠错指南。
-    build_hotword_block(hotwords)
-}
 
 fn extract_assistant_content(body: &str) -> Result<String, LLMError> {
     let json: Value = serde_json::from_str(body)
@@ -1956,196 +1682,6 @@ fn extract_assistant_content(body: &str) -> Result<String, LLMError> {
     Ok(clean_polish_output(content))
 }
 
-/// Best-effort cleanup of common LLM "introduction" prefixes and markdown fences.
-///
-/// Matches a small set of known leading phrases (`根据您给的内容...`, `整理如下...`, etc.)
-/// and strips them. We don't have the `regex` crate, so we use prefix checks plus
-/// an iterative trim — if the model stacks two boilerplate sentences we'll still
-/// strip both.
-///
-/// `pub(crate)` because `llm_gemini` 也要在它自己的解析路径上跑同一套清洗，
-/// 否则 polish prompt 已经禁用的"以下是整理后的内容"前缀只在 OpenAI 兼容路径生效。
-pub(crate) fn clean_polish_output(content: &str) -> String {
-    let without_thinking = strip_thinking_blocks(content);
-    let trimmed = without_thinking.trim();
-    let stripped = strip_markdown_fence(trimmed);
-    let mut output = stripped.to_string();
-
-    loop {
-        let before_len = output.len();
-        output = strip_leading_boilerplate(&output).to_string();
-        output = output.trim_start().to_string();
-        if output.len() == before_len {
-            break;
-        }
-    }
-
-    output.trim().to_string()
-}
-
-/// Strip model reasoning blocks so only the final polished text is inserted.
-///
-/// Thinking-capable OpenAI-compatible models commonly return their reasoning in
-/// `<think>...</think>` before the final answer. Match only explicit `think`
-/// tags, with optional attributes and ASCII casing variants, so normal prose is
-/// left untouched.
-fn strip_thinking_blocks(text: &str) -> Cow<'_, str> {
-    let mut cursor = 0;
-    let mut output: Option<String> = None;
-
-    while let Some((open_start, open_end)) = find_think_open(&text[cursor..]) {
-        let open_start = cursor + open_start;
-        let open_end = cursor + open_end;
-        let Some((_, close_end)) = find_think_close(&text[open_end..]) else {
-            break;
-        };
-        let close_end = open_end + close_end;
-
-        output
-            .get_or_insert_with(|| String::with_capacity(text.len()))
-            .push_str(&text[cursor..open_start]);
-        cursor = close_end;
-    }
-
-    match output {
-        Some(mut output) => {
-            output.push_str(&text[cursor..]);
-            Cow::Owned(output)
-        }
-        None => Cow::Borrowed(text),
-    }
-}
-
-fn find_think_open(text: &str) -> Option<(usize, usize)> {
-    let mut cursor = 0;
-    while let Some(offset) = text[cursor..].find('<') {
-        let start = cursor + offset;
-        if let Some(end) = parse_think_open_at(text, start) {
-            return Some((start, end));
-        }
-        cursor = start + '<'.len_utf8();
-    }
-    None
-}
-
-fn find_think_close(text: &str) -> Option<(usize, usize)> {
-    let mut cursor = 0;
-    while let Some(offset) = text[cursor..].find('<') {
-        let start = cursor + offset;
-        if let Some(end) = parse_think_close_at(text, start) {
-            return Some((start, end));
-        }
-        cursor = start + '<'.len_utf8();
-    }
-    None
-}
-
-fn parse_think_open_at(text: &str, start: usize) -> Option<usize> {
-    let tag_start = start + '<'.len_utf8();
-    if text.as_bytes().get(tag_start) == Some(&b'/') {
-        return None;
-    }
-    parse_think_tag_end(text, tag_start, true)
-}
-
-fn parse_think_close_at(text: &str, start: usize) -> Option<usize> {
-    let slash = start + '<'.len_utf8();
-    if text.as_bytes().get(slash) != Some(&b'/') {
-        return None;
-    }
-    parse_think_tag_end(text, slash + '/'.len_utf8(), false)
-}
-
-fn parse_think_tag_end(text: &str, tag_start: usize, allow_attributes: bool) -> Option<usize> {
-    let tag_end = tag_start.checked_add("think".len())?;
-    if tag_end > text.len() || !text[tag_start..tag_end].eq_ignore_ascii_case("think") {
-        return None;
-    }
-
-    let next = text.as_bytes().get(tag_end).copied()?;
-    if next == b'>' {
-        return Some(tag_end + 1);
-    }
-    if !next.is_ascii_whitespace() {
-        return None;
-    }
-
-    if allow_attributes {
-        return text[tag_end..].find('>').map(|offset| tag_end + offset + 1);
-    }
-
-    let suffix = &text[tag_end..];
-    let trimmed = suffix.trim_start_matches(|c: char| c.is_ascii_whitespace());
-    if trimmed.starts_with('>') {
-        Some(text.len() - trimmed.len() + 1)
-    } else {
-        None
-    }
-}
-
-fn strip_markdown_fence(text: &str) -> &str {
-    if !(text.starts_with("```") && text.ends_with("```")) {
-        return text;
-    }
-    let mut lines: Vec<&str> = text.lines().collect();
-    if lines.len() < 2 {
-        return text;
-    }
-    lines.remove(0);
-    lines.pop();
-    // Re-borrow as &str by stitching is impossible without alloc; fallback to
-    // returning the original slice if the cheap path can't strip.
-    // Find the byte offsets of the first newline and the last fence to slice in place.
-    let after_first_line = match text.find('\n') {
-        Some(i) => i + 1,
-        None => return text,
-    };
-    let before_last_fence = match text.rfind("```") {
-        Some(i) => i,
-        None => return text,
-    };
-    if before_last_fence <= after_first_line {
-        return text;
-    }
-    text[after_first_line..before_last_fence].trim_matches(['\n', ' ', '\t', '\r'].as_ref())
-}
-
-/// Known introduction phrases that some models prepend even when prompted not to.
-const LEADING_BOILERPLATE_PREFIXES: &[&str] = &[
-    "根据您给的内容",
-    "根据您提供的内容",
-    "根据你给的内容",
-    "根据你提供的内容",
-    "以下是整理后的内容",
-    "以下是优化后的内容",
-    "以下为整理后的内容",
-    "以下是结构化整理后的内容",
-    "我整理如下",
-    "我已整理如下",
-    "整理如下",
-    "优化如下",
-    "结构化整理如下",
-];
-
-const BOILERPLATE_END_CHARS: &[char] = &['。', '：', ':', '，', ',', '\n'];
-
-fn strip_leading_boilerplate(text: &str) -> &str {
-    for prefix in LEADING_BOILERPLATE_PREFIXES {
-        if let Some(after_prefix) = text.strip_prefix(prefix) {
-            // Trim characters after the prefix up to (and including) the first
-            // sentence-ending punctuation or newline.
-            for (idx, c) in after_prefix.char_indices() {
-                if BOILERPLATE_END_CHARS.contains(&c) {
-                    let cut = prefix.len() + idx + c.len_utf8();
-                    return &text[cut..];
-                }
-            }
-            // No terminator: drop the prefix only.
-            return after_prefix;
-        }
-    }
-    text
-}
 
 pub mod prompts {
     use crate::types::PolishMode;
@@ -2463,6 +1999,20 @@ mod tests {
 
     static CODEX_AUTH_FIXTURE_COUNTER: AtomicU64 = AtomicU64::new(0);
     static ENV_LOCK: StdMutex<()> = StdMutex::new(());
+
+    #[test]
+    fn retries_connect_or_request_only_when_not_timeout() {
+        // connect / request 失败（非超时）→ 服务端必然没收到，重试安全。
+        assert!(should_retry_transient(true, false, false));
+        assert!(should_retry_transient(false, true, false));
+        // 请求体写出阶段超时（reqwest 归类 is_request + is_timeout）→ 服务端可能已扣费，
+        // 不重试，避免重复 LLM completion 与双重计费（#680）。
+        assert!(!should_retry_transient(false, true, true));
+        assert!(!should_retry_transient(true, false, true));
+        // 纯超时 / 其它错误也不重试。
+        assert!(!should_retry_transient(false, false, true));
+        assert!(!should_retry_transient(false, false, false));
+    }
 
     struct EnvSnapshot {
         values: Vec<(&'static str, Option<OsString>)>,
@@ -2859,45 +2409,6 @@ mod tests {
         assert!(
             s.contains("当前") && s.contains("最新"),
             "需要明确：只输出当前最新一条"
-        );
-    }
-
-    #[test]
-    fn clean_polish_output_strips_think_tag_block() {
-        let content =
-            "<think>先分析用户意图。\n这里可能很长。</think>\n\n请明天上午十点提醒我开会。";
-
-        assert_eq!(clean_polish_output(content), "请明天上午十点提醒我开会。");
-    }
-
-    #[test]
-    fn clean_polish_output_strips_think_tag_with_attributes_and_case() {
-        let content = r#"<THINK reason="true">hidden</THINK>
-最终文本。"#;
-
-        assert_eq!(clean_polish_output(content), "最终文本。");
-    }
-
-    #[test]
-    fn clean_polish_output_strips_multiple_think_blocks() {
-        let content = "<think>one</think>第一句。<think>two</think>第二句。";
-
-        assert_eq!(clean_polish_output(content), "第一句。第二句。");
-    }
-
-    #[test]
-    fn strip_thinking_blocks_ignores_non_think_and_unclosed_tags() {
-        assert!(matches!(
-            strip_thinking_blocks("普通文本"),
-            Cow::Borrowed(_)
-        ));
-        assert_eq!(
-            strip_thinking_blocks("<thinking>保留</thinking>正文"),
-            "<thinking>保留</thinking>正文"
-        );
-        assert_eq!(
-            strip_thinking_blocks("<think>未闭合正文"),
-            "<think>未闭合正文"
         );
     }
 

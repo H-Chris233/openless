@@ -2362,6 +2362,12 @@ pub(crate) struct ForegroundMonitor {
     pub(crate) top: i32,
     pub(crate) right: i32,
     pub(crate) bottom: i32,
+    /// 工作区矩形（physical px，去掉任务栏）。多端一致：胶囊优先夹到工作区内，
+    /// 避免压住任务栏。取不到时回退为整屏矩形。issue #470。
+    pub(crate) work_left: i32,
+    pub(crate) work_top: i32,
+    pub(crate) work_right: i32,
+    pub(crate) work_bottom: i32,
     /// 该显示器的有效 DPI 缩放（1.0 = 96dpi）。
     pub(crate) scale: f64,
 }
@@ -2399,6 +2405,10 @@ pub(crate) fn foreground_window_monitor() -> Option<ForegroundMonitor> {
             top: mi.rcMonitor.top,
             right: mi.rcMonitor.right,
             bottom: mi.rcMonitor.bottom,
+            work_left: mi.rcWork.left,
+            work_top: mi.rcWork.top,
+            work_right: mi.rcWork.right,
+            work_bottom: mi.rcWork.bottom,
             scale: (dpi_x as f64 / 96.0).max(0.1),
         })
     }
@@ -2431,15 +2441,24 @@ pub(crate) fn position_capsule_bottom_center<R: tauri::Runtime>(
             let offset_from_bottom =
                 (capsule_visual_height(translation_active) + 80.0 + bounds.bottom_inset) * scale;
             let y = ((mon.bottom as f64) - offset_from_bottom).round() as i32;
-            let clamped_y = y.max(mon.top);
-            // #470 诊断 v2：当前只夹了上边（.max(mon.top)），未夹下/左/右。多显示器、
-            // 负坐标或异常 DPI 下胶囊可能被算到屏幕外却无任何观测。记录显示器几何与
-            // 最终落点，用于证伪/证实「胶囊定位到屏幕外」(C 子嫌疑)。
+
+            // #470：四边都夹到「工作区」内（去掉任务栏），保证整窗可见。GetMonitorInfoW
+            // 取不到 rcWork 时（理论上不会，rcWork 总随 rcMonitor 一同填）退回整屏矩形。
+            let (work_l, work_t, work_r, work_b) =
+                if mon.work_right > mon.work_left && mon.work_bottom > mon.work_top {
+                    (mon.work_left, mon.work_top, mon.work_right, mon.work_bottom)
+                } else {
+                    (mon.left, mon.top, mon.right, mon.bottom)
+                };
+            let (clamped_x, clamped_y) =
+                clamp_to_monitor(x, y, phys_w, phys_h, work_l, work_t, work_r, work_b);
             log::debug!(
-                "[capsule] win position: mon=({},{})..({},{}) scale={:.2} size=({}x{}) -> x={} y={} clamped_y={}",
-                mon.left, mon.top, mon.right, mon.bottom, scale, phys_w, phys_h, x, y, clamped_y
+                "[capsule] win position: mon=({},{})..({},{}) work=({},{})..({},{}) scale={:.2} size=({}x{}) -> raw=({},{}) clamped=({},{})",
+                mon.left, mon.top, mon.right, mon.bottom,
+                work_l, work_t, work_r, work_b,
+                scale, phys_w, phys_h, x, y, clamped_x, clamped_y
             );
-            window.set_position(PhysicalPosition::new(x, clamped_y))?;
+            window.set_position(PhysicalPosition::new(clamped_x, clamped_y))?;
             return Ok(());
         }
         // 仅当 Win32 取不到前台显示器时，落回下面的 current_monitor 逻辑。
@@ -2728,6 +2747,54 @@ mod tests {
         let pos = bottom_visual_position(frame, 220.0, 96.0, 80.0, 0.0);
 
         assert_eq!(pos, (610.0, -176.0));
+    }
+
+    // ---- #470: capsule 四边 clamp（纯函数，合成多显示器 / 负原点 / 1.5x DPI 输入）----
+
+    #[test]
+    fn clamp_to_monitor_leaves_on_screen_position_untouched() {
+        // 1080p 主屏正中偏下，整窗本就可见 → 原样返回。
+        let (x, y) = clamp_to_monitor(800, 900, 264, 126, 0, 0, 1920, 1040);
+        assert_eq!((x, y), (800, 900));
+    }
+
+    #[test]
+    fn clamp_to_monitor_pulls_back_off_screen_right_and_bottom() {
+        // x/y 算到了屏幕右下外侧 → 收回到「右下角减去窗口尺寸」，整窗仍可见。
+        let (x, y) = clamp_to_monitor(2000, 1200, 264, 126, 0, 0, 1920, 1040);
+        assert_eq!((x, y), (1920 - 264, 1040 - 126));
+        // 整窗右/下边界都落在 area 内。
+        assert!(x + 264 <= 1920);
+        assert!(y + 126 <= 1040);
+    }
+
+    #[test]
+    fn clamp_to_monitor_pushes_into_negative_origin_left_monitor() {
+        // 副屏在主屏左侧（负 X 原点），落点算到了副屏左外侧 → 夹回 area_left。
+        // 1.5x DPI 下尺寸偏大，但 area 仍宽于窗口，左上角夹到 (-2560, top)。
+        let (x, y) = clamp_to_monitor(-3000, -100, 294, 138, -2560, 0, 0, 1440);
+        assert_eq!(x, -2560);
+        assert_eq!(y, 0);
+        // 右/下仍在 area 内。
+        assert!(x >= -2560 && x + 294 <= 0);
+        assert!(y >= 0 && y + 138 <= 1440);
+    }
+
+    #[test]
+    fn clamp_to_monitor_respects_work_area_above_taskbar() {
+        // 工作区底部 = 1040（任务栏占了 1040..1080）。落点本在任务栏区域（y=1030），
+        // 应被夹到「工作区底 - 窗口高」之上，胶囊整窗不压任务栏。
+        let (_x, y) = clamp_to_monitor(800, 1030, 264, 126, 0, 0, 1920, 1040);
+        assert_eq!(y, 1040 - 126);
+        assert!(y + 126 <= 1040);
+    }
+
+    #[test]
+    fn clamp_to_monitor_degrades_gracefully_when_window_wider_than_area() {
+        // 病态输入：area 比窗口还窄（罕见，但要保证不 panic、不溢出为负超界）。
+        // max_x 钳到 area_left，clamp 把左上角收回 area_left。
+        let (x, y) = clamp_to_monitor(500, 500, 800, 600, 0, 0, 400, 300);
+        assert_eq!((x, y), (0, 0));
     }
 
     #[test]

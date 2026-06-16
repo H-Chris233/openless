@@ -6,14 +6,15 @@ function assertMatch(source, pattern, name) {
   }
 }
 
-// 契约函数 show_capsule_window_no_activate 的实现就在编译进二进制的 coordinator.rs 里。
-// （coordinator/ime_insertion.rs 曾是它的一份副本，但从未被 mod 进 crate —— 死代码，
-//  已删除；契约必须校验真正编译的那份，否则会出现「测试绿、线上坏」的假信心。）
-const coordinatorRs = (
-  await readFile(new URL('../src-tauri/src/coordinator.rs', import.meta.url), 'utf-8')
+// 契约函数 show_capsule_window_no_activate 的实现现位于编译进二进制的
+// coordinator/capsule_focus.rs（2026-06 板块化重构从 coordinator.rs 迁出，行为不变；
+// 函数可见性随迁移改为 pub(super)）。契约必须校验真正编译的那份，否则会出现
+// 「测试绿、线上坏」的假信心。
+const capsuleFocusRs = (
+  await readFile(new URL('../src-tauri/src/coordinator/capsule_focus.rs', import.meta.url), 'utf-8')
 ).replace(/\r\n/g, '\n');
-const functionMatch = coordinatorRs.match(
-  /#\[cfg\(target_os = "macos"\)\]\s*(?:pub\(crate\) )?fn show_capsule_window_no_activate[\s\S]*?\n}\n\n#\[cfg\(target_os = "linux"\)\]/,
+const functionMatch = capsuleFocusRs.match(
+  /#\[cfg\(target_os = "macos"\)\]\s*(?:pub\((?:crate|super)\) )?fn show_capsule_window_no_activate[\s\S]*?\n}\n\n#\[cfg\(target_os = "linux"\)\]/,
 );
 
 if (!functionMatch) {

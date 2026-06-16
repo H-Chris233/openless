@@ -218,7 +218,7 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
         {/* Sidebar — desktop / wide only */}
         {!mobile && (
         <aside
-          className="ol-aura-sidebar"
+          className="ol-sidebar-surface"
           style={{
             width: 188,
             flexShrink: 0,
@@ -347,11 +347,11 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
         {/* Main content — Linux 禁用透明窗口后使用不透明面；mobile 全宽无玻璃层。 */}
         <div style={{ flex: 1, minWidth: 0, padding: mobile ? 0 : '4px 8px 8px 0', display: 'flex' }}>
           <main
-            className="ol-console-main ol-aura-panel"
+            className="ol-console-main ol-panel-surface"
             style={{
               flex: 1, minWidth: 0,
               overflow: 'hidden',
-              background: useOpaqueMain ? 'var(--ol-panel-bg)' : 'var(--ol-aura-surface)',
+              background: useOpaqueMain ? 'var(--ol-panel-bg)' : 'var(--ol-panel-glass-bg)',
               backdropFilter: useOpaqueMain ? 'none' : 'blur(18px) saturate(170%)',
               WebkitBackdropFilter: useOpaqueMain ? 'none' : 'blur(18px) saturate(170%)',
               borderRadius: 'var(--ol-r-lg)',

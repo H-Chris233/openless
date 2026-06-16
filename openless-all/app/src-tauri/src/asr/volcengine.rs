@@ -57,8 +57,6 @@ pub enum VolcengineASRError {
     /// 文案简短，原因在文档里说明，capsule 不堆长引导。
     #[error("凭据被拒（{0}）")]
     AuthRejected(u16),
-    #[error("authentication failed")]
-    AuthenticationFailed,
     #[error("no final result")]
     NoFinalResult,
     #[error("final result timed out")]
@@ -122,10 +120,6 @@ impl VolcengineStreamingASR {
             pending_sends: Arc::new(AtomicUsize::new(0)),
             send_done: Arc::new(Notify::new()),
         }
-    }
-
-    pub fn is_connected(&self) -> bool {
-        self.state.lock().is_connected
     }
 
     pub async fn open_session(self: &Arc<Self>) -> Result<(), VolcengineASRError> {

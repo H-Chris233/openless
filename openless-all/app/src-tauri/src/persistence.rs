@@ -1170,10 +1170,6 @@ impl HistoryStore {
         self.read_locked()
     }
 
-    pub fn append(&self, session: DictationSession) -> Result<()> {
-        self.append_with_retention(session, 0, None)
-    }
-
     /// `retention_days == 0` 跟旧 append 行为一致（不按时间清理）。
     /// `> 0` 时在写入新条目后顺手把超过 N 天的会话裁掉，写入时就完成清理，
     /// 不需要后台轮询。最后再受条数上限约束：

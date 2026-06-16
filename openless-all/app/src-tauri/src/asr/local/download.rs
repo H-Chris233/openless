@@ -242,6 +242,27 @@ pub(crate) fn build_client() -> Result<reqwest::Client> {
     builder.build().context("build reqwest client failed")
 }
 
+/// 判定一个「已存在」的目标文件是否完整可信，纯函数便于单测（#686）。
+/// - 大小一致 → 完整；
+/// - 大小不符（截断 / 损坏 / 超大）→ 不完整，应删除重下；
+/// - `expected_size == 0`（HF 未给出大小）→ 退回旧行为「存在即信任」，避免对未知大小
+///   的文件反复重下。
+fn existing_file_is_complete(actual_size: u64, expected_size: u64) -> bool {
+    if expected_size == 0 {
+        return true;
+    }
+    actual_size == expected_size
+}
+
+/// 读盘取实际大小后按 [`existing_file_is_complete`] 判定。元数据取不到（文件刚被删 / 无权限）
+/// 视为不完整。读盘方式与 `partial_actual_size` 一致。
+fn dest_file_is_complete(dest: &Path, expected_size: u64) -> bool {
+    match std::fs::metadata(dest) {
+        Ok(m) => existing_file_is_complete(m.len(), expected_size),
+        Err(_) => false,
+    }
+}
+
 async fn run_download(
     app: &AppHandle,
     model_id: ModelId,
@@ -308,7 +329,9 @@ async fn run_download(
         .iter()
         .map(|f| {
             let d = dir.join(&f.path);
-            if d.exists() {
+            // 只把「已存在且大小完整」的文件计入已完成字节，与下面的跳过判定一致：
+            // 截断/损坏的残留文件会被重下，不应计入进度基线（#686）。
+            if dest_file_is_complete(&d, f.size) {
                 f.size
             } else {
                 0
@@ -322,8 +345,18 @@ async fn run_download(
     for (idx, file) in info.files.iter().enumerate() {
         let dest = dir.join(&file.path);
         if dest.exists() {
-            // 已经下完的（目录里直接存在 dest 文件）跳过；前面 already_done_bytes 已计入
-            continue;
+            if dest_file_is_complete(&dest, file.size) {
+                // 已存在且大小完整 → 跳过；前面 already_done_bytes 已计入。
+                continue;
+            }
+            // 已存在但大小不符（上次下载被中断 / 文件被外部损坏）→ 删除残留重下，
+            // 否则截断文件会被信任为完整、模型加载时才以含糊错误失败（#686）。
+            log::warn!(
+                "[asr-dl] {} exists but size mismatch (expected {}), re-downloading",
+                file.path,
+                file.size
+            );
+            let _ = std::fs::remove_file(&dest);
         }
         let url = format!(
             "{}/{}/resolve/main/{}",
@@ -997,4 +1030,31 @@ fn emit_cancelled(
             error: None,
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::existing_file_is_complete;
+
+    #[test]
+    fn complete_when_size_matches() {
+        assert!(existing_file_is_complete(1024, 1024));
+    }
+
+    #[test]
+    fn incomplete_when_truncated() {
+        assert!(!existing_file_is_complete(512, 1024));
+    }
+
+    #[test]
+    fn incomplete_when_oversized() {
+        assert!(!existing_file_is_complete(2048, 1024));
+    }
+
+    #[test]
+    fn trusts_existence_when_expected_size_unknown() {
+        // HF 未给大小（size == 0）时退回「存在即信任」，避免反复重下。
+        assert!(existing_file_is_complete(0, 0));
+        assert!(existing_file_is_complete(999, 0));
+    }
 }

@@ -12,7 +12,6 @@
 // dev 上传需要 prefs.marketplaceDevLogin（GitHub login 风格）—— 空时上传按钮 disabled。
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useAutoAnimate } from '@formkit/auto-animate/react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
 import { Icon } from '../components/Icon';
@@ -43,7 +42,6 @@ type SortMode = 'popular' | 'new' | 'liked';
 export function Marketplace() {
   const { t } = useTranslation();
   const { prefs, updatePrefs } = useHotkeySettings();
-  const [listRef] = useAutoAnimate<HTMLDivElement>({ duration: 300, easing: 'cubic-bezier(0.175, 0.885, 0.32, 1.275)' });
 
   // 启动时尝试读缓存：上次默认视图（popular + 空 query）的列表，秒呈现。后台 refresh 校准。
   const [items, setItems] = useState<MarketplaceListItem[]>(() => readMarketplaceListCache() ?? []);
@@ -56,7 +54,6 @@ export function Marketplace() {
   const [detail, setDetail] = useState<MarketplaceDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [actionMsg, setActionMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
-  const dismissActionMsg = useCallback(() => setActionMsg(null), []);
 
   const [showUpload, setShowUpload] = useState(false);
   const [uploadOriginPackId, setUploadOriginPackId] = useState<string | null>(null);

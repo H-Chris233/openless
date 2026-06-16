@@ -17,7 +17,12 @@ const config = JSON.parse(raw);
 const capsuleWindow = config.app.windows.find((window) => window.label === 'capsule');
 const mainWindow = config.app.windows.find((window) => window.label === 'main');
 const libRs = await readFile(new URL('../src-tauri/src/lib.rs', import.meta.url), 'utf-8');
-const coordinatorRs = await readFile(new URL('../src-tauri/src/coordinator.rs', import.meta.url), 'utf-8');
+// 板块化重构把胶囊 show/hide/focus/position 等迁到 coordinator/capsule_focus.rs（行为不变）。
+// 契约校验编译进二进制的胶囊子系统并集，覆盖留在 coordinator.rs 与迁出的两部分。
+const coordinatorRs =
+  (await readFile(new URL('../src-tauri/src/coordinator.rs', import.meta.url), 'utf-8')) +
+  '\n' +
+  (await readFile(new URL('../src-tauri/src/coordinator/capsule_focus.rs', import.meta.url), 'utf-8'));
 const capsuleTsx = await readFile(new URL('../src/components/Capsule.tsx', import.meta.url), 'utf-8');
 const capsuleLayoutTs = await readFile(new URL('../src/lib/capsuleLayout.ts', import.meta.url), 'utf-8');
 const windowChromeTsx = await readFile(new URL('../src/components/WindowChrome.tsx', import.meta.url), 'utf-8');

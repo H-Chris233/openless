@@ -193,23 +193,23 @@ html[data-ol-platform="android"] .ol-frost::before {
   background: var(--ol-app-shell-bg);
 }
 
-.ol-aura-panel {
+.ol-panel-surface {
   background: var(--ol-panel-bg);
   border: 0.5px solid var(--ol-panel-border);
   box-shadow: var(--ol-panel-shadow);
 }
 
-.ol-aura-card {
+.ol-card-surface {
   background: var(--ol-card-bg);
   border: 0.5px solid var(--ol-card-border);
   box-shadow: var(--ol-card-shadow);
 }
 
-.ol-aura-settings {
+.ol-settings-surface {
   background: var(--ol-settings-content-bg);
 }
 
-.ol-aura-settings[data-ol-mobile="true"] {
+.ol-settings-surface[data-ol-mobile="true"] {
   border-radius: var(--ol-panel-radius) var(--ol-panel-radius) 0 0;
 }
 

@@ -92,8 +92,8 @@ impl TextInserter {
     pub fn insert(
         &self,
         text: &str,
-        restore_clipboard_after_paste: bool,
-        paste_shortcut: PasteShortcut,
+        _restore_clipboard_after_paste: bool,
+        _paste_shortcut: PasteShortcut,
     ) -> InsertStatus {
         if text.is_empty() {
             return InsertStatus::CopiedFallback;

@@ -1,7 +1,6 @@
 // Theme preference: localStorage boot cache + Rust UserPreferences.theme_mode authority.
 // Applies via html[data-ol-theme] + CSS variables — no React re-render for color changes.
 
-import { detectOS } from '../components/WindowChrome';
 import { getSettings, isTauri } from './ipc';
 import { syncWindowsCaptionTheme } from './platform';
 import type { ThemeMode } from './types';
