@@ -77,7 +77,19 @@ pub fn less_computer_window_resize(coord: CoordinatorState<'_>, height: f64) {
 }
 
 /// 内联审批卡的 Approve / Deny 回执。token 关联到等待中的拦截动作。
+///
+/// 安全：审批 UI 渲染在 less-computer 窗口（LessComputerPanel），故仅允许该窗口提交，
+/// 拦截 main / capsule / qa / glow 等其它窗口伪造审批 —— 把可调用窗口从 5 个收紧到 1 个。
 #[tauri::command]
-pub fn less_computer_approve(coord: CoordinatorState<'_>, token: String, approved: bool) {
+pub fn less_computer_approve(
+    window: Window,
+    coord: CoordinatorState<'_>,
+    token: String,
+    approved: bool,
+) -> Result<(), String> {
+    if window.label() != "less-computer" {
+        return Err("approval can only be submitted from the Less Computer window".to_string());
+    }
     coord.less_computer_approve(&token, approved);
+    Ok(())
 }

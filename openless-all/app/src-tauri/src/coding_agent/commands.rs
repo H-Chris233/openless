@@ -8,7 +8,7 @@ use std::sync::Arc;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use serde::Serialize;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Window};
 
 use super::detect::{has_computer_use_mcp, McpServerStatus};
 use super::guard::build_guard_settings_json;
@@ -29,10 +29,57 @@ fn next_session_id() -> String {
     format!("console-{}", *c)
 }
 
-fn normalize_exe(exe: Option<String>) -> String {
-    exe.map(|e| e.trim().to_string())
+/// 仅允许裸名 "claude" 或规范化到已知安装目录下的绝对路径。
+/// 拒绝包含路径分隔符的相对路径（如 "../../evil"）。
+fn validate_exe(exe: &str) -> Result<(), String> {
+    // 纯可执行文件名，不含任何路径分隔符 — 交给 PATH 解析即可
+    if !exe.contains('/') && !exe.contains('\\') {
+        if exe == "claude" {
+            return Ok(());
+        }
+        return Err(format!("不允许的可执行文件名: {exe}（只接受 'claude' 或已知安装目录下的绝对路径）"));
+    }
+    // 绝对路径：必须规范化到已知 claude 安装目录之一
+    let path = std::path::Path::new(exe);
+    if !path.is_absolute() {
+        return Err(format!("不允许的相对路径: {exe}"));
+    }
+    // 已知 claude 安装目录前缀
+    let known_prefixes: &[&str] = &[
+        "/usr/local/bin/",
+        "/usr/bin/",
+        "/opt/homebrew/bin/",
+    ];
+    // 也允许 ~/.local/bin/claude（用户目录绝对路径，动态计算）
+    let home_prefix = std::env::var("HOME")
+        .ok()
+        .map(|h| format!("{h}/.local/bin/"));
+
+    let exe_norm = exe.replace('\\', "/");
+    let allowed = known_prefixes.iter().any(|p| exe_norm.starts_with(p))
+        || home_prefix.as_deref().map_or(false, |p| exe_norm.starts_with(p));
+    if allowed {
+        Ok(())
+    } else {
+        Err(format!("不允许的 claude 路径: {exe}（必须位于已知安装目录）"))
+    }
+}
+
+fn normalize_exe(exe: Option<String>) -> Result<String, String> {
+    let exe = exe
+        .map(|e| e.trim().to_string())
         .filter(|e| !e.is_empty())
-        .unwrap_or_else(|| "claude".to_string())
+        .unwrap_or_else(|| "claude".to_string());
+    validate_exe(&exe)?;
+    Ok(exe)
+}
+
+fn ensure_main_window(window: &Window) -> Result<(), String> {
+    if window.label() == "main" {
+        Ok(())
+    } else {
+        Err("coding agent commands are only allowed from the main window".to_string())
+    }
 }
 
 /// Claude Code 检测结果（回前端，camelCase）。
@@ -53,8 +100,12 @@ pub struct ClaudeDetectionWire {
 
 /// 检测 claude 是否安装、版本、已配置的 MCP server（即「computer use 技能」检测口径）。
 #[tauri::command]
-pub async fn coding_agent_detect(exe: Option<String>) -> ClaudeDetectionWire {
-    let exe = normalize_exe(exe);
+pub async fn coding_agent_detect(
+    window: Window,
+    exe: Option<String>,
+) -> Result<ClaudeDetectionWire, String> {
+    ensure_main_window(&window)?;
+    let exe = normalize_exe(exe)?;
     let version = detect_claude(&exe).await;
     let mcp_servers = if version.is_some() {
         claude_mcp_list(&exe).await
@@ -62,13 +113,13 @@ pub async fn coding_agent_detect(exe: Option<String>) -> ClaudeDetectionWire {
         Vec::new()
     };
     let has_computer_use = has_computer_use_mcp(&mcp_servers);
-    ClaudeDetectionWire {
+    Ok(ClaudeDetectionWire {
         installed: version.is_some(),
         version,
         exe,
         mcp_servers,
         has_computer_use,
-    }
+    })
 }
 
 /// 护栏化地无头跑一次 claude，事件流式 emit 到前端 `coding-agent:test`。
@@ -77,6 +128,7 @@ pub async fn coding_agent_detect(exe: Option<String>) -> ClaudeDetectionWire {
 /// 若 workdir 是 git 仓库，运行前做一次 `git stash create` 快照（可回滚）。
 #[tauri::command]
 pub async fn coding_agent_run_test(
+    window: Window,
     app: AppHandle,
     prompt: String,
     exe: Option<String>,
@@ -85,11 +137,12 @@ pub async fn coding_agent_run_test(
     model: Option<String>,
     max_budget_usd: Option<f64>,
 ) -> Result<(), String> {
+    ensure_main_window(&window)?;
     let prompt = prompt.trim().to_string();
     if prompt.is_empty() {
         return Err("指令为空".into());
     }
-    let exe = normalize_exe(exe);
+    let exe = normalize_exe(exe)?;
     let mode = permission_mode.unwrap_or_default();
 
     let cwd = workdir

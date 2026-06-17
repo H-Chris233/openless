@@ -1297,8 +1297,8 @@ impl PreferencesStore {
 
     pub fn set(&self, prefs: UserPreferences) -> Result<()> {
         let json = serde_json::to_vec_pretty(&prefs).context("encode prefs failed")?;
-        atomic_write(&self.path, &json)?;
         let mut guard = self.state.lock();
+        atomic_write(&self.path, &json)?;
         *guard = prefs;
         Ok(())
     }

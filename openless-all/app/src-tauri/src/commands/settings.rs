@@ -473,6 +473,13 @@ pub async fn app_download_and_install_android_update(
     signature: String,
     version: String,
 ) -> Result<(), String> {
+    // 安全：下载前校验 URL，防止 SSRF（如内网元数据接口、localhost 服务）。
+    // 只允许已知的 GitHub 直链和 fastgit 镜像前缀。
+    const DIRECT_BASE: &str = "https://github.com/appergb/openless";
+    const MIRROR_BASE: &str = "https://fastgit.cc/https://github.com/appergb/openless";
+    if !url.starts_with(DIRECT_BASE) && !url.starts_with(MIRROR_BASE) {
+        return Err(format!("不信任的更新 URL，拒绝下载: {url}"));
+    }
     #[cfg(target_os = "android")]
     {
         return crate::android::updater::download_and_install(app, url, signature, version).await;

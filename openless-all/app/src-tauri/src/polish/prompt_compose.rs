@@ -24,7 +24,21 @@ pub(super) fn context_premise(
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .collect();
-    let app = front_app.map(str::trim).filter(|s| !s.is_empty());
+    // 安全：window title 是攻击者可控字段，嵌入前必须清理。
+    // 去除换行符（防止注入多行指令）和 Markdown/XML 分隔符（防止结构性提示注入）；
+    // 截断到 100 个字符（远超任何真实 app 名称的合理长度）。
+    let app = front_app
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            let sanitized: String = s
+                .chars()
+                .filter(|c| *c != '\n' && *c != '\r' && *c != '#' && *c != '<' && *c != '>')
+                .take(100)
+                .collect();
+            sanitized
+        })
+        .filter(|s| !s.is_empty());
 
     let script_line = match chinese_script_preference {
         ChineseScriptPreference::Simplified => Some(

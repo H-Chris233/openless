@@ -1018,7 +1018,9 @@ pub(super) fn hotkey_bridge_loop(inner: Arc<Inner>, rx: mpsc::Receiver<HotkeyEve
                 }
             }
             HotkeyEvent::QaShortcutPressed => {
-                async_runtime::spawn(async move { handle_qa_hotkey_pressed(&inner_cloned).await });
+                async_runtime::block_on(async {
+                    handle_qa_hotkey_pressed(&inner_cloned).await;
+                });
             }
         }
     }

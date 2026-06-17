@@ -671,7 +671,11 @@ async fn run_voice_agent_transcript(
         None => outcome,
     };
 
-    inner.state.lock().phase = SessionPhase::Idle;
+    {
+        let mut state = inner.state.lock();
+        state.phase = SessionPhase::Idle;
+        state.focus_target = None; // 清除过期焦点目标，避免影响下次会话
+    }
     // 工作结束：熄灭全屏彩虹描边（聊天浮窗保留，等用户读完/关闭）。
     if let Some(app) = inner.app.lock().clone() {
         crate::hide_less_computer_glow(&app);

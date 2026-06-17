@@ -182,13 +182,21 @@ pub mod android {
             &[JValue::Object(&action_obj)],
         )
         .map_err(|error| format!("set service action: {error}"))?;
-        let start_method = if action.ends_with(".HIDE") || action.ends_with(".SHOW") {
-            "startService"
-        } else if android_sdk_int(env)? >= 26 {
-            "startForegroundService"
-        } else {
-            "startService"
-        };
+        // REPLACE_OVERLAY 和 REFRESH_LAYOUT 与 SHOW/HIDE 一样，发送到已在运行的服务，
+        // 不应使用 startForegroundService（Android 12+ 在后台调用会抛
+        // ForegroundServiceStartNotAllowedException）。
+        let start_method =
+            if action.ends_with(".HIDE")
+                || action.ends_with(".SHOW")
+                || action.ends_with(".REPLACE_OVERLAY")
+                || action.ends_with(".REFRESH_LAYOUT")
+            {
+                "startService"
+            } else if android_sdk_int(env)? >= 26 {
+                "startForegroundService"
+            } else {
+                "startService"
+            };
         env.call_method(
             context,
             start_method,

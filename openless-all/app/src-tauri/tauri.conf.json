@@ -101,8 +101,8 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZGNEI1OTk0RjMzMzk0QTkKUldTcGxEUHpsRmxMYjRnMFdZNkFyaVozaHN2SUNwZ01mMDlFS0RMWnNQNisrWjF6czZQQk1RQysK",
       "endpoints": [
-        "https://fastgit.cc/https://github.com/appergb/openless/releases/latest/download/latest-{{target}}-{{arch}}-mirror.json",
-        "https://github.com/appergb/openless/releases/latest/download/latest-{{target}}-{{arch}}.json"
+        "https://github.com/appergb/openless/releases/latest/download/latest-{{target}}-{{arch}}.json",
+        "https://fastgit.cc/https://github.com/appergb/openless/releases/latest/download/latest-{{target}}-{{arch}}-mirror.json"
       ]
     }
   }
