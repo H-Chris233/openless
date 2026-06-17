@@ -194,7 +194,7 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
   const useOpaqueMain = mobile || os === 'linux';
 
   return (
-    <div style={{ flex: 1, position: 'relative', display: 'flex', flexDirection: 'column', minHeight: 0, paddingTop: mobile ? 0 : os === 'mac' ? 28 : 0 }}>
+    <div style={{ flex: 1, position: 'relative', display: 'flex', flexDirection: 'column', minHeight: 0, paddingTop: mobile ? 0 : os === 'mac' ? 28 : 0, background: 'var(--ol-app-shell-bg)' }}>
 
       {mobile && (
         <MobileTopBar
