@@ -93,6 +93,8 @@ class OpenLessOverlayService : Service(), OpenLessOverlayBridge.OverlayStateList
         if (instance === this) {
             instance = null
         }
+        // 系统杀死前台服务时也会走到这里：同步原生 OVERLAY_VISIBLE=false，避免状态永久残留为 true。
+        runCatching { OpenLessNative.nativeNotifyOverlayDestroyed() }
         super.onDestroy()
     }
 

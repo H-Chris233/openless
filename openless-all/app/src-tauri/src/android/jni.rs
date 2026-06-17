@@ -17,7 +17,13 @@ pub mod android {
         let mut env = vm
             .attach_current_thread()
             .map_err(|error| format!("attach Android thread: {error}"))?;
-        let context = unsafe { JObject::from_raw(android_context.context() as jni::sys::jobject) };
+        let raw_context = android_context.context() as jni::sys::jobject;
+        if raw_context.is_null() {
+            return Err("Android context not yet initialized".to_string());
+        }
+        // SAFETY: raw_context is non-null and points to a valid Android Context object
+        // provided by tao/Tauri; the reference lifetime is valid for the duration of `f`.
+        let context = unsafe { JObject::from_raw(raw_context) };
         f(&mut env, &context)
     }
 
@@ -311,6 +317,77 @@ pub mod android {
         env.get_static_field("android/os/Build$VERSION", "SDK_INT", "I")
             .and_then(|value| value.i())
             .map_err(|error| format!("read SDK_INT: {error}"))
+    }
+
+    /// 读取剪贴板当前的第一条纯文本内容，用于在粘贴后还原。
+    /// 失败或剪贴板为空时返回 None（不返回错误，避免阻塞主流程）。
+    pub fn get_primary_clip_text(
+        env: &mut JNIEnv,
+        context: &JObject,
+    ) -> Option<String> {
+        let clipboard_name = jobject_str(env, "clipboard").ok()?;
+        let clipboard = env
+            .call_method(
+                context,
+                "getSystemService",
+                "(Ljava/lang/String;)Ljava/lang/Object;",
+                &[JValue::Object(&clipboard_name)],
+            )
+            .and_then(|value| value.l())
+            .ok()?;
+        let clip = env
+            .call_method(
+                &clipboard,
+                "getPrimaryClip",
+                "()Landroid/content/ClipData;",
+                &[],
+            )
+            .and_then(|value| value.l())
+            .ok()?;
+        if clip.is_null() {
+            return None;
+        }
+        let item = env
+            .call_method(
+                &clip,
+                "getItemAt",
+                "(I)Landroid/content/ClipData$Item;",
+                &[JValue::Int(0)],
+            )
+            .and_then(|value| value.l())
+            .ok()?;
+        if item.is_null() {
+            return None;
+        }
+        let text_val = env
+            .call_method(
+                &item,
+                "getText",
+                "()Ljava/lang/CharSequence;",
+                &[],
+            )
+            .and_then(|value| value.l())
+            .ok()?;
+        if text_val.is_null() {
+            return None;
+        }
+        let text_str = env
+            .call_method(&text_val, "toString", "()Ljava/lang/String;", &[])
+            .and_then(|value| value.l())
+            .ok()?;
+        let jstr = JString::from(text_str);
+        env.get_string(&jstr)
+            .map(|s| s.to_string_lossy().into_owned())
+            .ok()
+    }
+
+    /// 将指定文本写回剪贴板，用于 accessibility 粘贴后还原用户原有内容。
+    pub fn set_primary_clip_text(
+        env: &mut JNIEnv,
+        context: &JObject,
+        text: &str,
+    ) -> Result<(), String> {
+        copy_to_clipboard(env, context, text).map(|_| ())
     }
 
     pub fn copy_to_clipboard(

@@ -403,16 +403,18 @@ pub(super) async fn handle_less_computer_pressed(inner: &Arc<Inner>) {
         return;
     }
 
-    if begin_session(inner).await.is_err() {
+    // voice_agent=true 在 Starting 阶段就写入 state，防止 finish_starting_session
+    // 处理 pending_stop 时（快速松手 race）丢失标志，导致意外走普通听写路径。
+    if begin_session_as(inner, true).await.is_err() {
         return;
     }
     let started = {
-        let mut state = inner.state.lock();
+        let state = inner.state.lock();
+        // voice_agent 已在 begin_session_as 内设置；这里只检查阶段是否推进成功。
         if matches!(
             state.phase,
-            SessionPhase::Starting | SessionPhase::Listening
+            SessionPhase::Starting | SessionPhase::Listening | SessionPhase::Processing
         ) {
-            state.voice_agent = true;
             log::info!(
                 "[less-computer] voice session started (session={:?})",
                 state.session_id

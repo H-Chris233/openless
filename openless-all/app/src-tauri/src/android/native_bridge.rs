@@ -128,6 +128,14 @@ pub fn is_overlay_visible() -> bool {
     OVERLAY_VISIBLE.load(std::sync::atomic::Ordering::SeqCst)
 }
 
+/// Kotlin overlay service 的 onDestroy() 调用此函数，以便在 OS 杀死服务时
+/// 同步清除 OVERLAY_VISIBLE 标志，避免 refresh_overlay_if_visible() 向死亡
+/// 服务发送无效命令。
+pub fn notify_overlay_destroyed() {
+    OVERLAY_VISIBLE.store(false, std::sync::atomic::Ordering::SeqCst);
+    log::info!("[android-native] overlay service destroyed — OVERLAY_VISIBLE reset");
+}
+
 pub fn overlay_trigger_mode_name() -> &'static str {
     let Some(coordinator) = COORDINATOR.get() else {
         return "background";
@@ -392,5 +400,15 @@ mod jni_exports {
                 show_overlay_with_context(env, context)
             });
         }
+    }
+
+    /// 供 Kotlin overlay service 的 onDestroy() 调用，将 OVERLAY_VISIBLE 清除。
+    /// 解决 OS 杀死服务时 Rust 端状态永久失同步的问题。
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_com_openless_app_OpenLessNative_nativeNotifyOverlayDestroyed(
+        _env: *mut JNIEnv,
+        _class: JClass,
+    ) {
+        notify_overlay_destroyed();
     }
 }

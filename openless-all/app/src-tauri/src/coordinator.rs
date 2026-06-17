@@ -91,8 +91,8 @@ pub(super) fn qa_event_target() -> &'static str {
 #[cfg(test)]
 use dictation::dictation_error_code;
 use dictation::{
-    begin_session, cancel_session, end_session, handle_pressed_edge, handle_released_edge,
-    request_stop_during_starting,
+    begin_session, begin_session_as, cancel_session, end_session, handle_pressed_edge,
+    handle_released_edge, request_stop_during_starting,
 };
 #[cfg(any(debug_assertions, test))]
 use dictation::{handle_pressed, handle_released};
@@ -362,13 +362,25 @@ impl Coordinator {
         #[cfg(not(target_os = "windows"))]
         {
             let history = HistoryStore::new().unwrap_or_else(|e| {
-                log::error!("[coord] HistoryStore init failed: {e}; falling back to empty");
-                HistoryStore::new().expect("history store init")
+                log::error!("[coord] HistoryStore init failed: {e}; 降级为空历史记录");
+                HistoryStore::new_fallback()
             });
-            let prefs = PreferencesStore::new().expect("preferences store init");
-            let style_packs = StylePackStore::new(&prefs).expect("style pack store init");
-            let vocab = DictionaryStore::new().expect("dictionary store init");
-            let correction_rules = CorrectionRuleStore::new().expect("correction rule store init");
+            let prefs = PreferencesStore::new().unwrap_or_else(|e| {
+                log::error!("[coord] PreferencesStore init failed: {e}; 降级为默认偏好设置");
+                PreferencesStore::new_fallback()
+            });
+            let style_packs = StylePackStore::new(&prefs).unwrap_or_else(|e| {
+                log::error!("[coord] StylePackStore init failed: {e}; 降级为空样式包列表");
+                StylePackStore::new_fallback()
+            });
+            let vocab = DictionaryStore::new().unwrap_or_else(|e| {
+                log::error!("[coord] DictionaryStore init failed: {e}; 降级为空词库");
+                DictionaryStore::new_fallback()
+            });
+            let correction_rules = CorrectionRuleStore::new().unwrap_or_else(|e| {
+                log::error!("[coord] CorrectionRuleStore init failed: {e}; 降级为空纠错规则");
+                CorrectionRuleStore::new_fallback()
+            });
 
             Self {
                 inner: Arc::new(Inner {
@@ -440,13 +452,25 @@ impl Coordinator {
         sherpa_onnx_runtime: Arc<SherpaOnnxRuntime>,
     ) -> Self {
         let history = HistoryStore::new().unwrap_or_else(|e| {
-            log::error!("[coord] HistoryStore init failed: {e}; falling back to empty");
-            HistoryStore::new().expect("history store init")
+            log::error!("[coord] HistoryStore init failed: {e}; 降级为空历史记录");
+            HistoryStore::new_fallback()
         });
-        let prefs = PreferencesStore::new().expect("preferences store init");
-        let style_packs = StylePackStore::new(&prefs).expect("style pack store init");
-        let vocab = DictionaryStore::new().expect("dictionary store init");
-        let correction_rules = CorrectionRuleStore::new().expect("correction rule store init");
+        let prefs = PreferencesStore::new().unwrap_or_else(|e| {
+            log::error!("[coord] PreferencesStore init failed: {e}; 降级为默认偏好设置");
+            PreferencesStore::new_fallback()
+        });
+        let style_packs = StylePackStore::new(&prefs).unwrap_or_else(|e| {
+            log::error!("[coord] StylePackStore init failed: {e}; 降级为空样式包列表");
+            StylePackStore::new_fallback()
+        });
+        let vocab = DictionaryStore::new().unwrap_or_else(|e| {
+            log::error!("[coord] DictionaryStore init failed: {e}; 降级为空词库");
+            DictionaryStore::new_fallback()
+        });
+        let correction_rules = CorrectionRuleStore::new().unwrap_or_else(|e| {
+            log::error!("[coord] CorrectionRuleStore init failed: {e}; 降级为空纠错规则");
+            CorrectionRuleStore::new_fallback()
+        });
 
         Self {
             inner: Arc::new(Inner {

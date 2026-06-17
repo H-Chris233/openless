@@ -39,4 +39,6 @@ object OpenLessNative {
     @JvmStatic external fun nativeIsOverlayVisible(): Boolean
 
     @JvmStatic external fun nativeNotifyOverlayPermissionChanged(context: android.content.Context)
+
+    @JvmStatic external fun nativeNotifyOverlayDestroyed()
 }

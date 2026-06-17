@@ -999,6 +999,15 @@ pub(super) fn request_stop_during_starting(inner: &Arc<Inner>, reason: &str) {
 }
 
 pub(super) async fn begin_session(inner: &Arc<Inner>) -> Result<(), String> {
+    begin_session_as(inner, false).await
+}
+
+/// begin_session 的带参版本，voice_agent=true 时在 Starting 阶段就标记好，
+/// 防止 finish_starting_session 处理 pending_stop 时丢失标志。
+pub(super) async fn begin_session_as(
+    inner: &Arc<Inner>,
+    voice_agent: bool,
+) -> Result<(), String> {
     let current_session_id = {
         let mut state = inner.state.lock();
         let Some(session_id) =
@@ -1006,6 +1015,9 @@ pub(super) async fn begin_session(inner: &Arc<Inner>) -> Result<(), String> {
         else {
             return Ok(());
         };
+        if voice_agent {
+            state.voice_agent = true;
+        }
         if let Some(label) = state.front_app.as_deref() {
             log::info!("[coord] front_app captured: {label}");
         }
@@ -1635,6 +1647,8 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                 Ok(Ok(r)) => r,
                 Ok(Err(e)) => {
                     log::error!("[coord] await final failed: {e}");
+                    // 关闭 WebSocket 连接，避免流式 ASR 资源泄漏
+                    asr.cancel();
                     emit_capsule(
                         inner,
                         CapsuleState::Error,
@@ -1762,6 +1776,8 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                 Ok(Ok(r)) => r,
                 Ok(Err(e)) => {
                     log::error!("[coord] Bailian await final failed: {e}");
+                    // 关闭 WebSocket 连接，避免流式 ASR 资源泄漏
+                    asr.cancel();
                     emit_capsule(
                         inner,
                         CapsuleState::Error,

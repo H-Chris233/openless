@@ -1165,6 +1165,16 @@ impl HistoryStore {
         })
     }
 
+    /// 在 data_dir 不可用时构造一个降级实例（指向临时目录）。
+    /// 该实例在运行期间读写会安静地失败或返回空，不会 panic，
+    /// 也不会影响正常启动路径。
+    pub(crate) fn new_fallback() -> Self {
+        Self {
+            path: std::env::temp_dir().join("openless_history_fallback.json"),
+            lock: Mutex::new(()),
+        }
+    }
+
     pub fn list(&self) -> Result<Vec<DictationSession>> {
         let _guard = self.lock.lock();
         self.read_locked()
@@ -1213,12 +1223,14 @@ impl HistoryStore {
         let sessions = self.read_locked()?;
         let cutoff = chrono::Utc::now() - chrono::Duration::minutes(i64::from(minutes));
         // sessions 是 newest-first，超出窗口的会话之后的都更老，take_while 即可。
+        // unwrap_or(true)：时间戳解析失败时保留该条目，与 append_with_retention 的保守策略一致；
+        // 避免单条坏记录截断整个上下文窗口。
         let filtered: Vec<DictationSession> = sessions
             .into_iter()
             .take_while(|s| {
                 chrono::DateTime::parse_from_rfc3339(&s.created_at)
                     .map(|t| t.with_timezone(&chrono::Utc) >= cutoff)
-                    .unwrap_or(false)
+                    .unwrap_or(true)
             })
             .collect();
         Ok(filtered)
@@ -1289,6 +1301,14 @@ impl PreferencesStore {
             path,
             state: Mutex::new(prefs),
         })
+    }
+
+    /// 降级实例：data_dir 不可用时使用默认配置，写操作会安静地失败。
+    pub(crate) fn new_fallback() -> Self {
+        Self {
+            path: std::env::temp_dir().join("openless_prefs_fallback.json"),
+            state: Mutex::new(UserPreferences::default()),
+        }
     }
 
     pub fn get(&self) -> UserPreferences {
@@ -1392,6 +1412,16 @@ impl StylePackStore {
             asset_root,
             state: Mutex::new(packs),
         })
+    }
+
+    /// 降级实例：data_dir 不可用时使用临时路径和空列表，写操作会安静地失败。
+    pub(crate) fn new_fallback() -> Self {
+        let tmp = std::env::temp_dir();
+        Self {
+            path: tmp.join("openless_style_packs_fallback.json"),
+            asset_root: tmp.join("openless_style_pack_assets_fallback"),
+            state: Mutex::new(Vec::new()),
+        }
     }
 
     pub fn list(&self) -> Result<Vec<StylePack>> {
@@ -2156,6 +2186,14 @@ impl DictionaryStore {
         })
     }
 
+    /// 降级实例：data_dir 不可用时使用临时路径，读写会安静地失败或返回空。
+    pub(crate) fn new_fallback() -> Self {
+        Self {
+            path: std::env::temp_dir().join("openless_vocab_fallback.json"),
+            lock: Mutex::new(()),
+        }
+    }
+
     pub fn list(&self) -> Result<Vec<DictionaryEntry>> {
         let _guard = self.lock.lock();
         self.read_locked()
@@ -2298,6 +2336,14 @@ impl CorrectionRuleStore {
             path: dir.join(CORRECTION_RULES_FILE),
             lock: Mutex::new(()),
         })
+    }
+
+    /// 降级实例：data_dir 不可用时使用临时路径，读写会安静地失败或返回空。
+    pub(crate) fn new_fallback() -> Self {
+        Self {
+            path: std::env::temp_dir().join("openless_correction_rules_fallback.json"),
+            lock: Mutex::new(()),
+        }
     }
 
     pub fn list(&self) -> Result<Vec<CorrectionRule>> {
