@@ -288,6 +288,7 @@ macro_rules! app_invoke_handler_desktop {
             commands::sherpa_onnx_asr_reveal_model_dir,
             commands::export_error_log,
             restart_app,
+            log_client_error,
             set_windows_caption_theme,
         ]
     };
@@ -378,6 +379,7 @@ macro_rules! app_invoke_handler_mobile {
             $crate::commands::app_check_update_with_channel,
             $crate::commands::app_download_and_install_android_update,
             $crate::restart_app,
+            $crate::log_client_error,
         ]
     };
 }
@@ -1138,6 +1140,26 @@ fn restart_app(app: AppHandle) {
     #[cfg(target_os = "macos")]
     reset_tcc_for_beta_restart();
     app.restart();
+}
+
+/// 把前端的关键错误（如自动更新 install 失败）转发到 Rust 文件日志（openless.log）。
+/// webview 的 console.error 不会进 openless.log，单独留一个 IPC，便于用户「导出日志」
+/// 后我们拿到自动更新失败的真实原因。
+#[tauri::command]
+fn log_client_error(message: String) {
+    // message 由前端 webview 可控，可能很长或含换行（伪造日志行）。先把换行折成空格、
+    // 再按 UTF-8 字符边界截断，避免单条日志过大或污染日志格式。
+    const MAX_LEN: usize = 2048;
+    let mut sanitized = message.replace(['\n', '\r'], " ");
+    if sanitized.len() > MAX_LEN {
+        let mut end = MAX_LEN;
+        while !sanitized.is_char_boundary(end) {
+            end -= 1;
+        }
+        sanitized.truncate(end);
+        sanitized.push_str("…(truncated)");
+    }
+    log::error!("[client] {sanitized}");
 }
 
 #[cfg(target_os = "macos")]
