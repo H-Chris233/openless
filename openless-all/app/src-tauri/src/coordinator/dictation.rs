@@ -765,9 +765,13 @@ async fn run_less_computer_once(
             }
         })
         .collect();
+    // 只放行「可批准」的命令：deny_rule_for_pattern 返回该 pattern 在 default_deny_rules 里的
+    // 精确 deny 规则；提权/毁盘/系统级等不可安全表达的命令返回 None → 即使被批准也保持拦截
+    // （fail-closed），且不向 allow 注入畸形规则。允许的 allow 规则与被移除的 deny 严格一致。
     let allow_rules: Vec<String> = approved_patterns
         .iter()
-        .map(|p| format!("Bash({p}:*)"))
+        .filter_map(|p| crate::coding_agent::guard::deny_rule_for_pattern(p))
+        .map(|rule| rule.to_string())
         .collect();
     if !allow_rules.is_empty() {
         deny.retain(|d| !allow_rules.iter().any(|a| a == d));

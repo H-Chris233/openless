@@ -62,6 +62,34 @@ pub fn risk_equivalent_patterns(pattern: &str) -> Vec<&'static str> {
     Vec::new()
 }
 
+/// 把一个被审批的 `HIGH_RISK_PATTERNS` 子串映射到它在 [`default_deny_rules`] 里对应的
+/// **精确** deny 规则字符串。
+///
+/// - `Some(rule)`：该命令**可被用户批准放行**——批准时按此字符串从 deny 列表精确移除并加入
+///   等值 allow（保证「移除的 deny」与「加入的 allow」严格一致）。
+/// - `None`：**不可批准**——这些命令要么无法用 `Bash(<prefix>:*)` 安全表达（`| sh` / `:(){`
+///   / `> /dev/sd` 出现在命令中段或依赖 shell 语法），要么是提权 / 毁盘 / 系统级动作
+///   （sudo / dd / mkfs / chmod / chown / shutdown / reboot）；即使用户点「批准」也保持拦截
+///   （fail-closed），且不向 allow 注入任何规则。
+///
+/// 这同时修掉了旧实现的不一致：旧代码对所有 pattern 一律 `format!("Bash({p}:*)")`，对
+/// 带空格/参数的子串（`"sudo "` → `Bash(sudo :*)`）生成的串既不等于 deny `Bash(sudo:*)`
+/// （故 deny 没被移除、批准静默失效），又把畸形规则注入了 allowed_tools。
+pub fn deny_rule_for_pattern(pattern: &str) -> Option<&'static str> {
+    Some(match pattern {
+        "rm -rf" => "Bash(rm -rf:*)",
+        "rm -fr" => "Bash(rm -fr:*)",
+        "git push --force" => "Bash(git push --force:*)",
+        "git push -f" => "Bash(git push -f:*)",
+        "git reset --hard" => "Bash(git reset --hard:*)",
+        "git clean -fd" => "Bash(git clean -fd:*)",
+        "git clean -f -d" => "Bash(git clean -f -d:*)",
+        // 其余 HIGH_RISK_PATTERNS（sudo / dd if= / mkfs / chmod / chown / shutdown / reboot /
+        // 管道执行远程脚本 / fork 炸弹 / 写块设备）= 不可批准，保持拦截。
+        _ => return None,
+    })
+}
+
 /// CLI `--settings` 默认的 `permissions.deny` 规则（Claude Code 工具说明符语法）。
 ///
 /// 注意：管道执行远程脚本（`| sh`）、fork 炸弹（`:(){`）、`> /dev/sd` 等无法用命令前缀
@@ -219,5 +247,57 @@ mod tests {
         assert!(clean.contains(&"git clean -f -d"));
         // 不在任何分组里 → 返回空，调用方回落到 pattern 自身。
         assert!(risk_equivalent_patterns("sudo ").is_empty());
+    }
+
+    #[test]
+    fn approvable_pattern_maps_to_existing_deny_rule() {
+        // 关键不变量：每个「可批准」pattern 映射到的 deny 规则必须真实存在于 default_deny_rules
+        // 中，否则批准时 deny.retain 无从移除（= 旧 bug：批准静默失效）。
+        let deny = default_deny_rules();
+        for (pat, _reason) in HIGH_RISK_PATTERNS {
+            if let Some(rule) = deny_rule_for_pattern(pat) {
+                assert!(
+                    deny.iter().any(|d| d == rule),
+                    "可批准 pattern {pat:?} 映射到 {rule:?}，但它不在 default_deny_rules 中"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dangerous_system_commands_are_not_approvable() {
+        // 提权 / 毁盘 / 系统级 / 管道执行 / fork 炸弹：即使被「批准」也必须保持拦截（fail-closed），
+        // deny_rule_for_pattern 返回 None → 不移除 deny、不注入 allow。
+        for pat in [
+            "sudo ",
+            "dd if=",
+            "mkfs",
+            "chmod -r 777 /",
+            "chown -r",
+            "shutdown",
+            "reboot",
+            "> /dev/sd",
+            "| sh",
+            "| bash",
+            ":(){",
+        ] {
+            assert!(
+                deny_rule_for_pattern(pat).is_none(),
+                "{pat:?} 不应可批准（应保持拦截）"
+            );
+        }
+    }
+
+    #[test]
+    fn approvable_git_and_rm_map_to_exact_rules() {
+        assert_eq!(
+            deny_rule_for_pattern("git push --force"),
+            Some("Bash(git push --force:*)")
+        );
+        assert_eq!(deny_rule_for_pattern("rm -rf"), Some("Bash(rm -rf:*)"));
+        assert_eq!(
+            deny_rule_for_pattern("git reset --hard"),
+            Some("Bash(git reset --hard:*)")
+        );
     }
 }
