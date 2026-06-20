@@ -1574,17 +1574,34 @@ impl CapsuleTargetMonitor {
     }
 }
 
-/// macOS：把「当前 focused input / caret」映射到显示器。
+/// macOS：决定胶囊应该摆到哪块显示器。
 ///
-/// 不能用 capsule window 的 current_monitor：窗口隐藏时它仍停留在上一次出现的屏，
-/// 多屏输入会因此被缓存误判为“不需要移动”。这里先用 AX 取 caret/输入框位置，
-/// 再在 Tauri 的 monitor 坐标系里选包含该点的屏；如果点短暂落在所有屏外，
-/// 退到最近的屏，避免虚拟桌面负坐标/屏幕排列边缘导致完全不显示。
+/// 跟随**鼠标光标所在的屏**——这是用户的操作/视线焦点，也是唯一始终可用、
+/// 无需任何权限的信号，多显示器 + 多 Space 下都能稳定命中。光标取不到时
+/// （理论上不会）才退回 AX focused-input/caret 位置。
+///
+/// 关键：不能用 capsule window 自己的 current_monitor——窗口隐藏时它仍停留在
+/// 上一次出现的屏，多屏会被缓存误判为“不需要移动”，把胶囊锁死在第一块屏。
+/// 选屏时先找包含该点的屏；点短暂落在所有屏外则退到最近的屏，避免虚拟桌面
+/// 负坐标 / 屏幕排列边缘导致完全不显示。定位与 layout 去重缓存共用本函数，
+/// 二者看的必须是同一块屏。
 #[cfg(target_os = "macos")]
-pub(crate) fn focused_input_target_monitor<R: tauri::Runtime>(
+pub(crate) fn capsule_target_monitor<R: tauri::Runtime>(
     window: &tauri::WebviewWindow<R>,
 ) -> Option<CapsuleTargetMonitor> {
-    let (x, y) = macos_focused_input_anchor_point()?;
+    let (x, y) = macos_mouse_cursor_point().or_else(macos_focused_input_anchor_point)?;
+    monitor_for_anchor_point(window, x, y)
+}
+
+/// 在 Tauri 的 monitor 坐标系里，选出包含逻辑坐标点 `(x, y)` 的显示器；
+/// 点落在所有屏之外时退到最近的屏。坐标系同 AX / CGEvent 的全局显示空间
+/// （左上原点，points）。
+#[cfg(target_os = "macos")]
+fn monitor_for_anchor_point<R: tauri::Runtime>(
+    window: &tauri::WebviewWindow<R>,
+    x: f64,
+    y: f64,
+) -> Option<CapsuleTargetMonitor> {
     let monitors = window.available_monitors().ok()?;
     let mut nearest: Option<(f64, CapsuleTargetMonitor)> = None;
 
@@ -1608,6 +1625,11 @@ pub(crate) fn focused_input_target_monitor<R: tauri::Runtime>(
     }
 
     nearest.map(|(_, target)| target)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_mouse_cursor_point() -> Option<(f64, f64)> {
+    macos_capsule_ax::mouse_cursor_point()
 }
 
 #[cfg(target_os = "macos")]
@@ -1692,6 +1714,30 @@ mod macos_capsule_ax {
             let width = rect.size.width.max(1.0);
             let height = rect.size.height.max(1.0);
             Some((rect.origin.x + width / 2.0, rect.origin.y + height / 2.0))
+        }
+    }
+
+    type CGEventRef = *const c_void;
+    type CGEventSourceRef = *const c_void;
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGEventCreate(source: CGEventSourceRef) -> CGEventRef;
+        fn CGEventGetLocation(event: CGEventRef) -> CGPoint;
+    }
+
+    /// 当前鼠标光标在「全局显示坐标系」(左上原点，points) 的位置。该坐标系与 AX
+    /// caret 完全一致，可直接拿去和 `logical_frame` 比较选屏。`CGEventGetLocation`
+    /// 始终可用、不需要任何权限，所以作为胶囊跟随屏幕的首选信号。
+    pub(super) fn mouse_cursor_point() -> Option<(f64, f64)> {
+        unsafe {
+            let event = CGEventCreate(std::ptr::null());
+            if event.is_null() {
+                return None;
+            }
+            let point = CGEventGetLocation(event);
+            CFRelease(event as CFTypeRef);
+            Some((point.x, point.y))
         }
     }
 
@@ -2486,11 +2532,11 @@ pub(crate) fn position_capsule_bottom_center<R: tauri::Runtime>(
         // 仅当 Win32 取不到前台显示器时，落回下面的 current_monitor 逻辑。
     }
 
-    // macOS：跟随当前 focused input / caret 所在显示器，而不是胶囊窗口
-    // 上一次停留的显示器。这样外接屏上输入时，隐藏态胶囊也能先移动再出现。
+    // macOS：跟随鼠标光标所在显示器，而不是胶囊窗口上一次停留的显示器。
+    // 这样在任意外接屏 / 任意 Space 上触发时，隐藏态胶囊也能先移动再出现。
     #[cfg(target_os = "macos")]
     {
-        if let Some(mon) = focused_input_target_monitor(window) {
+        if let Some(mon) = capsule_target_monitor(window) {
             window.set_size(LogicalSize::new(bounds.width, bounds.height))?;
             let frame = mon.logical_frame();
             let (x, y) = bottom_visual_position(
