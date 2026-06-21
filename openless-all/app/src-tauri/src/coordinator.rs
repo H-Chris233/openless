@@ -2897,9 +2897,9 @@ const CAPSULE_AUTO_HIDE_DELAY_MS: u64 = 2000;
 const POST_SESSION_COOLDOWN_MS: u64 = 600;
 
 /// Coordinator 全局超时保护：防止 ASR await_final_result() 永远挂起。
-/// 设置为 15 秒（比 ASR 的 12 秒 FINAL_RESULT_TIMEOUT 稍长），
-/// 只在 ASR 超时机制失效时作为最后的防线触发。
-const COORDINATOR_GLOBAL_TIMEOUT_SECS: u64 = 15;
+/// 设置为 30 秒，为云端 batch ASR（OpenRouter Whisper 等）提供足够的
+/// 网络超时预算；只在 ASR 自身超时机制失效时作为最后的防线触发。
+const COORDINATOR_GLOBAL_TIMEOUT_SECS: u64 = 30;
 
 #[cfg(target_os = "windows")]
 fn foundry_audio_transcribe_timeout_duration() -> std::time::Duration {
@@ -2913,6 +2913,17 @@ fn foundry_audio_transcribe_timeout_duration() -> std::time::Duration {
 fn local_qwen_transcribe_timeout(audio_secs: f64) -> std::time::Duration {
     let secs = ((audio_secs * 0.6).ceil() as u64)
         .saturating_add(10)
+        .max(COORDINATOR_GLOBAL_TIMEOUT_SECS);
+    std::time::Duration::from_secs(secs)
+}
+
+/// Whisper / OpenRouter 云端 batch ASR 的动态转写超时。OpenRouter 按 30s
+/// 分片，每片是一次 HTTP round-trip；网络抖动、排队、base64 body 都会
+/// 拉长耗时。公式 max(30, ceil(audio_s × 0.5) + 20)：30s 是全局兜底；
+/// 长录音按音频长度的 0.5 倍 + 20s 余量，覆盖多分片串行请求 + 网络波动。
+fn whisper_transcribe_timeout(audio_secs: f64) -> std::time::Duration {
+    let secs = ((audio_secs * 0.5).ceil() as u64)
+        .saturating_add(20)
         .max(COORDINATOR_GLOBAL_TIMEOUT_SECS);
     std::time::Duration::from_secs(secs)
 }

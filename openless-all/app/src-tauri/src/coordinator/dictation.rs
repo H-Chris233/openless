@@ -1691,8 +1691,15 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         }
         ActiveAsr::Whisper(w) => {
             debug_assert!(uses_global_timeout);
-            // Whisper 也添加类似的超时保护
-            let timeout_duration = std::time::Duration::from_secs(COORDINATOR_GLOBAL_TIMEOUT_SECS);
+            // Whisper / OpenRouter 动态超时：音频越长、分片越多，给更多
+            // HTTP round-trip 预算。公式见 `whisper_transcribe_timeout`。
+            let audio_secs = (w.buffer_duration_ms() as f64) / 1000.0;
+            let timeout_duration = whisper_transcribe_timeout(audio_secs);
+            log::info!(
+                "[coord] Whisper transcribe: audio={:.2}s timeout={}s",
+                audio_secs,
+                timeout_duration.as_secs()
+            );
             match tokio::time::timeout(timeout_duration, w.transcribe()).await {
                 Ok(Ok(r)) => r,
                 Ok(Err(e)) => {
@@ -1712,8 +1719,9 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                 }
                 Err(_) => {
                     log::error!(
-                        "[coord] whisper 全局超时 {} 秒",
-                        COORDINATOR_GLOBAL_TIMEOUT_SECS
+                        "[coord] Whisper 动态超时 {}s（音频 {:.2}s）",
+                        timeout_duration.as_secs(),
+                        audio_secs
                     );
                     emit_capsule(
                         inner,
