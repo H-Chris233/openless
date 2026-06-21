@@ -6,7 +6,7 @@ import { useTranslation } from 'react-i18next';
 import { Icon } from '../components/Icon';
 import { detectOS } from '../components/WindowChrome';
 import { formatComboLabel } from '../lib/hotkey';
-import { clearHistory, deleteHistoryEntry, listHistory, readAudioRecording } from '../lib/ipc';
+import { clearHistory, deleteHistoryEntry, listHistory, readAudioRecording, retranscribeRecording } from '../lib/ipc';
 import { useMobileLayout } from '../lib/useMobileLayout';
 import type { DictationSession, PolishMode } from '../lib/types';
 import { useHotkeySettings } from '../state/HotkeySettingsContext';
@@ -48,6 +48,8 @@ export function History() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [justCopied, setJustCopied] = useState(false);
+  // 「重新转录」进行中：禁用按钮 + 显示「转录中…」，避免重复点击发起多次 ASR。
+  const [retranscribing, setRetranscribing] = useState(false);
   // 录音文件 lazily-detected missing 状态：retention / 条数 cap 清理后磁盘上 wav
   // 可能已被删，但 history 条目 hasAudioRecording 仍写 true。任一组件
   // （播放 / 导出）首次 IPC 拿到 'recording not found' 时把 id 加进来，
@@ -198,6 +200,31 @@ export function History() {
     }
   };
 
+  // 对一条「转录失败 / 没识别到语音」的历史用当前 ASR provider 重新转录（issue #613）。
+  // 后端读 recordings/<id>.wav → 重转 → 原地回写该条 rawTranscript/finalText、清 errorCode，
+  // 返回整条记录；前端据此局部刷新。失败保留 + 自动重试已让这些条目的录音留得住，这里给
+  // 持久失败（重试也没救回来）一个手动重转入口。
+  const onRetranscribe = async () => {
+    if (!item || !item.hasAudioRecording) return;
+    setRetranscribing(true);
+    setActionError(null);
+    try {
+      const updated = await retranscribeRecording(item.id);
+      setItems(prev => prev.map(s => (s.id === updated.id ? updated : s)));
+    } catch (error) {
+      console.error('[history] retranscribe failed', error);
+      const msg = errorMessage(error);
+      // wav 已被 retention / 条数 cap 清理：隐藏入口，不报错（用户没干错事）。
+      if (msg.includes('recording not found') || msg.includes('not found')) {
+        markAudioMissing(item.id);
+        return;
+      }
+      setActionError(t('history.retranscribeFailed', { err: msg }));
+    } finally {
+      setRetranscribing(false);
+    }
+  };
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <PageHeader
@@ -330,6 +357,13 @@ export function History() {
                   <Btn icon={justCopied ? 'check' : 'copy'} variant="ghost" size="sm" onClick={() => void onCopy()}>{justCopied ? t('common.copied') : t('common.copy')}</Btn>
                   {item.hasAudioRecording && !audioMissingIds.has(item.id) && (
                     <Btn icon="download" variant="ghost" size="sm" onClick={() => void onExportAudio()}>{t('history.exportRecording')}</Btn>
+                  )}
+                  {item.hasAudioRecording
+                    && !audioMissingIds.has(item.id)
+                    && (item.errorCode === 'transcribeFailed' || item.errorCode === 'emptyTranscript') && (
+                    <Btn icon="refresh" variant="ghost" size="sm" disabled={retranscribing} onClick={() => void onRetranscribe()}>
+                      {retranscribing ? t('history.retranscribing') : t('history.retranscribe')}
+                    </Btn>
                   )}
                   <Btn icon="trash" variant="ghost" size="sm" onClick={onDelete}>{t('common.delete')}</Btn>
                 </div>

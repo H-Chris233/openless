@@ -497,25 +497,51 @@ pub(super) async fn handle_pressed_edge(inner: &Arc<Inner>) {
     }
 }
 
+/// 「排队接力」放行窗口（ms）。识别中按下热键想录下一条时,那个 Pressed 在处理期间就被缓进
+/// hotkey channel,bridge 串行阻塞到本条会话收尾(Idle)才取出 —— 取出几乎在 Idle 后 0ms
+/// (bridge 立即 recv)。它和 #545「会话结束后胶囊离场动画期间误触」的区别在于物理按下时刻:
+/// 误触是会话结束后才按,处理时刻离 Idle 已隔人类反应时间(>150ms)。所以冷却期内、但距 Idle
+/// < 该窗口的按下 = 排队接力,放行开录下一条;其余冷却期按下仍按 #545 拦截。120ms 远低于
+/// 人类反应、又足够覆盖 end_session 收尾尾巴 + bridge recv 延迟。
+const HOTKEY_QUEUE_GRACE_MS: u64 = 120;
+
+/// 判断一次落在冷却期内的 Toggle 激活是否为「排队接力」按下（见 HOTKEY_QUEUE_GRACE_MS）。
+/// since_idle = POST_SESSION_COOLDOWN_MS − 剩余冷却；落在 grace 窗口内即认为是处理期间缓进、
+/// 收尾后立刻取出的接力按下。剩余冷却异常(> 全程,理论不会发生)时返回 false,从严不放行。
+fn is_queued_chain_press(now: std::time::Instant, cooldown_until: std::time::Instant) -> bool {
+    let cooldown = std::time::Duration::from_millis(POST_SESSION_COOLDOWN_MS);
+    let remaining = cooldown_until.saturating_duration_since(now);
+    cooldown
+        .checked_sub(remaining)
+        .map(|since_idle| since_idle < std::time::Duration::from_millis(HOTKEY_QUEUE_GRACE_MS))
+        .unwrap_or(false)
+}
+
 pub(super) async fn handle_pressed(inner: &Arc<Inner>) {
     let mode = inner.prefs.get().hotkey.mode;
     let phase = inner.state.lock().phase;
     log::info!("[coord] hotkey pressed (mode={mode:?}, phase={phase:?})");
     match (mode, phase) {
         (HotkeyMode::Toggle, SessionPhase::Idle) => {
-            // 冷却检查：end_session 刚收尾时禁止短时间内再次激活，
-            // 避免三连按第 3 次误触（此时胶囊仍在离场动画周期内，issue #545）。
+            // 冷却检查：end_session 刚收尾时禁止短时间内再次激活，避免三连按第 3 次误触
+            // （此时胶囊仍在离场动画周期内，issue #545）。例外「排队接力」：识别中按下想录
+            // 下一条的 Pressed 被缓在 channel 里、会话收尾后立刻取出（距 Idle < grace），放行
+            // 直接开录下一条（用户选的「安全版排队接力」）。
             let now = std::time::Instant::now();
-            let on_cooldown = inner
-                .session_cooldown_until
-                .lock()
-                .map(|deadline| now < deadline)
-                .unwrap_or(false);
-            if on_cooldown {
-                log::info!(
-                    "[coord] toggle activation blocked by cooldown (session still winding down)"
-                );
-                return;
+            let cooldown_until = *inner.session_cooldown_until.lock();
+            if let Some(deadline) = cooldown_until {
+                if now < deadline {
+                    if is_queued_chain_press(now, deadline) {
+                        log::info!(
+                            "[coord] queued-chain activation: 识别中按下，会话收尾后接力开录下一条"
+                        );
+                    } else {
+                        log::info!(
+                            "[coord] toggle activation blocked by cooldown (session still winding down)"
+                        );
+                        return;
+                    }
+                }
             }
             let _ = begin_session(inner).await;
         }
@@ -1445,18 +1471,20 @@ pub(super) async fn start_recorder_for_starting(
     let microphone_device_name = selected_microphone_device_name(inner);
     stop_microphone_preview_monitor(inner, "dictation recorder");
     acquire_recording_mute(inner, "dictation").await;
-    let audio_archive_path = if inner.prefs.get().record_audio_for_debug {
-        // 用 coordinator 的 SessionId 作为文件名，跟 history 那条记录 id 对齐（见
-        // 下游 polish 收尾时 `history_session_id = current_session_id.to_string()`）。
-        // 顺手把超龄 / 超量录音清理一下，避免 debug 开关常开时磁盘膨胀。
+    // 总是把这次口述归档成 `recordings/<session_id>.wav`，不再只在 record_audio_for_debug
+    // 下归档。原因：失败保留 + 自动重试需要原始音频，而该开关默认 false——之前转录失败时音频
+    // 直接丢失（用户反馈「识别失败，之前的语音也都丢失了」）。归档是临时的：拿到非空转写后，
+    // 若用户没开 record_audio_for_debug 就立刻删掉（隐私——成功的口述不留痕），只有「转录失败」
+    // 的录音会留下，供历史里手动「重新转录」或自动静默重试复用。prune_recordings 兜底总量。
+    // 文件名用 coordinator 的 SessionId，跟 history 那条记录 id 对齐（见下游 polish 收尾
+    // `history_session_id = current_session_id.to_string()`），前端凭 id 就能找到录音。
+    let audio_archive_path = {
         let prefs = inner.prefs.get();
         let _ = crate::persistence::prune_recordings(
             prefs.history_retention_days,
             prefs.audio_recording_max_entries,
         );
         crate::persistence::recording_path_for_session(&session_id.to_string()).ok()
-    } else {
-        None
     };
     match Recorder::start(
         microphone_device_name,
@@ -1611,6 +1639,162 @@ pub(super) async fn finish_starting_session(inner: &Arc<Inner>, session_id: Sess
     }
 }
 
+/// 转录失败时落一条「转录失败」历史，并保留这次的原始录音，让用户能在历史里看到失败、
+/// 手动「重新转录」。复活并修好 issue #613：之前失败的录音被孤立——历史里看不到这条、
+/// 音频也找不回（孤儿 wav 最终被 prune 清掉，语音彻底丢失）。
+///
+/// session_id 与归档 wav 同名（`recordings/<session_id>.wav`），保证 read_audio_recording /
+/// retranscribe_recording 凭 id 能定位文件。has_audio_recording 读 Recorder::start 的实际
+/// 写盘状态（不是 prefs 开关）：开关想录但路径创建失败时为 false，避免前端渲染播放/重转
+/// 按钮而后端 404。
+fn build_transcribe_failed_session(
+    session_id: SessionId,
+    duration_ms: u64,
+    mode: PolishMode,
+    has_audio_recording: bool,
+) -> DictationSession {
+    DictationSession {
+        id: session_id.to_string(),
+        created_at: Utc::now().to_rfc3339(),
+        raw_transcript: String::new(),
+        final_text: String::new(),
+        mode,
+        style_pack_id: None,
+        translation_active: false,
+        polish_source: None,
+        app_bundle_id: None,
+        app_name: None,
+        insert_status: InsertStatus::Failed,
+        error_code: Some("transcribeFailed".to_string()),
+        duration_ms: Some(duration_ms),
+        dictionary_entry_count: None,
+        has_audio_recording: Some(has_audio_recording),
+    }
+}
+
+fn write_transcribe_failed_history(inner: &Arc<Inner>, session_id: SessionId, duration_ms: u64) {
+    let prefs = inner.prefs.get();
+    let session = build_transcribe_failed_session(
+        session_id,
+        duration_ms,
+        prefs.default_mode,
+        inner.audio_archive_active.load(Ordering::Relaxed),
+    );
+    if let Err(e) = inner.history.append_with_retention(
+        session,
+        prefs.history_retention_days,
+        prefs.history_max_entries,
+    ) {
+        log::error!("[coord] transcribeFailed history append failed: {e}");
+    }
+}
+
+/// ASR 转录失败 / 超时的统一收尾，替代之前散落在每个引擎分支里重复 5 行的失败尾巴：
+/// 保留录音 + 落失败历史 → 错误胶囊 → 恢复窗口/IME → 回 Idle → 定时隐藏胶囊。
+/// 永远返回 `Err(err)`，调用方写 `return fail_dictation(...)`。集中一处既保证没有任何引擎
+/// 分支漏掉「失败保留」，也是自动静默重试彻底失败后的唯一收尾点。
+fn fail_dictation(
+    inner: &Arc<Inner>,
+    session_id: SessionId,
+    elapsed: u64,
+    user_msg: String,
+    err: String,
+) -> Result<(), String> {
+    write_transcribe_failed_history(inner, session_id, elapsed);
+    emit_capsule(inner, CapsuleState::Error, 0.0, elapsed, Some(user_msg), None);
+    restore_prepared_windows_ime_session(inner, session_id);
+    inner.state.lock().phase = SessionPhase::Idle;
+    schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
+    Err(err)
+}
+
+/// ASR 失败/超时分支从引擎 match 里产出的「失败」值：带用户提示文案 + 内部错误串，交给
+/// match 之后的统一处理（先自动重试，彻底失败再 fail_dictation 收尾）。
+struct TranscribeFail {
+    user_msg: String,
+    err: String,
+}
+
+impl TranscribeFail {
+    fn new(user_msg: String, err: String) -> Self {
+        Self { user_msg, err }
+    }
+}
+
+/// 自动静默重试的最大次数（不含首次转写）。失败/超时多为网络或服务端瞬时抖动，重试几次
+/// 往往就能拿回这段语音；上限避免在永久性故障（如鉴权失败）上空耗太久。
+const SILENT_RETRY_MAX: u32 = 2;
+/// 每次重试前的线性退避基数：第 N 次重试前等 `SILENT_RETRY_BACKOFF_MS * N` 毫秒，给抖动的
+/// 网络/服务端一点缓冲再打。
+const SILENT_RETRY_BACKOFF_MS: u64 = 500;
+
+/// 归档 wav 是 16k/mono/16-bit、固定 44 字节标准头（asr::wav::encode_wav_16k_mono）；取出
+/// PCM 负载。长度 <= 44（空/损坏）返回 None。
+fn pcm_from_wav_bytes(wav: &[u8]) -> Option<Vec<u8>> {
+    if wav.len() <= 44 {
+        return None;
+    }
+    Some(wav[44..].to_vec())
+}
+
+/// 16k/mono/16-bit PCM：每毫秒 32 字节（16000 * 2 / 1000）。用 PCM 长度反推时长，给重试成功
+/// 后的 RawTranscript.duration_ms（写历史 / 胶囊用）。
+fn pcm_duration_ms(pcm_len: usize) -> u64 {
+    (pcm_len as u64) / 32
+}
+
+/// 用「当前」provider 把一段 PCM 重新转录（建一条全新 ASR 会话——原会话失败/断开后不可
+/// 复用）。复用 Coordinator::retranscribe_pcm（历史「重新转录」同款逻辑）；Coordinator 只持有
+/// `inner`，这里用 inner 重建一个轻量句柄，零副作用。
+async fn retranscribe_pcm_via_inner(inner: &Arc<Inner>, pcm: Vec<u8>) -> Result<String, String> {
+    Coordinator {
+        inner: Arc::clone(inner),
+    }
+    .retranscribe_pcm(pcm)
+    .await
+}
+
+/// 自动静默重试：从刚归档的 wav 读 PCM，用当前 provider 重转最多 SILENT_RETRY_MAX 次（线性
+/// 退避）。任一次拿到非空文本立即 Some（当作正常转写继续走润色/插入）；没有归档音频、读不到、
+/// 或全部失败则 None（交回 fail_dictation 做「失败保留 + 报错」）。全程不改胶囊文案——对用户
+/// 静默，只是「转写中」多停留一会儿。
+async fn try_silent_retranscribe(
+    inner: &Arc<Inner>,
+    session_id: SessionId,
+) -> Option<RawTranscript> {
+    if !inner.audio_archive_active.load(Ordering::Relaxed) {
+        return None; // 没归档音频，无从重试
+    }
+    let path = crate::persistence::recording_path_for_session(&session_id.to_string()).ok()?;
+    let wav = tokio::fs::read(&path).await.ok()?;
+    let pcm = pcm_from_wav_bytes(&wav)?;
+    let duration_ms = pcm_duration_ms(pcm.len());
+    for attempt in 1..=SILENT_RETRY_MAX {
+        tokio::time::sleep(std::time::Duration::from_millis(
+            SILENT_RETRY_BACKOFF_MS * attempt as u64,
+        ))
+        .await;
+        match retranscribe_pcm_via_inner(inner, pcm.clone()).await {
+            Ok(text) if !text.trim().is_empty() => {
+                log::info!(
+                    "[coord] 自动静默重试第 {attempt}/{SILENT_RETRY_MAX} 次成功（{} 字）",
+                    text.chars().count()
+                );
+                return Some(RawTranscript { text, duration_ms });
+            }
+            Ok(_) => {
+                // 重试得到空转写——多半真没说话，再重试无意义，省流量直接放弃。
+                log::info!("[coord] 自动静默重试得到空转写，停止重试");
+                return None;
+            }
+            Err(e) => {
+                log::warn!("[coord] 自动静默重试第 {attempt}/{SILENT_RETRY_MAX} 次失败: {e}");
+            }
+        }
+    }
+    None
+}
+
 pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
     let current_session_id = {
         let mut state = inner.state.lock();
@@ -1639,7 +1823,10 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
     };
 
     let uses_global_timeout = asr_transcribe_uses_global_timeout(&asr);
-    let raw = match asr {
+    // 每个引擎分支产出 Ok(RawTranscript) 或 Err(TranscribeFail)；失败/超时不再就地 return，
+    // 而是把失败值交给 match 之后统一处理：先自动静默重试（从归档音频重转，应对网络/服务端
+    // 瞬时抖动），重试拿回文本就当正常转写继续；彻底失败才 fail_dictation 保留录音 + 报错。
+    let transcribe_outcome: Result<RawTranscript, TranscribeFail> = match asr {
         ActiveAsr::Volcengine(asr) => {
             debug_assert!(uses_global_timeout);
             if let Err(e) = asr.send_last_frame().await {
@@ -1648,23 +1835,12 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
             // 添加全局超时保护：防止 await_final_result() 永远挂起
             let timeout_duration = std::time::Duration::from_secs(COORDINATOR_GLOBAL_TIMEOUT_SECS);
             match tokio::time::timeout(timeout_duration, asr.await_final_result()).await {
-                Ok(Ok(r)) => r,
+                Ok(Ok(r)) => Ok(r),
                 Ok(Err(e)) => {
                     log::error!("[coord] await final failed: {e}");
                     // 关闭 WebSocket 连接，避免流式 ASR 资源泄漏
                     asr.cancel();
-                    emit_capsule(
-                        inner,
-                        CapsuleState::Error,
-                        0.0,
-                        elapsed,
-                        Some(format!("识别失败: {e}")),
-                        None,
-                    );
-                    restore_prepared_windows_ime_session(inner, current_session_id);
-                    inner.state.lock().phase = SessionPhase::Idle;
-                    schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-                    return Err(e.to_string());
+                    Err(TranscribeFail::new(format!("识别失败: {e}"), e.to_string()))
                 }
                 Err(_) => {
                     // 全局超时：最后的防线
@@ -1674,18 +1850,10 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                     );
                     // 清理 ASR session，避免资源泄漏
                     asr.cancel();
-                    emit_capsule(
-                        inner,
-                        CapsuleState::Error,
-                        0.0,
-                        elapsed,
-                        Some("识别超时".to_string()),
-                        None,
-                    );
-                    restore_prepared_windows_ime_session(inner, current_session_id);
-                    inner.state.lock().phase = SessionPhase::Idle;
-                    schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-                    return Err("global timeout".to_string());
+                    Err(TranscribeFail::new(
+                        "识别超时".to_string(),
+                        "global timeout".to_string(),
+                    ))
                 }
             }
         }
@@ -1701,21 +1869,10 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                 timeout_duration.as_secs()
             );
             match tokio::time::timeout(timeout_duration, w.transcribe()).await {
-                Ok(Ok(r)) => r,
+                Ok(Ok(r)) => Ok(r),
                 Ok(Err(e)) => {
                     log::error!("[coord] whisper transcribe failed: {e}");
-                    emit_capsule(
-                        inner,
-                        CapsuleState::Error,
-                        0.0,
-                        elapsed,
-                        Some(format!("识别失败: {e}")),
-                        None,
-                    );
-                    restore_prepared_windows_ime_session(inner, current_session_id);
-                    inner.state.lock().phase = SessionPhase::Idle;
-                    schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-                    return Err(e.to_string());
+                    Err(TranscribeFail::new(format!("识别失败: {e}"), e.to_string()))
                 }
                 Err(_) => {
                     log::error!(
@@ -1723,18 +1880,10 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                         timeout_duration.as_secs(),
                         audio_secs
                     );
-                    emit_capsule(
-                        inner,
-                        CapsuleState::Error,
-                        0.0,
-                        elapsed,
-                        Some("识别超时".to_string()),
-                        None,
-                    );
-                    restore_prepared_windows_ime_session(inner, current_session_id);
-                    inner.state.lock().phase = SessionPhase::Idle;
-                    schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-                    return Err("whisper global timeout".to_string());
+                    Err(TranscribeFail::new(
+                        "识别超时".to_string(),
+                        "whisper global timeout".to_string(),
+                    ))
                 }
             }
         }
@@ -1742,39 +1891,20 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
             debug_assert!(uses_global_timeout);
             let timeout_duration = std::time::Duration::from_secs(COORDINATOR_GLOBAL_TIMEOUT_SECS);
             match tokio::time::timeout(timeout_duration, m.transcribe()).await {
-                Ok(Ok(r)) => r,
+                Ok(Ok(r)) => Ok(r),
                 Ok(Err(e)) => {
                     log::error!("[coord] MiMo ASR transcribe failed: {e}");
-                    emit_capsule(
-                        inner,
-                        CapsuleState::Error,
-                        0.0,
-                        elapsed,
-                        Some(format!("识别失败: {e}")),
-                        None,
-                    );
-                    restore_prepared_windows_ime_session(inner, current_session_id);
-                    inner.state.lock().phase = SessionPhase::Idle;
-                    schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-                    return Err(e.to_string());
+                    Err(TranscribeFail::new(format!("识别失败: {e}"), e.to_string()))
                 }
                 Err(_) => {
                     log::error!(
                         "[coord] MiMo ASR 全局超时 {} 秒",
                         COORDINATOR_GLOBAL_TIMEOUT_SECS
                     );
-                    emit_capsule(
-                        inner,
-                        CapsuleState::Error,
-                        0.0,
-                        elapsed,
-                        Some("识别超时".to_string()),
-                        None,
-                    );
-                    restore_prepared_windows_ime_session(inner, current_session_id);
-                    inner.state.lock().phase = SessionPhase::Idle;
-                    schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-                    return Err("mimo global timeout".to_string());
+                    Err(TranscribeFail::new(
+                        "识别超时".to_string(),
+                        "mimo global timeout".to_string(),
+                    ))
                 }
             }
         }
@@ -1785,23 +1915,12 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
             }
             let timeout_duration = std::time::Duration::from_secs(COORDINATOR_GLOBAL_TIMEOUT_SECS);
             match tokio::time::timeout(timeout_duration, asr.await_final_result()).await {
-                Ok(Ok(r)) => r,
+                Ok(Ok(r)) => Ok(r),
                 Ok(Err(e)) => {
                     log::error!("[coord] Bailian await final failed: {e}");
                     // 关闭 WebSocket 连接，避免流式 ASR 资源泄漏
                     asr.cancel();
-                    emit_capsule(
-                        inner,
-                        CapsuleState::Error,
-                        0.0,
-                        elapsed,
-                        Some(format!("识别失败: {e}")),
-                        None,
-                    );
-                    restore_prepared_windows_ime_session(inner, current_session_id);
-                    inner.state.lock().phase = SessionPhase::Idle;
-                    schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-                    return Err(e.to_string());
+                    Err(TranscribeFail::new(format!("识别失败: {e}"), e.to_string()))
                 }
                 Err(_) => {
                     log::error!(
@@ -1809,18 +1928,10 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                         COORDINATOR_GLOBAL_TIMEOUT_SECS
                     );
                     asr.cancel();
-                    emit_capsule(
-                        inner,
-                        CapsuleState::Error,
-                        0.0,
-                        elapsed,
-                        Some("识别超时".to_string()),
-                        None,
-                    );
-                    restore_prepared_windows_ime_session(inner, current_session_id);
-                    inner.state.lock().phase = SessionPhase::Idle;
-                    schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-                    return Err("bailian global timeout".to_string());
+                    Err(TranscribeFail::new(
+                        "识别超时".to_string(),
+                        "bailian global timeout".to_string(),
+                    ))
                 }
             }
         }
@@ -1836,7 +1947,7 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                         inner,
                         AsrReleaseSession::Dictation(current_session_id),
                     );
-                    r
+                    Ok(r)
                 }
                 Err(e) => {
                     if inner.state.lock().cancelled {
@@ -1856,18 +1967,7 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                         inner,
                         AsrReleaseSession::Dictation(current_session_id),
                     );
-                    emit_capsule(
-                        inner,
-                        CapsuleState::Error,
-                        0.0,
-                        elapsed,
-                        Some(format!("本地识别失败: {e}")),
-                        None,
-                    );
-                    restore_prepared_windows_ime_session(inner, current_session_id);
-                    inner.state.lock().phase = SessionPhase::Idle;
-                    schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-                    return Err(e.to_string());
+                    Err(TranscribeFail::new(format!("本地识别失败: {e}"), e.to_string()))
                 }
             }
         }
@@ -1885,7 +1985,7 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                         inner,
                         AsrReleaseSession::Dictation(current_session_id),
                     );
-                    r
+                    Ok(r)
                 }
                 Err(e) => {
                     if inner.state.lock().cancelled {
@@ -1905,18 +2005,7 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                         inner,
                         AsrReleaseSession::Dictation(current_session_id),
                     );
-                    emit_capsule(
-                        inner,
-                        CapsuleState::Error,
-                        0.0,
-                        elapsed,
-                        Some(format!("本地识别失败: {e}")),
-                        None,
-                    );
-                    restore_prepared_windows_ime_session(inner, current_session_id);
-                    inner.state.lock().phase = SessionPhase::Idle;
-                    schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-                    return Err(e.to_string());
+                    Err(TranscribeFail::new(format!("本地识别失败: {e}"), e.to_string()))
                 }
             }
         }
@@ -1939,21 +2028,10 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
             inner.local_asr_cache.touch();
             schedule_local_asr_release(inner);
             match result {
-                Ok(Ok(r)) => r,
+                Ok(Ok(r)) => Ok(r),
                 Ok(Err(e)) => {
                     log::error!("[coord] local Qwen3-ASR transcribe failed: {e:#}");
-                    emit_capsule(
-                        inner,
-                        CapsuleState::Error,
-                        0.0,
-                        elapsed,
-                        Some(format!("本地识别失败: {e}")),
-                        None,
-                    );
-                    restore_prepared_windows_ime_session(inner, current_session_id);
-                    inner.state.lock().phase = SessionPhase::Idle;
-                    schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-                    return Err(e.to_string());
+                    Err(TranscribeFail::new(format!("本地识别失败: {e}"), e.to_string()))
                 }
                 Err(_) => {
                     log::error!(
@@ -1961,18 +2039,10 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                         timeout_duration.as_secs(),
                         audio_secs
                     );
-                    emit_capsule(
-                        inner,
-                        CapsuleState::Error,
-                        0.0,
-                        elapsed,
-                        Some("识别超时".to_string()),
-                        None,
-                    );
-                    restore_prepared_windows_ime_session(inner, current_session_id);
-                    inner.state.lock().phase = SessionPhase::Idle;
-                    schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-                    return Err("local global timeout".to_string());
+                    Err(TranscribeFail::new(
+                        "识别超时".to_string(),
+                        "local global timeout".to_string(),
+                    ))
                 }
             }
         }
@@ -1989,7 +2059,7 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                 timeout_duration.as_secs()
             );
             match tokio::time::timeout(timeout_duration, local.transcribe()).await {
-                Ok(Ok(r)) => r,
+                Ok(Ok(r)) => Ok(r),
                 Ok(Err(e)) => {
                     if inner.state.lock().cancelled {
                         log::info!(
@@ -2000,18 +2070,7 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                         return Ok(());
                     }
                     log::error!("[coord] Apple Speech transcribe failed: {e:#}");
-                    emit_capsule(
-                        inner,
-                        CapsuleState::Error,
-                        0.0,
-                        elapsed,
-                        Some(format!("本地识别失败: {e}")),
-                        None,
-                    );
-                    restore_prepared_windows_ime_session(inner, current_session_id);
-                    inner.state.lock().phase = SessionPhase::Idle;
-                    schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-                    return Err(e.to_string());
+                    Err(TranscribeFail::new(format!("本地识别失败: {e}"), e.to_string()))
                 }
                 Err(_) => {
                     log::error!(
@@ -2019,18 +2078,10 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                         timeout_duration.as_secs(),
                         audio_secs
                     );
-                    emit_capsule(
-                        inner,
-                        CapsuleState::Error,
-                        0.0,
-                        elapsed,
-                        Some("识别超时".to_string()),
-                        None,
-                    );
-                    restore_prepared_windows_ime_session(inner, current_session_id);
-                    inner.state.lock().phase = SessionPhase::Idle;
-                    schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-                    return Err("apple-speech global timeout".to_string());
+                    Err(TranscribeFail::new(
+                        "识别超时".to_string(),
+                        "apple-speech global timeout".to_string(),
+                    ))
                 }
             }
         }
@@ -2053,6 +2104,25 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         return Ok(());
     }
 
+    // ASR 失败/超时：先自动静默重试（从刚归档的音频重转，应对网络/服务端瞬时抖动）。上面的
+    // cancel 检查已先行——用户主动取消的会话不会走到这里触发重试。重试拿回文本就当作正常转写
+    // 继续走润色/插入；彻底失败才 fail_dictation 保留录音 + 报错（音频仍在，可去历史手动重转）。
+    let raw = match transcribe_outcome {
+        Ok(raw) => raw,
+        Err(fail) => match try_silent_retranscribe(inner, current_session_id).await {
+            Some(raw) => raw,
+            None => {
+                return fail_dictation(
+                    inner,
+                    current_session_id,
+                    elapsed,
+                    fail.user_msg,
+                    fail.err,
+                )
+            }
+        },
+    };
+
     // ASR 返回空转写护栏（来自 PR #66）：写一条 emptyTranscript 失败历史 + 错误胶囊，
     // 与 main 上其它 error 路径保持一致（带 schedule_capsule_idle 让胶囊自动消失）。
     let mut raw = raw;
@@ -2070,7 +2140,10 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
 
     if raw.text.trim().is_empty() {
         let session = DictationSession {
-            id: Uuid::new_v4().to_string(),
+            // session_id 与归档 wav 同名，empty 录音才能被 read_audio_recording /
+            // retranscribe_recording 凭 id 找回（之前用 Uuid::new_v4，与 `<session_id>.wav`
+            // 对不上，has_audio_recording 标了 true 但前端永远 404）。
+            id: current_session_id.to_string(),
             created_at: Utc::now().to_rfc3339(),
             raw_transcript: raw.text.clone(),
             final_text: String::new(),
@@ -2109,6 +2182,25 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         inner.state.lock().phase = SessionPhase::Idle;
         schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
         return Err("ASR returned empty transcript".to_string());
+    }
+
+    // 拿到非空转写 → 原始音频对「ASR 重试」已无价值。非 debug 用户：删掉刚归档的 wav
+    // （隐私——成功的口述不留痕，只保留失败录音供手动重转 / 自动重试），并把
+    // audio_archive_active 翻成 false，让下游 history 的 has_audio_recording 读到真实状态
+    // （成功条目不会渲染播放/重转按钮再 404）。debug 用户：保留全部录音（原调试行为）。
+    // 失败/超时路径在上面的 match 内就产出 Err 并走 fail_dictation，不会走到这里，失败录音始终留存。
+    if !inner.prefs.get().record_audio_for_debug
+        && inner.audio_archive_active.swap(false, Ordering::Relaxed)
+    {
+        if let Ok(path) =
+            crate::persistence::recording_path_for_session(&current_session_id.to_string())
+        {
+            if let Err(e) = tokio::fs::remove_file(&path).await {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    log::warn!("[coord] 清理成功口述的归档录音失败: {e}");
+                }
+            }
+        }
     }
 
     let correction_rules = match inner.correction_rules.list() {
@@ -2589,13 +2681,15 @@ fn eligible_polish_context_turns(
 #[cfg(test)]
 mod tests {
     use super::{
-        append_typed_prefix, batch_asr_chunk_limit_ms, default_done_message,
-        drain_streaming_insert_deltas_with, eligible_polish_context_turns, finalize_polished_text,
-        flush_streaming_insert_buffer_with, streaming_insert_eligible,
+        append_typed_prefix, batch_asr_chunk_limit_ms, build_transcribe_failed_session,
+        default_done_message, drain_streaming_insert_deltas_with, eligible_polish_context_turns,
+        finalize_polished_text, flush_streaming_insert_buffer_with, pcm_duration_ms,
+        pcm_from_wav_bytes, streaming_insert_eligible,
     };
     use crate::types::{
         ChineseScriptPreference, CorrectionRule, DictationSession, InsertStatus, PolishMode,
     };
+    use uuid::Uuid;
 
     fn correction_rule(pattern: &str, replacement: &str) -> CorrectionRule {
         CorrectionRule {
@@ -2655,6 +2749,89 @@ mod tests {
                 ("raw2".to_string(), "final2".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn transcribe_failed_history_keeps_session_id_for_recording_lookup() {
+        // 修 #613：失败 / empty 历史条目的 id 必须 == coordinator SessionId，这样归档录音
+        // `recordings/<session_id>.wav` 才能被 read_audio_recording / retranscribe_recording
+        // 凭 id 找回。之前 empty 分支用 Uuid::new_v4()，与 wav 文件名对不上 → 前端永远 404、
+        // 录音随 prune 丢失（用户报告「识别失败之前的语音也都丢失了」）。
+        let sid = Uuid::new_v4();
+        let session = build_transcribe_failed_session(sid, 4200, PolishMode::Structured, true);
+        assert_eq!(session.id, sid.to_string());
+    }
+
+    #[test]
+    fn transcribe_failed_history_marks_failed_and_recoverable() {
+        let sid = Uuid::new_v4();
+        let session = build_transcribe_failed_session(sid, 1234, PolishMode::Structured, true);
+        assert!(matches!(session.insert_status, InsertStatus::Failed));
+        assert_eq!(session.error_code.as_deref(), Some("transcribeFailed"));
+        assert_eq!(session.duration_ms, Some(1234));
+        // 归档成功 → 标 has_audio_recording=true，前端据此渲染「重新转录」入口。
+        assert_eq!(session.has_audio_recording, Some(true));
+    }
+
+    #[test]
+    fn transcribe_failed_history_flags_no_audio_when_archive_inactive() {
+        // 录音归档失败（has_audio=false）→ 条目仍写（用户看得到这次失败），但不标可重转，
+        // 避免前端渲染重转按钮而后端找不到 wav。
+        let sid = Uuid::new_v4();
+        let session = build_transcribe_failed_session(sid, 1, PolishMode::Structured, false);
+        assert_eq!(session.has_audio_recording, Some(false));
+    }
+
+    #[test]
+    fn pcm_from_wav_strips_44_byte_header() {
+        // 自动静默重试从归档 wav 取 PCM：标准 16k/mono/16-bit 头固定 44 字节，PCM = 头之后全部。
+        let mut wav = vec![0u8; 44];
+        wav.extend_from_slice(&[1, 2, 3, 4]);
+        assert_eq!(pcm_from_wav_bytes(&wav), Some(vec![1, 2, 3, 4]));
+    }
+
+    #[test]
+    fn pcm_from_wav_rejects_headeronly_or_truncated() {
+        // <= 44 字节 = 没有音频负载（空录音 / 截断）→ None，不触发无意义的重试。
+        assert_eq!(pcm_from_wav_bytes(&[0u8; 44]), None);
+        assert_eq!(pcm_from_wav_bytes(&[0u8; 10]), None);
+        assert_eq!(pcm_from_wav_bytes(&[]), None);
+    }
+
+    #[test]
+    fn pcm_duration_ms_matches_16k_mono_16bit_rate() {
+        // 16000 样本/秒 × 2 字节/样本 = 32000 字节/秒 = 32 字节/毫秒。
+        assert_eq!(pcm_duration_ms(32_000), 1000); // 1s
+        assert_eq!(pcm_duration_ms(16_000), 500); // 0.5s
+        assert_eq!(pcm_duration_ms(32), 1); // 1ms
+        assert_eq!(pcm_duration_ms(0), 0);
+    }
+
+    #[test]
+    fn queued_chain_press_allowed_within_grace_blocked_after() {
+        use super::{is_queued_chain_press, HOTKEY_QUEUE_GRACE_MS};
+        use std::time::{Duration, Instant};
+        let cooldown_ms = crate::coordinator::POST_SESSION_COOLDOWN_MS;
+        // 模拟 end_session 收尾：cooldown_until = idle + POST_SESSION_COOLDOWN_MS。
+        let idle = Instant::now();
+        let cooldown_until = idle + Duration::from_millis(cooldown_ms);
+        // 排队接力：识别中按下、会话收尾后 ~0ms 被取出处理 → 放行开录下一条。
+        assert!(is_queued_chain_press(idle, cooldown_until));
+        // grace 窗口边缘内 → 仍放行。
+        assert!(is_queued_chain_press(
+            idle + Duration::from_millis(HOTKEY_QUEUE_GRACE_MS - 1),
+            cooldown_until
+        ));
+        // #545 误触：会话结束后隔了人类反应时间才物理按下 → 仍在冷却期但超出 grace → 拦截。
+        assert!(!is_queued_chain_press(
+            idle + Duration::from_millis(300),
+            cooldown_until
+        ));
+        // 冷却已过：函数对超期返回 false（此时调用方本就放行，从严也安全）。
+        assert!(!is_queued_chain_press(
+            idle + Duration::from_millis(cooldown_ms + 10),
+            cooldown_until
+        ));
     }
 
     #[test]
