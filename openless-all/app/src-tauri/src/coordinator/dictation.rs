@@ -407,9 +407,15 @@ fn finalize_polished_text(
         return polished;
     }
     let should_force_script = if translation_active {
+        // 翻译路径目标可能是非中文（英/日/韩），OpenCC 会破坏它，故只在 polish 失败、
+        // 回退到中文原文时才做字形转换。
         polish_error.is_some()
     } else {
-        mode == PolishMode::Raw || polish_error.is_some()
+        // 普通听写：始终按用户所选字形（简/繁）做确定性 OpenCC 转换。Auto 时
+        // apply_chinese_script_preference 内部是 no-op，对默认用户零影响。
+        // 不再只在 Raw / polish 失败时转——polish 模式靠 LLM 提示输出繁体并不可靠
+        // （模型默认简体），导致繁中用户每次都拿到简体输出（issue #643）。
+        true
     };
     let polished = if should_force_script {
         apply_chinese_script_preference(&polished, chinese_script_preference)
@@ -436,8 +442,15 @@ fn streaming_insert_eligible(
     translation_active: bool,
     mode: PolishMode,
     raw_uses_llm: bool,
+    chinese_script_preference: crate::types::ChineseScriptPreference,
 ) -> bool {
-    streaming_insert_enabled && !translation_active && (mode != PolishMode::Raw || raw_uses_llm)
+    streaming_insert_enabled
+        && !translation_active
+        && (mode != PolishMode::Raw || raw_uses_llm)
+        // 非 Auto 字形（简/繁）要对成品文本做确定性 OpenCC 转换，而流式是边出边落字、
+        // 没有成品可后处理（finalize_polished_text 在 already_streamed 时直接 return）。
+        // → 非 Auto 时关掉流式，走一次性路径，确保简/繁转换真正生效（issue #643）。
+        && chinese_script_preference == crate::types::ChineseScriptPreference::Auto
 }
 
 fn default_done_message(status: InsertStatus, polish_failed: bool) -> Option<String> {
@@ -2298,6 +2311,7 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         translation_active,
         mode,
         raw_uses_llm,
+        chinese_script_preference,
     );
     log::info!(
         "[coord] polish dispatch: translation={translation_active} mode={mode:?} streaming_eligible={streaming_eligible}"
@@ -3001,7 +3015,65 @@ mod tests {
             false,
             PolishMode::Light,
             false,
+            ChineseScriptPreference::Auto,
         ));
+    }
+
+    #[test]
+    fn streaming_disabled_for_non_auto_script_so_opencc_runs() {
+        // issue #643：非 Auto 字形（简/繁）必须走一次性路径，让 finalize 的 OpenCC 转换生效。
+        for pref in [
+            ChineseScriptPreference::Simplified,
+            ChineseScriptPreference::Traditional,
+        ] {
+            assert!(!streaming_insert_eligible(
+                true,
+                false,
+                PolishMode::Light,
+                false,
+                pref
+            ));
+        }
+        // Auto 不受影响，仍可流式。
+        assert!(streaming_insert_eligible(
+            true,
+            false,
+            PolishMode::Light,
+            false,
+            ChineseScriptPreference::Auto,
+        ));
+    }
+
+    #[test]
+    fn polish_output_honors_chinese_script_preference() {
+        // issue #643：polish 模式（非 Raw、polish 成功）的成品也按用户字形偏好确定性转换，
+        // 不再依赖 LLM 提示——繁中用户因此每次都拿到繁体。
+        let finalize = |pref| {
+            finalize_polished_text(
+                "学习".to_string(),
+                false, // translation_active
+                false, // raw_uses_llm
+                PolishMode::Structured,
+                &None, // polish 成功
+                pref,
+                &[],
+                false, // already_streamed
+            )
+        };
+        // 繁体偏好：学习 → 學習（OpenCC S2t），至少不再含简体「学/习」。
+        let trad = finalize(ChineseScriptPreference::Traditional);
+        assert!(
+            !trad.contains('学') && !trad.contains('习'),
+            "traditional pref left simplified chars: {trad}"
+        );
+        // 简体偏好：保持简体（输入已是简体，T2s 无变化）。
+        let simp = finalize(ChineseScriptPreference::Simplified);
+        assert!(
+            simp.contains('学') && simp.contains('习'),
+            "simplified pref: {simp}"
+        );
+        // Auto：不转换，对默认用户零影响。
+        assert_eq!(finalize(ChineseScriptPreference::Auto), "学习");
     }
 
     #[test]
