@@ -2326,7 +2326,7 @@ mod tests {
 
     #[test]
     fn local_qwen_timeout_floors_at_global_timeout_for_short_audio() {
-        // 5s 录音：5 × 0.6 = 3, +10 = 13, max(15) = 15。短录音保留 15s 兜底。
+        // 5s 录音：5 × 0.6 = 3, +10 = 13, max(30) = 30。短录音兜底。
         assert_eq!(
             local_qwen_transcribe_timeout(5.0),
             std::time::Duration::from_secs(COORDINATOR_GLOBAL_TIMEOUT_SECS)
@@ -2344,19 +2344,47 @@ mod tests {
 
     #[test]
     fn local_qwen_timeout_ceils_partial_seconds() {
-        // 10.1s 录音：10.1 × 0.6 = 6.06, ceil = 7, +10 = 17, max(15) = 17。
+        // 10.1s 录音：10.1 × 0.6 = 6.06, ceil = 7, +10 = 17, max(30) = 30。
+        // COORDINATOR_GLOBAL_TIMEOUT_SECS 提升到 30 后，短音频统一被兜底值覆盖。
         assert_eq!(
             local_qwen_transcribe_timeout(10.1),
-            std::time::Duration::from_secs(17)
+            std::time::Duration::from_secs(COORDINATOR_GLOBAL_TIMEOUT_SECS)
         );
     }
 
     #[test]
     fn local_qwen_timeout_handles_zero_duration() {
-        // 0 时长（空 buffer 边界）：0 × 0.6 = 0, +10 = 10, max(15) = 15。
+        // 0 时长（空 buffer 边界）：0 × 0.6 = 0, +10 = 10, max(30) = 30。
         assert_eq!(
             local_qwen_transcribe_timeout(0.0),
             std::time::Duration::from_secs(COORDINATOR_GLOBAL_TIMEOUT_SECS)
+        );
+    }
+
+    #[test]
+    fn whisper_timeout_floors_at_global_timeout_for_short_audio() {
+        // 10s 录音：10 × 0.5 = 5, +20 = 25, max(30) = 30。短音频兜底。
+        assert_eq!(
+            whisper_transcribe_timeout(10.0),
+            std::time::Duration::from_secs(COORDINATOR_GLOBAL_TIMEOUT_SECS)
+        );
+    }
+
+    #[test]
+    fn whisper_timeout_scales_with_audio_duration() {
+        // 60s 录音：60 × 0.5 = 30, +20 = 50。覆盖多分片 HTTP 请求。
+        assert_eq!(
+            whisper_transcribe_timeout(60.0),
+            std::time::Duration::from_secs(50)
+        );
+    }
+
+    #[test]
+    fn whisper_timeout_ceils_partial_seconds() {
+        // 45.3s 录音：45.3 × 0.5 = 22.65, ceil = 23, +20 = 43, max(30) = 43。
+        assert_eq!(
+            whisper_transcribe_timeout(45.3),
+            std::time::Duration::from_secs(43)
         );
     }
 
@@ -2897,9 +2925,9 @@ const CAPSULE_AUTO_HIDE_DELAY_MS: u64 = 2000;
 const POST_SESSION_COOLDOWN_MS: u64 = 600;
 
 /// Coordinator 全局超时保护：防止 ASR await_final_result() 永远挂起。
-/// 设置为 15 秒（比 ASR 的 12 秒 FINAL_RESULT_TIMEOUT 稍长），
-/// 只在 ASR 超时机制失效时作为最后的防线触发。
-const COORDINATOR_GLOBAL_TIMEOUT_SECS: u64 = 15;
+/// 设置为 30 秒，为云端 batch ASR（OpenRouter Whisper 等）提供足够的
+/// 网络超时预算；只在 ASR 自身超时机制失效时作为最后的防线触发。
+const COORDINATOR_GLOBAL_TIMEOUT_SECS: u64 = 30;
 
 #[cfg(target_os = "windows")]
 fn foundry_audio_transcribe_timeout_duration() -> std::time::Duration {
@@ -2913,6 +2941,17 @@ fn foundry_audio_transcribe_timeout_duration() -> std::time::Duration {
 fn local_qwen_transcribe_timeout(audio_secs: f64) -> std::time::Duration {
     let secs = ((audio_secs * 0.6).ceil() as u64)
         .saturating_add(10)
+        .max(COORDINATOR_GLOBAL_TIMEOUT_SECS);
+    std::time::Duration::from_secs(secs)
+}
+
+/// Whisper / OpenRouter 云端 batch ASR 的动态转写超时。OpenRouter 按 30s
+/// 分片，每片是一次 HTTP round-trip；网络抖动、排队、base64 body 都会
+/// 拉长耗时。公式 max(30, ceil(audio_s × 0.5) + 20)：30s 是全局兜底；
+/// 长录音按音频长度的 0.5 倍 + 20s 余量，覆盖多分片串行请求 + 网络波动。
+fn whisper_transcribe_timeout(audio_secs: f64) -> std::time::Duration {
+    let secs = ((audio_secs * 0.5).ceil() as u64)
+        .saturating_add(20)
         .max(COORDINATOR_GLOBAL_TIMEOUT_SECS);
     std::time::Duration::from_secs(secs)
 }
