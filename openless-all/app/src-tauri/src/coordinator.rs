@@ -2326,7 +2326,7 @@ mod tests {
 
     #[test]
     fn local_qwen_timeout_floors_at_global_timeout_for_short_audio() {
-        // 5s 录音：5 × 0.6 = 3, +10 = 13, max(15) = 15。短录音保留 15s 兜底。
+        // 5s 录音：5 × 0.6 = 3, +10 = 13, max(30) = 30。短录音兜底。
         assert_eq!(
             local_qwen_transcribe_timeout(5.0),
             std::time::Duration::from_secs(COORDINATOR_GLOBAL_TIMEOUT_SECS)
@@ -2344,19 +2344,47 @@ mod tests {
 
     #[test]
     fn local_qwen_timeout_ceils_partial_seconds() {
-        // 10.1s 录音：10.1 × 0.6 = 6.06, ceil = 7, +10 = 17, max(15) = 17。
+        // 10.1s 录音：10.1 × 0.6 = 6.06, ceil = 7, +10 = 17, max(30) = 30。
+        // COORDINATOR_GLOBAL_TIMEOUT_SECS 提升到 30 后，短音频统一被兜底值覆盖。
         assert_eq!(
             local_qwen_transcribe_timeout(10.1),
-            std::time::Duration::from_secs(17)
+            std::time::Duration::from_secs(COORDINATOR_GLOBAL_TIMEOUT_SECS)
         );
     }
 
     #[test]
     fn local_qwen_timeout_handles_zero_duration() {
-        // 0 时长（空 buffer 边界）：0 × 0.6 = 0, +10 = 10, max(15) = 15。
+        // 0 时长（空 buffer 边界）：0 × 0.6 = 0, +10 = 10, max(30) = 30。
         assert_eq!(
             local_qwen_transcribe_timeout(0.0),
             std::time::Duration::from_secs(COORDINATOR_GLOBAL_TIMEOUT_SECS)
+        );
+    }
+
+    #[test]
+    fn whisper_timeout_floors_at_global_timeout_for_short_audio() {
+        // 10s 录音：10 × 0.5 = 5, +20 = 25, max(30) = 30。短音频兜底。
+        assert_eq!(
+            whisper_transcribe_timeout(10.0),
+            std::time::Duration::from_secs(COORDINATOR_GLOBAL_TIMEOUT_SECS)
+        );
+    }
+
+    #[test]
+    fn whisper_timeout_scales_with_audio_duration() {
+        // 60s 录音：60 × 0.5 = 30, +20 = 50。覆盖多分片 HTTP 请求。
+        assert_eq!(
+            whisper_transcribe_timeout(60.0),
+            std::time::Duration::from_secs(50)
+        );
+    }
+
+    #[test]
+    fn whisper_timeout_ceils_partial_seconds() {
+        // 45.3s 录音：45.3 × 0.5 = 22.65, ceil = 23, +20 = 43, max(30) = 43。
+        assert_eq!(
+            whisper_transcribe_timeout(45.3),
+            std::time::Duration::from_secs(43)
         );
     }
 
