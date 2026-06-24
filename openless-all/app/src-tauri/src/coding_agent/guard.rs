@@ -150,6 +150,87 @@ pub fn build_guard_settings_json(mode: &str, extra_deny: &[String]) -> serde_jso
     })
 }
 
+/// OpenCode `permission` 护栏的高风险 bash 子命令前缀（OpenCode glob 语法，如 `"rm *"`）。
+///
+/// OpenCode 的 `permission.bash` 是「glob → allow/ask/deny」映射（见官方 permissions 文档），
+/// 与 Claude 的 `Bash(<prefix>:*)` 说明符是同类东西，但写法不同。这里把
+/// [`default_deny_rules`] 里的 Bash 前缀翻译成 OpenCode glob。管道执行远程脚本
+/// （`| sh`）、fork 炸弹等中段/shell 语法仍无法用前缀 glob 表达，由运行级
+/// [`is_high_risk_command`] 兜底。
+pub fn opencode_bash_deny_prefixes() -> Vec<&'static str> {
+    vec![
+        "rm -rf", "rm -fr", "sudo", "git push --force", "git push -f", "git reset --hard",
+        "git clean -fd", "git clean -f -d", "mkfs", "dd", "shutdown", "reboot", "chmod", "chown",
+        "crontab", "osascript", "launchctl", "kextload", "nvram",
+    ]
+}
+
+/// 生成传给 OpenCode 的护栏配置（写入 `OPENCODE_CONFIG_CONTENT` inline JSON）。
+///
+/// 与 [`build_guard_settings_json`]（Claude `--settings`）等价的 OpenCode 形态：
+/// - `permission.bash`：默认 `allow`（放行可恢复轻动作），高风险前缀 `deny`；
+///   `extra_allow_prefixes` 里的前缀（审批通过的）显式 `allow`，盖掉默认 deny。
+/// - `permission.edit` / `permission.write`：补齐与 Claude [`default_deny_rules`] 对等的
+///   文件级 deny（.env / .git/** / macOS 持久化面）。若 OpenCode 版本不支持 per-file glob deny，
+///   这些键被静默忽略（无害）；若支持则获得与 Claude 路径同级的文件保护。
+/// - `permission.webfetch = "deny"`：去掉直抓任意 URL 面（与 Claude 路径不放 WebFetch 一致）。
+/// - 其余工具（read/glob/grep/websearch）默认 `allow`，靠 `*: allow` 兜底，
+///   保持「放行 + 护栏」语义（高风险只在 bash/文件这两层拦）。
+pub fn build_opencode_guard_config(extra_allow_prefixes: &[String]) -> serde_json::Value {
+    let mut bash: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+    // 先放默认：未命中规则一律 allow（轻动作不打断无头执行）。
+    bash.insert("*".into(), serde_json::Value::String("allow".into()));
+    for prefix in opencode_bash_deny_prefixes() {
+        bash.insert(format!("{prefix} *"), serde_json::Value::String("deny".into()));
+        // 无参形式（如 `reboot`）也要拦：glob `reboot *` 不匹配光秃秃的 `reboot`。
+        bash.insert(prefix.to_string(), serde_json::Value::String("deny".into()));
+    }
+    // 审批放行：把通过的高风险前缀显式 allow，盖掉上面的 deny（后写覆盖）。
+    for prefix in extra_allow_prefixes {
+        bash.insert(format!("{prefix} *"), serde_json::Value::String("allow".into()));
+        bash.insert(prefix.clone(), serde_json::Value::String("allow".into()));
+    }
+
+    // 文件级 deny：与 Claude default_deny_rules() 对等 —— .env / .git/** / macOS 持久化面。
+    // 若 OpenCode 不支持 edit/write 的 per-file glob deny，该键被静默忽略（无害）。
+    let mut edit_rules: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+    edit_rules.insert("*".into(), "allow".into());
+    for pat in [".env", ".git/**"] {
+        edit_rules.insert(pat.to_string(), "deny".into());
+    }
+    for pat in [
+        "~/Library/LaunchAgents/**",
+        "~/.zshrc",
+        "~/.zprofile",
+        "~/.bash_profile",
+        "~/.bashrc",
+    ] {
+        edit_rules.insert(pat.to_string(), "deny".into());
+    }
+
+    let mut write_rules: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+    write_rules.insert("*".into(), "allow".into());
+    for pat in [
+        "~/Library/LaunchAgents/**",
+        "~/.zshrc",
+        "~/.zprofile",
+        "~/.bash_profile",
+        "~/.bashrc",
+    ] {
+        write_rules.insert(pat.to_string(), "deny".into());
+    }
+
+    serde_json::json!({
+        "permission": {
+            "*": "allow",
+            "bash": bash,
+            "edit": edit_rules,
+            "write": write_rules,
+            "webfetch": "deny",
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,6 +272,32 @@ mod tests {
         let v = build_guard_settings_json("acceptEdits", &extra);
         let deny = v["permissions"]["deny"].as_array().unwrap();
         assert!(deny.iter().any(|d| d == "Bash(npm publish:*)"));
+    }
+
+    #[test]
+    fn opencode_guard_denies_high_risk_bash_and_webfetch() {
+        let v = build_opencode_guard_config(&[]);
+        let perm = &v["permission"];
+        assert_eq!(perm["*"], "allow");
+        assert_eq!(perm["webfetch"], "deny");
+        let bash = &perm["bash"];
+        assert_eq!(bash["*"], "allow");
+        // 高风险前缀两种形态都拦（带参 glob + 无参）。
+        assert_eq!(bash["rm -rf *"], "deny");
+        assert_eq!(bash["sudo *"], "deny");
+        assert_eq!(bash["reboot"], "deny");
+        assert_eq!(bash["git push --force *"], "deny");
+    }
+
+    #[test]
+    fn opencode_guard_extra_allow_overrides_deny() {
+        let v = build_opencode_guard_config(&["git push --force".to_string()]);
+        let bash = &v["permission"]["bash"];
+        // 审批放行后，被批准的前缀变 allow（覆盖默认 deny）。
+        assert_eq!(bash["git push --force *"], "allow");
+        assert_eq!(bash["git push --force"], "allow");
+        // 未放行的仍然 deny。
+        assert_eq!(bash["rm -rf *"], "deny");
     }
 
     #[test]

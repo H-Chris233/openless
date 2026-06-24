@@ -608,7 +608,8 @@ export const en: typeof zhCN = {
       voiceHotkey: 'Hold-to-talk key',
       voiceHotkeyDesc: 'Hold to talk, release to run. Supports Ctrl/Option/Fn single keys.',
       provider: 'Agent backend',
-      providerOpenCodeSoon: 'OpenCode (coming soon)',
+      opencodeReady: 'OpenCode v{{version}} detected.',
+      opencodeMissing: 'opencode command not found. Install it (npm i -g opencode-ai) and sign in with opencode auth login before use.',
       panelHotkey: 'Panel hotkey (voice agent)',
       panelHotkeyDesc: 'Record voice → ASR → Claude → streamed into a panel. Default Cmd/Ctrl+Shift+Enter.',
       quickHotkey: 'Quick-take hotkey',
@@ -617,6 +618,7 @@ export const en: typeof zhCN = {
       modelPlaceholder: 'Default: sonnet',
       modelDefault: 'Default (auto sonnet)',
       modelHint: 'Haiku = fastest · Sonnet = balanced · Opus = strongest',
+      exe: 'Executable path',
     },
     debug: {
       title: 'Debug tools',

@@ -187,6 +187,7 @@ macro_rules! app_invoke_handler_desktop {
             commands::stop_dictation,
             commands::cancel_dictation,
             coding_agent::commands::coding_agent_detect,
+            coding_agent::commands::coding_agent_detect_opencode,
             coding_agent::commands::coding_agent_run_test,
             coding_agent::commands::coding_agent_cancel_test,
             coding_agent::commands::coding_agent_command_risk,

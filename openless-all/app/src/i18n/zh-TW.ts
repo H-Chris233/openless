@@ -608,7 +608,8 @@ export const zhTW: typeof zhCN = {
       voiceHotkey: '按住說話鍵',
       voiceHotkeyDesc: '按住說話、放開執行。支援 Ctrl/Option/Fn 等單鍵。',
       provider: 'Agent 後端',
-      providerOpenCodeSoon: 'OpenCode（即將支援）',
+      opencodeReady: '已偵測到 OpenCode v{{version}}。',
+      opencodeMissing: '未偵測到 opencode 指令。請先安裝（npm i -g opencode-ai）並用 opencode auth login 登入後再使用。',
       panelHotkey: '面板鍵（語音 Agent）',
       panelHotkeyDesc: '錄音 → ASR → Claude → 結果串流進面板。預設 Cmd/Ctrl+Shift+Enter。',
       quickHotkey: '快取用鍵',
@@ -617,6 +618,7 @@ export const zhTW: typeof zhCN = {
       modelPlaceholder: '預設 sonnet',
       modelDefault: '預設（自動 sonnet）',
       modelHint: 'Haiku 最快 · Sonnet 均衡 · Opus 最強',
+      exe: '可執行檔路徑',
     },
     debug: {
       title: '除錯工具',

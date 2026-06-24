@@ -644,6 +644,10 @@ pub struct UserPreferences {
     /// Agent 工作目录（`None` = 临时目录）。
     #[serde(default)]
     pub coding_agent_workdir: Option<String>,
+    /// Agent 可执行文件路径/命令（`None` 或空白 = 按后端取默认 `claude` / `opencode`）。
+    /// 供用户在「高级 → Less Computer」填自定义路径（例如未加入 PATH 的 opencode 二进制）。
+    #[serde(default)]
+    pub coding_agent_exe: Option<String>,
     /// Less Computer 语音触发键。macOS 生效；支持单修饰键（左/右 Control、左/右 Option、Fn）
     /// 和普通组合键。`None` = 停用。
     #[serde(default = "default_coding_agent_voice_hotkey")]
@@ -904,6 +908,8 @@ struct UserPreferencesWire {
     coding_agent_permission_mode: String,
     #[serde(default)]
     coding_agent_workdir: Option<String>,
+    #[serde(default)]
+    coding_agent_exe: Option<String>,
     #[serde(default = "default_coding_agent_voice_hotkey")]
     coding_agent_voice_hotkey: Option<ShortcutBinding>,
     #[serde(default = "default_coding_agent_panel_hotkey")]
@@ -1020,6 +1026,7 @@ impl Default for UserPreferencesWire {
             coding_agent_model: prefs.coding_agent_model,
             coding_agent_permission_mode: prefs.coding_agent_permission_mode,
             coding_agent_workdir: prefs.coding_agent_workdir,
+            coding_agent_exe: prefs.coding_agent_exe,
             coding_agent_voice_hotkey: prefs.coding_agent_voice_hotkey,
             coding_agent_panel_hotkey: prefs.coding_agent_panel_hotkey,
             coding_agent_quick_hotkey: prefs.coding_agent_quick_hotkey,
@@ -1115,6 +1122,7 @@ impl<'de> Deserialize<'de> for UserPreferences {
             coding_agent_model: wire.coding_agent_model,
             coding_agent_permission_mode: wire.coding_agent_permission_mode,
             coding_agent_workdir: wire.coding_agent_workdir,
+            coding_agent_exe: wire.coding_agent_exe,
             coding_agent_voice_hotkey: wire.coding_agent_voice_hotkey,
             coding_agent_panel_hotkey: wire.coding_agent_panel_hotkey,
             coding_agent_quick_hotkey: wire.coding_agent_quick_hotkey,
@@ -1862,6 +1870,7 @@ impl Default for UserPreferences {
             coding_agent_model: None,
             coding_agent_permission_mode: default_coding_agent_permission_mode(),
             coding_agent_workdir: None,
+            coding_agent_exe: None,
             coding_agent_voice_hotkey: default_coding_agent_voice_hotkey(),
             coding_agent_panel_hotkey: default_coding_agent_panel_hotkey(),
             coding_agent_quick_hotkey: None,

@@ -610,7 +610,8 @@ export const ko: typeof zhCN = {
       voiceHotkey: '누르고 말하기 키',
       voiceHotkeyDesc: '누르고 말하고 놓으면 실행. Ctrl/Option/Fn 단일 키 지원.',
       provider: 'Agent 백엔드',
-      providerOpenCodeSoon: 'OpenCode(곧 지원)',
+      opencodeReady: 'OpenCode v{{version}} 감지됨.',
+      opencodeMissing: 'opencode 명령을 찾을 수 없습니다. 먼저 설치(npm i -g opencode-ai)하고 opencode auth login으로 로그인하세요.',
       panelHotkey: '패널 키(음성 Agent)',
       panelHotkeyDesc: '녹음 → ASR → Claude → 패널에 스트리밍. 기본 Cmd/Ctrl+Shift+Enter.',
       quickHotkey: '빠른 가져오기 키',
@@ -619,6 +620,7 @@ export const ko: typeof zhCN = {
       modelPlaceholder: '기본: sonnet',
       modelDefault: '기본(자동 sonnet)',
       modelHint: 'Haiku = 가장 빠름 · Sonnet = 균형 · Opus = 최강',
+      exe: '실행 파일 경로',
     },
     debug: {
       title: '디버그 도구',

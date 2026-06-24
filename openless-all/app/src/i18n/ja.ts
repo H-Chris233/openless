@@ -610,7 +610,8 @@ export const ja: typeof zhCN = {
       voiceHotkey: '押しながら話すキー',
       voiceHotkeyDesc: '押して話す、離して実行。Ctrl/Option/Fn などの単キー対応。',
       provider: 'Agent バックエンド',
-      providerOpenCodeSoon: 'OpenCode（近日対応）',
+      opencodeReady: 'OpenCode v{{version}} を検出しました。',
+      opencodeMissing: 'opencode コマンドが見つかりません。先にインストール（npm i -g opencode-ai）して opencode auth login でログインしてください。',
       panelHotkey: 'パネルキー（音声 Agent）',
       panelHotkeyDesc: '録音 → ASR → Claude → パネルにストリーミング表示。デフォルト Cmd/Ctrl+Shift+Enter。',
       quickHotkey: 'クイック取得キー',
@@ -619,6 +620,7 @@ export const ja: typeof zhCN = {
       modelPlaceholder: 'デフォルト: sonnet',
       modelDefault: 'デフォルト（自動 sonnet）',
       modelHint: 'Haiku = 最速 · Sonnet = バランス · Opus = 最強',
+      exe: '実行ファイルのパス',
     },
     debug: {
       title: 'デバッグツール',

@@ -161,10 +161,12 @@ export type {
 export type {
     McpServerStatus,
     ClaudeDetection,
+    OpenCodeDetection,
     CodingAgentRunTestArgs,
 } from "./coding-agent"
 export {
     codingAgentDetect,
+    codingAgentDetectOpencode,
     codingAgentRunTest,
     codingAgentCancelTest,
     codingAgentCommandRisk,

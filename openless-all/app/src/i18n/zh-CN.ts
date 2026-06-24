@@ -606,7 +606,8 @@ export const zhCN = {
       voiceHotkey: '按住说话键',
       voiceHotkeyDesc: '按住说话、松开执行。支持 Ctrl/Option/Fn 等单键。',
       provider: 'Agent 后端',
-      providerOpenCodeSoon: 'OpenCode（即将支持）',
+      opencodeReady: '已检测到 OpenCode v{{version}}。',
+      opencodeMissing: '未检测到 opencode 命令。请先安装（npm i -g opencode-ai）并用 opencode auth login 登录后再使用。',
       panelHotkey: '面板键（语音 Agent）',
       panelHotkeyDesc: '录音 → ASR → Claude → 结果流式进面板。默认 Cmd/Ctrl+Shift+Enter。',
       quickHotkey: '快取用键',
@@ -615,6 +616,7 @@ export const zhCN = {
       modelPlaceholder: '默认 sonnet',
       modelDefault: '默认（自动 sonnet）',
       modelHint: 'Haiku 最快 · Sonnet 均衡 · Opus 最强',
+      exe: '可执行文件路径',
     },
     debug: {
       title: '调试工具',

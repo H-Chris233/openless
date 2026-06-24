@@ -298,6 +298,8 @@ export interface UserPreferences {
   codingAgentPermissionMode: CodingAgentPermissionMode;
   /** Agent 工作目录，null = 临时目录。 */
   codingAgentWorkdir: string | null;
+  /** Agent 可执行文件路径/命令，null 或空 = 按后端取默认（claude / opencode）。 */
+  codingAgentExe: string | null;
   /** Less Computer 按住说话快捷键。null = 停用；目前仅 macOS 显示/生效。 */
   codingAgentVoiceHotkey: ShortcutBinding | null;
   /** 热键 1：语音 Agent 面板键。null = 停用。 */
