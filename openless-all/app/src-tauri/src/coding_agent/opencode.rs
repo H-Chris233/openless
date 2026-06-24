@@ -16,7 +16,7 @@
 //!   [`CodingAgentEvent::Completed`]，`cost_usd = None`（OpenCode CLI 不在 JSON 里给单次成本）。
 
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 

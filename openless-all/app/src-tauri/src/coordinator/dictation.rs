@@ -415,7 +415,7 @@ fn finalize_polished_text(
     polished: String,
     translation_active: bool,
     _raw_uses_llm: bool,
-    mode: PolishMode,
+    _mode: PolishMode,
     polish_error: &Option<String>,
     chinese_script_preference: crate::types::ChineseScriptPreference,
     correction_rules: &[crate::types::CorrectionRule],
