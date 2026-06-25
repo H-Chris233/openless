@@ -89,6 +89,7 @@ export {
     openSystemSettings,
     triggerMicrophonePrompt,
     restartApp,
+    resetAccessibilityPermissionAndRestartApp,
 } from "./permissions"
 
 // hotkeys
