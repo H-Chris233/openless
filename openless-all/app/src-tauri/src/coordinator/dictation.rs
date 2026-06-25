@@ -172,8 +172,22 @@ async fn run_streaming_polish(
     // 与用户实际看到的内容一致；（b）pr-agent #412 反馈 \"saved output diverges
     // from what the user actually sees\"。
     let (tx, rx) = std::sync::mpsc::channel::<String>();
+    #[cfg(target_os = "windows")]
+    let sendinput_options =
+        windows_sendinput_options_from_prefs(&inner.prefs.get());
     let typer_handle = tokio::task::spawn_blocking(move || {
-        drain_streaming_insert_deltas(rx, STREAMING_INSERT_FLUSH_INTERVAL)
+        #[cfg(target_os = "windows")]
+        {
+            drain_streaming_insert_deltas_with_sendinput_options(
+                rx,
+                STREAMING_INSERT_FLUSH_INTERVAL,
+                sendinput_options,
+            )
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            drain_streaming_insert_deltas(rx, STREAMING_INSERT_FLUSH_INTERVAL)
+        }
     });
 
     // 3. 调流式润色，on_delta 塞 mpsc；should_cancel 检查 dictation 取消旗。
@@ -312,11 +326,41 @@ async fn run_streaming_polish(
     }
 }
 
+#[cfg(target_os = "windows")]
+fn windows_sendinput_options_from_prefs(
+    prefs: &crate::types::UserPreferences,
+) -> crate::unicode_keystroke::WindowsSendInputOptions {
+    crate::unicode_keystroke::WindowsSendInputOptions {
+        newline_mode: prefs.windows_sendinput_newline_mode,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_insertion_allows_streaming(mode: crate::types::WindowsInsertionMode) -> bool {
+    mode == crate::types::WindowsInsertionMode::SendInput
+}
+
+#[cfg(not(target_os = "windows"))]
+fn windows_insertion_allows_streaming(_mode: crate::types::WindowsInsertionMode) -> bool {
+    true
+}
+
 fn drain_streaming_insert_deltas(
     rx: std::sync::mpsc::Receiver<String>,
     flush_interval: std::time::Duration,
 ) -> (String, Option<String>) {
     drain_streaming_insert_deltas_with(rx, flush_interval, flush_streaming_insert_buffer)
+}
+
+#[cfg(target_os = "windows")]
+fn drain_streaming_insert_deltas_with_sendinput_options(
+    rx: std::sync::mpsc::Receiver<String>,
+    flush_interval: std::time::Duration,
+    options: crate::unicode_keystroke::WindowsSendInputOptions,
+) -> (String, Option<String>) {
+    drain_streaming_insert_deltas_with(rx, flush_interval, move |pending, typed| {
+        flush_streaming_insert_buffer_with_options(pending, typed, options)
+    })
 }
 
 fn drain_streaming_insert_deltas_with<F>(
@@ -367,6 +411,17 @@ fn flush_streaming_insert_buffer(pending: &mut String, typed_text: &mut String) 
         typed_text,
         crate::unicode_keystroke::type_unicode_chunk,
     )
+}
+
+#[cfg(target_os = "windows")]
+fn flush_streaming_insert_buffer_with_options(
+    pending: &mut String,
+    typed_text: &mut String,
+    options: crate::unicode_keystroke::WindowsSendInputOptions,
+) -> Option<String> {
+    flush_streaming_insert_buffer_with(pending, typed_text, move |text| {
+        crate::unicode_keystroke::type_unicode_chunk_with_options(text, options)
+    })
 }
 
 fn flush_streaming_insert_buffer_with<F>(
@@ -461,6 +516,7 @@ fn streaming_insert_eligible(
     mode: PolishMode,
     raw_uses_llm: bool,
     chinese_script_preference: crate::types::ChineseScriptPreference,
+    windows_insertion_mode: crate::types::WindowsInsertionMode,
 ) -> bool {
     streaming_insert_enabled
         && !translation_active
@@ -469,6 +525,7 @@ fn streaming_insert_eligible(
         // 没有成品可后处理（finalize_polished_text 在 already_streamed 时直接 return）。
         // → 非 Auto 时关掉流式，走一次性路径，确保简/繁转换真正生效（issue #643）。
         && chinese_script_preference == crate::types::ChineseScriptPreference::Auto
+        && windows_insertion_allows_streaming(windows_insertion_mode)
 }
 
 fn default_done_message(status: InsertStatus, polish_failed: bool) -> Option<String> {
@@ -1142,9 +1199,11 @@ pub(super) async fn begin_session_as(
     };
     #[cfg(target_os = "windows")]
     {
-        let prepared = inner.windows_ime.prepare_session();
-        let mut slots = inner.prepared_windows_ime_session.lock();
-        store_prepared_windows_ime_session(&mut slots, current_session_id, prepared);
+        if inner.prefs.get().windows_insertion_mode == crate::types::WindowsInsertionMode::Tsf {
+            let prepared = inner.windows_ime.prepare_session();
+            let mut slots = inner.prepared_windows_ime_session.lock();
+            store_prepared_windows_ime_session(&mut slots, current_session_id, prepared);
+        }
     }
     // 翻译模式标志重置；hotkey 监听器在 Shift down 时再 set true。
     inner
@@ -2411,6 +2470,7 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         mode,
         raw_uses_llm,
         chinese_script_preference,
+        prefs.windows_insertion_mode,
     );
     log::info!(
         "[coord] polish dispatch: translation={translation_active} mode={mode:?} streaming_eligible={streaming_eligible}"
@@ -2518,6 +2578,7 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
     let prefs = inner.prefs.get();
     let restore_clipboard = prefs.restore_clipboard_after_paste;
     let allow_non_tsf_insertion_fallback = prefs.allow_non_tsf_insertion_fallback;
+    let windows_insertion_mode = prefs.windows_insertion_mode;
     let paste_shortcut = prefs.paste_shortcut;
     // 流式路径下，字符已经通过 Unicode keystroke 落到光标处，跳过 inserter.insert。
     let status = if already_streamed {
@@ -2540,17 +2601,41 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         if focus_ready_for_paste {
             #[cfg(target_os = "windows")]
             {
-                let ime_target = capture_ime_submit_target();
-                insert_with_windows_ime_first(
-                    inner,
-                    current_session_id,
-                    &polished,
-                    restore_clipboard,
-                    allow_non_tsf_insertion_fallback,
-                    paste_shortcut,
-                    ime_target,
-                )
-                .await
+                match windows_insertion_mode {
+                    crate::types::WindowsInsertionMode::SendInput => {
+                        let sendinput_options = windows_sendinput_options_from_prefs(&prefs);
+                        if allow_non_tsf_insertion_fallback {
+                            insert_via_non_tsf_fallback(
+                                inner,
+                                &polished,
+                                restore_clipboard,
+                                paste_shortcut,
+                            )
+                        } else {
+                            inner
+                                .inserter
+                                .insert_via_unicode_keystrokes(&polished, sendinput_options)
+                        }
+                    }
+                    crate::types::WindowsInsertionMode::Paste => inner.inserter.insert(
+                        &polished,
+                        restore_clipboard,
+                        paste_shortcut,
+                    ),
+                    crate::types::WindowsInsertionMode::Tsf => {
+                        let ime_target = capture_ime_submit_target();
+                        insert_with_windows_ime_first(
+                            inner,
+                            current_session_id,
+                            &polished,
+                            restore_clipboard,
+                            allow_non_tsf_insertion_fallback,
+                            paste_shortcut,
+                            ime_target,
+                        )
+                        .await
+                    }
+                }
             }
             #[cfg(not(target_os = "windows"))]
             {
@@ -2606,6 +2691,7 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         polish_error.is_some(),
         focus_ready_for_paste,
         allow_non_tsf_insertion_fallback,
+        windows_insertion_mode,
     )
     .map(str::to_string);
     let tsf_required_insert_failed = error_code.as_deref() == Some("windowsImeTsfRequired");
@@ -2690,12 +2776,14 @@ pub(super) fn dictation_error_code(
     polish_failed: bool,
     focus_ready_for_paste: bool,
     allow_non_tsf_insertion_fallback: bool,
+    windows_insertion_mode: crate::types::WindowsInsertionMode,
 ) -> Option<&'static str> {
     if !focus_ready_for_paste && status == InsertStatus::Failed {
         Some("focusRestoreFailed")
     } else if cfg!(target_os = "windows")
         && focus_ready_for_paste
         && !allow_non_tsf_insertion_fallback
+        && windows_insertion_mode == crate::types::WindowsInsertionMode::Tsf
         && status == InsertStatus::Failed
     {
         Some("windowsImeTsfRequired")
@@ -3131,7 +3219,52 @@ mod tests {
             PolishMode::Light,
             false,
             ChineseScriptPreference::Auto,
+            crate::types::WindowsInsertionMode::SendInput,
         ));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn streaming_disabled_for_windows_tsf_insertion_mode() {
+        assert!(!streaming_insert_eligible(
+            true,
+            false,
+            PolishMode::Light,
+            false,
+            ChineseScriptPreference::Auto,
+            crate::types::WindowsInsertionMode::Tsf,
+        ));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn streaming_disabled_for_windows_paste_insertion_mode() {
+        assert!(!streaming_insert_eligible(
+            true,
+            false,
+            PolishMode::Light,
+            false,
+            ChineseScriptPreference::Auto,
+            crate::types::WindowsInsertionMode::Paste,
+        ));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn streaming_ignores_windows_insertion_mode_on_non_windows() {
+        for mode in [
+            crate::types::WindowsInsertionMode::Tsf,
+            crate::types::WindowsInsertionMode::Paste,
+        ] {
+            assert!(streaming_insert_eligible(
+                true,
+                false,
+                PolishMode::Light,
+                false,
+                ChineseScriptPreference::Auto,
+                mode,
+            ));
+        }
     }
 
     #[test]
@@ -3146,16 +3279,18 @@ mod tests {
                 false,
                 PolishMode::Light,
                 false,
-                pref
+                pref,
+                crate::types::WindowsInsertionMode::Tsf,
             ));
         }
-        // Auto 不受影响，仍可流式。
+        // Auto + SendInput 仍可流式。
         assert!(streaming_insert_eligible(
             true,
             false,
             PolishMode::Light,
             false,
             ChineseScriptPreference::Auto,
+            crate::types::WindowsInsertionMode::SendInput,
         ));
     }
 

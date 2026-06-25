@@ -1778,14 +1778,20 @@ fn should_try_non_tsf_insertion_fallback(
 }
 
 #[cfg(target_os = "windows")]
-fn insert_via_non_tsf_fallback(
+pub(super) fn insert_via_non_tsf_fallback(
     inner: &Arc<Inner>,
     polished: &str,
     _restore_clipboard: bool,
     _paste_shortcut: PasteShortcut,
 ) -> InsertStatus {
+    let prefs = inner.prefs.get();
+    let sendinput_options = crate::unicode_keystroke::WindowsSendInputOptions {
+        newline_mode: prefs.windows_sendinput_newline_mode,
+    };
     let status = finish_non_tsf_insertion_fallback(
-        || inner.inserter.insert_via_unicode_keystrokes(polished),
+        || inner
+            .inserter
+            .insert_via_unicode_keystrokes(polished, sendinput_options),
         || inner.inserter.copy_fallback(polished),
     );
 
@@ -2794,7 +2800,13 @@ mod tests {
     #[test]
     fn focus_restore_failure_uses_specific_error_code_when_insert_fails() {
         assert_eq!(
-            dictation_error_code(InsertStatus::Failed, false, false, false),
+            dictation_error_code(
+                InsertStatus::Failed,
+                false,
+                false,
+                false,
+                crate::types::WindowsInsertionMode::Tsf,
+            ),
             Some("focusRestoreFailed")
         );
     }
@@ -2811,8 +2823,28 @@ mod tests {
     #[cfg(target_os = "windows")]
     fn tsf_required_failure_keeps_tsf_error_when_focus_was_ready() {
         assert_eq!(
-            dictation_error_code(InsertStatus::Failed, false, true, false),
+            dictation_error_code(
+                InsertStatus::Failed,
+                false,
+                true,
+                false,
+                crate::types::WindowsInsertionMode::Tsf,
+            ),
             Some("windowsImeTsfRequired")
+        );
+    }
+
+    #[test]
+    fn sendinput_only_mode_skips_tsf_required_error() {
+        assert_eq!(
+            dictation_error_code(
+                InsertStatus::Failed,
+                false,
+                true,
+                false,
+                crate::types::WindowsInsertionMode::SendInput,
+            ),
+            None
         );
     }
 
