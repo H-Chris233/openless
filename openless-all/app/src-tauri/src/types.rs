@@ -2082,6 +2082,9 @@ pub enum HotkeyTrigger {
     RightControl,
     LeftControl,
     RightCommand,
+    LeftCommand,
+    LeftShift,
+    RightShift,
     Fn,
     RightAlt, // Windows synonym for RightOption
     MediaPlayPause,
@@ -2096,6 +2099,9 @@ impl HotkeyTrigger {
             HotkeyTrigger::RightControl => "右 Control",
             HotkeyTrigger::LeftControl => "左 Control",
             HotkeyTrigger::RightCommand => "右 Command",
+            HotkeyTrigger::LeftCommand => "左 Command",
+            HotkeyTrigger::LeftShift => "左 Shift",
+            HotkeyTrigger::RightShift => "右 Shift",
             HotkeyTrigger::Fn => "Fn (地球键)",
             HotkeyTrigger::RightAlt => "右 Alt",
             HotkeyTrigger::MediaPlayPause => "⏯ Media 播放/暂停",
@@ -2189,6 +2195,9 @@ fn legacy_trigger_code(trigger: HotkeyTrigger) -> &'static str {
         HotkeyTrigger::RightControl => "ControlRight",
         HotkeyTrigger::LeftControl => "ControlLeft",
         HotkeyTrigger::RightCommand => "MetaRight",
+        HotkeyTrigger::LeftCommand => "MetaLeft",
+        HotkeyTrigger::LeftShift => "ShiftLeft",
+        HotkeyTrigger::RightShift => "ShiftRight",
         #[cfg(target_os = "windows")]
         HotkeyTrigger::Fn => "ControlRight",
         #[cfg(not(target_os = "windows"))]
@@ -2309,6 +2318,9 @@ impl HotkeyCapability {
                     HotkeyTrigger::RightControl,
                     HotkeyTrigger::LeftControl,
                     HotkeyTrigger::RightCommand,
+                    HotkeyTrigger::LeftCommand,
+                    HotkeyTrigger::LeftShift,
+                    HotkeyTrigger::RightShift,
                     HotkeyTrigger::Fn,
                     HotkeyTrigger::Custom,
                 ],
@@ -2329,6 +2341,9 @@ impl HotkeyCapability {
                     HotkeyTrigger::RightAlt,
                     HotkeyTrigger::LeftControl,
                     HotkeyTrigger::RightCommand,
+                    HotkeyTrigger::LeftCommand,
+                    HotkeyTrigger::LeftShift,
+                    HotkeyTrigger::RightShift,
                     HotkeyTrigger::MediaPlayPause,
                     HotkeyTrigger::Custom,
                 ],
@@ -2351,6 +2366,9 @@ impl HotkeyCapability {
                     HotkeyTrigger::RightAlt,
                     HotkeyTrigger::RightControl,
                     HotkeyTrigger::LeftControl,
+                    HotkeyTrigger::LeftCommand,
+                    HotkeyTrigger::LeftShift,
+                    HotkeyTrigger::RightShift,
                     HotkeyTrigger::Custom,
                 ],
                 requires_accessibility_permission: false,
@@ -2358,7 +2376,8 @@ impl HotkeyCapability {
                 supports_side_specific_modifiers: true,
                 explicit_fallback_available: false,
                 status_hint: Some(
-                    "Linux 使用 fcitx5 插件监听热键和提交文字；无需桌面环境额外配置。".into(),
+                    "Linux 使用 fcitx5 插件监听热键和提交文字。鼠标/侧别组合键需 evdev 读取 /dev/input/event*；若无权限请将用户加入 input 组（sudo usermod -aG input $USER）后重新登录。"
+                        .into(),
                 ),
             }
         }
