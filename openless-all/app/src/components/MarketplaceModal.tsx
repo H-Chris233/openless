@@ -38,8 +38,8 @@ export function MarketplaceModal({ onClose }: MarketplaceModalProps) {
         background: 'rgba(15,17,22,0.32)',
         backdropFilter: 'blur(8px) saturate(140%)',
         WebkitBackdropFilter: 'blur(8px) saturate(140%)',
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        padding: 28,
+        // Drawer 逻辑（用户拍板）：风格市场从右缘滑入的全高抽屉，右上角 ✕ 关闭。
+        display: 'flex', alignItems: 'stretch', justifyContent: 'flex-end',
         zIndex: 50,
         animation: 'ol-modal-backdrop-in 0.18s var(--ol-motion-soft)',
       }}
@@ -47,15 +47,20 @@ export function MarketplaceModal({ onClose }: MarketplaceModalProps) {
       <div
         onClick={(e) => e.stopPropagation()}
         style={{
-          width: '100%', maxWidth: 1080, height: '100%', maxHeight: 720,
-          background: 'var(--ol-surface)',
-          borderRadius: 14,
-          border: '0.5px solid rgba(0,0,0,.08)',
-          boxShadow: '0 30px 80px -20px rgba(15,17,22,.35), 0 0 0 0.5px rgba(0,0,0,.06)',
+          width: 'min(1080px, 92%)', height: '100%',
+          // 底色渐变到实面：主窗口玻璃卡自带 backdrop-filter，嵌套的内层
+          // backdrop-filter 在 WebKit 里不可靠——顶部留一丝通透，中下部落到
+          // --ol-surface 实面，不依赖模糊也保证底下内容不透出。
+          background: 'linear-gradient(180deg, var(--ol-glass-bg-strong), var(--ol-surface) 62%)',
+          backdropFilter: 'blur(8px) saturate(140%)',
+          WebkitBackdropFilter: 'blur(8px) saturate(140%)',
+          borderRadius: '14px 0 0 14px',
+          borderLeft: '0.5px solid var(--ol-line)',
+          boxShadow: '-24px 0 60px -24px rgba(15,17,22,.4), 0 0 0 0.5px rgba(0,0,0,.06)',
           overflow: 'hidden',
           position: 'relative',
           display: 'flex', flexDirection: 'column',
-          animation: 'ol-modal-card-in 0.24s var(--ol-motion-spring)',
+          animation: 'ol-drawer-in-right 0.32s var(--ol-motion-spring)',
         }}
       >
         <div

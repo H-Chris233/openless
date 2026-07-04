@@ -32,6 +32,15 @@ const BYTES_PER_MS: f64 = 32.0;
 const HOTWORD_CAP: usize = 80;
 const FINAL_RESULT_TIMEOUT: Duration = Duration::from_secs(12);
 
+/// 弱网下 TLS/WebSocket 握手可能一直挂到 OS 级 TCP 超时（几十秒），期间用户卡在
+/// 「Starting」无法语音输入。协调器的全局超时只覆盖 `await_final_result`，**不**覆盖
+/// `open_session`，所以这里必须自己给握手设上限：超时即快速失败并重试，而不是冻结。
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// 单次网络抖动（连接被重置 / 瞬时 DNS 失败）以前会直接让整次听写失败。重试几次让
+/// 抖动可恢复。`AuthRejected`（凭据被拒）不在重试之列——重试也不会变好，只会拖慢报错。
+const CONNECT_MAX_ATTEMPTS: usize = 3;
+const CONNECT_RETRY_BACKOFF: Duration = Duration::from_millis(250);
+
 #[derive(Clone, Debug)]
 pub struct VolcengineCredentials {
     pub app_id: String,
@@ -131,34 +140,7 @@ impl VolcengineStreamingASR {
         }
 
         let connect_id = Uuid::new_v4().to_string();
-        let mut request = ENDPOINT
-            .into_client_request()
-            .map_err(|e| VolcengineASRError::ConnectionFailed(e.to_string()))?;
-        let headers = request.headers_mut();
-        headers.insert(
-            "X-Api-App-Key",
-            HeaderValue::from_str(&self.credentials.app_id)
-                .map_err(|e| VolcengineASRError::ConnectionFailed(e.to_string()))?,
-        );
-        headers.insert(
-            "X-Api-Access-Key",
-            HeaderValue::from_str(&self.credentials.access_token)
-                .map_err(|e| VolcengineASRError::ConnectionFailed(e.to_string()))?,
-        );
-        headers.insert(
-            "X-Api-Resource-Id",
-            HeaderValue::from_str(&self.credentials.resource_id)
-                .map_err(|e| VolcengineASRError::ConnectionFailed(e.to_string()))?,
-        );
-        headers.insert(
-            "X-Api-Connect-Id",
-            HeaderValue::from_str(&connect_id)
-                .map_err(|e| VolcengineASRError::ConnectionFailed(e.to_string()))?,
-        );
-
-        let (ws, _resp) = connect_async(request)
-            .await
-            .map_err(classify_connect_error)?;
+        let ws = self.connect_with_retry(&connect_id).await?;
         let (write, read) = ws.split();
 
         let (tx, rx) = oneshot::channel();
@@ -258,6 +240,79 @@ impl VolcengineStreamingASR {
         });
 
         Ok(())
+    }
+
+    /// Build the WebSocket handshake request (endpoint + auth headers). Rebuilt
+    /// per connect attempt because `connect_async` consumes the request and
+    /// `http::Request` is not `Clone`.
+    fn build_connect_request(
+        &self,
+        connect_id: &str,
+    ) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request, VolcengineASRError>
+    {
+        let mut request = ENDPOINT
+            .into_client_request()
+            .map_err(|e| VolcengineASRError::ConnectionFailed(e.to_string()))?;
+        let headers = request.headers_mut();
+        headers.insert(
+            "X-Api-App-Key",
+            HeaderValue::from_str(&self.credentials.app_id)
+                .map_err(|e| VolcengineASRError::ConnectionFailed(e.to_string()))?,
+        );
+        headers.insert(
+            "X-Api-Access-Key",
+            HeaderValue::from_str(&self.credentials.access_token)
+                .map_err(|e| VolcengineASRError::ConnectionFailed(e.to_string()))?,
+        );
+        headers.insert(
+            "X-Api-Resource-Id",
+            HeaderValue::from_str(&self.credentials.resource_id)
+                .map_err(|e| VolcengineASRError::ConnectionFailed(e.to_string()))?,
+        );
+        headers.insert(
+            "X-Api-Connect-Id",
+            HeaderValue::from_str(connect_id)
+                .map_err(|e| VolcengineASRError::ConnectionFailed(e.to_string()))?,
+        );
+        Ok(request)
+    }
+
+    /// Connect with a per-attempt timeout and bounded retries so a poor network
+    /// (hung handshake or a transient blip) doesn't kill the whole dictation.
+    /// `AuthRejected` short-circuits — bad credentials never heal on retry.
+    async fn connect_with_retry(&self, connect_id: &str) -> Result<WsStream, VolcengineASRError> {
+        let mut attempt = 0usize;
+        loop {
+            attempt += 1;
+            let request = self.build_connect_request(connect_id)?;
+            match tokio::time::timeout(CONNECT_TIMEOUT, connect_async(request)).await {
+                Ok(Ok((ws, _resp))) => return Ok(ws),
+                Ok(Err(e)) => {
+                    let classified = classify_connect_error(e);
+                    if matches!(classified, VolcengineASRError::AuthRejected(_))
+                        || attempt >= CONNECT_MAX_ATTEMPTS
+                    {
+                        return Err(classified);
+                    }
+                    log::warn!(
+                        "[asr] 连接尝试 {attempt}/{CONNECT_MAX_ATTEMPTS} 失败: {classified}；重试中"
+                    );
+                }
+                Err(_) => {
+                    if attempt >= CONNECT_MAX_ATTEMPTS {
+                        return Err(VolcengineASRError::ConnectionFailed(format!(
+                            "连接超时（{} ms）",
+                            CONNECT_TIMEOUT.as_millis()
+                        )));
+                    }
+                    log::warn!(
+                        "[asr] 连接尝试 {attempt}/{CONNECT_MAX_ATTEMPTS} 超时（{} ms）；重试中",
+                        CONNECT_TIMEOUT.as_millis()
+                    );
+                }
+            }
+            tokio::time::sleep(CONNECT_RETRY_BACKOFF * attempt as u32).await;
+        }
     }
 
     pub async fn send_last_frame(&self) -> Result<(), VolcengineASRError> {

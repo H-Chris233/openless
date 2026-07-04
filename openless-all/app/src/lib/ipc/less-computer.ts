@@ -25,3 +25,12 @@ export function lessComputerWindowResize(height: number): Promise<void> {
         () => undefined,
     )
 }
+
+/** 浮窗打字输入：文字指令直接进入 Less Computer 执行链（与语音同护栏/审批/连续会话）。 */
+export function lessComputerSubmitText(text: string): Promise<void> {
+    return invokeOrMock(
+        "less_computer_submit_text",
+        { text },
+        () => undefined,
+    )
+}

@@ -95,9 +95,10 @@ fn emit_less_computer(inner: &Arc<Inner>, payload: serde_json::Value) {
 ///    - 失败：`(raw_text, Some(reason), false)` — 流式过程出错，调用方走 raw 一次性兜底
 ///    - 不支持：`run_streaming_polish` 内部直接调 `polish_or_passthrough` 透明降级
 ///
-/// **不在流式路径里做**：`apply_chinese_script_preference` / `apply_correction_rules`
-/// 这两步在 v1 跳过 —— 字符已经一边流一边落出去了，不好回退。需要的话只能关 toggle 走
-/// 一次性路径。
+/// **流式路径里的字形转换**：Simplified（t2s）在 `on_delta` 对每个 delta 就地转换
+/// （近乎逐字映射，跨 delta 拆散词条也几乎总是正确）；Traditional（s2t）有真歧义，
+/// `streaming_insert_eligible` 仍把它挡在一次性路径。`apply_correction_rules` 依旧
+/// 不在流式路径里做 —— 字符已经落出去，不好回退。
 #[allow(clippy::too_many_arguments)]
 async fn run_streaming_polish(
     inner: &Arc<Inner>,
@@ -193,6 +194,18 @@ async fn run_streaming_polish(
     // 3. 调流式润色，on_delta 塞 mpsc；should_cancel 检查 dictation 取消旗。
     let inner_for_cancel = Arc::clone(inner);
     let should_cancel = move || inner_for_cancel.state.lock().cancelled;
+    // Simplified 目标：对每个 delta 就地 t2s（转换器建一次，避免每个 delta 重新加载
+    // 词典）。Traditional 不会走到这里（eligibility 已降级），Auto 无需转换。
+    let delta_converter = (chinese_script_preference
+        == crate::types::ChineseScriptPreference::Simplified)
+        .then(|| {
+            ferrous_opencc::OpenCC::from_config(ferrous_opencc::config::BuiltinConfig::T2s)
+                .map_err(|e| {
+                    log::warn!("[coord] streaming_insert: OpenCC t2s init failed, deltas stay unconverted: {e}");
+                })
+                .ok()
+        })
+        .flatten();
     let outcome = super::polish_or_passthrough_streaming(
         raw,
         mode,
@@ -205,7 +218,11 @@ async fn run_streaming_polish(
         front_app,
         prior_turns,
         move |delta: &str| {
-            let _ = tx.send(delta.to_string());
+            let converted = match delta_converter.as_ref() {
+                Some(converter) => converter.convert(delta),
+                None => delta.to_string(),
+            };
+            let _ = tx.send(converted);
         },
         should_cancel,
     )
@@ -521,10 +538,13 @@ fn streaming_insert_eligible(
     streaming_insert_enabled
         && !translation_active
         && (mode != PolishMode::Raw || raw_uses_llm)
-        // 非 Auto 字形（简/繁）要对成品文本做确定性 OpenCC 转换，而流式是边出边落字、
-        // 没有成品可后处理（finalize_polished_text 在 already_streamed 时直接 return）。
-        // → 非 Auto 时关掉流式，走一次性路径，确保简/繁转换真正生效（issue #643）。
-        && chinese_script_preference == crate::types::ChineseScriptPreference::Auto
+        // 固定字形的 OpenCC 转换与流式的兼容性按方向区分：
+        //   - Simplified（t2s）：近乎逐字映射，对每个 delta 就地转换即可（跨 delta
+        //     边界拆散的词级条目退化为逐字转换，t2s 方向仍几乎总是正确），流式放行
+        //     —— 否则固定简体的用户流式静默失效且无从得知原因。
+        //   - Traditional（s2t）：一简对多繁有真歧义（发→發/髮），需要全文上下文，
+        //     仍走一次性路径确保转换准确（issue #643）。
+        && chinese_script_preference != crate::types::ChineseScriptPreference::Traditional
         && windows_insertion_allows_streaming(windows_insertion_mode)
 }
 
@@ -687,7 +707,9 @@ pub(super) async fn handle_released(inner: &Arc<Inner>) {
 }
 
 /// Less Computer 收尾：把转写当作指令交给无头 Claude，结果以胶囊展示（不插入到光标）。
-async fn run_voice_agent_transcript(
+/// pub(super)：除语音路径外，浮窗的打字输入（less_computer_submit_text 命令）
+/// 也以文字直接进入同一条执行链（同样的护栏 / 审批 / 连续会话语义）。
+pub(super) async fn run_voice_agent_transcript(
     inner: &Arc<Inner>,
     _session_id: SessionId,
     transcript: String,
@@ -1031,6 +1053,9 @@ async fn run_less_computer_once(
             E::ToolUse { name, .. } => {
                 emit_less_computer(inner, serde_json::json!({ "kind": "tool", "name": name }));
             }
+            E::Compaction { .. } => {
+                emit_less_computer(inner, serde_json::json!({ "kind": "compaction" }));
+            }
             E::Completed {
                 text, cost_usd: c, ..
             } => {
@@ -1218,6 +1243,14 @@ pub(super) async fn begin_session_as(
         return Ok(());
     }
 
+    // 乐观显示：按下热键即弹出胶囊并播入场动画，不等麦克风/ASR。此刻麦克风还在 cpal
+    // init 窗口内、没有第一帧 PCM，先进「预备态」（warming=true → 前端渲染待命光效，引导
+    // 用户稍候再开口）；level_handler 首次触发（PCM 真的流入）后翻成正式录音态、光条点亮。
+    // 这样把「视觉反馈」与「麦克风就绪」解耦：即时反馈 + 完整入场动画，同时用预备→点亮的
+    // 过渡守住「不漏首字」。若随后凭证/权限校验失败，下面分支会用 Error 覆盖这一帧。
+    inner.capsule_warming.store(true, Ordering::SeqCst);
+    emit_capsule(inner, CapsuleState::Recording, 0.0, 0, None, None);
+
     if let Err(message) = ensure_asr_credentials() {
         log::warn!("[coord] ASR credential gate failed: {message}");
         emit_capsule(
@@ -1384,7 +1417,7 @@ pub(super) async fn begin_session_as(
                 .await?;
             }
             MacosKeylessDictationProvider::AppleSpeech => {
-                let local = build_apple_speech();
+                let local = build_apple_speech(&inner.prefs.get());
                 store_asr_for_session(
                     inner,
                     current_session_id,
@@ -1629,6 +1662,10 @@ pub(super) async fn start_recorder_for_starting(
             .started_at
             .elapsed()
             .as_millis() as u64;
+        // 第一帧 PCM 真的流到 consumer 了（recorder.rs::process_callback 的顺序保证
+        // consume_pcm_chunk 先于 level_handler）——关掉预备态，让这一帧起 payload.warming
+        // 翻 false，前端把「待命」光条点亮成正式录音态。之后每帧都是 false（幂等）。
+        inner_for_level.capsule_warming.store(false, Ordering::SeqCst);
         emit_capsule(
             &inner_for_level,
             CapsuleState::Recording,
@@ -2729,6 +2766,14 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
     ) {
         log::error!("[coord] history append failed: {e}");
     }
+    // 活动计数（概览页热力图数据源）：只有成功完成的听写才点亮格子——转录失败 /
+    // 错误收尾的两处 append 不计。写失败不阻断主流程。
+    if let Err(e) = inner
+        .activity
+        .bump(&chrono::Local::now().format("%Y-%m-%d").to_string())
+    {
+        log::warn!("[coord] activity bump failed: {e}");
+    }
 
     // 远程输入：把本次最终文字回传给手机端。remote_server 的 WS handler 订阅了
     // "remote:result"（mod.rs:614），但此前全仓从未 emit，导致手机结果区永远空（#691）。
@@ -3268,30 +3313,31 @@ mod tests {
     }
 
     #[test]
-    fn streaming_disabled_for_non_auto_script_so_opencc_runs() {
-        // issue #643：非 Auto 字形（简/繁）必须走一次性路径，让 finalize 的 OpenCC 转换生效。
-        for pref in [
-            ChineseScriptPreference::Simplified,
+    fn streaming_script_gate_blocks_only_traditional() {
+        // Traditional（s2t）有一简对多繁的真歧义，必须走一次性路径做全文 OpenCC
+        // 转换（issue #643）；Simplified（t2s）近乎逐字，on_delta 就地转换即可，
+        // 不再挡流式（用户反馈：固定简体导致流式静默失效）。
+        assert!(!streaming_insert_eligible(
+            true,
+            false,
+            PolishMode::Light,
+            false,
             ChineseScriptPreference::Traditional,
+            crate::types::WindowsInsertionMode::SendInput,
+        ));
+        for pref in [
+            ChineseScriptPreference::Auto,
+            ChineseScriptPreference::Simplified,
         ] {
-            assert!(!streaming_insert_eligible(
+            assert!(streaming_insert_eligible(
                 true,
                 false,
                 PolishMode::Light,
                 false,
                 pref,
-                crate::types::WindowsInsertionMode::Tsf,
+                crate::types::WindowsInsertionMode::SendInput,
             ));
         }
-        // Auto + SendInput 仍可流式。
-        assert!(streaming_insert_eligible(
-            true,
-            false,
-            PolishMode::Light,
-            false,
-            ChineseScriptPreference::Auto,
-            crate::types::WindowsInsertionMode::SendInput,
-        ));
     }
 
     #[test]

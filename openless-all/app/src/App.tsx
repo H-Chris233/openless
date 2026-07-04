@@ -53,7 +53,7 @@ const ANDROID_SETUP_WIZARD_COMPLETE_KEY = 'openless.androidSetupWizardComplete';
 
 export function App({ isCapsule, isQa, isLessComputer, isLessComputerGlow, forcedOs }: AppProps) {
   if (isCapsule) {
-    return <Capsule />;
+    return <Capsule os={forcedOs} />;
   }
   if (isQa) {
     return (

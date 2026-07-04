@@ -451,13 +451,62 @@ fn read_chunk_manifest(json: &str) -> Option<CredsChunkManifest> {
     }
 }
 
+/// Windows Credential Manager (`CredReadW`) can transiently fail right after
+/// login / under contention when we read the manifest entry plus every chunk
+/// entry in quick succession. A single failed read makes the whole credential
+/// set look empty → `load_keyring_credentials` returns `Err` → `load_credentials`
+/// falls back to an empty default → Overview shows「火山引擎未配置」even though the
+/// secrets are present (the next dictation re-reads and succeeds, which is why the
+/// bug is *probabilistic* and the app "实际可以正常使用"). The more chunks a
+/// credential set spans, the more reads per load, the higher the odds at least
+/// one trips. Retry transient errors a few times with short backoff.
+///
+/// macOS / Linux keep the original single-shot behavior on purpose: their read
+/// errors are ACL denials that won't heal on retry, and the un-cached error path
+/// already retries on the next call — adding sleeps there would only slow the
+/// macOS first-launch Keychain authorization flow.
+#[cfg(target_os = "windows")]
+const KEYRING_READ_RETRY_ATTEMPTS: usize = 4;
+#[cfg(target_os = "windows")]
+const KEYRING_READ_RETRY_BACKOFF_MS: u64 = 60;
+
 #[cfg(not(target_os = "android"))]
 fn get_keyring_password(account: &str) -> Result<Option<String>> {
-    match keyring_entry_for(account)?.get_password() {
-        Ok(value) => Ok(Some(value)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => {
-            Err(anyhow!(e)).with_context(|| format!("read system credential vault {account}"))
+    #[cfg(target_os = "windows")]
+    {
+        let mut attempt = 0usize;
+        loop {
+            match keyring_entry_for(account)?.get_password() {
+                Ok(value) => return Ok(Some(value)),
+                // NoEntry is a definitive "not stored" answer, never a transient
+                // failure — return immediately so genuinely-unconfigured providers
+                // don't pay the retry latency.
+                Err(keyring::Error::NoEntry) => return Ok(None),
+                Err(e) => {
+                    attempt += 1;
+                    if attempt >= KEYRING_READ_RETRY_ATTEMPTS {
+                        return Err(anyhow!(e))
+                            .with_context(|| format!("read system credential vault {account}"));
+                    }
+                    log::warn!(
+                        "[vault] transient credential read for {account} failed \
+                         (attempt {attempt}/{KEYRING_READ_RETRY_ATTEMPTS}): {e}; retrying"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        KEYRING_READ_RETRY_BACKOFF_MS * attempt as u64,
+                    ));
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        match keyring_entry_for(account)?.get_password() {
+            Ok(value) => Ok(Some(value)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => {
+                Err(anyhow!(e)).with_context(|| format!("read system credential vault {account}"))
+            }
         }
     }
 }

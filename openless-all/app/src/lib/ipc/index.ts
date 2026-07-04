@@ -37,6 +37,7 @@ export {
     listHistory,
     deleteHistoryEntry,
     clearHistory,
+    getActivityStats,
     readAudioRecording,
     retranscribeRecording,
 } from "./history"
@@ -132,6 +133,7 @@ export {
     lessComputerWindowDismiss,
     lessComputerApprove,
     lessComputerWindowResize,
+    lessComputerSubmitText,
 } from "./less-computer"
 
 // updater
@@ -158,11 +160,9 @@ export type {
     CodingAgentPermissionMode,
     McpHealth,
     CodingAgentEvent,
-} from "./coding-agent"
-export type {
+    OpenCodeDetection,
     McpServerStatus,
     ClaudeDetection,
-    OpenCodeDetection,
     CodingAgentRunTestArgs,
 } from "./coding-agent"
 export {

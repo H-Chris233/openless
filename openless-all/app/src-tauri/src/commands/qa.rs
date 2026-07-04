@@ -77,6 +77,12 @@ pub fn less_computer_window_resize(coord: CoordinatorState<'_>, height: f64) {
     coord.less_computer_window_resize(height);
 }
 
+/// 浮窗打字输入：文字指令直接进入 Less Computer 执行链（跳过录音与 ASR）。
+#[tauri::command]
+pub fn less_computer_submit_text(coord: CoordinatorState<'_>, text: String) {
+    coord.less_computer_submit_text(text);
+}
+
 /// 内联审批卡的 Approve / Deny 回执。token 关联到等待中的拦截动作。
 ///
 /// 安全：审批 UI 渲染在 less-computer 窗口（LessComputerPanel），故仅允许该窗口提交，

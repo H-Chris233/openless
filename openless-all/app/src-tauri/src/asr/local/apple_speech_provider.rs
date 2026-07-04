@@ -39,16 +39,25 @@ const SF_AUTH_AUTHORIZED: i64 = 3;
 /// 这里只防 block 永不回调导致线程永久阻塞。
 const RECOGNITION_WAIT: Duration = Duration::from_secs(60);
 const AUTHORIZATION_WAIT: Duration = Duration::from_secs(30);
+/// 识别引擎就绪（isAvailable）的轮询等待：刚 init 的 recognizer 常瞬时不可用（异步
+/// 加载语言资源），稍等即就绪。等满仍不可用才报错——修「有时用不了」的竞态。
+const AVAILABILITY_WAIT: Duration = Duration::from_secs(3);
+const AVAILABILITY_POLL: Duration = Duration::from_millis(100);
 
 pub struct AppleSpeechAsr {
     /// 16-bit LE PCM 字节缓冲（recorder 推什么我们存什么）。与 LocalQwenAsr 同形。
     buffer: Mutex<Vec<u8>>,
+    /// 识别 locale（Apple 标识符，如 "zh-CN"）。None = 用系统默认。由用户工作语言映射
+    /// 而来 —— SFSpeechRecognizer 一个实例只认一种语言，不显式指定就落到系统首选语言
+    /// （常是英文），中文语音会被英文引擎识别成英文且理解错误（用户报告的根因）。
+    locale: Option<String>,
 }
 
 impl AppleSpeechAsr {
-    pub fn new() -> Self {
+    pub fn new(locale: Option<String>) -> Self {
         Self {
             buffer: Mutex::new(Vec::new()),
+            locale,
         }
     }
 
@@ -73,12 +82,13 @@ impl AppleSpeechAsr {
             });
         }
         let duration_ms = (pcm.len() as u64 / 2) * 1000 / 16_000;
+        let locale = self.locale.clone();
 
         // SFSpeechRecognizer 是阻塞且基于 objc runloop 的同步桥接；放到
         // spawn_blocking 不占 tokio runtime。与 LocalQwenAsr 走同一个 Tauri
         // 持有的 runtime handle。
         let result = tauri::async_runtime::spawn_blocking(move || {
-            transcribe_pcm_blocking(&pcm, duration_ms)
+            transcribe_pcm_blocking(&pcm, duration_ms, locale.as_deref())
         })
         .await
         .context("apple-speech transcribe spawn_blocking join 失败")?;
@@ -96,7 +106,7 @@ impl AppleSpeechAsr {
 
 impl Default for AppleSpeechAsr {
     fn default() -> Self {
-        Self::new()
+        Self::new(None)
     }
 }
 
@@ -108,7 +118,11 @@ impl crate::recorder::AudioConsumer for AppleSpeechAsr {
 
 /// 把 PCM 写成临时 wav，确保授权，跑批处理识别，删临时文件，返回结果。
 /// 在 spawn_blocking 线程内同步执行。
-fn transcribe_pcm_blocking(pcm: &[u8], duration_ms: u64) -> Result<RawTranscript> {
+fn transcribe_pcm_blocking(
+    pcm: &[u8],
+    duration_ms: u64,
+    locale: Option<&str>,
+) -> Result<RawTranscript> {
     ensure_authorized()?;
 
     let samples: Vec<i16> = pcm
@@ -129,7 +143,7 @@ fn transcribe_pcm_blocking(pcm: &[u8], duration_ms: u64) -> Result<RawTranscript
     let path_str = path
         .to_str()
         .ok_or_else(|| anyhow!("临时 wav 路径含非 UTF-8 字符: {}", path.display()))?;
-    let text = recognize_file(path_str)?;
+    let text = recognize_file(path_str, locale)?;
 
     Ok(RawTranscript { text, duration_ms })
 }
@@ -183,18 +197,21 @@ fn ensure_authorized() -> Result<()> {
 
 /// 用 `SFSpeechURLRecognitionRequest` 对给定 wav 文件做一次批处理识别，
 /// 把 `recognitionTaskWithRequest:resultHandler:` 的异步回调同步化。
-fn recognize_file(wav_path: &str) -> Result<String> {
-    let recognizer = create_recognizer()?;
+fn recognize_file(wav_path: &str, locale: Option<&str>) -> Result<String> {
+    let recognizer = create_recognizer(locale)?;
 
-    // recognizer.isAvailable —— 识别引擎当前是否可用（首次可能在下载语言资源）。
-    // SAFETY: `recognizer` 是有效的 `SFSpeechRecognizer` 实例；`isAvailable` 无参，返回 BOOL。
-    let available: Bool = unsafe { msg_send![recognizer, isAvailable] };
-    if !available.as_bool() {
-        bail!("当前语言的语音识别暂不可用（系统可能正在准备识别资源，请稍后重试）");
-    }
+    // 识别引擎就绪等待（isAvailable 竞态）：SFSpeechRecognizer 刚 init 时引擎往往还没
+    // 就绪（异步加载语言资源），isAvailable 瞬时为 false、稍等即 true。之前一见 false
+    // 就 bail —— 这正是「有时用不了」的主因。改为轮询等待最多几秒再判定。
+    wait_until_available(recognizer)?;
 
     let url = file_url(wav_path)?;
     let request = create_url_request(url)?;
+
+    // on-device 优先：设备支持当前语言的设备端识别就强制 on-device —— 音频不出本机
+    // （隐私）、离线可用、不受网络波动/限流影响（消除「有时连不上服务器」）。不支持的
+    // 语言回退系统默认（可能走网络）以保底能用。
+    configure_on_device(recognizer, request);
 
     let (tx, rx) = mpsc::channel::<RecognitionOutcome>();
     // resultHandler: void(^)(SFSpeechRecognitionResult *result, NSError *error)
@@ -223,6 +240,44 @@ fn recognize_file(wav_path: &str) -> Result<String> {
         Ok(RecognitionOutcome::Failed(message)) => bail!("语音识别失败: {message}"),
         Ok(RecognitionOutcome::Pending) => unreachable!("Pending 不会被发送"),
         Err(err) => bail!("等待语音识别结果超时或失败: {err}"),
+    }
+}
+
+/// 轮询等待识别引擎就绪。init 后 isAvailable 可能瞬时 false（异步加载资源），稍等
+/// 即 true；等满 AVAILABILITY_WAIT 仍不可用才报错并引导。
+fn wait_until_available(recognizer: *mut AnyObject) -> Result<()> {
+    let deadline = std::time::Instant::now() + AVAILABILITY_WAIT;
+    loop {
+        // SAFETY: `recognizer` 有效；`isAvailable` 无参返回 BOOL。
+        let available: Bool = unsafe { msg_send![recognizer, isAvailable] };
+        if available.as_bool() {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            bail!(
+                "当前语言的语音识别暂不可用：系统可能仍在准备识别资源，或需在 系统设置 → 键盘 → 听写 中下载对应语言。可稍后重试，或改用其它 ASR。"
+            );
+        }
+        std::thread::sleep(AVAILABILITY_POLL);
+    }
+}
+
+/// 支持设备端识别的语言就把请求设成强制 on-device（音频不出本机、离线可用）；不支持
+/// 的语言不设，回退系统默认（可能走网络）以保底能用。
+fn configure_on_device(recognizer: *mut AnyObject, request: *mut AnyObject) {
+    // SFSpeechRecognizer.supportsOnDeviceRecognition（macOS 10.15+，BOOL 属性）。
+    // SAFETY: `recognizer` 有效；无参返回 BOOL。
+    let supports: Bool = unsafe { msg_send![recognizer, supportsOnDeviceRecognition] };
+    if supports.as_bool() {
+        // SFSpeechRecognitionRequest.requiresOnDeviceRecognition = YES。
+        // SAFETY: `request` 是 SFSpeechURLRecognitionRequest（父类
+        // SFSpeechRecognitionRequest 提供该 setter）；参数 BOOL。
+        let _: () = unsafe { msg_send![request, setRequiresOnDeviceRecognition: Bool::new(true)] };
+        log::info!("[apple-speech] on-device recognition enabled");
+    } else {
+        log::info!(
+            "[apple-speech] on-device unsupported for current locale; using default (may use network)"
+        );
     }
 }
 
@@ -271,19 +326,72 @@ fn speech_recognizer_class() -> Result<&'static AnyClass> {
     })
 }
 
-/// `[[SFSpeechRecognizer alloc] init]` —— 用系统当前 locale。
-fn create_recognizer() -> Result<*mut AnyObject> {
+/// 创建 recognizer。有指定 locale 就 `initWithLocale:`（关键 —— 否则落到系统首选语言，
+/// 中文语音会被英文引擎误识别）；无 locale 或 NSLocale 构造失败时回退 `init`（系统默认）。
+fn create_recognizer(locale: Option<&str>) -> Result<*mut AnyObject> {
     let cls = speech_recognizer_class()?;
-    // SAFETY: `cls` 是 `SFSpeechRecognizer` 类；`alloc` 返回未初始化实例，
-    // `init` 对其初始化，返回的实例由本函数所有权移交调用方（随后被 ARC 管理）。
-    let recognizer: *mut AnyObject = unsafe {
-        let alloc: *mut AnyObject = msg_send![cls, alloc];
-        msg_send![alloc, init]
+    let recognizer: *mut AnyObject = match locale.and_then(ns_locale) {
+        Some(ns_loc) => {
+            log::info!("[apple-speech] recognizer locale = {}", locale.unwrap_or(""));
+            // SAFETY: `cls` 是 SFSpeechRecognizer 类；`alloc` 得未初始化实例，
+            // `initWithLocale:` 用有效 NSLocale 初始化，返回实例移交调用方（ARC 管理）。
+            unsafe {
+                let alloc: *mut AnyObject = msg_send![cls, alloc];
+                msg_send![alloc, initWithLocale: ns_loc]
+            }
+        }
+        None => {
+            // SAFETY: 同上；`init` 用系统默认 locale。
+            unsafe {
+                let alloc: *mut AnyObject = msg_send![cls, alloc];
+                msg_send![alloc, init]
+            }
+        }
     };
     if recognizer.is_null() {
-        bail!("无法创建 SFSpeechRecognizer（当前系统语言可能不支持语音识别）");
+        bail!("无法创建 SFSpeechRecognizer（当前语言可能不支持语音识别）");
     }
     Ok(recognizer)
+}
+
+/// `[NSLocale localeWithLocaleIdentifier:<id>]`。构造失败返回 None（调用方回退系统默认）。
+fn ns_locale(identifier: &str) -> Option<*mut AnyObject> {
+    let ns_id = ns_string_from_str(identifier).ok()?;
+    let cls = AnyClass::get("NSLocale")?;
+    // SAFETY: `cls` 是 NSLocale；`localeWithLocaleIdentifier:` 接收 NSString（`ns_id` 有效），
+    // 返回 autoreleased NSLocale（在 spawn_blocking 线程的 autorelease 池存活）。
+    let loc: *mut AnyObject = unsafe { msg_send![cls, localeWithLocaleIdentifier: ns_id] };
+    if loc.is_null() {
+        None
+    } else {
+        Some(loc)
+    }
+}
+
+/// 用户工作语言（原生名，见前端 `SUPPORTED_LANGUAGES`）→ SFSpeechRecognizer 的 locale
+/// 标识符。取 `working_languages` 主语言映射；未收录的语言返回 None（回退系统默认 locale）。
+/// SFSpeechRecognizer 一个实例只认一种语言，中英混说时以主语言为准 —— 这是 Apple 的固有
+/// 限制，云端 ASR 才能自由多语言混识。
+pub fn native_name_to_apple_locale(native_name: &str) -> Option<String> {
+    let locale = match native_name.trim() {
+        "简体中文" => "zh-CN",
+        "繁体中文" | "繁體中文" => "zh-TW",
+        "English" => "en-US",
+        "日本語" => "ja-JP",
+        "한국어" => "ko-KR",
+        "Français" => "fr-FR",
+        "Deutsch" => "de-DE",
+        "Español" => "es-ES",
+        "Italiano" => "it-IT",
+        "Português" => "pt-BR",
+        "Русский" => "ru-RU",
+        "العربية" => "ar-SA",
+        "Tiếng Việt" => "vi-VN",
+        "ไทย" => "th-TH",
+        "हिन्दी" => "hi-IN",
+        _ => return None,
+    };
+    Some(locale.to_string())
 }
 
 /// `[NSURL fileURLWithPath:<path>]`。
@@ -387,7 +495,7 @@ mod tests {
 
     #[test]
     fn buffer_duration_tracks_consumed_pcm() {
-        let asr = AppleSpeechAsr::new();
+        let asr = AppleSpeechAsr::new(None);
         assert_eq!(asr.buffer_duration_ms(), 0);
         // 16k * 2 bytes/sample * 1s = 32000 bytes。
         asr.consume_pcm_chunk(&vec![0u8; 32_000]);
@@ -398,7 +506,7 @@ mod tests {
 
     #[test]
     fn cancel_clears_buffer() {
-        let asr = AppleSpeechAsr::new();
+        let asr = AppleSpeechAsr::new(None);
         asr.consume_pcm_chunk(&vec![0u8; 32_000]);
         asr.cancel();
         assert_eq!(asr.buffer_duration_ms(), 0);
@@ -406,7 +514,7 @@ mod tests {
 
     #[tokio::test]
     async fn transcribe_empty_buffer_returns_empty() {
-        let asr = AppleSpeechAsr::new();
+        let asr = AppleSpeechAsr::new(None);
         let transcript = asr.transcribe().await.unwrap();
         assert_eq!(transcript.text, "");
         assert_eq!(transcript.duration_ms, 0);

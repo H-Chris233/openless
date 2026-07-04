@@ -127,6 +127,14 @@ pub enum InsertStatus {
     Failed,
 }
 
+/// 概览页年度活动热力图的单日计数（date = 本地日期 YYYY-MM-DD）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivityDay {
+    pub date: String,
+    pub count: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DictationSession {
@@ -819,6 +827,10 @@ pub struct UserPreferences {
     /// 默认 true（更接近用户习惯）。
     #[serde(default = "default_true")]
     pub streaming_insert_save_clipboard: bool,
+    /// 概览页是否显示「年度活动」热力图卡。默认 true；关闭只隐藏卡片，
+    /// 活动计数照常记录（persistence/activity.rs），再打开时全年数据仍在。
+    #[serde(default = "default_true")]
+    pub show_overview_activity_heatmap: bool,
     /// 主窗口启动 + 后台每 60 分钟自动检查更新。默认 true。
     /// Android 开启后自动检查并下载，校验后打开系统安装器；桌面仅自动检查 + 用户确认安装。
     /// 关闭后仅 Settings 手动「检查更新」按钮可用。
@@ -1039,6 +1051,8 @@ struct UserPreferencesWire {
     #[serde(default = "default_true")]
     streaming_insert_save_clipboard: bool,
     #[serde(default = "default_true")]
+    show_overview_activity_heatmap: bool,
+    #[serde(default = "default_true")]
     auto_update_check: bool,
     #[serde(default)]
     history_max_entries: Option<u32>,
@@ -1133,6 +1147,7 @@ impl Default for UserPreferencesWire {
             streaming_insert: prefs.streaming_insert,
             streaming_insert_default_migrated: prefs.streaming_insert_default_migrated,
             streaming_insert_save_clipboard: prefs.streaming_insert_save_clipboard,
+            show_overview_activity_heatmap: prefs.show_overview_activity_heatmap,
             auto_update_check: prefs.auto_update_check,
             history_max_entries: prefs.history_max_entries,
             record_audio_for_debug: prefs.record_audio_for_debug,
@@ -1251,6 +1266,7 @@ impl<'de> Deserialize<'de> for UserPreferences {
             streaming_insert,
             streaming_insert_default_migrated: true,
             streaming_insert_save_clipboard: wire.streaming_insert_save_clipboard,
+            show_overview_activity_heatmap: wire.show_overview_activity_heatmap,
             auto_update_check: wire.auto_update_check,
             history_max_entries: wire.history_max_entries,
             record_audio_for_debug: wire.record_audio_for_debug,
@@ -1991,6 +2007,7 @@ impl Default for UserPreferences {
             streaming_insert: true,
             streaming_insert_default_migrated: true,
             streaming_insert_save_clipboard: true,
+            show_overview_activity_heatmap: true,
             auto_update_check: true,
             history_max_entries: None,
             record_audio_for_debug: false,
@@ -2658,6 +2675,12 @@ pub struct CapsulePayload {
     /// 从 "thinking" 换成 "using"——告诉用户 Agent 正在操作电脑而非单纯思考。
     #[serde(default)]
     pub operating: bool,
+    /// 预备态：胶囊已经"乐观显示"出来（按下热键即弹出并播入场动画），但麦克风还没
+    /// 真正开始 capture 第一帧 PCM。为 true 时前端渲染"待命"光效（柔和呼吸、不接真实
+    /// 电平），并暗示用户先别急着开口；`level_handler` 首次触发（PCM 真的流入）后翻成
+    /// false，光条"点亮"进入正式录音态。只对 Recording 状态有意义。详见胶囊出现时序改造。
+    #[serde(default)]
+    pub warming: bool,
 }
 
 /// Snapshot of credentials read from vault — only what the UI needs to know

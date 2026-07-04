@@ -166,6 +166,7 @@ macro_rules! app_invoke_handler_desktop {
             commands::list_history,
             commands::delete_history_entry,
             commands::clear_history,
+            commands::get_activity_stats,
             commands::read_audio_recording,
             commands::retranscribe_recording,
             commands::marketplace_list,
@@ -232,6 +233,7 @@ macro_rules! app_invoke_handler_desktop {
             commands::qa_window_pin,
             commands::less_computer_window_dismiss,
             commands::less_computer_window_resize,
+            commands::less_computer_submit_text,
             commands::less_computer_approve,
             commands::validate_combo_hotkey,
             commands::set_combo_hotkey,
@@ -331,6 +333,7 @@ macro_rules! app_invoke_handler_mobile {
             $crate::commands::list_history,
             $crate::commands::delete_history_entry,
             $crate::commands::clear_history,
+            $crate::commands::get_activity_stats,
             $crate::commands::read_audio_recording,
             $crate::commands::retranscribe_recording,
             $crate::commands::marketplace_list,
@@ -508,6 +511,11 @@ fn run_desktop() {
                         }
                         Err(e) => log::warn!("[capsule] to_panel failed: {e:?}"),
                     }
+                }
+                // 纯光效舞台没有任何可点元素（✕/✓ 按钮已移除），而窗口放大到 460×180
+                // 盖住屏幕底部中央 —— 必须鼠标穿透，否则会挡住底下应用的点击。
+                if let Err(e) = capsule.set_ignore_cursor_events(true) {
+                    log::warn!("[capsule] set_ignore_cursor_events failed: {e}");
                 }
                 if let Err(e) = position_capsule_bottom_center(&capsule, false) {
                     log::warn!("[capsule] position failed: {e}");
@@ -2080,11 +2088,21 @@ fn make_qa_window_draggable_macos<R: tauri::Runtime>(window: &tauri::WebviewWind
         log::warn!("[qa] ns_window null; drag fix skipped");
         return;
     }
-    unsafe {
-        let _: () = msg_send![ns_window, setMovableByWindowBackground: Bool::YES];
-        let _: () = msg_send![ns_window, setMovable: Bool::YES];
+    // 异常兜底：AppKit 在 drag margins 状态不一致时会从 setMovable 内部 raise
+    // NSException；不捕获的话异常穿过 Rust 边界直接 abort 整个 app。捕获后降级为
+    // 日志（拖动失效但 app 活着），日志会指认具体异常便于追根因。
+    // SAFETY: 闭包内只有两个无返回值的 ObjC 消息发送，没有需要运行析构的 Rust 值，
+    // 异常展开跳过闭包帧不会破坏内存安全。
+    let result = unsafe {
+        objc2::exception::catch(std::panic::AssertUnwindSafe(|| {
+            let _: () = msg_send![ns_window, setMovableByWindowBackground: Bool::YES];
+            let _: () = msg_send![ns_window, setMovable: Bool::YES];
+        }))
+    };
+    match result {
+        Ok(()) => log::info!("[qa] NSWindow movableByWindowBackground=YES"),
+        Err(e) => log::error!("[qa] drag setup raised ObjC exception (caught, drag disabled): {e:?}"),
     }
-    log::info!("[qa] NSWindow movableByWindowBackground=YES");
 }
 
 /// 懒创建 QA 浮窗：原来在 tauri.conf.json eager 创建（常驻一个 WebKit 进程）。改为首次
@@ -2112,8 +2130,15 @@ fn ensure_qa_window<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<tauri::Webv
         .build();
     match built {
         Ok(w) => {
+            // ⚠️ NSWindow 操作必须在主线程（macOS 26 硬约束）。ensure_qa_window 常从
+            // tokio worker 进来（热键桥接循环），在 worker 线程直接 setMovable 会让
+            // AppKit 从 _postWindowNeedsToResetDragMargins 抛 NSException 直接崩掉
+            // 整个 app（2026-07-03 四次同栈崩溃的根因）——dispatch 回主线程执行。
             #[cfg(target_os = "macos")]
-            make_qa_window_draggable_macos(&w);
+            {
+                let w_clone = w.clone();
+                let _ = app.run_on_main_thread(move || make_qa_window_draggable_macos(&w_clone));
+            }
             Some(w)
         }
         Err(e) => {
@@ -2625,42 +2650,21 @@ struct CapsuleWindowBounds {
 }
 
 fn capsule_window_bounds(translation_active: bool) -> CapsuleWindowBounds {
-    #[cfg(target_os = "windows")]
-    {
-        const WINDOWS_CAPSULE_PILL_WIDTH: f64 = 196.0;
-        const WINDOWS_CAPSULE_SIDE_INSET: f64 = 12.0;
-        CapsuleWindowBounds {
-            // Keep the existing Windows hitbox width, but express it as
-            // pill width (196) + symmetric 12px side insets for shadow room.
-            width: WINDOWS_CAPSULE_PILL_WIDTH + WINDOWS_CAPSULE_SIDE_INSET * 2.0,
-            height: if translation_active { 118.0 } else { 84.0 },
-            bottom_inset: 12.0,
-        }
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        // macOS / Linux：固定 220×110，与 1.2.11 行为一致 — 录音 / 翻译徽章
-        // 共用同一个窗口尺寸，避免按 Shift 后窗口高度变化导致胶囊整体下移。
-        let _ = translation_active;
-        CapsuleWindowBounds {
-            width: 220.0,
-            height: 110.0,
-            bottom_inset: 0.0,
-        }
+    // 纯光效语音舞台（siri-glsl 原始比例）：光条横贯 ~420px + 发光扩散余量。
+    // 与前端 src/lib/capsuleLayout.ts 的 VOICE_ORB_STAGE_* 保持一致。
+    let _ = translation_active;
+    CapsuleWindowBounds {
+        width: 460.0,
+        height: 180.0,
+        bottom_inset: 0.0,
     }
 }
 
 fn capsule_visual_height(_translation_active: bool) -> f64 {
-    #[cfg(target_os = "windows")]
-    {
-        52.0
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        96.0
-    }
+    // 故意小于窗口高(180)：窗口整体下沉 40px，让光条视觉中心落回原胶囊的高度
+    // 附近（bottom_visual_position 以此值算窗口顶 y = 屏底 - 80 - visual_height）。
+    // 底部 40px 只是发光余量，窗口透明 + 鼠标穿透，压到 Dock 上方无碍。
+    140.0
 }
 
 fn capsule_height_for_qa() -> f64 {
@@ -2729,53 +2733,31 @@ mod tests {
     }
 
     #[test]
-    fn capsule_window_bounds_leave_room_for_windows_shadow() {
+    fn capsule_window_bounds_match_voice_orb_stage() {
         let bounds = capsule_window_bounds(false);
-        #[cfg(target_os = "windows")]
         assert_eq!(
             (bounds.width, bounds.height, bounds.bottom_inset),
-            (220.0, 84.0, 12.0)
-        );
-
-        #[cfg(not(target_os = "windows"))]
-        assert_eq!(
-            (bounds.width, bounds.height, bounds.bottom_inset),
-            (220.0, 110.0, 0.0)
+            (460.0, 180.0, 0.0)
         );
     }
 
     #[test]
-    fn capsule_window_bounds_expand_for_translation_badge() {
+    fn capsule_window_bounds_stay_fixed_for_translation_badge() {
         let bounds = capsule_window_bounds(true);
-        #[cfg(target_os = "windows")]
         assert_eq!(
             (bounds.width, bounds.height, bounds.bottom_inset),
-            (220.0, 118.0, 12.0)
-        );
-
-        #[cfg(not(target_os = "windows"))]
-        assert_eq!(
-            (bounds.width, bounds.height, bounds.bottom_inset),
-            (220.0, 110.0, 0.0)
+            (460.0, 180.0, 0.0)
         );
     }
 
     #[test]
-    fn capsule_visual_height_matches_frontend_pill() {
-        #[cfg(target_os = "windows")]
-        assert_eq!(capsule_visual_height(true), 52.0);
-
-        #[cfg(not(target_os = "windows"))]
-        assert_eq!(capsule_visual_height(true), 96.0);
+    fn capsule_visual_height_sinks_stage_toward_dock() {
+        assert_eq!(capsule_visual_height(true), 140.0);
     }
 
     #[test]
     fn qa_anchor_uses_normal_capsule_height_source() {
-        #[cfg(target_os = "windows")]
-        assert_eq!(capsule_height_for_qa(), 52.0);
-
-        #[cfg(not(target_os = "windows"))]
-        assert_eq!(capsule_height_for_qa(), 96.0);
+        assert_eq!(capsule_height_for_qa(), 140.0);
     }
 
     #[test]
