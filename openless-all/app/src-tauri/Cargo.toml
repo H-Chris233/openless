@@ -21,7 +21,8 @@ cc = "1.1"
 # macos-private-api must live in [dependencies] so tauri_build can match tauri.conf.json
 # macOSPrivateApi; tray-icon stays desktop-only in the target table below.
 tauri = { version = "~2.11", features = ["macos-private-api"] }
-tauri-plugin-shell = "2"
+# 锁 >=2.3.5 修复 GHSA-c9pr-q8gx-3mgp：tauri-plugin-shell `open` 端点作用域校验绕过（CRITICAL，issue #668）。
+tauri-plugin-shell = "2.3.5"
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
