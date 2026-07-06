@@ -66,6 +66,12 @@ pub enum VolcengineASRError {
     /// 文案简短，原因在文档里说明，capsule 不堆长引导。
     #[error("凭据被拒（{0}）")]
     AuthRejected(u16),
+    /// WebSocket 握手阶段服务端返回 429：请求过多 / 账号被限流。
+    /// 单独归类而非落入 `ConnectionFailed` —— 后者会被 `connect_with_retry` 当网络抖动
+    /// 立即重试 3 次，反而加剧限流、且文案含糊指向「网络失败」误导用户。此类与
+    /// `AuthRejected` 一样**短路不重试**：立即回带明确文案，让用户知道是限流不是断网。
+    #[error("请求过多，账号被限流（{0}）")]
+    RateLimited(u16),
     #[error("no final result")]
     NoFinalResult,
     #[error("final result timed out")]
@@ -279,7 +285,8 @@ impl VolcengineStreamingASR {
 
     /// Connect with a per-attempt timeout and bounded retries so a poor network
     /// (hung handshake or a transient blip) doesn't kill the whole dictation.
-    /// `AuthRejected` short-circuits — bad credentials never heal on retry.
+    /// `AuthRejected` / `RateLimited` short-circuit — bad credentials never heal on
+    /// retry, and hammering a rate-limited account only makes the throttle worse.
     async fn connect_with_retry(&self, connect_id: &str) -> Result<WsStream, VolcengineASRError> {
         let mut attempt = 0usize;
         loop {
@@ -289,9 +296,7 @@ impl VolcengineStreamingASR {
                 Ok(Ok((ws, _resp))) => return Ok(ws),
                 Ok(Err(e)) => {
                     let classified = classify_connect_error(e);
-                    if matches!(classified, VolcengineASRError::AuthRejected(_))
-                        || attempt >= CONNECT_MAX_ATTEMPTS
-                    {
+                    if is_non_retryable(&classified) || attempt >= CONNECT_MAX_ATTEMPTS {
                         return Err(classified);
                     }
                     log::warn!(
@@ -741,7 +746,8 @@ fn normalized_result(json: &Value) -> Option<&Value> {
 }
 
 /// 把 tokio-tungstenite 的 connect 错误分类：握手收到 HTTP 401 / 403 → `AuthRejected`
-/// （凭据被拒，要 user 检查 App ID / Access Token / 账号资源开通状态）；其它 → 通用
+/// （凭据被拒，要 user 检查 App ID / Access Token / 账号资源开通状态）；429 →
+/// `RateLimited`（请求过多 / 限流，重试只会火上浇油，短路报明确文案）；其它 → 通用
 /// `ConnectionFailed`（DNS / TLS / 网络层）。让 capsule 文案能跟泛泛 HTTP error 区分。
 fn classify_connect_error(err: tokio_tungstenite::tungstenite::Error) -> VolcengineASRError {
     use tokio_tungstenite::tungstenite::Error as WsError;
@@ -750,8 +756,21 @@ fn classify_connect_error(err: tokio_tungstenite::tungstenite::Error) -> Volceng
         if status == 401 || status == 403 {
             return VolcengineASRError::AuthRejected(status);
         }
+        if status == 429 {
+            return VolcengineASRError::RateLimited(status);
+        }
     }
     VolcengineASRError::ConnectionFailed(err.to_string())
+}
+
+/// 握手错误是否「重试也无益」，`connect_with_retry` 据此短路。凭据被拒（401/403）
+/// 与限流（429）都属此类：前者重试不会变对，后者重试只会加剧限流。其余（网络层）
+/// 才值得在抖动时重试。
+fn is_non_retryable(err: &VolcengineASRError) -> bool {
+    matches!(
+        err,
+        VolcengineASRError::AuthRejected(_) | VolcengineASRError::RateLimited(_)
+    )
 }
 
 fn hotword_context(entries: &[DictionaryHotword]) -> Option<String> {
@@ -838,6 +857,67 @@ mod tests {
             VolcengineCredentials::default_resource_id(),
             "volc.seedasr.sauc.duration"
         );
+    }
+
+    /// 构造一个握手阶段返回给定 HTTP 状态码的 tungstenite 错误，用于分类测试。
+    fn http_ws_error(status: u16) -> tokio_tungstenite::tungstenite::Error {
+        use tokio_tungstenite::tungstenite::http::Response;
+        let resp = Response::builder()
+            .status(status)
+            .body(None)
+            .expect("build test http response");
+        tokio_tungstenite::tungstenite::Error::Http(resp)
+    }
+
+    #[test]
+    fn classify_429_is_rate_limited_not_connection_failed() {
+        let classified = classify_connect_error(http_ws_error(429));
+        assert!(
+            matches!(classified, VolcengineASRError::RateLimited(429)),
+            "429 应归类为 RateLimited 而非 ConnectionFailed，避免被当网络抖动重试"
+        );
+    }
+
+    #[test]
+    fn rate_limited_is_non_retryable_like_auth_rejected() {
+        assert!(
+            is_non_retryable(&VolcengineASRError::RateLimited(429)),
+            "限流不可重试：重试只会加剧限流"
+        );
+        assert!(
+            is_non_retryable(&VolcengineASRError::AuthRejected(401)),
+            "凭据被拒不可重试"
+        );
+    }
+
+    #[test]
+    fn network_errors_stay_retryable() {
+        // 通用网络失败仍应重试（抖动可恢复）——不能被误判成短路。
+        assert!(!is_non_retryable(&VolcengineASRError::ConnectionFailed(
+            "dns fail".into()
+        )));
+        assert!(!is_non_retryable(&VolcengineASRError::FinalResultTimeout));
+    }
+
+    #[test]
+    fn classify_401_403_still_auth_rejected() {
+        // 回归：新增 429 分类不影响既有 401 / 403 → AuthRejected。
+        assert!(matches!(
+            classify_connect_error(http_ws_error(401)),
+            VolcengineASRError::AuthRejected(401)
+        ));
+        assert!(matches!(
+            classify_connect_error(http_ws_error(403)),
+            VolcengineASRError::AuthRejected(403)
+        ));
+    }
+
+    #[test]
+    fn rate_limited_message_mentions_throttling_not_network() {
+        // 文案必须明确指向「限流/请求过多」，不是含糊的「网络失败」。
+        let msg = VolcengineASRError::RateLimited(429).to_string();
+        assert!(msg.contains("限流") || msg.contains("请求过多"), "文案: {msg}");
+        assert!(!msg.contains("网络"), "限流文案不应误导为网络失败: {msg}");
     }
 
     #[tokio::test]

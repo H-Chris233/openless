@@ -54,7 +54,7 @@ export const zhCN = {
     mobileRecordLabel: '录音按钮',
     mobileRecordStart: '开始录音',
     mobileRecordStop: '结束并提交',
-    composerPlaceholder: '输入问题，Enter 发送，Shift+Enter 换行',
+    composerPlaceholder: '输入问题，Enter 发送',
     composerSend: '发送',
     statusIdle: '按 {{recordHotkey}} 提问',
     statusRecording: '录音中',
@@ -64,6 +64,7 @@ export const zhCN = {
   },
   lessComputer: {
     title: 'Less Computer',
+    subtitle: '想让电脑做什么？',
     you: '你',
     working: '正在操控电脑…',
     tool: '调用了 {{name}}',

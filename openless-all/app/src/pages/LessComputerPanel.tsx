@@ -1,40 +1,74 @@
 // LessComputerPanel.tsx — Less Computer 语音 Agent 浮窗（窗口 label = "less-computer"）。
 //
-// 把「按住专用键说话 → Agent 操控电脑」的交互渲染成 agent 输出流（Codex 风格）：
-//   - 用户气泡：语音指令转写（`user` 事件，开启新会话并清空旧内容）。
-//   - 助手输出：文本与工具调用**按到达顺序交错**成一条文档流 —— 文本段落之间
-//     穿插工具行（纯文字，无图标无边框），进行中文字扫光，结束后停光继续往下。
-//   - 内联审批卡（`approval`）：高风险动作被护栏拦下时弹 Approve / Deny。
-//   - 完成（`completed`）落成本；出错（`error`）红色样式。
-// 视觉：shadcn Card 消息窗（主题 token 自适应浅/深色）。
+// 结构 = 官方 shadcn base 组件文档 message-scroller-demo **同款骨架**：
+//   MessageScrollerProvider → Card（CardHeader 标题/副行/CardAction ✕ →
+//   CardContent(p-0) 内 MessageScroller / Empty 空状态 → CardFooter 内
+//   InputGroup 输入组）。组件源码 1:1 来自官方 registry（components/chat/ui/，
+//   仅按 CLI 规则改 import 路径），行为来自 @shadcn/react 官方 primitive。
 //
-// 窗口随内容自适应高度（measure content → setSize），不可拖动、置顶。
-// 仅 macOS 实际触发（后端只在 macOS 注册 Less Computer 热键并 emit 事件）。
+// 「电脑操控」形态：不带头像 —— 用户指令 = Bubble align="end"（官方 bubble-demo
+// 同款）；工具调用 = Marker + Spinner/✓ + shimmer（官方 marker-demo 同款）；
+// 上下文压缩 = Marker separator；思考 = 与转译胶囊一模一样的 SiriGL 流体圆点。
+//
+// 事件流：`user`（fresh=true 清空重开）→ delta/tool/compaction/approval 交错 →
+// completed（落成本）/ error / cancelled。浮窗首次创建时后端事件可能先于
+// listener 注册到达（webview 冷加载），丢掉 user 事件后其余事件必须自愈补轮，
+// 不能对空轮次静默丢弃（真机「后端在跑、前端一片空白」的根因）。
+//
+// 窗口固定尺寸（Rust 侧创建即定死 420×540），内容只在滚动框内滚动。
 // 关闭：Esc / ✕ → less_computer_window_dismiss → 后端隐藏窗口。
 
-import {
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type CSSProperties,
-} from 'react';
+import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import DOMPurify from 'dompurify';
-import { useRafThrottle } from '../lib/useRafThrottle';
-import { Marker, MarkerContent, MarkerIcon } from '../components/Marker';
-import { MessageScroller } from '../components/MessageScroller';
-import { ThinkingDots } from '../components/ThinkingDots';
-import { SiriGL } from '../components/SiriGL';
+import { ArrowUpIcon, CheckIcon, MessageCircleDashedIcon, XIcon } from 'lucide-react';
 import {
+  MessageScroller,
+  MessageScrollerButton,
+  MessageScrollerContent,
+  MessageScrollerItem,
+  MessageScrollerProvider,
+  MessageScrollerViewport,
+} from '../components/chat/ui/message-scroller';
+import {
+  Card,
+  CardAction,
+  CardContent,
+  CardDescription,
+  CardFooter,
+  CardHeader,
+  CardTitle,
+} from '../components/chat/ui/card';
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from '../components/chat/ui/empty';
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupButton,
+  InputGroupInput,
+} from '../components/chat/ui/input-group';
+import { Marker, MarkerContent, MarkerIcon } from '../components/chat/ui/marker';
+import { Bubble, BubbleContent } from '../components/chat/ui/bubble';
+import { Button } from '../components/chat/ui/button';
+import { Spinner } from '../components/chat/ui/spinner';
+import { ThinkingOrb } from '../components/chat/avatars';
+import { AssistantMarkdown } from '../components/chat/markdown';
+import { useChatPanelLifecycle } from '../components/chat/lifecycle';
+import { cn } from '../components/chat/lib/utils';
+import {
+  chatPanelFocusKeyboard,
   isTauri,
   lessComputerApprove,
   lessComputerSubmitText,
+  lessComputerSync,
   lessComputerWindowDismiss,
-  lessComputerWindowResize,
 } from '../lib/ipc';
 import type { CapsulePayload, LessComputerEvent } from '../lib/types';
-import { renderQaMarkdown, renderQaPlainText } from '../lib/qaMarkdown';
+import '../components/chat/chat.css';
 
 type RunStatus = 'idle' | 'working' | 'done' | 'error' | 'cancelled';
 
@@ -75,10 +109,23 @@ interface Turn {
   costUsd: number | null;
 }
 
-/** 对 turns 数组「最后一轮」做不可变更新。 */
+function emptyTurn(user: string): Turn {
+  return { user, segments: [], status: 'working', errorMsg: '', costUsd: null };
+}
+
+/**
+ * 自愈：浮窗首次创建时 webview 冷加载，后端的 `user` 事件常常先于 listener
+ * 注册被丢掉；随后的 delta/tool/收尾若发现没有任何轮次，就地补一轮（用户文案
+ * 缺失，只是不显示指令气泡），保证输出照常渲染而不是永久空白。
+ */
+function ensureTurn(turns: Turn[]): Turn[] {
+  return turns.length > 0 ? turns : [emptyTurn('')];
+}
+
+/** 对 turns 数组「最后一轮」做不可变更新（空数组先自愈补轮）。 */
 function updateLastTurn(turns: Turn[], fn: (t: Turn) => Turn): Turn[] {
-  if (turns.length === 0) return turns;
-  return [...turns.slice(0, -1), fn(turns[turns.length - 1])];
+  const list = ensureTurn(turns);
+  return [...list.slice(0, -1), fn(list[list.length - 1])];
 }
 
 /** 把流里还在扫光的工具行停下来（下一个事件到达 = 上一个工具已结束）。 */
@@ -87,24 +134,33 @@ function settleRunningTools(segments: Segment[]): Segment[] {
   return segments.map(s => (s.kind === 'tool' && s.running ? { ...s, running: false } : s));
 }
 
-const WINDOW_MIN_HEIGHT = 140;
-const WINDOW_MAX_HEIGHT = 520;
-/** ChatHeader 的固定高度（标题 + 状态行两行），窗口自适应测量时加上它。 */
-const TOOLBAR_HEIGHT = 56;
-/** 底部输入区（Composer）的固定高度，窗口自适应测量时加上它。 */
-const COMPOSER_HEIGHT = 58;
-
-// 浏览器预览（vite dev，非 Tauri）：?window=less-computer&demo=1 注入一轮演示对话，
-// 覆盖「文本 → 扫光工具行 → 文本 → 已停光工具行 → 审批卡」的交错流，方便调样式。
+// 浏览器预览（vite dev，非 Tauri）：?window=less-computer&demo=1 注入两轮演示对话
+// （第一轮完成态含成本行；第二轮进行中，覆盖「文本 → 工具行 → 压缩行 → 进行中
+// 工具行 → 审批卡」交错流与新轮次锚定），方便调样式。
 function getPreviewTurns(): Turn[] {
   if (isTauri || typeof window === 'undefined') return [];
   if (new URLSearchParams(window.location.search).get('demo') !== '1') return [];
   return [
     {
+      user: '看一下下载文件夹里最大的三个文件是什么',
+      segments: [
+        { kind: 'tool', name: 'Bash', running: false },
+        {
+          kind: 'text',
+          content:
+            '最大的三个文件：\n1. `Xcode_26.5.xip` — 12.4 GB\n2. `ubuntu-24.04.iso` — 5.8 GB\n3. `设计素材包.zip` — 2.1 GB',
+        },
+      ],
+      status: 'done',
+      errorMsg: '',
+      costUsd: 0.012,
+    },
+    {
       user: '帮我把桌面上的截图整理到「本周素材」文件夹',
       segments: [
         { kind: 'text', content: '好的，我先看一下桌面上有哪些截图。' },
         { kind: 'tool', name: 'Bash', running: false },
+        { kind: 'compaction' },
         { kind: 'text', content: '找到 6 张截图，正在移动并按日期重命名…' },
         { kind: 'tool', name: 'Bash', running: true },
         {
@@ -121,28 +177,67 @@ function getPreviewTurns(): Turn[] {
   ];
 }
 
+/** macOS movableByWindowBackground 拖动把手（header 区域整条可拖，普通箭头指针）。 */
+const drag = { 'data-tauri-drag-region': true } as const;
+
+/** 已应用事件的最大 seq。放模块级而不是 effect 闭包：StrictMode/HMR 重挂载时
+ *  组件 state 保留，若水位归零会把同一批积压重放两遍、轮次翻倍。后端 seq 全局
+ *  单调不回卷（新会话只清缓冲），webview 整页重载时本变量归零、恰好与「需要
+ *  完整重放」对齐。 */
+let lcAppliedSeq = 0;
+
 export function LessComputerPanel() {
   const { t } = useTranslation();
   // 连续对话：每按一次说话键追加一轮（除非后端标记 fresh=新会话则清空重开）。
   const [turns, setTurns] = useState<Turn[]>(getPreviewTurns);
-  // 新会话计数：fresh 时 +1，作为 shell 的 key 重放入场动画 —— 浮窗是常驻
-  // webview（hide/show 复用），没有这个的话再次唤起时内容直接闪现，很突兀。
+  // 新会话计数：fresh 时 +1，作为壳 key 重放入场动画 —— 浮窗是常驻 webview
+  // （hide/show 复用），没有这个的话再次唤起时内容直接闪现，很突兀。
   const [sessionSeq, setSessionSeq] = useState(0);
+  // 出现/消失动画：后端 show/hide 发 chat-panel:shown / chat-panel:closing。
+  const { enterEpoch, closing } = useChatPanelLifecycle();
 
   // ── 后端事件订阅（mount 一次）────────────────────────────────────────
+  //
+  // 冷加载竞态补偿：webview 首次创建需要数百毫秒，后端在此期间 emit 的事件
+  // （尤其首条 user —— 用户说的那句话）到不了 listener。协议：
+  //   1) 先注册 listener，实时事件暂存 pending（不直接应用）；
+  //   2) 调 less_computer_sync 拉后端缓冲，按 seq 升序全量重放；
+  //   3) 放行 pending 与后续实时流，seq ≤ 已应用最大值的重复事件丢弃。
+  // 无 seq 的事件（后端缓冲锁异常的降级路径）无条件应用。
   useEffect(() => {
     if (!isTauri) return;
     let unlisten: (() => void) | undefined;
     let cancelled = false;
+    let synced = false;
+    const pending: LessComputerEvent[] = [];
+    const applyDeduped = (ev: LessComputerEvent) => {
+      if (typeof ev.seq === 'number') {
+        if (ev.seq <= lcAppliedSeq) return;
+        lcAppliedSeq = ev.seq;
+      }
+      applyEvent(ev);
+    };
     (async () => {
       try {
         const { listen } = await import('@tauri-apps/api/event');
-        const handle = await listen<LessComputerEvent>(
-          'less-computer:event',
-          event => applyEvent(event.payload),
-        );
-        if (cancelled) handle();
-        else unlisten = handle;
+        const handle = await listen<LessComputerEvent>('less-computer:event', event => {
+          if (synced) applyDeduped(event.payload);
+          else pending.push(event.payload);
+        });
+        if (cancelled) {
+          handle();
+          return;
+        }
+        unlisten = handle;
+        const backlog = await lessComputerSync().catch(error => {
+          console.error('[LessComputer] sync failed', error);
+          return [] as LessComputerEvent[];
+        });
+        if (cancelled) return;
+        for (const ev of backlog) applyDeduped(ev);
+        synced = true;
+        for (const ev of pending) applyDeduped(ev);
+        pending.length = 0;
       } catch (error) {
         console.error('[LessComputer] listener setup failed', error);
       }
@@ -157,14 +252,7 @@ export function LessComputerPanel() {
     switch (ev.kind) {
       case 'user': {
         // 一轮新对话。fresh=true（后端无可续会话→新会话）则清空历史重开；否则追加为后续轮次。
-        const fresh: Turn = {
-          user: ev.text,
-          segments: [],
-          status: 'working',
-          errorMsg: '',
-          costUsd: null,
-        };
-        setTurns(prev => (ev.fresh ? [fresh] : [...prev, fresh]));
+        setTurns(prev => (ev.fresh ? [emptyTurn(ev.text)] : [...prev, emptyTurn(ev.text)]));
         if (ev.fresh) setSessionSeq(seq => seq + 1);
         break;
       }
@@ -179,13 +267,18 @@ export function LessComputerPanel() {
             if (last?.kind === 'text') {
               return {
                 ...tn,
+                status: 'working',
                 segments: [
                   ...segments.slice(0, -1),
                   { ...last, content: last.content + ev.text },
                 ],
               };
             }
-            return { ...tn, segments: [...segments, { kind: 'text', content: ev.text }] };
+            return {
+              ...tn,
+              status: 'working',
+              segments: [...segments, { kind: 'text', content: ev.text }],
+            };
           }),
         );
         break;
@@ -193,6 +286,7 @@ export function LessComputerPanel() {
         setTurns(prev =>
           updateLastTurn(prev, tn => ({
             ...tn,
+            status: 'working',
             segments: [
               ...settleRunningTools(tn.segments),
               { kind: 'tool', name: ev.name, running: true },
@@ -212,6 +306,7 @@ export function LessComputerPanel() {
         setTurns(prev =>
           updateLastTurn(prev, tn => ({
             ...tn,
+            status: 'working',
             segments: [
               ...settleRunningTools(tn.segments),
               { kind: 'approval', token: ev.token, command: ev.command, reason: ev.reason },
@@ -282,56 +377,93 @@ export function LessComputerPanel() {
     return () => window.removeEventListener('keydown', onKey, true);
   }, []);
 
-  // ── 内容自适应：MessageScroller 的 ResizeObserver 报告内容高（含 markdown 渲染
-  // 引起的变化）→ 回传后端 clamp + bottom-anchored 摆放。超出 max 则内部滚动。
-  const onContentResize = (height: number) => {
-    if (!isTauri) return;
-    const target = Math.min(
-      WINDOW_MAX_HEIGHT,
-      Math.max(WINDOW_MIN_HEIGHT, height + TOOLBAR_HEIGHT + COMPOSER_HEIGHT),
-    );
-    void lessComputerWindowResize(target);
-  };
-
   const working = turns.some(tn => tn.status === 'working');
 
+  // ── 官方 message-scroller-demo 同款骨架 ─────────────────────────────
   return (
-    // key=sessionSeq：新会话唤起时重放 lc-shell-in 入场（浮窗窗口复用不重挂载）。
-    <div key={sessionSeq} className="lc-shell lc-shell-in" style={shellStyle}>
-      {/* 消息弹窗结构（用户指定的聊天卡片规范）：header 常驻标题 + 工作状态
-          （「正在操控电脑…」扫光）在上方显示，右上角 ✕。 */}
-      <ChatHeader
-        title={t('lessComputer.title')}
-        status={working ? t('lessComputer.working') : undefined}
-        closeLabel={t('lessComputer.closeTooltip')}
-        onClose={onClose}
-      />
-      {/* 滚动行为遵循聊天滚动标准（MessageScroller）：新轮次锚定视口顶部、
-          读者离底不跟随、屏外增长浮现「跳到最新」。 */}
-      <MessageScroller
-        anchorKey={`${sessionSeq}-${turns.length}`}
-        defaultScrollPosition="last-anchor"
-        busy={working}
-        onContentResize={onContentResize}
-        jumpLabel={t('lessComputer.jumpToLatest')}
-        style={scrollStyle}
-        contentStyle={contentStyle}
+    <MessageScrollerProvider
+      autoScroll
+      defaultScrollPosition="last-anchor"
+      scrollPreviousItemPeek={18}
+    >
+      <Card
+        key={`${sessionSeq}-${enterEpoch}`}
+        className={cn(
+          'olchat-shell olchat-shell-in h-screen w-full gap-0',
+          closing && 'olchat-shell-out',
+        )}
       >
-        {turns.map((turn, ti) => (
-          <TurnView key={ti} turn={turn} onApproval={onApproval} t={t} />
-        ))}
-      </MessageScroller>
-      <Composer working={working} t={t} />
-    </div>
+        <CardHeader {...drag} className="gap-1 border-b">
+          <CardTitle {...drag}>{t('lessComputer.title')}</CardTitle>
+          <CardDescription {...drag}>
+            {working ? (
+              <span className="shimmer" role="status">
+                {t('lessComputer.working')}
+              </span>
+            ) : (
+              t('lessComputer.subtitle')
+            )}
+          </CardDescription>
+          <CardAction>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              onClick={onClose}
+              onMouseDown={event => {
+                event.preventDefault();
+                event.stopPropagation();
+              }}
+              title={t('lessComputer.closeTooltip')}
+              aria-label={t('lessComputer.closeTooltip')}
+            >
+              <XIcon />
+            </Button>
+          </CardAction>
+        </CardHeader>
+        <CardContent className="flex-1 overflow-hidden p-0">
+          {turns.length === 0 ? (
+            <Empty className="h-full">
+              <EmptyHeader>
+                <EmptyMedia variant="icon">
+                  <MessageCircleDashedIcon />
+                </EmptyMedia>
+                <EmptyTitle>{t('lessComputer.title')}</EmptyTitle>
+                <EmptyDescription>{t('lessComputer.subtitle')}</EmptyDescription>
+              </EmptyHeader>
+            </Empty>
+          ) : (
+            <MessageScroller>
+              <MessageScrollerViewport>
+                <MessageScrollerContent
+                  aria-busy={working || undefined}
+                  className="p-(--card-spacing)"
+                >
+                  {turns.map((turn, ti) => (
+                    <TurnView key={ti} index={ti} turn={turn} onApproval={onApproval} t={t} />
+                  ))}
+                </MessageScrollerContent>
+              </MessageScrollerViewport>
+              <MessageScrollerButton aria-label={t('lessComputer.jumpToLatest')} />
+            </MessageScroller>
+          )}
+        </CardContent>
+        <CardFooter className="flex-col gap-2">
+          <Composer working={working} t={t} />
+        </CardFooter>
+      </Card>
+    </MessageScrollerProvider>
   );
 }
 
-/**
- * 底部输入区（shadcn chat demo 的 CardFooter 复刻）：打字输入 + 发送按钮。
- * 语音状态内嵌（用户拍板）：按住 Less Computer 键说话时这里变成胶囊同款
- * 彩虹光条（SiriGL wave，真实电平驱动），转写/思考时变成六点圆环 —— 通过监听
- * capsule:state 的 operating 会话获得状态与电平，与屏幕下方胶囊同一数据源。
- */
+// ── 底部输入区：官方 demo 同款 InputGroup，打字 + 语音两种形式完整 ────
+//
+// · 打字：单行输入 + 右下发送（官方 demo 的 block-end addon 布局）；Enter 走
+//   表单提交；IME 组合中的 Enter（选字确认）不触发（isComposing/keyCode 229
+//   守卫）。点进输入框时 chat_panel_focus_keyboard 让非激活面板成为 key window
+//   （不激活 app，主窗口不动）。
+// · 语音：录音红光、转译思考黑光绕输入组一圈圈跑（olchat-ring），输入框本体
+//   保持可见；指令落定（user 事件到、agent 开跑）即停 —— 监听 capsule:state
+//   的 operating 会话获得状态，与屏幕下方胶囊同一数据源。
 function Composer({
   working,
   t,
@@ -340,9 +472,19 @@ function Composer({
   t: ReturnType<typeof useTranslation>['t'];
 }) {
   const [text, setText] = useState('');
-  const [voice, setVoice] = useState<{ state: 'recording' | 'thinking'; level: number } | null>(
-    null,
-  );
+  const [voice, setVoice] = useState<
+    { state: 'recording'; level: number } | { state: 'thinking' } | null
+  >(null);
+  // 输入组环形光：录音红光 → 转译黑光 → 指令落定（agent 已在跑）即停。
+  const ring =
+    voice?.state === 'recording'
+      ? 'recording'
+      : voice?.state === 'thinking' && !working
+        ? 'thinking'
+        : undefined;
+  // IME 组合期间的 Enter 是「选字确认」不是「发送」。keydown 里 isComposing
+  // 已覆盖大部分场景，keyCode 229 兜底 WebKit 老行为。
+  const composingRef = useRef(false);
 
   useEffect(() => {
     if (!isTauri) return;
@@ -354,10 +496,13 @@ function Composer({
         const handle = await listen<CapsulePayload>('capsule:state', event => {
           const p = event.payload;
           if (p.operating !== true) return;
-          if (p.state === 'recording') setVoice({ state: 'recording', level: p.level ?? 0 });
-          else if (p.state === 'transcribing' || p.state === 'polishing')
-            setVoice({ state: 'thinking', level: 0 });
-          else setVoice(null);
+          if (p.state === 'recording') {
+            setVoice({ state: 'recording', level: p.level ?? 0 });
+          } else if (p.state === 'transcribing' || p.state === 'polishing') {
+            setVoice(prev => (prev?.state === 'thinking' ? prev : { state: 'thinking' }));
+          } else {
+            setVoice(null);
+          }
         });
         if (cancelled) handle();
         else unlisten = handle;
@@ -378,254 +523,182 @@ function Composer({
     void lessComputerSubmitText(trimmed);
   };
 
+  const onKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (event.key !== 'Enter') return;
+    if (composingRef.current || event.nativeEvent.isComposing || event.keyCode === 229) {
+      event.preventDefault();
+    }
+  };
+
   return (
-    <div style={composerStyle}>
-      {voice ? (
-        <div style={{ flex: 1, height: 42, position: 'relative' }}>
-          {voice.state === 'recording' ? (
-            <SiriGL
-              mode="wave"
-              level={voice.level}
-              resolved
-              style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}
-            />
-          ) : (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, height: '100%' }}>
-              <ThinkingDots size={18} />
-              <span style={{ fontSize: 12, color: 'var(--ol-ink-3)', fontWeight: 500 }}>
-                {t('lessComputer.working')}
-              </span>
-            </div>
-          )}
-        </div>
-      ) : (
-        <>
-          <textarea
-            value={text}
-            onChange={event => setText(event.target.value)}
-            onKeyDown={event => {
-              if (event.key === 'Enter' && !event.shiftKey) {
-                event.preventDefault();
-                send();
-              }
-            }}
-            placeholder={t('lessComputer.inputPlaceholder')}
-            rows={1}
-            style={composerInputStyle}
-          />
-          <button
-            onClick={send}
-            disabled={!text.trim() || working}
-            aria-label={t('lessComputer.send')}
-            title={t('lessComputer.send')}
-            style={{
-              ...sendButtonStyle,
-              opacity: !text.trim() || working ? 0.45 : 1,
-            }}
+    <form
+      onSubmit={event => {
+        event.preventDefault();
+        send();
+      }}
+      className="w-full"
+    >
+      <InputGroup className="olchat-ring" data-ring={ring}>
+        <InputGroupInput
+          value={text}
+          placeholder={t('lessComputer.inputPlaceholder')}
+          onChange={event => setText(event.currentTarget.value)}
+          onKeyDown={onKeyDown}
+          onCompositionStart={() => {
+            composingRef.current = true;
+          }}
+          onCompositionEnd={() => {
+            composingRef.current = false;
+          }}
+          onFocus={() => void chatPanelFocusKeyboard()}
+          onPointerDown={() => void chatPanelFocusKeyboard()}
+        />
+        <InputGroupAddon align="block-end" className="pt-1">
+          <InputGroupButton
+            type="submit"
+            variant="default"
+            size="icon-sm"
+            className="ml-auto"
+            disabled={working || !text.trim()}
           >
-            <svg width="13" height="13" viewBox="0 0 13 13" aria-hidden>
-              <path
-                d="M6.5 11V2M2.5 6 6.5 2l4 4"
-                stroke="currentColor"
-                strokeWidth="1.7"
-                fill="none"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
-          </button>
-        </>
-      )}
-    </div>
+            <ArrowUpIcon />
+            <span className="sr-only">{t('lessComputer.send')}</span>
+          </InputGroupButton>
+        </InputGroupAddon>
+      </InputGroup>
+    </form>
   );
 }
 
-// ── 子组件 ────────────────────────────────────────────────────────────
+// ── 消息行 ────────────────────────────────────────────────────────────
 
-/** 渲染单轮对话：用户气泡 → 输出流（文本/工具行/审批卡交错）→ 收尾(错误/花费)。 */
+/** 渲染单轮对话：用户气泡行（锚点，无头像）→ 输出流（文本 / Marker 工具行 /
+ *  separator 压缩行 / 审批卡交错）→ 收尾（思考圆点 / 错误 / 花费）。
+ *  自愈补出的轮次没有用户文案，跳过指令气泡、锚点落在输出行上。 */
 function TurnView({
+  index,
   turn,
   onApproval,
   t,
 }: {
+  index: number;
   turn: Turn;
   onApproval: (token: string, approved: boolean) => void;
   t: ReturnType<typeof useTranslation>['t'];
 }) {
+  const hasUser = turn.user.trim().length > 0;
   const lastSegment = turn.segments[turn.segments.length - 1];
-  // 等待指示只在流里没有「自带活动感」的内容时出现：整轮还没输出，或审批已决、
-  // 后端正在带着授权重跑。running 工具行的扫光本身就是活动指示。
+  // 思考指示只在流里没有「自带活动感」的内容时出现：整轮还没输出，或审批已决、
+  // 后端正在带着授权重跑。进行中工具行的 Spinner + 扫光本身就是活动指示。
   const waiting =
     turn.status === 'working' &&
     (turn.segments.length === 0 ||
       (lastSegment?.kind === 'approval' && lastSegment.decision != null));
+  const hasAssistantRow =
+    turn.segments.length > 0 ||
+    waiting ||
+    turn.status === 'error' ||
+    turn.status === 'cancelled' ||
+    (turn.status === 'done' && turn.costUsd != null);
   return (
     <>
-      <UserBubble text={turn.user} label={t('lessComputer.you')} />
-      {turn.segments.map((segment, i) => {
-        if (segment.kind === 'text') {
-          const streaming =
-            turn.status === 'working' && i === turn.segments.length - 1;
-          return <AssistantText key={`s${i}`} markdown={segment.content} streaming={streaming} />;
-        }
-        if (segment.kind === 'tool') {
-          return (
-            <ToolLine
-              key={`s${i}`}
-              label={t('lessComputer.tool', { name: segment.name })}
-              running={segment.running}
-            />
-          );
-        }
-        if (segment.kind === 'compaction') {
-          return <CompactionLine key={`s${i}`} label={t('lessComputer.compaction')} />;
-        }
-        return <ApprovalRow key={segment.token} card={segment} onDecide={onApproval} t={t} />;
-      })}
-      {waiting && <WorkingRow label={t('lessComputer.working')} />}
-      {turn.status === 'error' && <ErrorRow message={turn.errorMsg || t('lessComputer.error')} />}
-      {turn.status === 'cancelled' && <CostRow label={t('common.cancelled')} />}
-      {turn.status === 'done' && turn.costUsd != null && (
-        <CostRow label={t('lessComputer.cost', { cost: turn.costUsd.toFixed(3) })} />
+      {/* 用户指令 = 新轮次锚点行。电脑操控形态不带头像，右侧主色气泡。 */}
+      {hasUser && (
+        <MessageScrollerItem messageId={`t${index}-user`} scrollAnchor className="olchat-enter">
+          <Bubble align="end">
+            <BubbleContent>{turn.user}</BubbleContent>
+          </Bubble>
+        </MessageScrollerItem>
+      )}
+      {hasAssistantRow && (
+        <MessageScrollerItem messageId={`t${index}-assistant`} scrollAnchor={!hasUser}>
+          <div className="flex min-w-0 flex-col gap-3">
+            {turn.segments.map((segment, i) => {
+              if (segment.kind === 'text') {
+                const streaming =
+                  turn.status === 'working' && i === turn.segments.length - 1;
+                return (
+                  <div key={`s${i}`} className="olchat-enter">
+                    <AssistantMarkdown markdown={segment.content} streaming={streaming} />
+                  </div>
+                );
+              }
+              if (segment.kind === 'tool') {
+                return (
+                  <ToolMarker
+                    key={`s${i}`}
+                    label={t('lessComputer.tool', { name: segment.name })}
+                    running={segment.running}
+                  />
+                );
+              }
+              if (segment.kind === 'compaction') {
+                return <CompactionMarker key={`s${i}`} label={t('lessComputer.compaction')} />;
+              }
+              return (
+                <ApprovalCard key={segment.token} card={segment} onDecide={onApproval} t={t} />
+              );
+            })}
+            {waiting && <WorkingRow label={t('lessComputer.working')} />}
+            {turn.status === 'error' && (
+              <Bubble variant="destructive" className="olchat-enter">
+                <BubbleContent>{turn.errorMsg || t('lessComputer.error')}</BubbleContent>
+              </Bubble>
+            )}
+            {turn.status === 'cancelled' && (
+              <Marker>
+                <MarkerContent className="font-mono text-[11px]">
+                  {t('common.cancelled')}
+                </MarkerContent>
+              </Marker>
+            )}
+            {turn.status === 'done' && turn.costUsd != null && (
+              <Marker>
+                <MarkerContent className="font-mono text-[11px]">
+                  {t('lessComputer.cost', { cost: turn.costUsd.toFixed(3) })}
+                </MarkerContent>
+              </Marker>
+            )}
+          </div>
+        </MessageScrollerItem>
       )}
     </>
   );
 }
 
 /**
- * 聊天卡片头（消息弹窗规范）：标题 + 工作状态行（「正在操控电脑…」扫光）常驻上方，
- * 右上角 ✕。整条作为拖动把手：按住空白处可把聊天框拖到屏幕任意位置。
+ * 工具调用标签：官方 marker-demo 同款 —— 进行中 = Marker role="status" +
+ * MarkerIcon Spinner + MarkerContent shimmer；结束 = ✓ + 淡字。
  */
-function ChatHeader({
-  title,
-  status,
-  closeLabel,
-  onClose,
-}: {
-  title: string;
-  status?: string;
-  closeLabel: string;
-  onClose: () => void;
-}) {
+function ToolMarker({ label, running }: { label: string; running: boolean }) {
   return (
-    <div data-tauri-drag-region style={{ ...headerStyle, cursor: 'grab' }}>
-      <div data-tauri-drag-region style={{ flex: 1, minWidth: 0 }}>
-        <div data-tauri-drag-region style={headerTitleStyle}>{title}</div>
-        <div
-          data-tauri-drag-region
-          role={status ? 'status' : undefined}
-          className={status ? 'lc-tool-shimmer' : undefined}
-          style={headerStatusStyle}
-        >
-          {status ?? ' '}
-        </div>
-      </div>
-      <button
-        onClick={onClose}
-        onMouseDown={(event) => {
-          event.preventDefault();
-          event.stopPropagation();
-        }}
-        title={closeLabel}
-        aria-label={closeLabel}
-        style={closeBtnStyle}
-      >
-        <svg width="11" height="11" viewBox="0 0 11 11">
-          <path
-            d="M1.5 1.5l8 8M9.5 1.5l-8 8"
-            stroke="currentColor"
-            strokeWidth="1.6"
-            strokeLinecap="round"
-          />
-        </svg>
-      </button>
-    </div>
-  );
-}
-
-function UserBubble({ text, label }: { text: string; label: string }) {
-  return (
-    // data-scroll-anchor：用户消息是新轮次的锚点行（MessageScroller 把它定位到视口顶部附近）。
-    <div
-      className="lc-enter"
-      data-scroll-anchor
-      style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 3 }}
-    >
-      <span style={roleLabelStyle}>{label}</span>
-      <div style={userBubbleStyle}>{text}</div>
-    </div>
-  );
-}
-
-/** 助手文本段：无气泡的文档流（agent 输出风格），流式时末尾带光标。 */
-function AssistantText({ markdown, streaming }: { markdown: string; streaming: boolean }) {
-  // 按帧率节流：流式回复逐 token 全量 parse + DOMPurify 是 O(n²)，长回复越来越卡。
-  const throttled = useRafThrottle(markdown);
-  const html = useMemo(() => {
-    let rendered: string;
-    try {
-      rendered = renderQaMarkdown(throttled);
-    } catch (error) {
-      console.error('[LessComputer] markdown render failed', error);
-      rendered = renderQaPlainText(String(throttled ?? ''));
-    }
-    // 兜底再消毒：qaMarkdown 已转义 raw HTML token，这里 DOMPurify 多一道防线，
-    // 即便上游渲染逻辑回归也不会把恶意标记注入 DOM。
-    return DOMPurify.sanitize(rendered, { ADD_ATTR: ['target', 'rel'] });
-  }, [throttled]);
-  return (
-    <div className="lc-enter" style={{ display: 'flex', flexDirection: 'column', alignItems: 'stretch', gap: 3 }}>
-      <div
-        className="lc-answer"
-        style={assistantTextStyle}
-        // eslint-disable-next-line react/no-danger
-        dangerouslySetInnerHTML={{ __html: html }}
-      />
-      {streaming && <span style={caretStyle} />}
-    </div>
-  );
-}
-
-/**
- * 工具行（Codex 式，Marker 语义）：纯文字穿插在输出流里，无图标无边框。
- * 进行中 role="status"（辅助技术播报）+ 文字扫光（background-clip:text，
- * 元素只有一行小字，重绘面积可忽略），结束后停光变普通淡字。
- */
-function ToolLine({ label, running }: { label: string; running: boolean }) {
-  return (
-    <Marker className="lc-enter" role={running ? 'status' : undefined}>
-      <MarkerContent className={running ? 'lc-tool lc-tool-shimmer' : 'lc-tool'}>
-        {label}
-      </MarkerContent>
+    <Marker className="olchat-enter" role={running ? 'status' : undefined}>
+      <MarkerIcon>{running ? <Spinner /> : <CheckIcon />}</MarkerIcon>
+      <MarkerContent className={running ? 'shimmer' : undefined}>{label}</MarkerContent>
     </Marker>
   );
 }
 
-/** 上下文压缩行：separator 变体，横贯输出流标出压缩边界（穿插在它实际发生的位置）。 */
-function CompactionLine({ label }: { label: string }) {
+/** 上下文压缩标签：官方 marker-demo 同款 separator 形态（居中标签 + 分隔线）。 */
+function CompactionMarker({ label }: { label: string }) {
   return (
-    <Marker className="lc-enter" variant="separator">
-      <MarkerContent style={{ fontSize: 11, color: 'var(--ol-ink-4)', fontWeight: 500 }}>
-        {label}
-      </MarkerContent>
+    <Marker className="olchat-enter" variant="separator">
+      <MarkerContent className="text-xs">{label}</MarkerContent>
     </Marker>
   );
 }
 
+/** 思考行：与转译胶囊一模一样的流体圆点（ThinkingOrb）+ 扫光文案。 */
 function WorkingRow({ label }: { label: string }) {
   return (
-    <Marker role="status" style={{ gap: 8 }}>
-      <MarkerIcon>
-        <ThinkingDots size={18} />
-      </MarkerIcon>
-      <MarkerContent style={{ fontSize: 12, color: 'var(--ol-ink-3)', fontWeight: 500 }}>
-        {label}
-      </MarkerContent>
-    </Marker>
+    <div className="olchat-enter flex items-center gap-2.5" role="status">
+      <ThinkingOrb size={48} />
+      <span className="shimmer text-xs font-medium">{label}</span>
+    </div>
   );
 }
 
-function ApprovalRow({
+function ApprovalCard({
   card,
   onDecide,
   t,
@@ -636,358 +709,46 @@ function ApprovalRow({
 }) {
   const decided = card.decision != null;
   return (
-    <div className="lc-enter" style={approvalCardStyle}>
-      <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--ol-ink)' }}>
+    <div className="olchat-enter flex flex-col gap-2 rounded-2xl border border-destructive/30 bg-destructive/5 p-3">
+      <div className="text-[12.5px] font-semibold text-foreground">
         {t('lessComputer.approvalTitle')}
       </div>
-      <code style={approvalCmdStyle}>{card.command}</code>
-      <div style={{ fontSize: 11.5, color: 'var(--ol-ink-3)' }}>{card.reason}</div>
+      <code className="rounded-md bg-muted px-2 py-1.5 font-mono text-[11.5px] break-all text-foreground">
+        {card.command}
+      </code>
+      <div className="text-[11.5px] text-muted-foreground">{card.reason}</div>
       {!decided && (
-        <div style={approvalRerunWarningStyle}>
+        <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-[11px] leading-snug text-amber-700">
           {t('lessComputer.approvalRerunWarning')}
         </div>
       )}
       {decided ? (
-        <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--ol-ink-3)' }}>
+        <div className="text-[11.5px] font-semibold text-muted-foreground">
           {card.decision === 'approved'
             ? t('lessComputer.approved')
             : t('lessComputer.denied')}
         </div>
       ) : (
-        <div style={{ display: 'flex', gap: 8 }}>
-          <button
-            style={denyBtnStyle}
-            onMouseDown={(event) => event.stopPropagation()}
+        <div className="flex gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            className="flex-1"
+            onMouseDown={event => event.stopPropagation()}
             onClick={() => onDecide(card.token, false)}
           >
             {t('lessComputer.deny')}
-          </button>
-          <button
-            style={approveBtnStyle}
-            onMouseDown={(event) => event.stopPropagation()}
+          </Button>
+          <Button
+            size="sm"
+            className="flex-1"
+            onMouseDown={event => event.stopPropagation()}
             onClick={() => onDecide(card.token, true)}
           >
             {t('lessComputer.approve')}
-          </button>
+          </Button>
         </div>
       )}
     </div>
   );
-}
-
-function ErrorRow({ message }: { message: string }) {
-  return (
-    <div style={errorRowStyle}>
-      <span style={{ fontSize: 12.5, color: 'var(--ol-err)', lineHeight: 1.5 }}>{message}</span>
-    </div>
-  );
-}
-
-function CostRow({ label }: { label: string }) {
-  return (
-    <Marker>
-      <MarkerContent style={costChipStyle}>{label}</MarkerContent>
-    </Marker>
-  );
-}
-
-// ── 样式（shadcn Card 消息窗语言，主题 token 自适应浅/深色 —— 用户拍板）──
-// 实底 + 细边框，不用 backdrop-filter（webview 模糊不了透明窗口背后的桌面，
-// issue #470 同款结论）。
-
-const shellStyle: CSSProperties = {
-  width: '100%',
-  height: '100vh',
-  display: 'flex',
-  flexDirection: 'column',
-  borderRadius: 14,
-  overflow: 'hidden',
-  border: '0.5px solid var(--ol-line)',
-  background: 'var(--ol-surface)',
-  boxShadow: '0 18px 44px -22px rgba(0,0,0,.4)',
-  fontFamily: 'var(--ol-font-sans)',
-  color: 'var(--ol-ink)',
-  isolation: 'isolate',
-};
-
-const headerStyle: CSSProperties = {
-  height: 56,
-  display: 'flex',
-  alignItems: 'center',
-  gap: 8,
-  padding: '0 10px 0 14px',
-  borderBottom: '0.5px solid var(--ol-line)',
-  flexShrink: 0,
-  position: 'relative',
-  zIndex: 1,
-};
-
-const headerTitleStyle: CSSProperties = {
-  fontSize: 13,
-  fontWeight: 600,
-  color: 'var(--ol-ink)',
-  lineHeight: '18px',
-  whiteSpace: 'nowrap',
-  overflow: 'hidden',
-  textOverflow: 'ellipsis',
-};
-
-/** 状态行：working 时显示「正在操控电脑…」（扫光由 lc-tool-shimmer 提供），
-    空闲时占位保持 header 高度稳定。 */
-const headerStatusStyle: CSSProperties = {
-  fontSize: 11.5,
-  fontWeight: 500,
-  lineHeight: '16px',
-  color: 'var(--ol-ink-3)',
-  whiteSpace: 'nowrap',
-  overflow: 'hidden',
-  textOverflow: 'ellipsis',
-  minHeight: 16,
-};
-
-const closeBtnStyle: CSSProperties = {
-  width: 22,
-  height: 22,
-  border: 0,
-  borderRadius: 6,
-  display: 'inline-flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  cursor: 'default',
-  padding: 0,
-  background: 'transparent',
-  color: 'var(--ol-ink-3)',
-  transition: 'background 0.16s var(--ol-motion-quick)',
-};
-
-// overflow 由 MessageScroller 的内部 viewport 接管，外层只负责占满剩余高度。
-const scrollStyle: CSSProperties = {
-  flex: 1,
-  minHeight: 0,
-  zIndex: 1,
-};
-
-const contentStyle: CSSProperties = {
-  padding: 14,
-  display: 'flex',
-  flexDirection: 'column',
-  gap: 10,
-};
-
-const roleLabelStyle: CSSProperties = {
-  fontSize: 10.5,
-  color: 'var(--ol-ink-4)',
-  fontWeight: 600,
-};
-
-const userBubbleStyle: CSSProperties = {
-  maxWidth: '85%',
-  padding: '8px 12px',
-  borderRadius: 14,
-  borderBottomRightRadius: 4,
-  background: 'var(--ol-accent-solid-bg)',
-  boxShadow: '0 2px 10px -6px rgba(37, 99, 235, 0.5)',
-  color: 'var(--ol-accent-solid-ink)',
-  fontSize: 13,
-  lineHeight: 1.55,
-  wordBreak: 'break-word',
-};
-
-/** 助手文本：无气泡的文档流。 */
-const assistantTextStyle: CSSProperties = {
-  fontSize: 13,
-  lineHeight: 1.6,
-  color: 'var(--ol-ink)',
-  wordBreak: 'break-word',
-};
-
-const caretStyle: CSSProperties = {
-  display: 'inline-block',
-  width: 6,
-  height: 12,
-  background: 'var(--ol-blue)',
-  animation: 'lc-pulse 0.9s var(--ol-motion-soft) infinite',
-  borderRadius: 1,
-};
-
-const costChipStyle: CSSProperties = {
-  fontSize: 11,
-  fontWeight: 500,
-  color: 'var(--ol-ink-4)',
-  fontFamily: 'var(--ol-font-mono)',
-};
-
-const approvalCardStyle: CSSProperties = {
-  display: 'flex',
-  flexDirection: 'column',
-  gap: 6,
-  padding: '10px 12px',
-  borderRadius: 12,
-  background: 'rgba(239, 68, 68, 0.08)',
-  border: '0.5px solid rgba(239, 68, 68, 0.28)',
-};
-
-const approvalCmdStyle: CSSProperties = {
-  fontFamily: 'var(--ol-font-mono)',
-  fontSize: 11.5,
-  color: 'var(--ol-ink)',
-  background: 'var(--ol-surface-2)',
-  borderRadius: 6,
-  padding: '5px 8px',
-  wordBreak: 'break-all',
-};
-
-const approvalRerunWarningStyle: CSSProperties = {
-  fontSize: 11,
-  lineHeight: 1.45,
-  color: 'var(--ol-warn)',
-  background: 'rgba(245, 158, 11, 0.12)',
-  border: '0.5px solid rgba(245, 158, 11, 0.30)',
-  borderRadius: 6,
-  padding: '5px 8px',
-};
-
-const approveBtnStyle: CSSProperties = {
-  flex: 1,
-  border: 0,
-  borderRadius: 8,
-  padding: '6px 10px',
-  fontSize: 12,
-  fontWeight: 600,
-  cursor: 'default',
-  background: 'var(--ol-accent-solid-bg)',
-  color: 'var(--ol-accent-solid-ink)',
-};
-
-const denyBtnStyle: CSSProperties = {
-  flex: 1,
-  borderRadius: 8,
-  padding: '6px 10px',
-  fontSize: 12,
-  fontWeight: 600,
-  cursor: 'default',
-  background: 'transparent',
-  border: '0.5px solid var(--ol-line-strong)',
-  color: 'var(--ol-ink-2)',
-};
-
-const errorRowStyle: CSSProperties = {
-  padding: '8px 12px',
-  borderRadius: 10,
-  background: 'rgba(239, 68, 68, 0.08)',
-  border: '0.5px solid rgba(239, 68, 68, 0.24)',
-};
-
-const composerStyle: CSSProperties = {
-  flexShrink: 0,
-  minHeight: COMPOSER_HEIGHT,
-  display: 'flex',
-  alignItems: 'center',
-  gap: 8,
-  padding: '8px 10px',
-  borderTop: '0.5px solid var(--ol-line)',
-  position: 'relative',
-  zIndex: 1,
-};
-
-const composerInputStyle: CSSProperties = {
-  flex: 1,
-  minWidth: 0,
-  resize: 'none',
-  border: '0.5px solid var(--ol-line-strong)',
-  borderRadius: 10,
-  padding: '9px 12px',
-  fontSize: 13,
-  lineHeight: 1.5,
-  fontFamily: 'var(--ol-font-sans)',
-  color: 'var(--ol-ink)',
-  background: 'var(--ol-surface-2)',
-  outline: 'none',
-  maxHeight: 92,
-};
-
-const sendButtonStyle: CSSProperties = {
-  width: 30,
-  height: 30,
-  borderRadius: 999,
-  border: 0,
-  flexShrink: 0,
-  display: 'inline-flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  cursor: 'default',
-  padding: 0,
-  background: 'var(--ol-accent-solid-bg)',
-  color: 'var(--ol-accent-solid-ink)',
-};
-
-const globalCss = `
-@keyframes lc-pulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50%      { opacity: 0.35; transform: scale(.94); }
-}
-/* 内容进场：工具行 / 气泡 / 审批卡出现时柔和淡入上滑，而不是直接闪出。 */
-@keyframes lc-enter {
-  from { opacity: 0; transform: translateY(6px); }
-  to   { opacity: 1; transform: translateY(0); }
-}
-/* 浮窗整体入场：新会话唤起时上滑浮现（窗口复用，靠 key 重放）。 */
-@keyframes lc-shell-in {
-  from { opacity: 0; transform: translateY(10px) scale(.985); }
-  to   { opacity: 1; transform: translateY(0) scale(1); }
-}
-.lc-shell { position: relative; }
-.lc-shell-in { animation: lc-shell-in 0.34s var(--ol-motion-spring, cubic-bezier(0.16,1,0.3,1)) both; }
-@media (prefers-reduced-motion: reduce) {
-  .lc-shell-in { animation: none; }
-}
-.lc-enter { animation: lc-enter 0.30s var(--ol-motion-soft, cubic-bezier(.16,1,.3,1)) both; }
-@media (prefers-reduced-motion: reduce) {
-  .lc-enter { animation: none; }
-}
-/* 工具行：纯文字（无图标无框）。进行中扫光，结束停光。 */
-.lc-tool {
-  font-size: 12px;
-  font-weight: 500;
-  line-height: 1.5;
-  color: var(--ol-ink-4);
-}
-.lc-tool-shimmer {
-  background-image: linear-gradient(100deg,
-    var(--ol-ink-4) 0%, var(--ol-ink-4) 35%,
-    var(--ol-blue) 50%,
-    var(--ol-ink-4) 65%, var(--ol-ink-4) 100%);
-  background-size: 220% auto;
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
-  animation: lc-shimmer 1.6s linear infinite;
-}
-@keyframes lc-shimmer {
-  0%   { background-position: 200% center; }
-  100% { background-position: -200% center; }
-}
-@media (prefers-reduced-motion: reduce) {
-  .lc-tool-shimmer { animation: none; -webkit-text-fill-color: currentColor; }
-}
-.lc-answer p        { margin: 0 0 6px; }
-.lc-answer p:last-child { margin-bottom: 0; }
-.lc-answer ul,
-.lc-answer ol       { margin: 0 0 6px; padding-left: 18px; }
-.lc-answer li       { margin: 2px 0; }
-.lc-answer code     { font-family: var(--ol-font-mono); font-size: 12px;
-                      padding: 1px 5px; border-radius: 4px;
-                      background: var(--ol-surface-2); }
-.lc-answer pre      { margin: 0 0 6px; padding: 8px 10px;
-                      border-radius: 8px; background: var(--ol-surface-2);
-                      overflow-x: auto; }
-.lc-answer pre code { padding: 0; background: transparent; }
-.lc-answer a        { color: var(--ol-blue); text-decoration: none; }
-`;
-
-if (typeof document !== 'undefined' && !document.getElementById('less-computer-panel-style')) {
-  const tag = document.createElement('style');
-  tag.id = 'less-computer-panel-style';
-  tag.textContent = globalCss;
-  document.head.appendChild(tag);
 }

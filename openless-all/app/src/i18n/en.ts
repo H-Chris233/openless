@@ -56,7 +56,7 @@ export const en: typeof zhCN = {
     mobileRecordLabel: 'record button',
     mobileRecordStart: 'Start recording',
     mobileRecordStop: 'Stop and submit',
-    composerPlaceholder: 'Type a question. Enter to send, Shift+Enter for a new line',
+    composerPlaceholder: 'Type a question. Enter to send',
     composerSend: 'Send',
     statusIdle: 'Press {{recordHotkey}} to ask',
     statusRecording: 'Recording',
@@ -66,6 +66,7 @@ export const en: typeof zhCN = {
   },
   lessComputer: {
     title: 'Less Computer',
+    subtitle: 'What should your computer do?',
     you: 'You',
     working: 'Operating…',
     tool: 'Used {{name}}',

@@ -51,7 +51,8 @@ const RENDER_SCALE = 0.75;
  */
 const WARMING_RESOLVED = 0.2;
 
-const VERTEX_SRC = 'attribute vec2 aPos; void main(){ gl_Position=vec4(aPos,0.0,1.0); }';
+// 导出给 chat/orbFeed（共享 orb 渲染源：一个 GL context 镜像到多个小头像）。
+export const VERTEX_SRC = 'attribute vec2 aPos; void main(){ gl_Position=vec4(aPos,0.0,1.0); }';
 
 const WAVE_FRAGMENT_SRC = `
 precision highp float;
@@ -130,7 +131,7 @@ void main(){
 //   2. 聚拢改为 uniform uGather 驱动的「出场」：1=六点全聚在圆心（视觉上就是
 //      wave 汇聚后的那颗光点），0=散开成环 —— 光条收拢的光点由此平滑「化开」
 //      成思考圆点，中间没有任何跳变或弹入冲击。
-const ORB_FRAGMENT_SRC = `
+export const ORB_FRAGMENT_SRC = `
 precision highp float;
 uniform vec2 iResolution; uniform float iTime;
 uniform float uGather;
@@ -282,7 +283,7 @@ function visualVoice(raw: number): number {
 }
 
 export function SiriGL({ mode, level, resolved, warming, warmupMs, speed, merging, className, style }: SiriGLProps) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const hostRef = useRef<HTMLDivElement>(null);
   // 60Hz 的 level 更新走 ref 桥接：render 只同步数值，绘制循环在 rAF 里读，
   // 不因 props 变化重建 GL 管线。
   const levelRef = useRef(0);
@@ -299,14 +300,24 @@ export function SiriGL({ mode, level, resolved, warming, warmupMs, speed, mergin
   warmupMsRef.current = warmupMs ?? 150;
 
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return undefined;
+    const host = hostRef.current;
+    if (!host) return undefined;
+    // 每次 effect 都新建 canvas：卸载时我们主动 loseContext 释放 GPU，而浏览器对
+    // 同一个 canvas 永远返回同一个（已死的）context —— React 复用 DOM 节点时
+    // （StrictMode 双挂载 / mode 切换重跑 effect）在旧 canvas 上重建管线必然全军
+    // 覆没（compile failed: null）。新 canvas = 新 context，彻底绕开。
+    const canvas = document.createElement('canvas');
+    canvas.style.cssText = 'display:block;width:100%;height:100%;pointer-events:none;';
+    host.appendChild(canvas);
     const gl = canvas.getContext('webgl', {
       alpha: true,
       premultipliedAlpha: true,
       antialias: false,
     });
-    if (!gl) return undefined;
+    if (!gl) {
+      canvas.remove();
+      return undefined;
+    }
 
     const compile = (type: number, src: string): WebGLShader | null => {
       const shader = gl.createShader(type);
@@ -323,14 +334,21 @@ export function SiriGL({ mode, level, resolved, warming, warmupMs, speed, mergin
 
     const vs = compile(gl.VERTEX_SHADER, VERTEX_SRC);
     const fs = compile(gl.FRAGMENT_SHADER, mode === 'wave' ? WAVE_FRAGMENT_SRC : ORB_FRAGMENT_SRC);
-    if (!vs || !fs) return undefined;
+    if (!vs || !fs) {
+      canvas.remove();
+      return undefined;
+    }
     const program = gl.createProgram();
-    if (!program) return undefined;
+    if (!program) {
+      canvas.remove();
+      return undefined;
+    }
     gl.attachShader(program, vs);
     gl.attachShader(program, fs);
     gl.linkProgram(program);
     if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
       console.error('[SiriGL] program link failed:', gl.getProgramInfoLog(program));
+      canvas.remove();
       return undefined;
     }
     gl.useProgram(program);
@@ -438,12 +456,13 @@ export function SiriGL({ mode, level, resolved, warming, warmupMs, speed, mergin
       gl.deleteShader(vs);
       gl.deleteShader(fs);
       gl.getExtension('WEBGL_lose_context')?.loseContext();
+      canvas.remove();
     };
   }, [mode]);
 
   return (
-    <canvas
-      ref={canvasRef}
+    <div
+      ref={hostRef}
       className={className}
       style={{ display: 'block', pointerEvents: 'none', ...style }}
       aria-hidden

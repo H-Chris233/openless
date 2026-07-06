@@ -58,7 +58,7 @@ export const ko: typeof zhCN = {
     mobileRecordLabel: '녹음 버튼',
     mobileRecordStart: '녹음 시작',
     mobileRecordStop: '종료하고 제출',
-    composerPlaceholder: '질문을 입력하세요. Enter로 보내고 Shift+Enter로 줄바꿈',
+    composerPlaceholder: '질문을 입력하세요. Enter로 보내기',
     composerSend: '보내기',
     statusIdle: '{{recordHotkey}} 로 질문',
     statusRecording: '녹음 중',
@@ -68,6 +68,7 @@ export const ko: typeof zhCN = {
   },
   lessComputer: {
     title: 'Less Computer',
+    subtitle: '컴퓨터로 무엇을 할까요?',
     you: '나',
     working: '조작 중…',
     tool: '{{name}} 사용',

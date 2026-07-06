@@ -77,6 +77,9 @@ use hotkey_loops::*;
 use polish_flow::*;
 use qa_session::*;
 
+// less_computer_sync 命令的数据源（浮窗 webview 冷加载竞态补偿，见 dictation.rs）。
+pub(crate) use dictation::less_computer_event_backlog;
+
 pub(super) fn qa_event_target() -> &'static str {
     #[cfg(target_os = "android")]
     {
@@ -1079,11 +1082,6 @@ impl Coordinator {
         close_qa_panel(&self.inner);
     }
 
-    /// 用户点 📌 切换 pinned 状态。pinned=true 时浮窗不自动隐藏。
-    pub fn qa_window_pin(&self, pinned: bool) {
-        self.inner.qa_state.lock().pinned = pinned;
-        log::info!("[coord] QA window pinned={pinned}");
-    }
 
     /// 用户点 ✕ / 按 Esc 关 Less Computer 浮窗：隐藏窗口 + 结束连续对话
     /// （下次说话开新会话，不再 --continue 续旧上下文）。
@@ -1094,13 +1092,6 @@ impl Coordinator {
         if let Some(app) = self.inner.app.lock().clone() {
             crate::hide_less_computer_window(&app);
             crate::hide_less_computer_glow(&app);
-        }
-    }
-
-    /// 前端按内容测高后回传，后端 clamp + bottom-anchored 重新摆放 Less Computer 浮窗。
-    pub fn less_computer_window_resize(&self, height: f64) {
-        if let Some(app) = self.inner.app.lock().clone() {
-            crate::resize_less_computer_window(&app, height);
         }
     }
 
@@ -1828,9 +1819,7 @@ pub(super) fn insert_via_non_tsf_fallback(
     _paste_shortcut: PasteShortcut,
 ) -> InsertStatus {
     let prefs = inner.prefs.get();
-    let sendinput_options = crate::unicode_keystroke::WindowsSendInputOptions {
-        newline_mode: prefs.windows_sendinput_newline_mode,
-    };
+    let sendinput_options = dictation::windows_sendinput_options_from_prefs(&prefs);
     let status = finish_non_tsf_insertion_fallback(
         || inner
             .inserter

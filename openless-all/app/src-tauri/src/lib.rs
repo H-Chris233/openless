@@ -102,6 +102,11 @@ const OPENLESS_BUNDLE_ID: &str = "com.openless.app";
 /// 第一次 show 时把 QA 浮窗摆到屏幕底部居中；之后的 show 不再 reposition，
 /// 让用户拖动后的位置在 hide → show 之间得以保持。详见 issue #118 v2。
 static QA_WINDOW_POSITIONED: AtomicBool = AtomicBool::new(false);
+/// 聊天面板退场动画的世代计数：hide 先发 `chat-panel:closing` 让前端播 220ms
+/// 退场动画、240ms 后才真正 hide；期间再次 show 会推进世代，作废挂起的 hide。
+static QA_PANEL_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static LESS_COMPUTER_PANEL_EPOCH: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 #[cfg(not(mobile))]
 static TRAY_MICROPHONE_WATCHER_STOPPING: AtomicBool = AtomicBool::new(false);
 #[cfg(not(mobile))]
@@ -230,10 +235,12 @@ macro_rules! app_invoke_handler_desktop {
             commands::set_switch_style_hotkey,
             commands::set_open_app_hotkey,
             commands::qa_window_dismiss,
-            commands::qa_window_pin,
+            commands::qa_toggle_recording,
+            commands::qa_submit_text,
             commands::less_computer_window_dismiss,
-            commands::less_computer_window_resize,
+            commands::chat_panel_focus_keyboard,
             commands::less_computer_submit_text,
+            commands::less_computer_sync,
             commands::less_computer_approve,
             commands::validate_combo_hotkey,
             commands::set_combo_hotkey,
@@ -360,7 +367,6 @@ macro_rules! app_invoke_handler_mobile {
             $crate::commands::stop_dictation,
             $crate::commands::cancel_dictation,
             $crate::commands::qa_window_dismiss,
-            $crate::commands::qa_window_pin,
             $crate::commands::qa_toggle_recording,
             $crate::commands::qa_submit_text,
             $crate::commands::repolish,
@@ -1516,10 +1522,10 @@ fn wait_for_app_activation<R: Runtime>(app: &AppHandle<R>) {
 #[cfg(not(target_os = "macos"))]
 fn wait_for_app_activation<R: Runtime>(_app: &AppHandle<R>) {}
 
-/// QA 浮窗的目标尺寸（issue #118）。胶囊默认 220×96 + Dock 80pt + 8pt gap，
-/// 算下来 QA 窗口顶部坐标 = h - 80 - 96 - 8 - 280。
-const QA_WINDOW_WIDTH: f64 = 380.0;
-const QA_WINDOW_HEIGHT: f64 = 440.0;
+/// QA 浮窗的目标尺寸（issue #118；统一聊天面板后与 Less Computer 同尺寸）。
+/// 窗口固定大小，内容在面板内部的 MessageScroller 里滚动。
+const QA_WINDOW_WIDTH: f64 = 420.0;
+const QA_WINDOW_HEIGHT: f64 = 540.0;
 /// 胶囊与 QA 窗口的间距，与设计稿一致。
 const QA_WINDOW_GAP_TO_CAPSULE: f64 = 8.0;
 /// 给 macOS Dock 留的下边距（与 capsule 同源）。
@@ -2060,6 +2066,9 @@ pub(crate) fn show_qa_window<R: tauri::Runtime>(app: &AppHandle<R>, content_kind
     if let Err(e) = window.show() {
         log::warn!("[qa] show failed: {e}");
     }
+    // 作废挂起的退场 hide（快速关-开），并让前端重放入场动画。
+    QA_PANEL_EPOCH.fetch_add(1, Ordering::SeqCst);
+    let _ = app.emit_to("qa", "chat-panel:shown", serde_json::json!({}));
     let _ = app.emit_to(
         "qa",
         "qa:state",
@@ -2067,7 +2076,35 @@ pub(crate) fn show_qa_window<R: tauri::Runtime>(app: &AppHandle<R>, content_kind
     );
 }
 
-/// QA 浮窗的拖动修复（macOS）。
+/// 聊天面板浮窗（qa / less-computer）转「非激活 NSPanel」（macOS，胶囊同手法）。
+///
+/// 目的：让面板可以**在 OpenLess 不激活的情况下成为 key window**（Spotlight 同款）。
+/// 之前打字焦点走 `window.set_focus()`，它会激活整个 app —— 主窗口（设置页）被
+/// 一起带到前台，且 frontmost 变成 OpenLess 自己、AX 再也读不到原 app 的选区。
+/// 转成 NonactivatingPanel 后：点输入框 / makeKeyWindow 只给面板键盘焦点，
+/// app 保持后台、主窗口不动、frontmost 始终是用户原 app。
+/// 顺带 CanJoinAllSpaces + FullScreenAuxiliary：划词常发生在全屏 app 里，面板要能叠上去。
+#[cfg(target_os = "macos")]
+fn make_chat_window_panel_macos<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>, tag: &str) {
+    use tauri_nspanel::cocoa::appkit::NSWindowCollectionBehavior;
+    use tauri_nspanel::WebviewWindowExt;
+    match window.to_panel() {
+        Ok(panel) => {
+            const NS_NONACTIVATING_PANEL_MASK: i32 = 1 << 7;
+            panel.set_style_mask(NS_NONACTIVATING_PANEL_MASK);
+            // 浮层级别（NSFloatingWindowLevel）：盖普通窗口，不盖菜单栏/胶囊(25)。
+            panel.set_level(3);
+            panel.set_collection_behaviour(
+                NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenAuxiliary
+                    | NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces,
+            );
+            log::info!("[{tag}] converted to nonactivating NSPanel");
+        }
+        Err(e) => log::warn!("[{tag}] to_panel failed: {e:?}"),
+    }
+}
+
+/// 聊天面板浮窗（qa / less-computer）的拖动修复（macOS）。
 ///
 /// 配置 `focus: false` 让 Tauri 把窗口创建为 nonactivating panel 风格（避免抢前台 app
 /// 焦点）。代价是 AppKit 的 `performWindowDragWithEvent:` 在 nonactivating 窗口上无效，
@@ -2076,16 +2113,16 @@ pub(crate) fn show_qa_window<R: tauri::Runtime>(app: &AppHandle<R>, content_kind
 /// 解法是把 NSWindow 的 `movableByWindowBackground` 打开——这条路径不依赖窗口是否成为
 /// key window，跟 Spotlight / Raycast 的浮窗是同一手法。设一次就够，整个生命周期保持。
 #[cfg(target_os = "macos")]
-fn make_qa_window_draggable_macos<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
+fn make_chat_window_draggable_macos<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>, tag: &str) {
     use objc2::msg_send;
     use objc2::runtime::{AnyObject, Bool};
     let Ok(handle) = window.ns_window() else {
-        log::warn!("[qa] ns_window unavailable; drag fix skipped");
+        log::warn!("[{tag}] ns_window unavailable; drag fix skipped");
         return;
     };
     let ns_window = handle as *mut AnyObject;
     if ns_window.is_null() {
-        log::warn!("[qa] ns_window null; drag fix skipped");
+        log::warn!("[{tag}] ns_window null; drag fix skipped");
         return;
     }
     // 异常兜底：AppKit 在 drag margins 状态不一致时会从 setMovable 内部 raise
@@ -2100,8 +2137,10 @@ fn make_qa_window_draggable_macos<R: tauri::Runtime>(window: &tauri::WebviewWind
         }))
     };
     match result {
-        Ok(()) => log::info!("[qa] NSWindow movableByWindowBackground=YES"),
-        Err(e) => log::error!("[qa] drag setup raised ObjC exception (caught, drag disabled): {e:?}"),
+        Ok(()) => log::info!("[{tag}] NSWindow movableByWindowBackground=YES"),
+        Err(e) => {
+            log::error!("[{tag}] drag setup raised ObjC exception (caught, drag disabled): {e:?}")
+        }
     }
 }
 
@@ -2117,7 +2156,7 @@ fn ensure_qa_window<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<tauri::Webv
     }
     let built = WebviewWindowBuilder::new(app, "qa", WebviewUrl::App("index.html?window=qa".into()))
         .title("OpenLess QA")
-        .inner_size(380.0, 440.0)
+        .inner_size(QA_WINDOW_WIDTH, QA_WINDOW_HEIGHT)
         .decorations(false)
         .transparent(true)
         .shadow(true)
@@ -2137,7 +2176,10 @@ fn ensure_qa_window<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<tauri::Webv
             #[cfg(target_os = "macos")]
             {
                 let w_clone = w.clone();
-                let _ = app.run_on_main_thread(move || make_qa_window_draggable_macos(&w_clone));
+                let _ = app.run_on_main_thread(move || {
+                    make_chat_window_panel_macos(&w_clone, "qa");
+                    make_chat_window_draggable_macos(&w_clone, "qa");
+                });
             }
             Some(w)
         }
@@ -2167,7 +2209,7 @@ fn ensure_less_computer_window<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<
         WebviewUrl::App("index.html?window=less-computer".into()),
     )
     .title("OpenLess Less Computer")
-    .inner_size(400.0, 200.0)
+    .inner_size(LESS_COMPUTER_WINDOW_WIDTH, LESS_COMPUTER_WINDOW_HEIGHT)
     .decorations(false)
     .transparent(true)
     .shadow(true)
@@ -2179,7 +2221,16 @@ fn ensure_less_computer_window<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<
     .accept_first_mouse(true)
     .build()
     {
-        Ok(w) => Some(w),
+        Ok(w) => {
+            // 与 QA 同款：转非激活 NSPanel（打字不激活 app）+ 拖动修复
+            // （movableByWindowBackground；必须主线程，见 make_chat_window_draggable_macos）。
+            let w_clone = w.clone();
+            let _ = app.run_on_main_thread(move || {
+                make_chat_window_panel_macos(&w_clone, "less-computer");
+                make_chat_window_draggable_macos(&w_clone, "less-computer");
+            });
+            Some(w)
+        }
         Err(e) => {
             log::warn!("[less-computer] lazy window create failed: {e}");
             None
@@ -2222,6 +2273,32 @@ fn ensure_less_computer_glow_window<R: tauri::Runtime>(
     }
 }
 
+/// 带退场动画地隐藏聊天面板：先发 `chat-panel:closing` 让前端播退场动画，
+/// 240ms 后真正 hide。期间再次 show（epoch 前进）则作废本次挂起的 hide ——
+/// 避免「关的动画还没放完用户又唤起 → 窗口被旧定时器藏掉」。
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn hide_chat_window_animated<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    label: &str,
+    epoch: &'static std::sync::atomic::AtomicU64,
+) {
+    let Some(window) = app.get_webview_window(label) else {
+        return;
+    };
+    if !window.is_visible().unwrap_or(false) {
+        let _ = window.hide();
+        return;
+    }
+    let token = epoch.fetch_add(1, Ordering::SeqCst) + 1;
+    let _ = app.emit_to(label, "chat-panel:closing", serde_json::json!({}));
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(240)).await;
+        if epoch.load(Ordering::SeqCst) == token {
+            let _ = window.hide();
+        }
+    });
+}
+
 /// 隐藏 QA 窗口。供 commands::qa_window_dismiss / coordinator session 收尾共用。
 pub(crate) fn hide_qa_window<R: tauri::Runtime>(app: &AppHandle<R>) {
     #[cfg(target_os = "android")]
@@ -2230,9 +2307,8 @@ pub(crate) fn hide_qa_window<R: tauri::Runtime>(app: &AppHandle<R>) {
         return;
     }
 
-    if let Some(window) = app.get_webview_window("qa") {
-        let _ = window.hide();
-    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    hide_chat_window_animated(app, "qa", &QA_PANEL_EPOCH);
 }
 
 // ───────────────────────── Less Computer 浮窗 ─────────────────────────
@@ -2242,21 +2318,17 @@ pub(crate) fn hide_qa_window<R: tauri::Runtime>(app: &AppHandle<R>) {
 // 不注册热键、前端 detectOS 不渲染入口），所以这些窗口操作全部 `#[cfg(macos)]`，
 // 其它平台是 no-op，避免在非目标平台动 NSWindow / 弹一个空浮窗。
 
-/// Less Computer 浮窗宽度（高度由前端按内容自适应，经 `less_computer_window_resize`
-/// 回传，Rust 端按 bottom-anchored 重新摆放，让内容增长向上撑开）。
+/// Less Computer 浮窗尺寸：与 QA 同款「统一聊天面板」固定大小 —— 窗口出现即
+/// 定死，内容只在面板内部的 MessageScroller 里滚动，不再按内容自适应缩放窗口。
 #[cfg(target_os = "macos")]
-const LESS_COMPUTER_WINDOW_WIDTH: f64 = 400.0;
+const LESS_COMPUTER_WINDOW_WIDTH: f64 = 420.0;
 #[cfg(target_os = "macos")]
-const LESS_COMPUTER_WINDOW_MIN_HEIGHT: f64 = 120.0;
-#[cfg(target_os = "macos")]
-const LESS_COMPUTER_WINDOW_MAX_HEIGHT: f64 = 520.0;
+const LESS_COMPUTER_WINDOW_HEIGHT: f64 = 540.0;
 
-/// 把 Less Computer 浮窗按给定高度（clamp 到 [min,max]）摆到屏幕底部居中、
-/// 紧贴胶囊上方。bottom 对齐胶囊顶部，所以高度变化时窗口向上生长。
+/// 把 Less Computer 浮窗（固定尺寸）摆到屏幕底部居中、紧贴胶囊上方。
 #[cfg(target_os = "macos")]
 fn position_less_computer_window<R: tauri::Runtime>(
     window: &tauri::WebviewWindow<R>,
-    height: f64,
 ) -> tauri::Result<()> {
     let monitor = match window.current_monitor()? {
         Some(m) => m,
@@ -2266,18 +2338,17 @@ fn position_less_computer_window<R: tauri::Runtime>(
     let size = monitor.size();
     let pos = monitor.position();
     let frame = logical_monitor_frame(pos.x, pos.y, size.width, size.height, scale);
-    let height = height.clamp(
-        LESS_COMPUTER_WINDOW_MIN_HEIGHT,
-        LESS_COMPUTER_WINDOW_MAX_HEIGHT,
-    );
     let capsule_height = capsule_height_for_qa();
     let (x, y) = bottom_center_position(
         frame,
         LESS_COMPUTER_WINDOW_WIDTH,
-        height,
+        LESS_COMPUTER_WINDOW_HEIGHT,
         DOCK_BOTTOM_PADDING_FOR_QA + capsule_height + QA_WINDOW_GAP_TO_CAPSULE,
     );
-    window.set_size(tauri::LogicalSize::new(LESS_COMPUTER_WINDOW_WIDTH, height))?;
+    window.set_size(tauri::LogicalSize::new(
+        LESS_COMPUTER_WINDOW_WIDTH,
+        LESS_COMPUTER_WINDOW_HEIGHT,
+    ))?;
     window.set_position(LogicalPosition::new(x, y))?;
     Ok(())
 }
@@ -2289,7 +2360,7 @@ pub(crate) fn show_less_computer_window<R: tauri::Runtime>(app: &AppHandle<R>) {
         log::info!("[less-computer] show 跳过：窗口不存在");
         return;
     };
-    if let Err(e) = position_less_computer_window(&window, LESS_COMPUTER_WINDOW_MIN_HEIGHT) {
+    if let Err(e) = position_less_computer_window(&window) {
         log::warn!("[less-computer] position before show failed: {e}");
     }
     let window_clone = window.clone();
@@ -2314,6 +2385,9 @@ pub(crate) fn show_less_computer_window<R: tauri::Runtime>(app: &AppHandle<R>) {
             }
         }
     });
+    // 作废挂起的退场 hide（快速关-开），并让前端重放入场动画。
+    LESS_COMPUTER_PANEL_EPOCH.fetch_add(1, Ordering::SeqCst);
+    let _ = app.emit_to("less-computer", "chat-panel:shown", serde_json::json!({}));
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -2322,9 +2396,7 @@ pub(crate) fn show_less_computer_window<R: tauri::Runtime>(_app: &AppHandle<R>) 
 /// 隐藏 Less Computer 浮窗。供 dismiss 命令 / session 收尾共用。
 #[cfg(target_os = "macos")]
 pub(crate) fn hide_less_computer_window<R: tauri::Runtime>(app: &AppHandle<R>) {
-    if let Some(window) = app.get_webview_window("less-computer") {
-        let _ = window.hide();
-    }
+    hide_chat_window_animated(app, "less-computer", &LESS_COMPUTER_PANEL_EPOCH);
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -2403,50 +2475,6 @@ pub(crate) fn hide_less_computer_glow<R: tauri::Runtime>(app: &AppHandle<R>) {
 
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn hide_less_computer_glow<R: tauri::Runtime>(_app: &AppHandle<R>) {}
-
-/// 前端按内容测高后回传。以「当前窗口底边」为锚向上生长——只改高度、保住用户拖动后的位置，
-/// 不再重新居中（否则一改内容就把拖走的框拉回屏幕底部中间）。`macos` 专用。
-#[cfg(target_os = "macos")]
-pub(crate) fn resize_less_computer_window<R: tauri::Runtime>(app: &AppHandle<R>, height: f64) {
-    let Some(window) = app.get_webview_window("less-computer") else {
-        return;
-    };
-    let height = height.clamp(
-        LESS_COMPUTER_WINDOW_MIN_HEIGHT,
-        LESS_COMPUTER_WINDOW_MAX_HEIGHT,
-    );
-    let scale = window.scale_factor().unwrap_or(1.0);
-    match (window.outer_position(), window.outer_size()) {
-        (Ok(pos), Ok(size)) => {
-            let x = pos.x as f64 / scale;
-            let cur_top = pos.y as f64 / scale;
-            let cur_h = size.height as f64 / scale;
-            let bottom = cur_top + cur_h;
-            let monitor_top = window
-                .current_monitor()
-                .ok()
-                .flatten()
-                .map(|m| {
-                    let p = m.position();
-                    let s = m.size();
-                    logical_monitor_frame(p.x, p.y, s.width, s.height, m.scale_factor()).y
-                })
-                .unwrap_or(f64::NEG_INFINITY);
-            let new_y = (bottom - height).max(monitor_top);
-            let _ = window.set_size(tauri::LogicalSize::new(LESS_COMPUTER_WINDOW_WIDTH, height));
-            let _ = window.set_position(tauri::LogicalPosition::new(x, new_y));
-        }
-        // 拿不到当前位置（极少见）→ 退回首屏居中摆放。
-        _ => {
-            if let Err(e) = position_less_computer_window(&window, height) {
-                log::warn!("[less-computer] resize fallback failed: {e}");
-            }
-        }
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn resize_less_computer_window<R: tauri::Runtime>(_app: &AppHandle<R>, _height: f64) {}
 
 /// 抓完选区后把焦点重新交回 QA 浮窗（Windows focus-dance 下半场）。begin_qa_session
 /// 在 capture_selection 跑完时调；非 Windows 平台是 no-op。issue #466。

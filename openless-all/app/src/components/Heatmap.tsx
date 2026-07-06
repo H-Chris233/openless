@@ -80,7 +80,11 @@ export function Heatmap({
     const columns: { days: { iso: string; date: Date; value: number | null }[]; monthStart: number | null }[] = [];
     let maxValue = 0;
     let lastMonth = -1;
+    // 防御上限：正常 365 天调用约 53 列，远低于此值；超大跨度时钳到 ~5 年，
+    // 避免生成数千 DOM 列拖垮渲染。
+    const MAX_WEEKS = 260;
     while (cursor <= endDate) {
+      if (columns.length >= MAX_WEEKS) break;
       const days: { iso: string; date: Date; value: number | null }[] = [];
       let monthStart: number | null = null;
       for (let i = 0; i < 7; i += 1) {

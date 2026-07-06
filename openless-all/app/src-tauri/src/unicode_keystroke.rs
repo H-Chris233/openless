@@ -355,35 +355,35 @@ mod windows_impl {
         let mut sent_in_chunk = 0usize;
         let mut chars = text.chars().peekable();
         while let Some(ch) = chars.next() {
-            if ch == '\r' {
-                continue;
-            }
-
-            if ch == '\n' {
-                if let Err(e) = send_newline(options.newline_mode) {
-                    return Err(partial_or_original(typed_chars, e));
-                }
-                typed_chars += 1;
-                sent_in_chunk += 1;
-            } else if ch == '\t' {
-                if let Err(e) = press_vk(VK_TAB) {
-                    return Err(partial_or_original(typed_chars, e));
-                }
-                typed_chars += 1;
-                sent_in_chunk += 1;
-            } else {
-                let mut buf = [0u16; 2];
-                for unit in ch.encode_utf16(&mut buf) {
-                    if let Err(e) = send_utf16_unit(*unit, false) {
-                        return Err(partial_or_original(typed_chars, e));
-                    }
-                    if let Err(e) = send_utf16_unit(*unit, true) {
+            // 分类与计数复用 `classify_sendinput_char` / `sendinput_char_is_typed`——与
+            // `expected_sendinput_typed_chars` 同一真相，避免规则漂移导致成功的 SendInput
+            // 被误判为回落。
+            match super::classify_sendinput_char(ch) {
+                super::SendInputCharKind::Skip => continue,
+                super::SendInputCharKind::Newline => {
+                    if let Err(e) = send_newline(options.newline_mode) {
                         return Err(partial_or_original(typed_chars, e));
                     }
                 }
-                typed_chars += 1;
-                sent_in_chunk += 1;
+                super::SendInputCharKind::Tab => {
+                    if let Err(e) = press_vk(VK_TAB) {
+                        return Err(partial_or_original(typed_chars, e));
+                    }
+                }
+                super::SendInputCharKind::Unicode => {
+                    let mut buf = [0u16; 2];
+                    for unit in ch.encode_utf16(&mut buf) {
+                        if let Err(e) = send_utf16_unit(*unit, false) {
+                            return Err(partial_or_original(typed_chars, e));
+                        }
+                        if let Err(e) = send_utf16_unit(*unit, true) {
+                            return Err(partial_or_original(typed_chars, e));
+                        }
+                    }
+                }
             }
+            typed_chars += 1;
+            sent_in_chunk += 1;
 
             if sent_in_chunk >= SENDINPUT_CHUNK_CHARS && chars.peek().is_some() {
                 std::thread::sleep(SENDINPUT_CHUNK_DELAY);
@@ -497,24 +497,39 @@ mod windows_impl {
     ) -> Result<(), TisError> {
         Ok(())
     }
+}
 
-    #[cfg(test)]
-    pub(super) fn classify_sendinput_char(ch: char) -> SendInputCharKind {
-        match ch {
-            '\r' => SendInputCharKind::Skip,
-            '\n' => SendInputCharKind::Newline,
-            '\t' => SendInputCharKind::Tab,
-            _ => SendInputCharKind::Unicode,
-        }
-    }
+/// SendInput 单字符分类的唯一真相。`type_unicode_chunk_with_options` 的实际打字路径与
+/// `expected_sendinput_typed_chars`（用于校验实际发出的 typed char 数）都复用它，避免三处
+/// 独立的字符规则手工同步——一旦漏改，一次成功的 SendInput 会被 `map_sendinput_type_result`
+/// 误判成 `CopiedFallback`，在已打字的基础上又把整段复制到剪贴板，用户 Ctrl+V 看到重复。
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SendInputCharKind {
+    /// `\r`：跳过（CRLF 只产生一次换行），不计入 typed char。
+    Skip,
+    /// `\n`：按换行发出（模式由 `WindowsSendInputOptions::newline_mode` 决定）。
+    Newline,
+    /// `\t`：按 Tab 键发出。
+    Tab,
+    /// 其余字符：按 UTF-16 Unicode 事件逐 code unit 发出。
+    Unicode,
+}
 
-    #[cfg(test)]
-    pub(super) enum SendInputCharKind {
-        Skip,
-        Newline,
-        Tab,
-        Unicode,
+#[cfg(target_os = "windows")]
+pub(crate) fn classify_sendinput_char(ch: char) -> SendInputCharKind {
+    match ch {
+        '\r' => SendInputCharKind::Skip,
+        '\n' => SendInputCharKind::Newline,
+        '\t' => SendInputCharKind::Tab,
+        _ => SendInputCharKind::Unicode,
     }
+}
+
+/// 该字符是否计入「已发出的 typed char」。`Skip`（`\r`）不计入，其余都计入。
+#[cfg(target_os = "windows")]
+pub(crate) fn sendinput_char_is_typed(kind: SendInputCharKind) -> bool {
+    !matches!(kind, SendInputCharKind::Skip)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -591,6 +606,7 @@ mod tests {
         TypeError::EnigoText("fail".into())
     }
 
+    #[cfg(target_os = "windows")]
     #[test]
     fn expected_sendinput_typed_chars_skips_carriage_return() {
         assert_eq!(super::expected_sendinput_typed_chars("a\r\nb"), 3);
@@ -600,7 +616,10 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     mod windows_sendinput_char_tests {
-        use super::super::windows_impl::{classify_sendinput_char, SendInputCharKind};
+        use super::super::{
+            classify_sendinput_char, expected_sendinput_typed_chars, sendinput_char_is_typed,
+            SendInputCharKind,
+        };
 
         #[test]
         fn classify_skips_carriage_return() {
@@ -626,13 +645,44 @@ mod tests {
                 SendInputCharKind::Unicode
             ));
         }
+
+        /// 只有 `Skip`（`\r`）不计入 typed char，其余三类都计入。这是
+        /// `expected_sendinput_typed_chars` 与实际打字循环 `typed_chars += 1` 之间保持一致
+        /// 的核心不变量。
+        #[test]
+        fn only_carriage_return_is_not_counted() {
+            assert!(!sendinput_char_is_typed(SendInputCharKind::Skip));
+            assert!(sendinput_char_is_typed(SendInputCharKind::Newline));
+            assert!(sendinput_char_is_typed(SendInputCharKind::Tab));
+            assert!(sendinput_char_is_typed(SendInputCharKind::Unicode));
+        }
+
+        /// 期望计数必须与「逐字符分类后计入的数量」逐字节一致——即 expected 复用了同一分类
+        /// 真相。若二者用不同规则表达，成功的 SendInput 会被 `map_sendinput_type_result`
+        /// 误判为 `CopiedFallback`（重复粘贴）。
+        #[test]
+        fn expected_count_matches_per_char_classification() {
+            for sample in ["a\r\nb", "hello", "\r\r\n", "行1\n\t行2", ""] {
+                let manual = sample
+                    .chars()
+                    .filter(|ch| sendinput_char_is_typed(classify_sendinput_char(*ch)))
+                    .count();
+                assert_eq!(expected_sendinput_typed_chars(sample), manual, "{sample:?}");
+            }
+        }
     }
 }
 
 /// Windows SendInput 路径上 `type_unicode_chunk` 计入的 typed char 数。
 /// `\r` 会被跳过（CRLF 只产生一次换行），因此不能与 `text.chars().count()` 直接比较。
+///
+/// 复用 `classify_sendinput_char` / `sendinput_char_is_typed`——与实际打字路径同一真相，
+/// 保证 `map_sendinput_type_result` 的期望值与真正发出的 typed char 数永远一致。
+#[cfg(target_os = "windows")]
 pub fn expected_sendinput_typed_chars(text: &str) -> usize {
-    text.chars().filter(|ch| *ch != '\r').count()
+    text.chars()
+        .filter(|ch| sendinput_char_is_typed(classify_sendinput_char(*ch)))
+        .count()
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

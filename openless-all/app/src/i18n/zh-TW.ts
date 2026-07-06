@@ -56,7 +56,7 @@ export const zhTW: typeof zhCN = {
     mobileRecordLabel: '錄音按鈕',
     mobileRecordStart: '開始錄音',
     mobileRecordStop: '結束並提交',
-    composerPlaceholder: '輸入問題，Enter 發送，Shift+Enter 換行',
+    composerPlaceholder: '輸入問題，Enter 發送',
     composerSend: '發送',
     statusIdle: '按 {{recordHotkey}} 提問',
     statusRecording: '錄音中',
@@ -66,6 +66,7 @@ export const zhTW: typeof zhCN = {
   },
   lessComputer: {
     title: 'Less Computer',
+    subtitle: '想讓電腦做什麼？',
     you: '你',
     working: '正在操控電腦…',
     tool: '呼叫了 {{name}}',

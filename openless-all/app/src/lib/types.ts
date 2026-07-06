@@ -478,7 +478,7 @@ export interface QaStatePayload {
  * Less Computer 语音 Agent 浮窗事件（窗口 label = "less-computer"，事件名
  * `less-computer:event`）。后端按 `kind` 标记，前端据此把交互渲染成聊天结构。
  */
-export type LessComputerEvent =
+export type LessComputerEvent = (
   /** 一轮用户气泡（语音指令转写）。fresh=true 表示新会话（清空历史）；否则追加为后续轮次。 */
   | { kind: 'user'; text: string; fresh?: boolean }
   /** Agent 启动，进入运行态。 */
@@ -496,7 +496,12 @@ export type LessComputerEvent =
   /** 用户从胶囊取消正在运行的 Agent。 */
   | { kind: 'cancelled' }
   /** 运行出错。 */
-  | { kind: 'error'; message: string };
+  | { kind: 'error'; message: string }
+) & {
+  /** 单调事件序号（后端 emit 时编）。用于 less_computer_sync 重放与实时流去重；
+   *  缓冲锁异常时后端可能省略，无 seq 的事件前端无条件应用。 */
+  seq?: number;
+};
 
 /** 内置语言列表 — 前端 Settings UI 用，后端只接收原生名字符串拼 prompt。
  *  添加新语言时直接在这里加一项（原生名），无需修改后端。 */

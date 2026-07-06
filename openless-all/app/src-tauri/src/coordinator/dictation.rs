@@ -66,10 +66,111 @@ pub(super) fn resolve_less_computer_approval(token: &str, approved: bool) {
     }
 }
 
+/// Less Computer 事件缓冲：浮窗首次创建时 webview 冷加载需要数百毫秒，此时后端
+/// emit 的事件（尤其第一条 `user` —— 用户说出的那句话）会先于前端 listener 注册
+/// 被丢弃，表现为「AI 在干活、但面板上没有我说的话」。这里按单调 seq 缓存当前
+/// 会话的全部事件，前端 mount 后调 `less_computer_sync` 全量重放，实时流按 seq
+/// 去重衔接。fresh=true 的 user 事件 = 新会话，清空重来（seq 不回卷，去重不混淆）。
+/// 容量上限防极端长会话无界增长（超限丢最旧 —— 重放的意义在冷启动窗口，尾部足够）。
+const LESS_COMPUTER_EVENT_LOG_CAP: usize = 2048;
+
+struct LessComputerEventLog {
+    next_seq: u64,
+    events: std::collections::VecDeque<serde_json::Value>,
+}
+
+static LESS_COMPUTER_EVENT_LOG: std::sync::OnceLock<std::sync::Mutex<LessComputerEventLog>> =
+    std::sync::OnceLock::new();
+
+fn less_computer_event_log() -> &'static std::sync::Mutex<LessComputerEventLog> {
+    LESS_COMPUTER_EVENT_LOG.get_or_init(|| {
+        std::sync::Mutex::new(LessComputerEventLog {
+            next_seq: 0,
+            events: std::collections::VecDeque::new(),
+        })
+    })
+}
+
+/// 纯逻辑：给 payload 编 seq 并写入缓冲（fresh user 先清空，超限丢最旧）。
+fn log_less_computer_event(log: &mut LessComputerEventLog, payload: &mut serde_json::Value) {
+    let fresh_user = payload.get("kind").and_then(|k| k.as_str()) == Some("user")
+        && payload.get("fresh").and_then(|f| f.as_bool()) == Some(true);
+    if fresh_user {
+        log.events.clear();
+    }
+    log.next_seq += 1;
+    payload["seq"] = serde_json::json!(log.next_seq);
+    log.events.push_back(payload.clone());
+    while log.events.len() > LESS_COMPUTER_EVENT_LOG_CAP {
+        log.events.pop_front();
+    }
+}
+
+/// `less_computer_sync` 命令的数据源：当前会话已发生的事件（seq 升序）。
+pub(crate) fn less_computer_event_backlog() -> Vec<serde_json::Value> {
+    less_computer_event_log()
+        .lock()
+        .map(|log| log.events.iter().cloned().collect())
+        .unwrap_or_default()
+}
+
 /// 往 Less Computer 浮窗发一条事件（macOS only；前端按 `kind` 渲染聊天结构）。
-fn emit_less_computer(inner: &Arc<Inner>, payload: serde_json::Value) {
+/// 每条事件先记入缓冲并带上 seq，再实时 emit —— 锁中毒时跳过缓冲照常 emit
+/// （无 seq 事件前端无条件应用，退化为修复前行为而不是丢事件）。
+fn emit_less_computer(inner: &Arc<Inner>, mut payload: serde_json::Value) {
+    if let Ok(mut log) = less_computer_event_log().lock() {
+        log_less_computer_event(&mut log, &mut payload);
+    }
     if let Some(app) = inner.app.lock().clone() {
         let _ = app.emit_to("less-computer", LESS_COMPUTER_EVENT, payload);
+    }
+}
+
+#[cfg(test)]
+mod less_computer_event_log_tests {
+    use super::{log_less_computer_event, LessComputerEventLog, LESS_COMPUTER_EVENT_LOG_CAP};
+
+    fn new_log() -> LessComputerEventLog {
+        LessComputerEventLog {
+            next_seq: 0,
+            events: std::collections::VecDeque::new(),
+        }
+    }
+
+    #[test]
+    fn assigns_monotonic_seq_and_clears_on_fresh_user() {
+        let mut log = new_log();
+        let mut e1 = serde_json::json!({"kind":"user","text":"第一句","fresh":true});
+        let mut e2 = serde_json::json!({"kind":"delta","text":"好的"});
+        log_less_computer_event(&mut log, &mut e1);
+        log_less_computer_event(&mut log, &mut e2);
+        assert_eq!(e1["seq"], 1);
+        assert_eq!(e2["seq"], 2);
+        assert_eq!(log.events.len(), 2);
+
+        // fresh=true 开新会话：缓冲清空，seq 继续单调（前端按 seq 去重不回卷）。
+        let mut e3 = serde_json::json!({"kind":"user","text":"新会话","fresh":true});
+        log_less_computer_event(&mut log, &mut e3);
+        assert_eq!(log.events.len(), 1);
+        assert_eq!(e3["seq"], 3);
+
+        // 追加轮次（fresh=false / 缺省）不清空。
+        let mut e4 = serde_json::json!({"kind":"user","text":"追加","fresh":false});
+        log_less_computer_event(&mut log, &mut e4);
+        assert_eq!(log.events.len(), 2);
+        assert_eq!(log.events.front().unwrap()["seq"], 3);
+    }
+
+    #[test]
+    fn caps_backlog_dropping_oldest() {
+        let mut log = new_log();
+        for i in 0..(LESS_COMPUTER_EVENT_LOG_CAP + 5) {
+            let mut e = serde_json::json!({"kind":"delta","text":i.to_string()});
+            log_less_computer_event(&mut log, &mut e);
+        }
+        assert_eq!(log.events.len(), LESS_COMPUTER_EVENT_LOG_CAP);
+        // 丢最旧：队首是第 6 条（seq 从 1 起）。
+        assert_eq!(log.events.front().unwrap()["seq"], 6);
     }
 }
 
@@ -344,7 +445,7 @@ async fn run_streaming_polish(
 }
 
 #[cfg(target_os = "windows")]
-fn windows_sendinput_options_from_prefs(
+pub(super) fn windows_sendinput_options_from_prefs(
     prefs: &crate::types::UserPreferences,
 ) -> crate::unicode_keystroke::WindowsSendInputOptions {
     crate::unicode_keystroke::WindowsSendInputOptions {

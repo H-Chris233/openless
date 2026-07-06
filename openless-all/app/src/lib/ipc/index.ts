@@ -123,7 +123,6 @@ export {
     getQaHotkeyLabel,
     setQaHotkey,
     qaWindowDismiss,
-    qaWindowPin,
     qaToggleRecording,
     qaSubmitText,
 } from "./qa"
@@ -132,9 +131,12 @@ export {
 export {
     lessComputerWindowDismiss,
     lessComputerApprove,
-    lessComputerWindowResize,
     lessComputerSubmitText,
+    lessComputerSync,
 } from "./less-computer"
+
+// chat-panel（QA / Less Computer 共用）
+export { chatPanelFocusKeyboard } from "./chat-panel"
 
 // updater
 export type { LatestBetaRelease, AppUpdateMetadata } from "./updater"
