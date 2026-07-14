@@ -275,6 +275,16 @@ pub(super) async fn transcribe_overlay_dictation_asr(
                 Err(_) => Err("mimo global timeout".to_string()),
             }
         }
+        ActiveAsr::DashScopeMultimodal(asr) => {
+            debug_assert!(uses_global_timeout);
+            let audio_secs = asr.buffer_duration_ms() as f64 / 1000.0;
+            let timeout_duration = whisper_transcribe_timeout(audio_secs);
+            match tokio::time::timeout(timeout_duration, asr.transcribe()).await {
+                Ok(Ok(raw)) => Ok(raw),
+                Ok(Err(error)) => Err(error.to_string()),
+                Err(_) => Err("dashscope multimodal global timeout".to_string()),
+            }
+        }
         #[cfg(target_os = "windows")]
         ActiveAsr::FoundryLocalWhisper(local) => {
             debug_assert!(!uses_global_timeout);
@@ -857,6 +867,28 @@ pub(super) async fn end_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
                     );
                     finish_qa_with_error(inner, "识别超时".to_string());
                     return Err("mimo global timeout".to_string());
+                }
+            }
+        }
+        ActiveAsr::DashScopeMultimodal(m) => {
+            debug_assert!(uses_global_timeout);
+            let audio_secs = m.buffer_duration_ms() as f64 / 1000.0;
+            let timeout_duration = whisper_transcribe_timeout(audio_secs);
+            match tokio::time::timeout(timeout_duration, m.transcribe()).await {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => {
+                    log::error!("[coord] QA: DashScope Fun-ASR-Flash transcribe failed: {e}");
+                    finish_qa_with_error(inner, format!("识别失败: {e}"));
+                    return Err(e.to_string());
+                }
+                Err(_) => {
+                    log::error!(
+                        "[coord] QA: DashScope Fun-ASR-Flash dynamic timeout {}s (audio {:.2}s)",
+                        timeout_duration.as_secs(),
+                        audio_secs
+                    );
+                    finish_qa_with_error(inner, "识别超时".to_string());
+                    return Err("dashscope multimodal global timeout".to_string());
                 }
             }
         }

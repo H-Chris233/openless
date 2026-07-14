@@ -27,11 +27,32 @@ pub async fn validate_provider_credentials(kind: String) -> Result<ProviderCheck
 
 #[tauri::command]
 pub async fn list_provider_models(kind: String) -> Result<ProviderModelsResult, String> {
-    if kind == "asr" && CredentialsVault::get_active_asr() == crate::asr::bailian::PROVIDER_ID {
-        // Bailian 实时 ASR 没有模型列表 HTTP 接口，列表只能是静态的。但直接返回
-        // 硬编码列表会让「拉取模型」在 Key / endpoint 全错时也显示成功，给用户
-        // "已连通"的错觉（其他厂商这颗按钮是真实带 Key GET /models）。先跑一次
-        // 与「验证」相同的 WebSocket 连通性检查，语义对齐后再返回静态列表。
+    if kind == "asr"
+        && CredentialsVault::get_active_asr() == crate::asr::bailian::PROVIDER_ID
+        && !cfg!(mobile)
+    {
+        // 统一「阿里云百炼」入口:三条协议(实时 fun-asr-realtime / 实时 qwen3 /
+        // 录音文件 fun-asr-flash)收成一个 provider。百炼各网关都没有模型列表 HTTP
+        // 接口,列表是静态的;但先跑一次与「验证」相同的、按当前所选模型对应协议的
+        // 连通性检查(validate_asr_provider 已按模型路由),避免 Key/endpoint 全错时
+        // 也显示成功。随后返回三个可选模型供下拉。
+        validate_asr_provider().await?;
+        // 静态清单只是常用快捷项；协议按模型名自动路由，用户也可在模型框直接手填
+        // 已支持的 DashScope ASR 模型；不支持的模型会在验证/开始录音前明确拒绝。
+        return Ok(ProviderModelsResult {
+            models: vec![
+                crate::asr::bailian::DEFAULT_MODEL.to_string(),
+                crate::asr::qwen_realtime::DEFAULT_MODEL.to_string(),
+                "qwen3-asr-flash-realtime-2026-02-10".to_string(),
+                "qwen3-asr-flash-realtime-2025-10-27".to_string(),
+                crate::asr::dashscope_multimodal::DEFAULT_MODEL.to_string(),
+            ],
+        });
+    }
+    if kind == "asr"
+        && CredentialsVault::get_active_asr() == crate::asr::bailian::PROVIDER_ID
+        && cfg!(mobile)
+    {
         validate_bailian_asr_provider().await?;
         return Ok(ProviderModelsResult {
             models: vec![crate::asr::bailian::DEFAULT_MODEL.to_string()],
@@ -53,6 +74,14 @@ pub async fn list_provider_models(kind: String) -> Result<ProviderModelsResult, 
     if kind == "asr" && CredentialsVault::get_active_asr() == crate::asr::mimo::PROVIDER_ID {
         return Ok(ProviderModelsResult {
             models: vec![crate::asr::mimo::DEFAULT_MODEL.to_string()],
+        });
+    }
+    if kind == "asr"
+        && CredentialsVault::get_active_asr() == crate::asr::dashscope_multimodal::PROVIDER_ID
+    {
+        // multimodal-generation 无模型列表 HTTP 接口；与 mimo 同，返回静态别名。
+        return Ok(ProviderModelsResult {
+            models: vec![crate::asr::dashscope_multimodal::DEFAULT_MODEL.to_string()],
         });
     }
     if kind == "llm" && CredentialsVault::get_active_llm() == CODEX_OAUTH_PROVIDER_ID {
@@ -203,6 +232,19 @@ async fn validate_asr_provider() -> Result<(), String> {
     }
 
     if active_asr == crate::asr::bailian::PROVIDER_ID {
+        // 统一百炼:按所选模型验证对应协议（endpoint 由前端按模型同步，各 validator
+        // 读到的都是该协议的正确地址）。
+        let model = CredentialsVault::get(CredentialAccount::AsrModel)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let effective = crate::coordinator::resolve_effective_asr_provider(&active_asr, &model)?;
+        if effective == crate::asr::qwen_realtime::PROVIDER_ID {
+            return validate_qwen3_realtime_asr_provider().await;
+        }
+        if effective == crate::asr::dashscope_multimodal::PROVIDER_ID {
+            return validate_dashscope_multimodal_asr_provider().await;
+        }
         return validate_bailian_asr_provider().await;
     }
     if active_asr == crate::asr::qwen_realtime::PROVIDER_ID {
@@ -210,6 +252,13 @@ async fn validate_asr_provider() -> Result<(), String> {
     }
     if active_asr == crate::asr::mimo::PROVIDER_ID {
         return validate_mimo_asr_provider().await;
+    }
+    if active_asr == crate::asr::dashscope_multimodal::PROVIDER_ID {
+        let model = CredentialsVault::get(CredentialAccount::AsrModel)
+            .map_err(|e| e.to_string())?
+            .unwrap_or_default();
+        crate::coordinator::validate_dashscope_multimodal_model(&model)?;
+        return validate_dashscope_multimodal_asr_provider().await;
     }
 
     let config = read_openai_provider_config("asr")?;
@@ -237,6 +286,73 @@ async fn validate_mimo_asr_provider() -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// fun-asr-flash 官方公开示例音频，用于连通性校验。该模型对纯静音会返回
+/// 400（"no speech" 类错误），无法像 Whisper/Mimo 那样发静音探活；改用这段
+/// 阿里官方文档在案的示例 wav（由 DashScope 侧拉取），key/endpoint/model 有效
+/// 即返回 200。
+const DASHSCOPE_ASR_VALIDATE_SAMPLE_URL: &str =
+    "https://dashscope.oss-cn-beijing.aliyuncs.com/samples/audio/paraformer/hello_world_female2.wav";
+
+async fn validate_dashscope_multimodal_asr_provider() -> Result<(), String> {
+    // 统一百炼复用配置中的区域/工作空间主机，并推导 multimodal 的 https 路径。
+    // 隐藏别名仍按原有完整 endpoint 读取。
+    let (api_key, base_url) = if crate::coordinator::unified_bailian_is_active() {
+        let api_key = CredentialsVault::get(CredentialAccount::AsrApiKey)
+            .map_err(|e| e.to_string())?
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| "API Key 为空".to_string())?;
+        let endpoint = CredentialsVault::get(CredentialAccount::AsrEndpoint)
+            .map_err(|e| e.to_string())?
+            .unwrap_or_default();
+        let endpoint = crate::coordinator::derive_bailian_endpoint(
+            &endpoint,
+            crate::coordinator::BailianEndpointProtocol::Multimodal,
+        )?;
+        (api_key, endpoint)
+    } else {
+        let config = read_openai_provider_config("asr")?;
+        (config.api_key, config.base_url)
+    };
+    let model = CredentialsVault::get(CredentialAccount::AsrModel)
+        .map_err(|e| e.to_string())?
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| crate::asr::dashscope_multimodal::DEFAULT_MODEL.to_string());
+    crate::coordinator::validate_dashscope_multimodal_model(&model)?;
+    let url = crate::asr::dashscope_multimodal::generation_url(&base_url)
+        .map_err(|_| "endpointInvalid".to_string())?;
+    let body = serde_json::json!({
+        "model": model,
+        "input": { "messages": [{ "role": "user", "content": [{
+            "type": "input_audio",
+            "input_audio": { "data": DASHSCOPE_ASR_VALIDATE_SAMPLE_URL },
+        }]}]},
+        "parameters": { "format": "wav", "sample_rate": "16000" },
+    });
+    let client = http_client_builder(&url, 20)
+        .build()
+        .map_err(|_| "providerClientInitFailed".to_string())?;
+    let response = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .header("X-DashScope-SSE", "disable")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| {
+            if e.is_timeout() {
+                "providerRequestTimeout".to_string()
+            } else {
+                "providerNetworkError".to_string()
+            }
+        })?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("providerHttpStatus:{}", status.as_u16()));
+    }
+    Ok(())
+}
+
 async fn validate_bailian_asr_provider() -> Result<(), String> {
     let api_key = CredentialsVault::get(CredentialAccount::AsrApiKey)
         .map_err(|e| e.to_string())?
@@ -246,10 +362,18 @@ async fn validate_bailian_asr_provider() -> Result<(), String> {
     }
     // 已知残留（issue #609 F-01 孪生 gap）：Bailian endpoint 走 `wss://`，与 http/https-only 的
     // validate_llm_endpoint 不兼容，无法直接复用，需单独的 ws/wss 感知 SSRF 校验器（超本次范围）。
-    let endpoint = CredentialsVault::get(CredentialAccount::AsrEndpoint)
+    let stored_endpoint = CredentialsVault::get(CredentialAccount::AsrEndpoint)
         .map_err(|e| e.to_string())?
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| crate::asr::bailian::DEFAULT_ENDPOINT.to_string());
+    let endpoint = if crate::coordinator::unified_bailian_is_active() {
+        crate::coordinator::derive_bailian_endpoint(
+            &stored_endpoint,
+            crate::coordinator::BailianEndpointProtocol::ClassicRealtime,
+        )?
+    } else {
+        stored_endpoint
+    };
     // 协议头先行校验：填成 https://（百炼兼容模式 / 专属域名地址）时，WebSocket
     // 握手报的 "URL scheme not supported" 会被前端兜底成笼统的「操作失败」，
     // 用户无从定位。这里拦下并返回专用错误码，前端映射成可操作的提示。
@@ -293,10 +417,21 @@ async fn validate_qwen3_realtime_asr_provider() -> Result<(), String> {
     if api_key.trim().is_empty() {
         return Err("API Key 为空".to_string());
     }
-    let endpoint = CredentialsVault::get(CredentialAccount::AsrEndpoint)
-        .map_err(|e| e.to_string())?
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| crate::asr::qwen_realtime::DEFAULT_ENDPOINT.to_string());
+    // 统一百炼保留配置中的区域/工作空间主机，并切换到 Qwen Realtime 路径。
+    let endpoint = if crate::coordinator::unified_bailian_is_active() {
+        let endpoint = CredentialsVault::get(CredentialAccount::AsrEndpoint)
+            .map_err(|e| e.to_string())?
+            .unwrap_or_default();
+        crate::coordinator::derive_bailian_endpoint(
+            &endpoint,
+            crate::coordinator::BailianEndpointProtocol::QwenRealtime,
+        )?
+    } else {
+        CredentialsVault::get(CredentialAccount::AsrEndpoint)
+            .map_err(|e| e.to_string())?
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| crate::asr::qwen_realtime::DEFAULT_ENDPOINT.to_string())
+    };
     if !crate::asr::qwen_realtime::endpoint_scheme_is_secure_websocket(&endpoint) {
         return Err("qwen3EndpointSchemeInvalid".to_string());
     }

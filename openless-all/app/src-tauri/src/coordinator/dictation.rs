@@ -1428,6 +1428,28 @@ pub(super) async fn begin_session_as(
     }
 
     let active_asr = CredentialsVault::get_active_asr();
+    let asr_model = CredentialsVault::get(CredentialAccount::AsrModel)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let effective_asr = match resolve_effective_asr_provider(&active_asr, &asr_model) {
+        Ok(provider) => provider,
+        Err(message) => {
+            log::warn!("[coord] ASR model routing rejected: {message}");
+            emit_capsule(
+                inner,
+                CapsuleState::Error,
+                0.0,
+                0,
+                Some(message.clone()),
+                None,
+            );
+            restore_prepared_windows_ime_session(inner, current_session_id);
+            inner.state.lock().phase = SessionPhase::Idle;
+            schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
+            return Err(message);
+        }
+    };
 
     if let Err(message) = ensure_microphone_permission(inner) {
         log::warn!("[coord] microphone permission gate failed: {message}");
@@ -1597,7 +1619,23 @@ pub(super) async fn begin_session_as(
         return Ok(());
     }
 
-    if is_bailian_provider(&active_asr) {
+    // 统一百炼:按所选模型把 build 分发重定向到具体协议 id（凭据仍读真实 active
+    // `bailian` 的那把 key；endpoint 由前端按模型同步）。别名 id 原样返回,走旧路径。
+    // 编译期护栏（exhaustiveness tripwire）：下面这条云端构建 if-else 链最后是
+    // `else` 静默落到火山。这个穷尽的空 match 本身不做事，但新增
+    // ActiveAsrProviderKind 时会在此编译失败，逼作者回来给新 kind 补一条构建分支
+    // ——把「装完才发现漏了」的运行期坑变成编译期错误。QA 侧的 build_qa_asr_start
+    // 已是穷尽 match，两条构建路径都受编译器保护。
+    match active_asr_provider_kind(&effective_asr) {
+        ActiveAsrProviderKind::Bailian
+        | ActiveAsrProviderKind::Qwen3Realtime
+        | ActiveAsrProviderKind::Mimo
+        | ActiveAsrProviderKind::DashScopeMultimodal
+        | ActiveAsrProviderKind::WhisperCompatible
+        | ActiveAsrProviderKind::Volcengine => {}
+    }
+
+    if is_bailian_provider(&effective_asr) {
         let asr = Arc::new(BailianRealtimeASR::new(read_bailian_credentials()));
         let bridge = Arc::new(DeferredAsrBridge::new());
         let consumer: Arc<dyn crate::recorder::AudioConsumer> = bridge.clone();
@@ -1669,7 +1707,7 @@ pub(super) async fn begin_session_as(
         let flushed_bytes = bridge.attach(target);
         log::info!("[coord] Bailian ASR connected; flushed {flushed_bytes} deferred audio bytes");
         finish_starting_session(inner, current_session_id).await;
-    } else if is_qwen3_realtime_provider(&active_asr) {
+    } else if is_qwen3_realtime_provider(&effective_asr) {
         // 与 Bailian 分支同构：流式 WS 会话 + DeferredAsrBridge 缓冲开链前音频。
         let asr = Arc::new(Qwen3RealtimeASR::new(read_qwen3_realtime_credentials()));
         let bridge = Arc::new(DeferredAsrBridge::new());
@@ -1746,7 +1784,7 @@ pub(super) async fn begin_session_as(
             "[coord] Qwen3 realtime ASR connected; flushed {flushed_bytes} deferred audio bytes"
         );
         finish_starting_session(inner, current_session_id).await;
-    } else if is_mimo_provider(&active_asr) {
+    } else if is_mimo_provider(&effective_asr) {
         let (api_key, base_url, model) = read_mimo_credentials();
         let mimo = Arc::new(MimoBatchASR::new(api_key, base_url, model));
         store_asr_for_session(
@@ -1757,7 +1795,18 @@ pub(super) async fn begin_session_as(
         let consumer: Arc<dyn crate::recorder::AudioConsumer> = mimo;
         start_recorder_and_enter_listening(inner, current_session_id, &active_asr, consumer)
             .await?;
-    } else if is_whisper_compatible_provider(&active_asr) {
+    } else if is_dashscope_multimodal_provider(&effective_asr) {
+        let (api_key, base_url, model) = read_dashscope_multimodal_credentials();
+        let asr = Arc::new(DashScopeMultimodalASR::new(api_key, base_url, model));
+        store_asr_for_session(
+            inner,
+            current_session_id,
+            ActiveAsr::DashScopeMultimodal(Arc::clone(&asr)),
+        );
+        let consumer: Arc<dyn crate::recorder::AudioConsumer> = asr;
+        start_recorder_and_enter_listening(inner, current_session_id, &active_asr, consumer)
+            .await?;
+    } else if is_whisper_compatible_provider(&effective_asr) {
         let (api_key, base_url, model) = read_whisper_credentials();
         // 用户辞書の有効フレーズを Whisper の `prompt` に流し込む。固有名詞や
         // 専門用語の同音・近形誤認識を ASR 段階で抑える。Polish LLM 側には
@@ -2449,6 +2498,34 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                             Err(TranscribeFail::new(
                                 "识别超时".to_string(),
                                 "mimo global timeout".to_string(),
+                            ))
+                        }
+                    }
+                }
+                ActiveAsr::DashScopeMultimodal(m) => {
+                    debug_assert!(uses_global_timeout);
+                    let audio_secs = m.buffer_duration_ms() as f64 / 1000.0;
+                    let timeout_duration = whisper_transcribe_timeout(audio_secs);
+                    log::info!(
+                        "[coord] DashScope Fun-ASR-Flash dynamic timeout: {}s (audio {:.2}s)",
+                        timeout_duration.as_secs(),
+                        audio_secs
+                    );
+                    match tokio::time::timeout(timeout_duration, m.transcribe()).await {
+                        Ok(Ok(r)) => Ok(r),
+                        Ok(Err(e)) => {
+                            log::error!("[coord] DashScope Fun-ASR-Flash transcribe failed: {e}");
+                            Err(TranscribeFail::new(format!("识别失败: {e}"), e.to_string()))
+                        }
+                        Err(_) => {
+                            log::error!(
+                                "[coord] DashScope Fun-ASR-Flash dynamic timeout {}s (audio {:.2}s)",
+                                timeout_duration.as_secs(),
+                                audio_secs
+                            );
+                            Err(TranscribeFail::new(
+                                "识别超时".to_string(),
+                                "dashscope multimodal global timeout".to_string(),
                             ))
                         }
                     }
