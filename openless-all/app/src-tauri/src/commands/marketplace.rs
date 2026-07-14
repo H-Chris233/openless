@@ -1,4 +1,5 @@
 use super::*;
+use std::io::Write;
 
 // ─────────────────────────── marketplace (Phase A) ───────────────────────────
 //
@@ -172,7 +173,7 @@ pub async fn marketplace_install(
         .map(|s| s.to_string());
 
     let download_url = format!("{base}/packs/{pack_id}/download");
-    let bytes = net::send_with_retry(|| {
+    let response = net::send_with_retry(|| {
         net::http()
             .get(&download_url)
             .timeout(std::time::Duration::from_secs(30))
@@ -180,26 +181,102 @@ pub async fn marketplace_install(
     .await
     .map_err(|e| format!("marketplace download failed: {e}"))?
     .error_for_status()
-    .map_err(|e| format!("marketplace HTTP error: {e}"))?
-    .bytes()
-    .await
-    .map_err(|e| format!("read body failed: {e}"))?;
+    .map_err(|e| format!("marketplace HTTP error: {e}"))?;
+    let bytes = read_marketplace_archive_response(response).await?;
 
-    // pack_id 已经过 UUID 白名单，拼临时文件路径安全。
-    let tmp = std::env::temp_dir().join(format!("openless-marketplace-{pack_id}.zip"));
-    std::fs::write(&tmp, &bytes).map_err(|e| format!("write tmp zip: {e}"))?;
-    let imported_result = coord
+    // 每次安装使用 create_new 的唯一临时路径；Drop 覆盖导入成功和所有错误分支。
+    let tmp = MarketplaceTempArchive::create(&pack_id, &bytes)?;
+    let imported = coord
         .style_packs()
-        .import_from_zip(&tmp)
-        .map_err(|e| e.to_string());
-    let _ = std::fs::remove_file(&tmp);
-    let imported = imported_result?;
+        .import_from_zip(tmp.path())
+        .map_err(|e| e.to_string())?;
 
     // 绑定 origin —— 后续编辑+发布走 derivative / supersede 分支。
     coord
         .style_packs()
         .set_origin(&imported.id, Some(pack_id), origin_author_login)
         .map_err(|e| format!("set origin failed: {e}"))
+}
+
+fn validate_marketplace_archive_content_length(content_length: Option<u64>) -> Result<(), String> {
+    if content_length.is_some_and(|length| {
+        length > crate::persistence::STYLE_PACK_ARCHIVE_MAX_COMPRESSED_BYTES as u64
+    }) {
+        return Err(format!(
+            "marketplace archive compressed size exceeds {} bytes",
+            crate::persistence::STYLE_PACK_ARCHIVE_MAX_COMPRESSED_BYTES
+        ));
+    }
+    Ok(())
+}
+
+fn append_marketplace_archive_chunk(body: &mut Vec<u8>, chunk: &[u8]) -> Result<(), String> {
+    if body.len().saturating_add(chunk.len())
+        > crate::persistence::STYLE_PACK_ARCHIVE_MAX_COMPRESSED_BYTES
+    {
+        return Err(format!(
+            "marketplace archive streamed compressed size exceeds {} bytes",
+            crate::persistence::STYLE_PACK_ARCHIVE_MAX_COMPRESSED_BYTES
+        ));
+    }
+    body.extend_from_slice(chunk);
+    Ok(())
+}
+
+async fn read_marketplace_archive_response(response: reqwest::Response) -> Result<Vec<u8>, String> {
+    use futures_util::StreamExt;
+
+    validate_marketplace_archive_content_length(response.content_length())?;
+    let initial_capacity = response
+        .content_length()
+        .and_then(|length| usize::try_from(length).ok())
+        .unwrap_or(0)
+        .min(crate::persistence::STYLE_PACK_ARCHIVE_MAX_COMPRESSED_BYTES);
+    let mut body = Vec::with_capacity(initial_capacity);
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("read marketplace archive body failed: {e}"))?;
+        append_marketplace_archive_chunk(&mut body, &chunk)?;
+    }
+    Ok(body)
+}
+
+struct MarketplaceTempArchive {
+    path: std::path::PathBuf,
+}
+
+impl MarketplaceTempArchive {
+    fn create(pack_id: &str, bytes: &[u8]) -> Result<Self, String> {
+        let path = std::env::temp_dir().join(format!(
+            "openless-marketplace-{pack_id}-{}.zip",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let write_result = (|| -> std::io::Result<()> {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)?;
+            file.write_all(bytes)?;
+            file.sync_all()
+        })();
+        if let Err(error) = write_result {
+            let _ = std::fs::remove_file(&path);
+            return Err(format!(
+                "write marketplace temporary archive failed: {error}"
+            ));
+        }
+        Ok(Self { path })
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for MarketplaceTempArchive {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 #[tauri::command]
@@ -314,6 +391,40 @@ pub async fn marketplace_like(
     resp.json::<serde_json::Value>()
         .await
         .map_err(|e| format!("parse failed: {e}"))
+}
+
+#[cfg(test)]
+mod archive_download_tests {
+    use super::{append_marketplace_archive_chunk, validate_marketplace_archive_content_length};
+    use crate::persistence::STYLE_PACK_ARCHIVE_MAX_COMPRESSED_BYTES;
+
+    #[test]
+    fn marketplace_archive_rejects_oversized_declared_content_length() {
+        let error = validate_marketplace_archive_content_length(Some(
+            STYLE_PACK_ARCHIVE_MAX_COMPRESSED_BYTES as u64 + 1,
+        ))
+        .expect_err("oversized content length must fail");
+
+        assert!(error.contains("compressed size"));
+    }
+
+    #[test]
+    fn marketplace_archive_rejects_streamed_chunk_crossing_limit() {
+        let mut body = vec![0; STYLE_PACK_ARCHIVE_MAX_COMPRESSED_BYTES];
+        let error = append_marketplace_archive_chunk(&mut body, b"x")
+            .expect_err("streamed overflow must fail");
+
+        assert!(error.contains("compressed size"));
+        assert_eq!(body.len(), STYLE_PACK_ARCHIVE_MAX_COMPRESSED_BYTES);
+    }
+
+    #[test]
+    fn marketplace_archive_accepts_exact_streamed_limit() {
+        let mut body = vec![0; STYLE_PACK_ARCHIVE_MAX_COMPRESSED_BYTES - 1];
+        append_marketplace_archive_chunk(&mut body, b"x").expect("exact limit is valid");
+
+        assert_eq!(body.len(), STYLE_PACK_ARCHIVE_MAX_COMPRESSED_BYTES);
+    }
 }
 
 /// 撤回自己发布的 pack（后端软删 state='withdrawn'，前端列表不再可见）。

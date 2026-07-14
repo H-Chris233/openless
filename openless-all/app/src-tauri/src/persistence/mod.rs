@@ -32,6 +32,7 @@ mod history;
 mod paths;
 mod preferences;
 mod style_pack;
+mod style_pack_archive;
 
 pub use activity::*;
 pub use correction::*;
@@ -41,6 +42,7 @@ pub use history::*;
 pub use paths::*;
 pub use preferences::*;
 pub use style_pack::*;
+pub(crate) use style_pack_archive::STYLE_PACK_ARCHIVE_MAX_COMPRESSED_BYTES;
 
 const HISTORY_CAP: usize = 200;
 const PREFERENCES_FILE: &str = "preferences.json";

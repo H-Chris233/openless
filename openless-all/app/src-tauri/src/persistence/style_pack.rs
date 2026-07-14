@@ -4,15 +4,18 @@
 //! enabled packs.
 
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use parking_lot::Mutex;
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::style_pack_archive::{
+    cleanup_style_pack_asset_dir, persist_style_pack_icon, read_style_pack_archive,
+    StylePackArchiveManifest,
+};
 use super::{atomic_write, data_dir, ensure_dir, read_or_default, PreferencesStore};
 use crate::types::{
     builtin_style_pack_for_mode, builtin_style_pack_id, builtin_style_packs,
@@ -22,40 +25,6 @@ use crate::types::{
 
 const STYLE_PACKS_FILE: &str = "style-packs.json";
 const STYLE_PACK_ASSETS_DIR: &str = "style-pack-assets";
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct StylePackArchiveManifest {
-    schema_version: u32,
-    id: String,
-    name: String,
-    description: String,
-    author: Option<String>,
-    version: String,
-    base_mode: PolishMode,
-    tags: Vec<String>,
-    prompt_file: String,
-    examples_file: String,
-    icon_file: Option<String>,
-    recommended_model: Option<String>,
-    compatible_app_version: Option<String>,
-    /// Marketplace 上游关系。旧 ZIP 没有此字段时自动为 None；
-    /// 兼容早期口误/拼写包里可能出现的 `orion*` 字段名。
-    #[serde(
-        default,
-        alias = "orionPackId",
-        alias = "orion_pack_id",
-        alias = "origin_pack_id"
-    )]
-    origin_pack_id: Option<String>,
-    #[serde(
-        default,
-        alias = "orionAuthorLogin",
-        alias = "orion_author_login",
-        alias = "origin_author_login"
-    )]
-    origin_author_login: Option<String>,
-}
 
 pub struct StylePackStore {
     path: PathBuf,
@@ -315,20 +284,15 @@ impl StylePackStore {
     }
 
     pub fn import_from_zip(&self, zip_path: &Path) -> Result<StylePack> {
-        let file = fs::File::open(zip_path)
-            .with_context(|| format!("open style pack zip failed: {}", zip_path.display()))?;
-        let mut archive = zip::ZipArchive::new(file).context("open style pack zip archive")?;
-        let manifest: StylePackArchiveManifest =
-            read_zip_json_entry(&mut archive, "manifest.json")?;
-        let prompt = read_zip_string_entry(&mut archive, &manifest.prompt_file)?;
-        let examples =
-            read_zip_json_entry::<Vec<StylePackExample>>(&mut archive, &manifest.examples_file)?;
+        let parsed = read_style_pack_archive(zip_path)?;
+        let manifest = parsed.manifest;
+        let manifest_id = manifest.id.clone();
 
         let mut packs = self.state.lock();
         let now = Utc::now().to_rfc3339();
         let pack_id = unique_imported_style_pack_id(&packs, &manifest.id);
-        let icon_path = if let Some(icon_file) = manifest.icon_file.as_deref() {
-            extract_style_pack_icon(&mut archive, &self.asset_root, &pack_id, icon_file)?
+        let icon_path = if let Some(icon) = parsed.icon {
+            Some(persist_style_pack_icon(&self.asset_root, &pack_id, icon)?)
         } else {
             None
         };
@@ -342,8 +306,8 @@ impl StylePackStore {
             version: normalize_version(&manifest.version),
             kind: StylePackKind::Imported,
             base_mode: manifest.base_mode,
-            prompt,
-            examples,
+            prompt: parsed.prompt,
+            examples: parsed.examples,
             tags: normalize_tags(&manifest.tags),
             icon_path,
             created_at: Some(now.clone()),
@@ -359,13 +323,20 @@ impl StylePackStore {
             origin_pack_id: normalize_optional_text(manifest.origin_pack_id),
             origin_author_login: normalize_optional_text(manifest.origin_author_login),
         };
-        packs.insert(0, pack.clone());
-        write_style_packs_file(&self.path, &packs)?;
+        let mut next_packs = packs.clone();
+        next_packs.insert(0, pack.clone());
+        if let Err(error) = write_style_packs_file(&self.path, &next_packs) {
+            if pack.icon_path.is_some() {
+                cleanup_style_pack_asset_dir(&self.asset_root, &pack.id);
+            }
+            return Err(error);
+        }
+        *packs = next_packs;
         log::info!(
             "[style-pack] imported source={} installed_id={} manifest_id={} base_mode={:?} prompt_chars={} examples={} tags={} icon={}",
             zip_path.display(),
             pack.id,
-            manifest.id,
+            manifest_id,
             pack.base_mode,
             pack.prompt.chars().count(),
             pack.examples.len(),
@@ -809,52 +780,6 @@ fn sanitize_style_pack_id(requested_id: &str) -> String {
     }
 }
 
-fn read_zip_json_entry<T: for<'de> Deserialize<'de>>(
-    archive: &mut zip::ZipArchive<fs::File>,
-    entry_name: &str,
-) -> Result<T> {
-    let text = read_zip_string_entry(archive, entry_name)?;
-    serde_json::from_str(&text)
-        .with_context(|| format!("decode style pack zip entry failed: {entry_name}"))
-}
-
-fn read_zip_string_entry(
-    archive: &mut zip::ZipArchive<fs::File>,
-    entry_name: &str,
-) -> Result<String> {
-    let mut file = archive
-        .by_name(entry_name)
-        .with_context(|| format!("missing style pack zip entry: {entry_name}"))?;
-    let mut buffer = String::new();
-    file.read_to_string(&mut buffer)
-        .with_context(|| format!("read style pack zip entry failed: {entry_name}"))?;
-    Ok(buffer)
-}
-
-fn extract_style_pack_icon(
-    archive: &mut zip::ZipArchive<fs::File>,
-    asset_root: &Path,
-    pack_id: &str,
-    entry_name: &str,
-) -> Result<Option<String>> {
-    let mut file = archive
-        .by_name(entry_name)
-        .with_context(|| format!("missing style pack icon entry: {entry_name}"))?;
-    let file_name = Path::new(entry_name)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| anyhow!("invalid style pack icon file name"))?;
-    let target_dir = asset_root.join(pack_id);
-    ensure_dir(&target_dir)?;
-    let target_path = target_dir.join(file_name);
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
-        .with_context(|| format!("read style pack icon failed: {entry_name}"))?;
-    fs::write(&target_path, &bytes)
-        .with_context(|| format!("write style pack icon failed: {}", target_path.display()))?;
-    Ok(Some(target_path.to_string_lossy().to_string()))
-}
-
 fn remove_style_pack_assets(asset_root: &Path, pack: &StylePack) {
     if let Some(icon_path) = pack.icon_path.as_deref() {
         let path = Path::new(icon_path);
@@ -869,42 +794,5 @@ fn remove_style_pack_assets(asset_root: &Path, pack: &StylePack) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::sync_style_pack_preferences;
-    use crate::types::{builtin_style_packs, CustomStylePrompts};
-
-    #[test]
-    fn sync_style_pack_preferences_uses_builtin_store_prompts_as_source_of_truth() {
-        let mut prefs = crate::types::UserPreferences {
-            style_system_prompts: crate::types::StyleSystemPrompts {
-                raw: "stale raw".into(),
-                light: "stale light".into(),
-                structured: "stale structured".into(),
-                formal: "stale formal".into(),
-            },
-            custom_style_prompts: CustomStylePrompts {
-                raw: String::new(),
-                light: "legacy extra instruction".into(),
-                structured: String::new(),
-                formal: String::new(),
-            },
-            ..Default::default()
-        };
-        let mut packs = builtin_style_packs();
-        let light = packs
-            .iter_mut()
-            .find(|pack| pack.id == "builtin.light")
-            .expect("builtin light pack");
-        light.prompt = "fresh light prompt from store".into();
-
-        assert!(sync_style_pack_preferences(&mut prefs, &packs));
-        assert_eq!(prefs.style_system_prompts.raw, packs[0].prompt);
-        assert_eq!(
-            prefs.style_system_prompts.light,
-            "fresh light prompt from store"
-        );
-        assert_eq!(prefs.style_system_prompts.structured, packs[2].prompt);
-        assert_eq!(prefs.style_system_prompts.formal, packs[3].prompt);
-        assert_eq!(prefs.custom_style_prompts, CustomStylePrompts::default());
-    }
-}
+#[path = "style_pack_tests.rs"]
+mod tests;
