@@ -67,9 +67,9 @@ pub(super) fn resolve_less_computer_approval(token: &str, approved: bool) {
         .and_then(|mut m| m.remove(token));
     if let Some(tx) = sender {
         let _ = tx.send(approved);
-        log::info!("[less-computer] 审批 token={token} approved={approved}");
+        log::info!("[less-computer] 审批已解析 approved={approved}");
     } else {
-        log::info!("[less-computer] 审批 token={token} 已失效（超时/重复）");
+        log::info!("[less-computer] 审批请求已失效（超时/重复）");
     }
 }
 
@@ -178,6 +178,34 @@ mod less_computer_event_log_tests {
         assert_eq!(log.events.len(), LESS_COMPUTER_EVENT_LOG_CAP);
         // 丢最旧：队首是第 6 条（seq 从 1 起）。
         assert_eq!(log.events.front().unwrap()["seq"], 6);
+    }
+}
+
+#[cfg(test)]
+mod less_computer_approval_log_tests {
+    #[test]
+    fn approval_capability_is_never_interpolated_into_logs() {
+        let sources = [
+            include_str!("dictation.rs"),
+            include_str!("hotkey_loops.rs"),
+            include_str!("../coordinator.rs"),
+            include_str!("../commands/qa.rs"),
+            include_str!("../lib.rs"),
+        ];
+
+        for source in sources {
+            for statement in source.split("log::").skip(1) {
+                let statement = statement
+                    .split_once(");")
+                    .map_or(statement, |(head, _)| head);
+                if statement.contains("[less-computer]") {
+                    assert!(
+                        !statement.contains("token"),
+                        "Less Computer approval logs must not contain the capability token: {statement}"
+                    );
+                }
+            }
+        }
     }
 }
 
