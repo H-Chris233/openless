@@ -544,6 +544,12 @@ pub(super) async fn answer_qa_question_text(
             duration_ms: Some(duration_ms),
             dictionary_entry_count: None,
             has_audio_recording: None,
+            asr_provider: None,
+            asr_model: None,
+            llm_provider: None,
+            llm_model: None,
+            asr_ms: None,
+            polish_ms: None,
         };
         let prefs_snapshot = inner.prefs.get();
         if let Err(error) = inner.history.append_with_retention(
@@ -649,8 +655,9 @@ pub(super) async fn begin_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
         return Err(message);
     }
 
+    // QA 历史暂不落模型归因字段，构建时快照就地丢弃（dictation / 重转录路径在用）。
     let qa_asr = match build_qa_asr_start(inner, &active_asr).await {
-        Ok(qa_asr) => qa_asr,
+        Ok((qa_asr, _asr_call_label)) => qa_asr,
         Err(message) => {
             log::error!("[coord] QA active ASR init failed: {message}");
             finish_qa_with_error(inner, format!("ASR 初始化失败: {message}"));
@@ -1236,6 +1243,12 @@ pub(super) async fn end_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
             duration_ms: Some(raw.duration_ms),
             dictionary_entry_count: None,
             has_audio_recording: None,
+            asr_provider: None,
+            asr_model: None,
+            llm_provider: None,
+            llm_model: None,
+            asr_ms: None,
+            polish_ms: None,
         };
         let prefs_snapshot = inner.prefs.get();
         if let Err(e) = inner.history.append_with_retention(
@@ -1459,6 +1472,7 @@ mod tests {
             &coordinator.inner,
             session_id,
             ActiveAsr::ElevenLabs(asr),
+            crate::coordinator::AsrCallLabel::new("elevenlabs", Some("scribe_v2".into())),
         );
 
         let transcribe = tokio::spawn({
