@@ -2202,6 +2202,7 @@ mod tests {
         let messages = vec![QaChatMessage {
             role: "user".into(),
             content: "问题".into(),
+            selection_text: None,
         }];
         let deltas = StdMutex::new(String::new());
         let output = provider

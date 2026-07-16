@@ -472,14 +472,20 @@ export type QaStateKind =
 export interface QaChatMessage {
   role: 'user' | 'assistant';
   content: string;
+  /** 未经模型安全信封转义的选区原文，仅用于 UI 文本展示。 */
+  selectionText?: string;
 }
 
 export interface QaStatePayload {
   kind: QaStateKind;
+  /** 后端会话 token；前端用它丢弃关闭/重开后迟到的旧轮事件。 */
+  session_id?: string;
   /** 后端权威：当前已有的多轮对话历史（user → assistant 交替）。answer 事件带完整版。 */
   messages?: QaChatMessage[];
   /** recording 状态时附带的选区预览（前 60 字）。 */
   selection_preview?: string | null;
+  /** Linux 选区工具缺失时的非阻断提醒码。 */
+  selection_warning?: 'linux_selection_tools_missing' | null;
   /** error 状态时附带的提示。 */
   error?: string;
   /** answer_delta 事件时附带的本帧增量字符串。 */

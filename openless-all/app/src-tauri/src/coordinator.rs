@@ -51,7 +51,6 @@ use crate::polish::{
 };
 use crate::qa_hotkey::{QaHotkeyError, QaHotkeyEvent, QaHotkeyMonitor};
 use crate::recorder::{Recorder, RecorderError};
-use crate::selection::capture_selection;
 #[cfg(target_os = "windows")]
 use crate::types::PasteShortcut;
 use crate::types::{
@@ -107,9 +106,11 @@ use qa::{
 #[cfg(test)]
 use resources::discard_startup_resources_for_session;
 use resources::{
-    acquire_recording_mute, cancel_active_asr, release_recording_mute,
-    selected_microphone_device_name, stop_microphone_preview_monitor, stop_qa_recorder,
-    take_asr_for_session, take_recorder_for_session, SessionResource, SharedRecordingMuteState,
+    acquire_recording_mute, cancel_active_asr, cancel_qa_asr_for_session, release_recording_mute,
+    selected_microphone_device_name, stop_microphone_preview_monitor,
+    stop_qa_recorder_for_session, store_qa_asr_for_session, store_qa_recorder_for_session,
+    take_asr_for_session, take_qa_asr_for_session, take_recorder_for_session, SessionResource,
+    SharedRecordingMuteState,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -498,9 +499,9 @@ struct Inner {
     /// 流入）后置 false，光条"点亮"进入正式录音。begin_session 每次入场重置为 true。
     capsule_warming: AtomicBool,
     /// QA 用的 ASR 句柄。必须跟 active_asr_provider 保持一致，避免浮窗走不同入口。
-    qa_asr: Mutex<Option<ActiveAsr>>,
+    qa_asr: Mutex<Option<SessionResource<ActiveAsr>>>,
     /// QA 用的 Recorder 句柄。
-    qa_recorder: Mutex<Option<Recorder>>,
+    qa_recorder: Mutex<Option<SessionResource<Recorder>>>,
     /// QA SSE 流取消标志。begin_qa_session 重置为 false；cancel_qa_session 设 true；
     /// polish::chat_completion_history_streaming 的 loop 每帧检查，true 时 break loop
     /// 避免取消后 LLM 仍 drain HTTP body 烧 token。详见 issue #161。
@@ -2005,25 +2006,32 @@ fn raw_mode_uses_llm(style_system_prompt: &str) -> bool {
 /// QA 录音 runtime error 监听器。镜像 `spawn_recorder_error_monitor` 的语义但走 QA
 /// 收尾路径（`finish_qa_with_error` 替代 `abort_recording_with_error`）。
 /// 用 qa_state.session_id 守卫 stale 事件。详见 issue #168。
-fn spawn_qa_recorder_error_monitor(inner: &Arc<Inner>, rx: mpsc::Receiver<RecorderError>) {
-    let captured_session_id = inner.qa_state.lock().session_id;
+fn spawn_qa_recorder_error_monitor(
+    inner: &Arc<Inner>,
+    session_id: SessionId,
+    rx: mpsc::Receiver<RecorderError>,
+) {
     let inner = Arc::clone(inner);
     std::thread::Builder::new()
         .name("openless-qa-recorder-error-monitor".into())
         .spawn(move || {
             if let Ok(err) = rx.recv() {
                 let current_session_id = inner.qa_state.lock().session_id;
-                if captured_session_id != current_session_id {
+                if session_id != current_session_id {
                     log::warn!(
                         "[coord] QA recorder error from stale session {} dropped (current={}, err={})",
-                        captured_session_id,
+                        session_id,
                         current_session_id,
                         err
                     );
                     return;
                 }
                 log::error!("[coord] QA recorder runtime error: {err}");
-                finish_qa_with_error(&inner, format!("录音设备异常: {err}"));
+                finish_qa_with_error_if_current(
+                    &inner,
+                    session_id,
+                    format!("录音设备异常: {err}"),
+                );
             }
         })
         .ok();
