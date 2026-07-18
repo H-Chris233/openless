@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 const target = process.env.OPENLESS_UPDATE_TARGET;
 const arch = process.env.OPENLESS_UPDATE_ARCH;
-const repo = process.env.OPENLESS_UPDATE_REPO || 'appergb/openless';
+const repo = process.env.OPENLESS_UPDATE_REPO || 'Open-Less/openless';
 const mirrorBaseUrl = process.env.OPENLESS_UPDATE_MIRROR_BASE_URL || 'https://fastgit.cc/https://github.com';
 const rawChannel = (process.env.OPENLESS_RELEASE_CHANNEL || 'stable').toLowerCase();
 if (rawChannel !== 'stable' && rawChannel !== 'beta') {

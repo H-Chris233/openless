@@ -14,8 +14,8 @@ import { Card } from '../_atoms';
 import { btnGhostStyle, SectionTitle } from './shared';
 import { CheckUpdateButton } from './CheckUpdateButton';
 
-const HELP_URL = 'https://github.com/appergb/openless#readme';
-const RELEASE_NOTES_URL = 'https://github.com/appergb/openless/releases';
+const HELP_URL = 'https://github.com/Open-Less/openless#readme';
+const RELEASE_NOTES_URL = 'https://github.com/Open-Less/openless/releases';
 
 export function AboutSection() {
   const { t } = useTranslation();
@@ -67,7 +67,7 @@ export function AboutSection() {
       <Card>
         <SectionTitle>{t('settings.about.linksTitle')}</SectionTitle>
         <Row label={t('modal.about.source')}>
-          <button style={btnGhostStyle} onClick={() => openExternal('https://github.com/appergb/openless')}>
+          <button style={btnGhostStyle} onClick={() => openExternal('https://github.com/Open-Less/openless')}>
             GitHub
           </button>
         </Row>
@@ -87,7 +87,7 @@ export function AboutSection() {
           </button>
         </Row>
         <Row label={t('modal.about.feedback')}>
-          <button style={btnGhostStyle} onClick={() => openExternal('https://github.com/appergb/openless/issues')}>
+          <button style={btnGhostStyle} onClick={() => openExternal('https://github.com/Open-Less/openless/issues')}>
             {t('modal.about.feedbackBtn')}
           </button>
         </Row>
@@ -110,4 +110,3 @@ export function AboutSection() {
     </>
   );
 }
-
