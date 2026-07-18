@@ -270,6 +270,18 @@ async fn validate_asr_provider() -> Result<(), String> {
     if active_asr == crate::asr::elevenlabs::PROVIDER_ID {
         return validate_elevenlabs_asr_provider().await;
     }
+    // StepFun 一入口双协议：`*-stream` 模型走实时 WS 验证，其余走批式
+    // /audio/transcriptions（与 build 侧 resolve_effective_asr_provider 同判据）。
+    if active_asr == "stepfun" || active_asr == crate::asr::stepfun_realtime::PROVIDER_ID {
+        let model = CredentialsVault::get(CredentialAccount::AsrModel)
+            .map_err(|e| e.to_string())?
+            .unwrap_or_default();
+        if active_asr == crate::asr::stepfun_realtime::PROVIDER_ID
+            || crate::coordinator::stepfun_model_is_stream(&model)
+        {
+            return validate_stepfun_realtime_asr_provider().await;
+        }
+    }
 
     let config = read_openai_provider_config("asr")?;
     let model = CredentialsVault::get(CredentialAccount::AsrModel)
@@ -277,6 +289,43 @@ async fn validate_asr_provider() -> Result<(), String> {
         .filter(|s| !s.trim().is_empty())
         .ok_or_else(|| "asrModelMissing".to_string())?;
     validate_asr_transcription(&config, model.trim()).await
+}
+
+/// StepFun 实时 WS 验证：真连 + session.update + 500ms 静音 + 收尾。
+/// 协议无 finish 事件，收尾走静音帧 + 宽限期（纯静音会话以空文本成功返回，
+/// 见 stepfun_realtime 模块注释），全程 ~2s。
+async fn validate_stepfun_realtime_asr_provider() -> Result<(), String> {
+    let api_key = CredentialsVault::get(CredentialAccount::AsrApiKey)
+        .map_err(|e| e.to_string())?
+        .unwrap_or_default();
+    if api_key.trim().is_empty() {
+        return Err("API Key 为空".to_string());
+    }
+    let endpoint = CredentialsVault::get(CredentialAccount::AsrEndpoint)
+        .map_err(|e| e.to_string())?
+        .unwrap_or_default();
+    let model = CredentialsVault::get(CredentialAccount::AsrModel)
+        .map_err(|e| e.to_string())?
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| crate::asr::stepfun_realtime::DEFAULT_MODEL.to_string());
+    let asr = std::sync::Arc::new(crate::asr::StepfunRealtimeASR::new(
+        crate::asr::StepfunRealtimeCredentials {
+            api_key,
+            endpoint,
+            model,
+            prompt: None,
+        },
+    ));
+    asr.open_session().await.map_err(|e| e.to_string())?;
+    crate::asr::AudioConsumer::consume_pcm_chunk(
+        &*asr,
+        &vec![0u8; crate::asr::stepfun_realtime::TARGET_AUDIO_CHUNK_BYTES * 5],
+    );
+    asr.send_last_frame().await.map_err(|e| e.to_string())?;
+    asr.await_final_result()
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 async fn validate_mimo_asr_provider() -> Result<(), String> {
@@ -588,6 +637,16 @@ async fn validate_asr_transcription(config: &ProviderConfig, model: &str) -> Res
     };
     let status = response.status();
     if !status.is_success() {
+        // 探针音频是纯静音，有的厂商（StepFun）对无语音内容直接 400
+        // "no speech found"。走到这一步说明鉴权（错 key 是 401）和模型名
+        // （错模型是 404 model_invalid）都已通过、转写管线是通的——这类
+        // 内容拒收判为验证成功，避免对静音敏感的厂商恒报假阴性。
+        if status.as_u16() == 400 {
+            let body = response.text().await.unwrap_or_default();
+            if asr_error_is_no_speech_rejection(&body) {
+                return Ok(());
+            }
+        }
         return Err(format!("providerHttpStatus:{}", status.as_u16()));
     }
     if let Some(len) = response.content_length() {
@@ -610,6 +669,13 @@ async fn validate_asr_transcription(config: &ProviderConfig, model: &str) -> Res
         return Err("asrMissingTextField".to_string());
     }
     Ok(())
+}
+
+/// 400 应答体是否是「音频里没有语音」类内容拒收（而非参数错误）。
+/// 只匹配语义明确的措辞，宁可漏判（用户看到 400 后实测仍可用）也不误判
+/// 真正的参数错误为成功。
+fn asr_error_is_no_speech_rejection(body: &str) -> bool {
+    body.to_ascii_lowercase().contains("no speech")
 }
 
 pub(crate) fn asr_transcriptions_url(base_url: &str) -> Result<String, String> {
@@ -836,10 +902,25 @@ mod tests {
     // LLM 路径的 SSRF 校验。read_openai_provider_config 依赖凭据库无法纯单测，这里直接对它调用
     // 的校验器锁定 ASR 形态 endpoint 的拒绝/放行契约。
     use super::{
-        fetch_provider_models, models_url, provider_llm_error_message, provider_log_context,
-        provider_request_error_message, sanitized_provider_destination, ProviderConfig,
+        asr_error_is_no_speech_rejection, fetch_provider_models, models_url,
+        provider_llm_error_message, provider_log_context, provider_request_error_message,
+        sanitized_provider_destination, ProviderConfig,
     };
     use crate::endpoint_security::validate_http_endpoint;
+
+    #[test]
+    fn silence_probe_content_rejection_is_not_a_credential_error() {
+        // StepFun 对静音探针的实测应答（2026-07）：鉴权/模型都通过，只是探针
+        // 音频没有语音内容——不能报成凭据错误。
+        assert!(asr_error_is_no_speech_rejection(
+            r#"{"error":{"message":"no speech found","type":"request_params_invalid"}}"#
+        ));
+        // 真正的参数错误不能被误判成功。
+        assert!(!asr_error_is_no_speech_rejection(
+            r#"{"error":{"message":"Request param: response_format is invalid","type":"input_invalid"}}"#
+        ));
+        assert!(!asr_error_is_no_speech_rejection(""));
+    }
 
     #[test]
     fn provider_destination_redacts_userinfo_query_and_fragment() {
