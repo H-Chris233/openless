@@ -330,6 +330,7 @@ export const zhCN = {
     },
   },
   history: {
+    exportError: '导出录音失败，请重试。',
     kicker: 'HISTORY',
     title: '历史记录',
     desc: '本机保存的识别记录。',
@@ -345,6 +346,7 @@ export const zhCN = {
     copyFailed: '复制失败：{{err}}',
     playRecording: '播放录音',
     audioLoading: '加载中…',
+    audioDecodeFailed: '音频解码失败：{{err}}',
     exportRecording: '导出录音',
     exportFailed: '导出失败：{{err}}',
     retranscribe: '重新转录',

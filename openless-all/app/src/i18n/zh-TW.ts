@@ -332,6 +332,7 @@ export const zhTW: typeof zhCN = {
     },
   },
   history: {
+    exportError: '匯出錄音失敗，請重試。',
     kicker: 'HISTORY',
     title: '歷史記錄',
     desc: '本機保存的識別記錄。',
@@ -347,6 +348,7 @@ export const zhTW: typeof zhCN = {
     copyFailed: '複製失敗：{{err}}',
     playRecording: '播放錄音',
     audioLoading: '載入中…',
+    audioDecodeFailed: '音訊解碼失敗：{{err}}',
     exportRecording: '匯出錄音',
     exportFailed: '匯出失敗：{{err}}',
     retranscribe: '重新轉錄',

@@ -334,6 +334,7 @@ export const ja: typeof zhCN = {
     },
   },
   history: {
+    exportError: '録音のエクスポートに失敗しました。もう一度お試しください。',
     kicker: 'HISTORY',
     title: '履歴',
     desc: 'ローカルに保存された認識記録。',
@@ -349,6 +350,7 @@ export const ja: typeof zhCN = {
     copyFailed: 'コピーに失敗：{{err}}',
     playRecording: '録音を再生',
     audioLoading: '読み込み中…',
+    audioDecodeFailed: '音声デコード失敗：{{err}}',
     exportRecording: '録音をエクスポート',
     exportFailed: 'エクスポート失敗：{{err}}',
     retranscribe: '再認識',

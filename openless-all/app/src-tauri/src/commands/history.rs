@@ -1,4 +1,5 @@
 use super::*;
+use tauri_plugin_dialog::{DialogExt, FilePath};
 
 #[tauri::command]
 pub fn list_history(coord: CoordinatorState<'_>) -> Result<Vec<DictationSession>, String> {
@@ -37,28 +38,164 @@ pub fn get_activity_stats(coord: CoordinatorState<'_>) -> Vec<ActivityDay> {
 /// session_id 在仓库内由 `Uuid::new_v4()` 生成 (`dictation.rs:1531`)，前端只会回传
 /// 自己列出的合法 id，但 IPC = boundary，按 boundary 规则严格校验。
 ///
-/// async fs：单条 5 分钟 wav 约 9.6MB，同步 `std::fs::read` 会阻塞 Tauri IPC 主循环。
-/// 改 `tokio::fs::read` 后让出线程给其它 IPC。
+/// 读取录音文件的 data URL（base64），前端 `<audio>` 直接 `src={url}` 播放。
+///
+/// 之前的实现返回 `Vec<u8>`，Tauri IPC 将其 JSON 序列化为 number 数组（~460 KB），
+/// 在 WebKit/Wry 中 `<audio>` 解析这个 Blob 有时会失败（表现为时长 0、导出无反应）。
+/// 改用 base64 data URL 后：
+/// - IPC payload 只增大 33%（150 KB），仍在安全范围内
+/// - 前端不需要 `ArrayBuffer → Blob → createObjectURL` 的复杂链路
+/// - 导出按钮直接把 data URL 设为 `<a>.href` 即可触发浏览器下载
 #[tauri::command]
-pub async fn read_audio_recording(session_id: String) -> Result<Vec<u8>, String> {
+pub async fn read_audio_recording(session_id: String) -> Result<String, String> {
     if !is_valid_session_id(&session_id) {
         return Err("invalid session id".into());
     }
     let path =
         crate::persistence::recording_path_for_session(&session_id).map_err(|e| e.to_string())?;
-    if !path.exists() {
-        return Err("recording not found".into());
-    }
-    // TOCTOU 兜底：exists() 通过到 read 之间文件可能被 prune（条数 cap / retention
-    // 清理 / 用户手动删）。把 NotFound 标准化成跟 exists() 失败同样的错误字符串，
-    // 前端单条 'recording not found' catch 就能稳定隐藏按钮，不依赖本地化 OS 错误。
-    tokio::fs::read(&path).await.map_err(|e| {
+    let data = tokio::fs::read(&path).await.map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             "recording not found".into()
         } else {
             format!("read wav failed: {e}")
         }
+    })?;
+    log::info!("[history] read_audio_recording id={session_id} bytes={} head={:?}", data.len(), &data.get(..16));
+    let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &data);
+    let data_url = format!("data:audio/wav;base64,{b64}");
+    log::info!("[history] read_audio_recording data_url_len={}", data_url.len());
+    Ok(data_url)
+}
+
+/// 把已归档录音 wav 导出到用户选定的路径。
+///
+/// 后端直接调系统文件保存对话框，路径不经 IPC 传递，无法被篡改或注入。
+/// 对话框调用在 spawn_blocking 中执行，避免阻塞 Tauri 异步线程池。
+#[tauri::command]
+pub async fn export_audio_recording(
+    app: tauri::AppHandle,
+    session_id: String,
+) -> Result<String, String> {
+    if !is_valid_session_id(&session_id) {
+        return Err("invalid session id".into());
+    }
+
+    tokio::task::spawn_blocking(move || -> Result<String, String> {
+        let file_path = app
+            .dialog()
+            .file()
+            .add_filter("WAV audio", &["wav"])
+            .set_file_name(format!("openless-recording-{session_id}.wav"))
+            .blocking_save_file();
+
+        let Some(file_path) = file_path else {
+            return Err("user cancelled".into());
+        };
+
+        let src = crate::persistence::recording_path_for_session(&session_id)
+            .map_err(|e| e.to_string())?;
+
+        export_recording_to_destination(&app, file_path, &src)
     })
+    .await
+    .map_err(|e| format!("internal error: {e}"))?
+}
+
+fn export_recording_to_destination(
+    app: &tauri::AppHandle,
+    file_path: FilePath,
+    source: &std::path::Path,
+) -> Result<String, String> {
+    #[cfg(target_os = "android")]
+    if let FilePath::Url(url) = &file_path {
+        if url.scheme() == "content" {
+            copy_recording_to_mobile_url(app, &file_path, source)?;
+            return Ok(url.to_string());
+        }
+    }
+
+    #[cfg(target_os = "ios")]
+    if let FilePath::Url(url) = &file_path {
+        if url.scheme() == "file" {
+            copy_recording_to_mobile_url(app, &file_path, source)?;
+            return Ok(url.to_string());
+        }
+    }
+
+    let destination = file_path
+        .into_path()
+        .map_err(export_recording_failed)?;
+    copy_recording_to_path(source, &destination)?;
+    Ok(destination.to_string_lossy().into_owned())
+}
+
+const RECORDING_EXPORT_FAILED: &str = "recording export failed";
+
+fn open_recording_source(source: &std::path::Path) -> Result<std::fs::File, String> {
+    std::fs::File::open(source).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            "recording not found".to_string()
+        } else {
+            export_recording_failed(error)
+        }
+    })
+}
+
+fn export_recording_failed(error: impl std::fmt::Display) -> String {
+    log::error!("[history] audio recording export failed: {error}");
+    RECORDING_EXPORT_FAILED.to_string()
+}
+
+fn copy_recording_to_path(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> Result<(), String> {
+    let mut source_file = open_recording_source(source)?;
+    let mut destination_file = std::fs::File::create(destination).map_err(export_recording_failed)?;
+    std::io::copy(&mut source_file, &mut destination_file)
+        .map(|_| ())
+        .map_err(export_recording_failed)
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn copy_recording_to_mobile_url(
+    app: &tauri::AppHandle,
+    destination: &FilePath,
+    source: &std::path::Path,
+) -> Result<(), String> {
+    use tauri_plugin_fs::{FsExt, OpenOptions};
+
+    let mut source_file = open_recording_source(source)?;
+    let mut options = OpenOptions::new();
+    options.write(true).truncate(true).create(true);
+    let mut destination_file = match app.fs().open(destination.clone(), options) {
+        Ok(file) => file,
+        Err(error) => {
+            #[cfg(target_os = "ios")]
+            let _ = app.fs().stop_accessing_security_scoped_resource(destination.clone());
+            return Err(export_recording_failed(error));
+        }
+    };
+
+    let copy_result = std::io::copy(&mut source_file, &mut destination_file)
+        .map(|_| ())
+        .map_err(export_recording_failed);
+
+    #[cfg(target_os = "ios")]
+    let stop_result = app
+        .fs()
+        .stop_accessing_security_scoped_resource(destination.clone())
+        .map_err(export_recording_failed);
+
+    if let Err(error) = copy_result {
+        #[cfg(target_os = "ios")]
+        let _ = stop_result;
+        return Err(error);
+    }
+
+    #[cfg(target_os = "ios")]
+    stop_result?;
+    Ok(())
 }
 
 /// 对一条「转录失败」历史条目的归档录音用**当前** ASR provider 重新转录（issue #613）。
