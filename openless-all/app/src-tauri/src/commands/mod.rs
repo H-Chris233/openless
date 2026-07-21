@@ -1261,13 +1261,13 @@ mod tests {
   <entry>
     <id>tag:github.com,2008:Repository/X/v1.2.23-tauri</id>
     <updated>2026-05-07T09:05:00Z</updated>
-    <link rel="alternate" type="text/html" href="https://github.com/appergb/openless/releases/tag/v1.2.23-tauri"/>
+    <link rel="alternate" type="text/html" href="https://github.com/Open-Less/openless/releases/tag/v1.2.23-tauri"/>
     <title>OpenLess v1.2.23-tauri</title>
   </entry>
   <entry>
     <id>tag:github.com,2008:Repository/X/v1.2.24-2-beta-tauri</id>
     <updated>2026-05-08T01:27:23Z</updated>
-    <link rel="alternate" type="text/html" href="https://github.com/appergb/openless/releases/tag/v1.2.24-2-beta-tauri"/>
+    <link rel="alternate" type="text/html" href="https://github.com/Open-Less/openless/releases/tag/v1.2.24-2-beta-tauri"/>
     <title>OpenLess v1.2.24-2-beta-tauri</title>
   </entry>
 </feed>"#;
@@ -1275,7 +1275,7 @@ mod tests {
         assert_eq!(got.tag_name, "v1.2.24-2-beta-tauri");
         assert_eq!(
             got.html_url,
-            "https://github.com/appergb/openless/releases/tag/v1.2.24-2-beta-tauri"
+            "https://github.com/Open-Less/openless/releases/tag/v1.2.24-2-beta-tauri"
         );
         assert_eq!(got.published_at, "2026-05-08T01:27:23Z");
     }
@@ -1286,15 +1286,15 @@ mod tests {
 <feed>
   <entry>
     <updated>2026-07-15T08:00:00Z</updated>
-    <link rel="alternate" type="text/html" href="https://github.com/appergb/openless/releases/tag/v1.3.15-tauri"/>
+    <link rel="alternate" type="text/html" href="https://github.com/Open-Less/openless/releases/tag/v1.3.15-tauri"/>
   </entry>
   <entry>
     <updated>2026-07-15T07:00:00Z</updated>
-    <link rel="alternate" type="text/html" href="https://github.com/appergb/openless/releases/tag/v1.3.15-Beta.1-tauri"/>
+    <link rel="alternate" type="text/html" href="https://github.com/Open-Less/openless/releases/tag/v1.3.15-Beta.1-tauri"/>
   </entry>
   <entry>
     <updated>2026-06-17T15:41:46Z</updated>
-    <link rel="alternate" type="text/html" href="https://github.com/appergb/openless/releases/tag/v1.3.10-4-beta-tauri"/>
+    <link rel="alternate" type="text/html" href="https://github.com/Open-Less/openless/releases/tag/v1.3.10-4-beta-tauri"/>
   </entry>
 </feed>"#;
 
@@ -1307,21 +1307,21 @@ mod tests {
     #[test]
     fn parse_latest_beta_from_atom_skips_malformed_modern_tags() {
         let body = r#"<feed>
-  <entry><link href="https://github.com/appergb/openless/releases/tag/v-Beta.1-tauri"/></entry>
-  <entry><link href="https://github.com/appergb/openless/releases/tag/garbage-Beta.1-tauri"/></entry>
-  <entry><link href="https://github.com/appergb/openless/releases/tag/1.3.15-Beta.1-tauri"/></entry>
-  <entry><link href="https://github.com/appergb/openless/releases/tag/v1.3-Beta.1-tauri"/></entry>
-  <entry><link href="https://github.com/appergb/openless/releases/tag/v1.3.15.0-Beta.1-tauri"/></entry>
-  <entry><link href="https://github.com/appergb/openless/releases/tag/v1..15-Beta.1-tauri"/></entry>
-  <entry><link href="https://github.com/appergb/openless/releases/tag/v1.3.x-Beta.1-tauri"/></entry>
-  <entry><link href="https://github.com/appergb/openless/releases/tag/v1.3.15-Beta.-tauri"/></entry>
-  <entry><link href="https://github.com/appergb/openless/releases/tag/v1.3.15-Beta.x-tauri"/></entry>
-  <entry><link href="https://github.com/appergb/openless/releases/tag/v1.3.15-Beta.1-extra-tauri"/></entry>
-  <entry><link href="https://github.com/appergb/openless/releases/tag/v1.3.15-Beta.1-tauri-extra"/></entry>
-  <entry><link href="https://github.com/appergb/openless/releases/tag/v1.3.15-Beta.2-Beta.1-tauri"/></entry>
+  <entry><link href="https://github.com/Open-Less/openless/releases/tag/v-Beta.1-tauri"/></entry>
+  <entry><link href="https://github.com/Open-Less/openless/releases/tag/garbage-Beta.1-tauri"/></entry>
+  <entry><link href="https://github.com/Open-Less/openless/releases/tag/1.3.15-Beta.1-tauri"/></entry>
+  <entry><link href="https://github.com/Open-Less/openless/releases/tag/v1.3-Beta.1-tauri"/></entry>
+  <entry><link href="https://github.com/Open-Less/openless/releases/tag/v1.3.15.0-Beta.1-tauri"/></entry>
+  <entry><link href="https://github.com/Open-Less/openless/releases/tag/v1..15-Beta.1-tauri"/></entry>
+  <entry><link href="https://github.com/Open-Less/openless/releases/tag/v1.3.x-Beta.1-tauri"/></entry>
+  <entry><link href="https://github.com/Open-Less/openless/releases/tag/v1.3.15-Beta.-tauri"/></entry>
+  <entry><link href="https://github.com/Open-Less/openless/releases/tag/v1.3.15-Beta.x-tauri"/></entry>
+  <entry><link href="https://github.com/Open-Less/openless/releases/tag/v1.3.15-Beta.1-extra-tauri"/></entry>
+  <entry><link href="https://github.com/Open-Less/openless/releases/tag/v1.3.15-Beta.1-tauri-extra"/></entry>
+  <entry><link href="https://github.com/Open-Less/openless/releases/tag/v1.3.15-Beta.2-Beta.1-tauri"/></entry>
   <entry>
     <updated>2026-07-15T07:00:00Z</updated>
-    <link href="https://github.com/appergb/openless/releases/tag/v1.3.15-Beta.1-tauri"/>
+    <link href="https://github.com/Open-Less/openless/releases/tag/v1.3.15-Beta.1-tauri"/>
   </entry>
 </feed>"#;
 
@@ -1335,7 +1335,7 @@ mod tests {
     fn parse_latest_beta_from_atom_returns_none_when_only_stable_releases() {
         let body = r#"<feed>
   <entry>
-    <link rel="alternate" type="text/html" href="https://github.com/appergb/openless/releases/tag/v1.2.23-tauri"/>
+    <link rel="alternate" type="text/html" href="https://github.com/Open-Less/openless/releases/tag/v1.2.23-tauri"/>
     <updated>2026-05-07T09:05:00Z</updated>
   </entry>
 </feed>"#;

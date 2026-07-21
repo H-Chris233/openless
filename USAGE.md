@@ -4,13 +4,13 @@
 
 ### macOS
 
-1. 从 [Releases](https://github.com/appergb/openless/releases/latest) 下载 `OpenLess_<版本>_aarch64.dmg`。
+1. 从 [Releases](https://github.com/Open-Less/openless/releases/latest) 下载 `OpenLess_<版本>_aarch64.dmg`。
 2. 打开 dmg，将 OpenLess.app 拖入「应用程序」文件夹。
 3. 双击启动。
 
 ### Windows
 
-1. 从 [Releases](https://github.com/appergb/openless/releases/latest) 下载 `OpenLess_<版本>_x64-setup.exe`。
+1. 从 [Releases](https://github.com/Open-Less/openless/releases/latest) 下载 `OpenLess_<版本>_x64-setup.exe`。
 2. 运行安装程序，按提示完成安装。
 3. 从开始菜单启动 OpenLess。
 

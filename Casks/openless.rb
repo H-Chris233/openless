@@ -5,10 +5,10 @@ cask "openless" do
   sha256 arm:   "4bfa85f48714626ec010b92d22a5ab98c834f60b5c7e5f6281e12a11ad90ad9f",
          intel: "929ad6c047fc8942724b7e1edb5dc0d88affbd2ec4184b2dd3d482c0e06d999f"
 
-  url "https://github.com/appergb/openless/releases/download/v#{version}-tauri/OpenLess_#{version}_#{arch}.dmg"
+  url "https://github.com/Open-Less/openless/releases/download/v#{version}-tauri/OpenLess_#{version}_#{arch}.dmg"
   name "OpenLess"
   desc "Menu-bar voice input layer"
-  homepage "https://github.com/appergb/openless"
+  homepage "https://github.com/Open-Less/openless"
 
   livecheck do
     url :url

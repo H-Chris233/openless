@@ -26,7 +26,7 @@ import { Btn } from '../pages/_atoms';
 const UPDATE_CHECK_TIMEOUT_MS = 15_000;
 
 // 自动更新失败时的手动下载兜底：直达 GitHub Releases（与「关于」页 RELEASE_NOTES_URL 一致）。
-const RELEASE_DOWNLOAD_URL = 'https://github.com/appergb/openless/releases';
+const RELEASE_DOWNLOAD_URL = 'https://github.com/Open-Less/openless/releases';
 
 export type UpdateStatus =
   | 'idle'

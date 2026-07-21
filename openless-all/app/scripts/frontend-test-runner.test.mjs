@@ -10,6 +10,7 @@ for (const expected of [
   'scripts/check-hotkey-injection.mjs',
   'scripts/macos-capsule-spaces-contract.test.mjs',
   'scripts/macos-speech-usage-description-contract.test.mjs',
+  'scripts/repository-owner-contract.test.mjs',
   'scripts/windows-ui-config.test.mjs',
   'src/lib/hotkeyRecorder.test.ts',
   'src/lib/windowHotkeyFallback.test.ts',

@@ -16,7 +16,7 @@
 <p align="center">
   <a href="https://openless.top"><strong>Website</strong></a>
   &nbsp;·&nbsp;
-  <a href="https://github.com/appergb/openless/releases/latest"><strong>Download</strong></a>
+  <a href="https://github.com/Open-Less/openless/releases/latest"><strong>Download</strong></a>
   &nbsp;·&nbsp;
   <a href="README.md">English</a>
   &nbsp;/&nbsp;
@@ -24,9 +24,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/appergb/openless/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/appergb/openless?style=flat-square&color=2c5282" /></a>
-  <a href="https://github.com/appergb/openless/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/github/license/appergb/openless?style=flat-square&color=2f855a" /></a>
-  <a href="https://github.com/appergb/openless/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/appergb/openless?style=flat-square&color=805ad5" /></a>
+  <a href="https://github.com/Open-Less/openless/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/Open-Less/openless?style=flat-square&color=2c5282" /></a>
+  <a href="https://github.com/Open-Less/openless/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/github/license/Open-Less/openless?style=flat-square&color=2f855a" /></a>
+  <a href="https://github.com/Open-Less/openless/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/Open-Less/openless?style=flat-square&color=805ad5" /></a>
   <a href="https://discord.gg/vTZHTFGFm"><img alt="Discord" src="https://img.shields.io/badge/Discord-Join-5865F2?style=flat-square&logo=discord&logoColor=white" /></a>
 </p>
 
@@ -240,7 +240,7 @@ Go to [Releases](../../releases) and download:
   - If unsure, run `adb shell getprop ro.product.cpu.abi` and pick the matching APK.
 - **macOS (Homebrew)**:
   ```bash
-  brew tap appergb/openless https://github.com/appergb/openless
+  brew tap Open-Less/openless https://github.com/Open-Less/openless
   brew install --cask openless
   xattr -cr /Applications/OpenLess.app
 
