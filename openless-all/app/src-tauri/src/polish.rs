@@ -39,7 +39,7 @@ pub struct OpenAICompatibleConfig {
     pub api_key: String,
     pub model: String,
     pub extra_headers: HashMap<String, String>,
-    pub temperature: f32,
+    pub temperature: Option<f32>,
     pub request_timeout_secs: u64,
     /// true = 让支持的 OpenAI-compatible provider 启用推理 / 思考；
     /// false = 按渠道级官方参数关闭或压低思考。不做模型白名单判断，
@@ -55,14 +55,17 @@ impl OpenAICompatibleConfig {
         api_key: impl Into<String>,
         model: impl Into<String>,
     ) -> Self {
+        let provider_id = provider_id.into();
+        let temperature = openai_compatible_temperature_for_provider(&provider_id, None);
+
         Self {
-            provider_id: provider_id.into(),
+            provider_id,
             display_name: display_name.into(),
             base_url: base_url.into(),
             api_key: api_key.into(),
             model: model.into(),
             extra_headers: HashMap::new(),
-            temperature: DEFAULT_TEMPERATURE,
+            temperature,
             request_timeout_secs: DEFAULT_REQUEST_TIMEOUT_SECS,
             thinking_enabled: false,
         }
@@ -77,6 +80,42 @@ impl OpenAICompatibleConfig {
         self.extra_headers = extra_headers;
         self
     }
+
+    pub fn with_temperature(mut self, temperature: Option<f32>) -> Self {
+        self.temperature = temperature;
+        self
+    }
+}
+
+pub fn openai_compatible_temperature_for_provider(
+    provider_id: &str,
+    custom_temperature: Option<f32>,
+) -> Option<f32> {
+    if provider_id == "custom" || !is_builtin_llm_provider(provider_id) {
+        custom_temperature
+    } else {
+        Some(DEFAULT_TEMPERATURE)
+    }
+}
+
+fn is_builtin_llm_provider(provider_id: &str) -> bool {
+    matches!(
+        provider_id,
+        "ark"
+            | "deepseek"
+            | "siliconflow"
+            | "atlascloud"
+            | "openai"
+            | "gemini"
+            | "codex_oauth"
+            | "mimo"
+            | "cometapi"
+            | "openrouterFree"
+            | "alibabaCoding"
+            | "codingPlanX"
+            | "minimax"
+            | "stepfun"
+    )
 }
 
 #[derive(Debug, Error)]
@@ -536,9 +575,11 @@ impl OpenAICompatibleLLMProvider {
         let mut body = json!({
             "model": self.config.model,
             "stream": stream,
-            "temperature": self.config.temperature,
             "messages": messages,
         });
+        if let Some(temperature) = self.config.temperature {
+            body["temperature"] = json!(temperature);
+        }
         apply_openai_compatible_thinking_control(&mut body, &self.config);
         body
     }
@@ -2300,6 +2341,55 @@ mod tests {
         haystack.find(needle).expect("needle exists") + 1
     }
 
+    #[tokio::test]
+    async fn polish_request_omits_temperature_for_unconfigured_custom_provider() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut stream);
+            let header_end = request
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .expect("request must contain headers");
+            let body: serde_json::Value = serde_json::from_slice(&request[header_end + 4..])
+                .expect("request body must be JSON");
+            assert!(body.get("temperature").is_none());
+
+            let body = r#"{"choices":[{"message":{"content":"polished"}}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let provider = OpenAICompatibleLLMProvider::new(OpenAICompatibleConfig::new(
+            "custom",
+            "Custom",
+            format!("http://{addr}"),
+            "",
+            "test-model",
+        ));
+        let output = provider
+            .polish(
+                "raw text",
+                PolishMode::Raw,
+                &[],
+                "",
+                &[],
+                ChineseScriptPreference::Auto,
+                OutputLanguagePreference::Auto,
+                None,
+                &[],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(output, "polished");
+        server.join().unwrap();
+    }
+
     // ──────────────── 对话感知 polish 的 chat 消息构造 ────────────────
     // 用户的核心顾虑：让 LLM 拿到上下文但**不要把上下文吐出来**。
     // 这里的不变量保证「不复读」靠两层防御：
@@ -2450,6 +2540,84 @@ mod tests {
         let body = provider.chat_body(false, vec![json!({ "role": "user", "content": "hi" })]);
 
         assert_eq!(body["reasoning_effort"], "medium");
+    }
+
+    #[test]
+    fn chat_body_omits_temperature_for_unconfigured_custom_provider() {
+        let provider = OpenAICompatibleLLMProvider::new(OpenAICompatibleConfig::new(
+            "custom",
+            "Custom",
+            "https://example.test/v1",
+            "k",
+            "gpt-5.6-terra",
+        ));
+
+        let body = provider.chat_body(false, vec![json!({ "role": "user", "content": "hi" })]);
+
+        assert!(body.get("temperature").is_none());
+    }
+
+    #[test]
+    fn chat_body_sends_configured_temperature() {
+        for temperature in [0.0, 0.3, 1.0] {
+            let provider = OpenAICompatibleLLMProvider::new(
+                OpenAICompatibleConfig::new(
+                    "custom",
+                    "Custom",
+                    "https://example.test/v1",
+                    "k",
+                    "gpt-5.6-terra",
+                )
+                .with_temperature(Some(temperature)),
+            );
+
+            let body = provider.chat_body(true, vec![json!({ "role": "user", "content": "hi" })]);
+
+            assert_eq!(body["temperature"], json!(temperature));
+        }
+    }
+
+    #[test]
+    fn chat_body_uses_default_temperature_for_builtin_provider() {
+        let provider = OpenAICompatibleLLMProvider::new(OpenAICompatibleConfig::new(
+            "openai",
+            "OpenAI",
+            "https://api.openai.com/v1",
+            "k",
+            "qwen3-max",
+        ));
+
+        let body = provider.chat_body(true, vec![json!({ "role": "user", "content": "hi" })]);
+
+        assert_eq!(body["temperature"], json!(DEFAULT_TEMPERATURE));
+    }
+
+    #[test]
+    fn provider_temperature_policy_makes_custom_opt_in() {
+        assert_eq!(
+            openai_compatible_temperature_for_provider("custom", None),
+            None
+        );
+        assert_eq!(
+            openai_compatible_temperature_for_provider("custom", Some(0.7)),
+            Some(0.7)
+        );
+        assert_eq!(
+            openai_compatible_temperature_for_provider("openai", None),
+            Some(DEFAULT_TEMPERATURE)
+        );
+        assert_eq!(
+            openai_compatible_temperature_for_provider("self-hosted", None),
+            None
+        );
+        assert_eq!(
+            openai_compatible_temperature_for_provider("self-hosted", Some(0.7)),
+            Some(0.7)
+        );
+        assert_eq!(
+            openai_compatible_temperature_for_provider("atlascloud", None),
+            Some(DEFAULT_TEMPERATURE)
+        );
     }
 
     #[test]
