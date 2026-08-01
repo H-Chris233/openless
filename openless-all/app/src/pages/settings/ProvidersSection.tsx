@@ -196,6 +196,18 @@ export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
   const os = detectOS();
   const unifiedBailian = committedAsrProvider === 'bailian' && os !== 'android';
   const [bailianModel, setBailianModel] = useState('');
+  const [volcengineAuthMode, setVolcengineAuthMode] = useState<'app_id_token' | 'api_key'>('app_id_token');
+
+  useEffect(() => {
+    if (committedAsrProvider === 'volcengine') {
+      readCredential('volcengine.auth_mode', 'volcengine')
+        .then(v => {
+          if (v === 'api_key') setVolcengineAuthMode('api_key');
+          else setVolcengineAuthMode('app_id_token');
+        })
+        .catch(() => setVolcengineAuthMode('app_id_token'));
+    }
+  }, [committedAsrProvider]);
 
   useEffect(() => {
     if (committedAsrProvider !== 'bailian') setBailianModel('');
@@ -474,22 +486,62 @@ export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
         </SettingRow>
         {committedAsrProvider === 'volcengine' ? (
           <>
-            <CredentialField
-              key={`${committedAsrProvider}:app_key`}
-              label={t('settings.providers.volcengineAppKeyLabel')}
-              account="volcengine.app_key"
-              provider={committedAsrProvider}
-              mono
-              mask
-            />
-            <CredentialField
-              key={`${committedAsrProvider}:access_key`}
-              label={t('settings.providers.volcengineAccessKeyLabel')}
-              account="volcengine.access_key"
-              provider={committedAsrProvider}
-              mono
-              mask
-            />
+            <SettingRow label={t('settings.providers.volcengineAuthModeLabel')}>
+              <SelectLite
+                value={volcengineAuthMode}
+                onChange={async (v) => {
+                  const mode = v as 'app_id_token' | 'api_key';
+                  const prev = volcengineAuthMode;
+                  setVolcengineAuthMode(mode);
+                  try {
+                    await setCredential('volcengine.auth_mode', mode, committedAsrProvider);
+                  } catch (error) {
+                    // 写入失败必须回滚 UI 并提示：否则模式看着已切换、重启后却静默回退，
+                    // 配合独立 API Key 槽会造成「Key 存在但模式不对」的混乱。
+                    console.error('[settings] failed to save volcengine auth mode', error);
+                    setVolcengineAuthMode(prev);
+                    emitSaved('failed', t('common.operationFailed'));
+                  }
+                }}
+                options={[
+                  { value: 'app_id_token', label: t('settings.providers.volcengineAuthModeAppIdToken') },
+                  { value: 'api_key', label: t('settings.providers.volcengineAuthModeApiKey') },
+                ]}
+                ariaLabel={t('settings.providers.volcengineAuthModeLabel')}
+                style={{ ...inputStyle, width: '100%', maxWidth: mobile ? '100%' : 260 }}
+              />
+            </SettingRow>
+            {/* 两种模式使用各自独立的凭据槽位：旧版 Access Token（volcengine.access_key）
+                与方舟 API Key（volcengine.api_key）互不预填，切换模式不会残留混淆。 */}
+            {volcengineAuthMode === 'app_id_token' ? (
+              <>
+                <CredentialField
+                  key={`${committedAsrProvider}:app_key`}
+                  label={t('settings.providers.volcengineAppKeyLabel')}
+                  account="volcengine.app_key"
+                  provider={committedAsrProvider}
+                  mono
+                  mask
+                />
+                <CredentialField
+                  key={`${committedAsrProvider}:access_key`}
+                  label={t('settings.providers.volcengineAccessKeyLabel')}
+                  account="volcengine.access_key"
+                  provider={committedAsrProvider}
+                  mono
+                  mask
+                />
+              </>
+            ) : (
+              <CredentialField
+                key={`${committedAsrProvider}:api_key`}
+                label={t('settings.providers.volcengineApiKeyLabel')}
+                account="volcengine.api_key"
+                provider={committedAsrProvider}
+                mono
+                mask
+              />
+            )}
             <CredentialField
               key={`${committedAsrProvider}:resource_id`}
               label={t('settings.providers.volcengineResourceIdLabel')}
@@ -498,7 +550,9 @@ export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
               mono
               placeholder={ASR_DEFAULT_RESOURCE_ID} defaultValue={ASR_DEFAULT_RESOURCE_ID} />
             <div style={{ marginTop: 2, fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.6 }}>
-              {t('settings.providers.volcengineMappingNote')}
+              {volcengineAuthMode === 'api_key'
+                ? t('settings.providers.volcengineApiKeyNote')
+                : t('settings.providers.volcengineMappingNote')}
             </div>
           </>
         ) : committedAsrProvider === 'local-qwen3' || committedAsrProvider === 'foundry-local-whisper' || committedAsrProvider === 'sherpa-onnx-local' || committedAsrProvider === 'apple-speech' ? (
