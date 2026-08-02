@@ -194,7 +194,7 @@ export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
   const [llmModelRevision, setLlmModelRevision] = useState(0);
   const [asrModelRevision, setAsrModelRevision] = useState(0);
   const os = detectOS();
-  const unifiedBailian = committedAsrProvider === 'bailian' && os !== 'android';
+  const unifiedBailian = committedAsrProvider === 'bailian';
   const [bailianModel, setBailianModel] = useState('');
   const [volcengineAuthMode, setVolcengineAuthMode] = useState<'app_id_token' | 'api_key'>('app_id_token');
 
@@ -607,11 +607,18 @@ export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
 
 // 统一「阿里云百炼」下,按模型名判断走哪种协议(与后端
 // coordinator::resolve_effective_asr_provider 保持一致):qwen3-asr-flash-realtime* 与
-// fun-asr-realtime* 与 fun-asr-flash-8k-realtime* 都是实时模型；当前支持的
-// fun-asr-flash-2026-06-15 / qwen-audio-3.0-asr-flash 是「录音文件·说完转写」。
-function bailianModelIsRecordedFile(model: string): boolean {
+// fun-asr-realtime* 与 fun-asr-flash-8k-realtime* 都是实时模型；fun-asr-flash-2026-06-15
+// 与 qwen-audio-3.0-asr-flash 是「录音文件·说完转写」（同步）。
+function bailianModelProtocol(model: string): 'realtime' | 'sync' | 'async' {
   const m = model.trim();
-  return m === 'fun-asr-flash-2026-06-15' || m === 'qwen-audio-3.0-asr-flash';
+  if (!m || m.includes('realtime')) return 'realtime';
+  // qwen3-asr-flash-filetrans 仅接受公网 URL，暂不支持（后端 protocol_for_model
+  // 显式拒绝），前端不再归为 async 提示。
+  if (m === 'fun-asr'
+    || m.startsWith('fun-asr-') && !m.startsWith('fun-asr-flash')
+    || m.startsWith('paraformer')) return 'async';
+  // 其余（fun-asr-flash-*、qwen3-asr-flash、qwen-audio-3.0-asr-flash）为同步录音模型。
+  return 'sync';
 }
 
 // qwen-audio-3.0-asr-flash 官方支持热词，但批量协议尚未把该设置写入请求体；
@@ -642,9 +649,12 @@ function BailianProtocolHint({ currentModel }: { currentModel: string }) {
     setModel(currentModel || 'fun-asr-realtime');
   }, [currentModel]);
 
-  const hint = bailianModelIsRecordedFile(model)
-    ? t('settings.providers.bailianModelRecordedFileHint')
-    : t('settings.providers.bailianModelRealtimeHint');
+  const protocol = bailianModelProtocol(model);
+  const hint = protocol === 'realtime'
+    ? t('settings.providers.bailianModelRealtimeHint')
+    : protocol === 'async'
+      ? t('settings.providers.bailianModelAsyncFileHint')
+      : t('settings.providers.bailianModelSyncFileHint');
 
   return (
     <div style={{ marginTop: 2, fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.6 }}>

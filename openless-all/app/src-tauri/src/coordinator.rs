@@ -340,30 +340,27 @@ pub(crate) fn resolve_effective_asr_provider(
         return Ok(active_asr.to_string());
     }
 
-    // Android/iOS 继续使用原来的 Bailian WebSocket 配置。统一入口的模型路由
-    // 只在桌面端启用，避免共享设置页意外改变移动端行为。
-    if cfg!(mobile) {
-        return Ok(crate::asr::bailian::PROVIDER_ID.to_string());
-    }
-
     let model = model.trim();
     if model.is_empty() || is_classic_bailian_realtime_model(model) {
         Ok(crate::asr::bailian::PROVIDER_ID.to_string())
     } else if model.starts_with("qwen3-asr-flash-realtime") {
         Ok(crate::asr::qwen_realtime::PROVIDER_ID.to_string())
-    } else if crate::asr::dashscope_multimodal::is_supported_model(model) {
+    } else if crate::asr::dashscope_multimodal::protocol_for_model(model).is_some() {
         Ok(crate::asr::dashscope_multimodal::PROVIDER_ID.to_string())
     } else {
         Err(format!(
-            "不支持的百炼 ASR 模型：{model}。支持 fun-asr-realtime、paraformer-realtime、sensevoice-realtime、qwen3-asr-flash-realtime、qwen-audio-3.0-asr-flash 和 fun-asr-flash-2026-06-15"
+            "不支持的百炼 ASR 模型：{model}。支持 Fun-ASR、Paraformer、SenseVoice、qwen-audio-3.0-asr-flash 和 Qwen3-ASR 的实时、同步及录音文件模型"
         ))
     }
 }
 
 fn is_classic_bailian_realtime_model(model: &str) -> bool {
     model.starts_with("fun-asr-realtime")
+        || model.starts_with("fun-asr-flash-8k-realtime")
         || model.starts_with("paraformer-realtime")
+        || model.starts_with("paraformer-8k-realtime")
         || model.starts_with("sensevoice-realtime")
+        || model.starts_with("sensevoice-8k-realtime")
 }
 
 /// StepFun 的流式模型命名恒以 `-stream` 结尾（stepaudio-2.5-asr-stream /
@@ -374,12 +371,10 @@ pub(crate) fn stepfun_model_is_stream(model: &str) -> bool {
 
 pub(crate) fn validate_dashscope_multimodal_model(model: &str) -> Result<(), String> {
     let model = model.trim();
-    if model.is_empty() || crate::asr::dashscope_multimodal::is_supported_model(model) {
+    if model.is_empty() || crate::asr::dashscope_multimodal::protocol_for_model(model).is_some() {
         return Ok(());
     }
-    Err(format!(
-        "不支持的 DashScope 录音文件 ASR 模型：{model}。该协议支持 qwen-audio-3.0-asr-flash 和 fun-asr-flash-2026-06-15；fun-asr-flash-8k-realtime 系列属于 8 kHz 实时 WebSocket 模型，当前尚未支持"
-    ))
+    Err(format!("不支持的 DashScope 录音文件 ASR 模型：{model}"))
 }
 
 #[derive(Clone, Copy)]
@@ -387,6 +382,7 @@ pub(crate) enum BailianEndpointProtocol {
     ClassicRealtime,
     QwenRealtime,
     Multimodal,
+    AsyncTranscription,
 }
 
 /// 统一百炼配置只需要表达区域/工作空间主机；具体协议的 scheme 与 path 由模型路由决定。
@@ -399,6 +395,9 @@ pub(crate) fn derive_bailian_endpoint(
         BailianEndpointProtocol::ClassicRealtime => crate::asr::bailian::DEFAULT_ENDPOINT,
         BailianEndpointProtocol::QwenRealtime => crate::asr::qwen_realtime::DEFAULT_ENDPOINT,
         BailianEndpointProtocol::Multimodal => crate::asr::dashscope_multimodal::DEFAULT_ENDPOINT,
+        BailianEndpointProtocol::AsyncTranscription => {
+            crate::asr::dashscope_multimodal::ASYNC_DEFAULT_ENDPOINT
+        }
     };
     let source = if endpoint.trim().is_empty() {
         default_endpoint
@@ -416,6 +415,9 @@ pub(crate) fn derive_bailian_endpoint(
             "https",
             "/api/v1/services/aigc/multimodal-generation/generation",
         ),
+        BailianEndpointProtocol::AsyncTranscription => {
+            ("https", "/api/v1/services/audio/asr/transcription")
+        }
     };
     url.set_scheme(scheme)
         .map_err(|_| "endpointInvalid".to_string())?;
@@ -1904,9 +1906,7 @@ impl Coordinator {
         let consumer = start.recorder_consumer();
         consumer.consume_pcm_chunk(&pcm);
         let timeout = std::time::Duration::from_secs(COORDINATOR_GLOBAL_TIMEOUT_SECS);
-        let dashscope_timeout = whisper_transcribe_timeout(
-            crate::asr::pcm::pcm_duration_ms(&pcm) as f64 / 1000.0,
-        );
+        let audio_secs = crate::asr::pcm::pcm_duration_ms(&pcm) as f64 / 1000.0;
         let elevenlabs_timeout = crate::asr::elevenlabs::transcribe_timeout(
             crate::asr::pcm::pcm_duration_ms(&pcm) as f64 / 1000.0,
         );
@@ -1948,7 +1948,7 @@ impl Coordinator {
                 .map_err(|_| "重新转录超时".to_string())?
                 .map_err(|e| e.to_string())?,
             ActiveAsr::DashScopeMultimodal(m) => {
-                tokio::time::timeout(dashscope_timeout, m.transcribe())
+                tokio::time::timeout(m.transcribe_timeout(audio_secs), m.transcribe())
                 .await
                 .map_err(|_| "重新转录超时".to_string())?
                 .map_err(|e| e.to_string())?
@@ -2386,9 +2386,20 @@ fn read_dashscope_multimodal_credentials() -> (String, String, String) {
         .ok()
         .flatten()
         .unwrap_or_default();
+    let model = CredentialsVault::get(CredentialAccount::AsrModel)
+        .ok()
+        .flatten()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| crate::asr::dashscope_multimodal::DEFAULT_MODEL.to_string());
     let base_url = if unified_bailian_is_active() {
         let endpoint = read_asr_endpoint(crate::asr::bailian::DEFAULT_ENDPOINT);
-        derive_bailian_endpoint(&endpoint, BailianEndpointProtocol::Multimodal).unwrap_or(endpoint)
+        let protocol = match crate::asr::dashscope_multimodal::protocol_for_model(&model) {
+            Some(crate::asr::dashscope_multimodal::DashScopeBatchProtocol::AsyncTranscription) => {
+                BailianEndpointProtocol::AsyncTranscription
+            }
+            _ => BailianEndpointProtocol::Multimodal,
+        };
+        derive_bailian_endpoint(&endpoint, protocol).unwrap_or(endpoint)
     } else {
         CredentialsVault::get(CredentialAccount::AsrEndpoint)
             .ok()
@@ -2396,11 +2407,6 @@ fn read_dashscope_multimodal_credentials() -> (String, String, String) {
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| crate::asr::dashscope_multimodal::DEFAULT_ENDPOINT.to_string())
     };
-    let model = CredentialsVault::get(CredentialAccount::AsrModel)
-        .ok()
-        .flatten()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| crate::asr::dashscope_multimodal::DEFAULT_MODEL.to_string());
     (api_key, base_url, model)
 }
 
@@ -3090,12 +3096,40 @@ mod tests {
             resolve_effective_asr_provider(bailian, "fun-asr-flash-2026-06-15").unwrap(),
             crate::asr::dashscope_multimodal::PROVIDER_ID
         );
+        for model in [
+            "fun-asr-flash-2026-09-01",
+            "qwen3-asr-flash",
+            "qwen3-asr-flash-2026-02-10",
+            "fun-asr",
+            "fun-asr-mtl-2025-08-25",
+            "paraformer-v2",
+        ] {
+            assert_eq!(
+                resolve_effective_asr_provider(bailian, model).unwrap(),
+                crate::asr::dashscope_multimodal::PROVIDER_ID,
+                "unexpected route for {model}"
+            );
+        }
+        assert_eq!(
+            resolve_effective_asr_provider(bailian, "fun-asr-flash-8k-realtime").unwrap(),
+            crate::asr::bailian::PROVIDER_ID
+        );
         assert_eq!(
             resolve_effective_asr_provider(bailian, "qwen-audio-3.0-asr-flash").unwrap(),
             crate::asr::dashscope_multimodal::PROVIDER_ID
         );
         assert_eq!(
             resolve_effective_asr_provider(bailian, "paraformer-realtime-v2").unwrap(),
+            crate::asr::bailian::PROVIDER_ID
+        );
+        // 8k 实时变体同样走经典 WebSocket（降采样 + sample_rate=8000），
+        // 与 bailian.rs::model_is_8k 的命名空间保持一致。
+        assert_eq!(
+            resolve_effective_asr_provider(bailian, "paraformer-8k-realtime-v2").unwrap(),
+            crate::asr::bailian::PROVIDER_ID
+        );
+        assert_eq!(
+            resolve_effective_asr_provider(bailian, "sensevoice-8k-realtime-v1").unwrap(),
             crate::asr::bailian::PROVIDER_ID
         );
         // 空模型 → 经典实时（百炼默认）；未知模型应被拒绝。
@@ -3117,15 +3151,13 @@ mod tests {
 
     #[test]
     fn resolve_effective_asr_provider_rejects_unsupported_bailian_model() {
-        let error = resolve_effective_asr_provider(crate::asr::bailian::PROVIDER_ID, "paraformer-v2")
+        let error = resolve_effective_asr_provider(crate::asr::bailian::PROVIDER_ID, "unknown-asr")
             .unwrap_err();
         assert!(error.contains("不支持的百炼 ASR 模型"));
-
-        let error = resolve_effective_asr_provider(
-            crate::asr::bailian::PROVIDER_ID,
-            "fun-asr-flash-8k-realtime",
-        )
-        .unwrap_err();
+        // qwen3-asr-flash-filetrans 仅接受公网 URL，与本地录音链路不兼容，同样拒绝。
+        let error =
+            resolve_effective_asr_provider(crate::asr::bailian::PROVIDER_ID, "qwen3-asr-flash-filetrans")
+                .unwrap_err();
         assert!(error.contains("不支持的百炼 ASR 模型"));
     }
 
@@ -3155,6 +3187,11 @@ mod tests {
         assert_eq!(
             derive_bailian_endpoint(endpoint, BailianEndpointProtocol::Multimodal).unwrap(),
             "https://workspace.ap-southeast-1.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
+        );
+        assert_eq!(
+            derive_bailian_endpoint(endpoint, BailianEndpointProtocol::AsyncTranscription)
+                .unwrap(),
+            "https://workspace.ap-southeast-1.maas.aliyuncs.com/api/v1/services/audio/asr/transcription"
         );
     }
 
