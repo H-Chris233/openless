@@ -82,12 +82,12 @@ impl StylePackStore {
         })
     }
 
-    /// 降级实例：data_dir 不可用时使用临时路径和空列表，写操作会安静地失败。
+    /// 降级实例：data_dir 不可用时使用空列表。
+    /// Android 使用空 path（内存态），禁止落 `/data/local/tmp`。
     pub(crate) fn new_fallback() -> Self {
-        let tmp = std::env::temp_dir();
         Self {
-            path: tmp.join("openless_style_packs_fallback.json"),
-            asset_root: tmp.join("openless_style_pack_assets_fallback"),
+            path: super::fallback_store_path("openless_style_packs_fallback.json"),
+            asset_root: super::fallback_store_path("openless_style_pack_assets_fallback"),
             state: Mutex::new(Vec::new()),
         }
     }
@@ -781,6 +781,9 @@ fn sanitize_style_pack_id(requested_id: &str) -> String {
 }
 
 fn remove_style_pack_assets(asset_root: &Path, pack: &StylePack) {
+    if asset_root.as_os_str().is_empty() {
+        return;
+    }
     if let Some(icon_path) = pack.icon_path.as_deref() {
         let path = Path::new(icon_path);
         let _ = fs::remove_file(path);
