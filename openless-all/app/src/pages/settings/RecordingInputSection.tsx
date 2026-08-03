@@ -16,6 +16,7 @@ import {
 } from '../../lib/ipc';
 import { getPlatformCapabilities } from '../../lib/platform';
 import type {
+  CapsuleStyle,
   HotkeyMode,
   MicrophoneDevice,
   PasteShortcut,
@@ -282,6 +283,20 @@ export function RecordingInputSection() {
         {os !== 'linux' && !isAndroid && (
         <SettingRow label={t('settings.recording.capsuleLabel')} desc={t('settings.recording.capsuleDesc')}>
           <Toggle on={prefs.showCapsule} onToggle={onShowCapsuleChange} />
+        </SettingRow>
+        )}
+        {os !== 'linux' && !isAndroid && (
+        <SettingRow label={t('settings.recording.capsuleStyleLabel')}>
+          <SelectLite
+            value={prefs.capsuleStyle ?? 'siri'}
+            onChange={next => savePrefs({ ...prefs, capsuleStyle: next as CapsuleStyle })}
+            options={[
+              { value: 'siri', label: t('settings.recording.capsuleStyleSiri') },
+              { value: 'classic', label: t('settings.recording.capsuleStyleClassic') },
+            ]}
+            ariaLabel={t('settings.recording.capsuleStyleLabel')}
+            style={{ ...inputStyle, maxWidth: 220 }}
+          />
         </SettingRow>
         )}
         <SettingRow label={t('settings.recording.muteDuringRecordingLabel')} desc={t('settings.recording.muteDuringRecordingDesc')}>
