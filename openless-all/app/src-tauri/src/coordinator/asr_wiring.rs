@@ -340,6 +340,8 @@ pub(super) fn build_apple_speech(
 
 /// `whisper` 是 OpenAI 原生；`siliconflow` / `zhipu` / `groq` / `stepfun`
 /// 都暴露 OpenAI 兼容的 `/audio/transcriptions`，统一走 `WhisperBatchASR`。
+/// `openai-compatible` 是通用预设：任意 OpenAI 兼容端点（自建 / LAN llama.cpp
+/// 等），无默认 endpoint/model，高级选项见 `AdvancedAsrConfig`。
 /// 新增 OpenAI 兼容 ASR 时只需在这里加一项。
 ///
 /// 注：DashScope 的 Qwen3-ASR-Flash 不在此列——它用 MultiModalConversation
@@ -349,7 +351,7 @@ pub(super) fn is_whisper_compatible_provider(id: &str) -> bool {
     matches!(
         id,
         "whisper" | "siliconflow" | "zhipu" | "groq" | "openrouter" | "stepfun"
-    )
+    ) || id == OPENAI_COMPATIBLE_ASR_PROVIDER_ID
 }
 
 /// 用户词典该走 `prompt` 还是一等 `hotwords` 参数。
@@ -395,8 +397,14 @@ pub(super) fn whisper_request_format(provider_id: &str) -> crate::asr::whisper::
 ///   发送 verbose_json 可能被拒，**保持关闭**走旧的 `json`。
 /// - `zhipu`（GLM-ASR）：虽接受 verbose_json，但不产出上述指标，过滤是空转；
 ///   为最小化行为变更，这里也**保持关闭**，仅对确证有收益的 whisper/groq 开启。
+/// - `openai-compatible`：由用户高级配置（`AdvancedAsrConfig.verbose_json`）决定，
+///   默认关闭，与服务端能力对齐。
 pub(super) fn whisper_supports_verbose_json(provider_id: &str) -> bool {
-    matches!(provider_id, "whisper" | "groq")
+    match provider_id {
+        "whisper" | "groq" => true,
+        // openai-compatible 由用户高级配置决定；其余厂商保持关闭。
+        _ => read_advanced_asr_config(provider_id).verbose_json,
+    }
 }
 
 pub(super) fn is_bailian_provider(id: &str) -> bool {

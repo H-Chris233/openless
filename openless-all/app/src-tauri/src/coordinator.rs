@@ -446,8 +446,68 @@ fn batch_asr_chunk_limit_ms(provider_id: &str) -> Option<u64> {
         // OpenRouter 把音频 base64 进 JSON body，体积比二进制大 ~33%，长录音易撞
         // body/时长上限，保守按 30s 切分（与 zhipu 同）。
         "zhipu" | "openrouter" => Some(30_000),
-        _ => None,
+        // 其余预设默认不分片；openai-compatible 可由用户高级配置覆盖。
+        _ => read_advanced_asr_config(provider_id).chunk_duration_ms,
     }
+}
+
+/// 通用 OpenAI 兼容 ASR 预设 id。把任意 OpenAI 兼容 `/audio/transcriptions`
+/// 端点（自建 / 局域网 llama.cpp 等）当 ASR 用，行为默认最保守；verbose_json
+/// 与分片时长由用户按 provider 配置（存凭据 vault）。
+pub(crate) const OPENAI_COMPATIBLE_ASR_PROVIDER_ID: &str = "openai-compatible";
+
+/// `openai-compatible` 预设的高级配置（per-provider 存于凭据 vault）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct AdvancedAsrConfig {
+    /// 是否请求 `response_format=verbose_json`（配合幻听过滤；服务端不支持时保持 false）。
+    pub(crate) verbose_json: bool,
+    /// 单次请求的音频分片时长；None = 不分片整段发送。
+    pub(crate) chunk_duration_ms: Option<u64>,
+}
+
+/// 解析 per-provider 高级配置 JSON；缺失/非法一律回落保守默认。
+fn parse_advanced_asr_config(raw: Option<&str>) -> AdvancedAsrConfig {
+    let Some(raw) = raw else {
+        return AdvancedAsrConfig::default();
+    };
+    let value: serde_json::Value = match serde_json::from_str(raw) {
+        Ok(value) => value,
+        Err(error) => {
+            log::warn!("[asr] 高级配置 JSON 解析失败，回落默认值: {error}");
+            return AdvancedAsrConfig::default();
+        }
+    };
+    AdvancedAsrConfig {
+        verbose_json: value
+            .get("verboseJson")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        chunk_duration_ms: value
+            .get("chunkDurationMs")
+            .and_then(|v| v.as_u64())
+            .filter(|ms| *ms > 0),
+    }
+}
+
+/// 按 provider id 决定高级配置：仅 `openai-compatible` 采用用户配置，
+/// 命名厂商一律返回默认（保持硬编码行为）。
+fn advanced_asr_config_for(provider_id: &str, raw: Option<&str>) -> AdvancedAsrConfig {
+    if provider_id != OPENAI_COMPATIBLE_ASR_PROVIDER_ID {
+        return AdvancedAsrConfig::default();
+    }
+    parse_advanced_asr_config(raw)
+}
+
+/// 读取某 ASR provider 的高级配置。仅 `openai-compatible` 读 vault；命名厂商
+/// 走硬编码行为（这里返回默认值），避免破坏已测通的路径。
+fn read_advanced_asr_config(provider_id: &str) -> AdvancedAsrConfig {
+    let raw = CredentialsVault::get_for_asr_provider(
+        provider_id,
+        CredentialAccount::AsrAdvancedConfig,
+    )
+    .ok()
+    .flatten();
+    advanced_asr_config_for(provider_id, raw.as_deref())
 }
 
 pub struct Coordinator {
@@ -3089,6 +3149,89 @@ mod tests {
         // SiliconFlow(SenseVoice/TeleSpeech) / Zhipu(GLM-ASR) 保持旧的 json 行为。
         assert!(!whisper_supports_verbose_json("siliconflow"));
         assert!(!whisper_supports_verbose_json("zhipu"));
+    }
+
+    #[test]
+    fn openai_compatible_preset_is_whisper_compatible_and_conservative_by_default() {
+        use crate::asr::whisper::AsrRequestFormat;
+
+        assert!(is_whisper_compatible_provider(OPENAI_COMPATIBLE_ASR_PROVIDER_ID));
+        assert_eq!(
+            active_asr_provider_kind(OPENAI_COMPATIBLE_ASR_PROVIDER_ID),
+            ActiveAsrProviderKind::WhisperCompatible
+        );
+        assert_eq!(
+            whisper_request_format(OPENAI_COMPATIBLE_ASR_PROVIDER_ID),
+            AsrRequestFormat::Multipart
+        );
+        assert!(!whisper_uses_hotwords(OPENAI_COMPATIBLE_ASR_PROVIDER_ID));
+        // 默认最保守：无 verbose_json、不分片。
+        assert_eq!(
+            advanced_asr_config_for(OPENAI_COMPATIBLE_ASR_PROVIDER_ID, None),
+            AdvancedAsrConfig::default()
+        );
+    }
+
+    #[test]
+    fn openai_compatible_advanced_config_controls_whisper_switches() {
+        assert_eq!(
+            advanced_asr_config_for(
+                OPENAI_COMPATIBLE_ASR_PROVIDER_ID,
+                Some(r#"{"verboseJson":true,"chunkDurationMs":30000}"#),
+            ),
+            AdvancedAsrConfig {
+                verbose_json: true,
+                chunk_duration_ms: Some(30_000),
+            }
+        );
+        // 命名厂商忽略该配置，保持硬编码行为。
+        assert_eq!(
+            advanced_asr_config_for(
+                "siliconflow",
+                Some(r#"{"verboseJson":true,"chunkDurationMs":30000}"#),
+            ),
+            AdvancedAsrConfig::default()
+        );
+        assert!(whisper_supports_verbose_json("whisper"));
+        assert!(!whisper_supports_verbose_json("siliconflow"));
+        assert_eq!(batch_asr_chunk_limit_ms("siliconflow"), None);
+        assert_eq!(
+            batch_asr_chunk_limit_ms(OPENAI_COMPATIBLE_ASR_PROVIDER_ID),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_advanced_asr_config_falls_back_on_missing_or_invalid_json() {
+        assert_eq!(
+            parse_advanced_asr_config(None),
+            AdvancedAsrConfig::default()
+        );
+        assert_eq!(
+            parse_advanced_asr_config(Some("not-json")),
+            AdvancedAsrConfig::default()
+        );
+        assert_eq!(
+            parse_advanced_asr_config(Some(r#"{"verboseJson":true}"#)),
+            AdvancedAsrConfig {
+                verbose_json: true,
+                chunk_duration_ms: None,
+            }
+        );
+        // 分片时长 0 或缺失 = 不分片。
+        assert_eq!(
+            parse_advanced_asr_config(Some(r#"{"chunkDurationMs":0}"#)),
+            AdvancedAsrConfig::default()
+        );
+        assert_eq!(
+            parse_advanced_asr_config(Some(
+                r#"{"verboseJson":false,"chunkDurationMs":30000}"#
+            )),
+            AdvancedAsrConfig {
+                verbose_json: false,
+                chunk_duration_ms: Some(30_000),
+            }
+        );
     }
 
     #[test]
