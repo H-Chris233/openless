@@ -616,7 +616,8 @@ export type PermissionStatus =
   | 'denied'
   | 'notDetermined'
   | 'restricted'
-  | 'notApplicable';
+  | 'notApplicable'
+  | 'noDevice';
 
 /** Runtime platform kind returned by `get_platform_capabilities`. */
 export type PlatformKind = 'desktop' | 'android' | 'mobile';

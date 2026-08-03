@@ -31,7 +31,12 @@ pub(super) fn ensure_microphone_permission(_inner: &Arc<Inner>) -> Result<(), St
         if permissions::windows_microphone_access_explicitly_denied() {
             return Err("需要麦克风权限，当前状态: Denied".to_string());
         }
-        return Ok(());
+        // 注册表只反映隐私开关；没插麦克风时不能当成“已就绪”，
+        // 否则用户会被误导去系统设置找不存在的麦克风权限。见 issue #779。
+        if permissions::has_microphone_input_device() {
+            return Ok(());
+        }
+        return Err("未检测到麦克风，请连接麦克风后重试".to_string());
     }
 
     let status = permissions::check_microphone();
@@ -40,6 +45,9 @@ pub(super) fn ensure_microphone_permission(_inner: &Arc<Inner>) -> Result<(), St
         PermissionStatus::Granted | PermissionStatus::NotApplicable
     ) {
         return Ok(());
+    }
+    if status == PermissionStatus::NoDevice {
+        return Err("未检测到麦克风，请连接麦克风后重试".to_string());
     }
 
     // 听写路径不抢前台焦点：缺 mic 权限时直接请求系统授权，不再先 show_main_window。

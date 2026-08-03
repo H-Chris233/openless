@@ -2440,20 +2440,21 @@ pub(super) async fn start_recorder_for_starting(
         }
         Err(e) => {
             log::error!("[coord] recorder start failed: {e}");
+            let message = e.user_message();
             cancel_asr_for_session(inner, session_id);
             emit_capsule(
                 inner,
                 CapsuleState::Error,
                 0.0,
                 0,
-                Some(format!("录音启动失败: {e}")),
+                Some(message.clone()),
                 None,
             );
             restore_prepared_windows_ime_session(inner, session_id);
             release_recording_mute(inner, "dictation");
             inner.state.lock().phase = SessionPhase::Idle;
             schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-            return Err(e.to_string());
+            return Err(message);
         }
     }
 
