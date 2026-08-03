@@ -280,6 +280,9 @@ async fn validate_asr_provider() -> Result<(), String> {
     if active_asr == crate::asr::elevenlabs::PROVIDER_ID {
         return validate_elevenlabs_asr_provider().await;
     }
+    if active_asr == crate::asr::xfyun::PROVIDER_ID {
+        return validate_xfyun_asr_provider().await;
+    }
     // StepFun 一入口双协议：`*-stream` 模型走实时 WS 验证，其余走批式
     // /audio/transcriptions（与 build 侧 resolve_effective_asr_provider 同判据）。
     if active_asr == "stepfun" || active_asr == crate::asr::stepfun_realtime::PROVIDER_ID {
@@ -299,6 +302,38 @@ async fn validate_asr_provider() -> Result<(), String> {
         .filter(|s| !s.trim().is_empty())
         .ok_or_else(|| "asrModelMissing".to_string())?;
     validate_asr_transcription(&config, model.trim()).await
+}
+
+/// 讯飞 RTASR 验证：真连 + 500ms 静音 + 收尾。鉴权错误（10105 / 10110）在握手阶段
+/// 即返回；纯静音会话服务端可能直接关闭且不返回任何 result（等价于「没说话」），
+/// 这类 `NoFinalResult` 不算验证失败 —— 握手成功已经证明 AppID/APIKey 有效。
+async fn validate_xfyun_asr_provider() -> Result<(), String> {
+    let app_id = CredentialsVault::get(CredentialAccount::XfyunAppId)
+        .map_err(|e| e.to_string())?
+        .unwrap_or_default();
+    if app_id.trim().is_empty() {
+        return Err("讯飞 AppID 为空".to_string());
+    }
+    let api_key = CredentialsVault::get(CredentialAccount::XfyunApiKey)
+        .map_err(|e| e.to_string())?
+        .unwrap_or_default();
+    if api_key.trim().is_empty() {
+        return Err("讯飞 API Key 为空".to_string());
+    }
+    let asr = std::sync::Arc::new(crate::asr::XfyunStreamingASR::new(
+        crate::asr::XfyunCredentials { app_id, api_key },
+    ));
+    asr.open_session().await.map_err(|e| e.to_string())?;
+    crate::asr::AudioConsumer::consume_pcm_chunk(
+        &*asr,
+        &vec![0u8; crate::asr::xfyun::TARGET_AUDIO_CHUNK_BYTES * 5],
+    );
+    asr.send_last_frame().await.map_err(|e| e.to_string())?;
+    match asr.await_final_result().await {
+        Ok(_) => Ok(()),
+        Err(crate::asr::xfyun::XfyunASRError::NoFinalResult) => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// StepFun 实时 WS 验证：真连 + session.update + 500ms 静音 + 收尾。

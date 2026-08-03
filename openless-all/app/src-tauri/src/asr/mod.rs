@@ -17,6 +17,7 @@ pub mod stepfun_realtime;
 pub mod volcengine;
 pub mod wav;
 pub mod whisper;
+pub mod xfyun;
 
 pub use bailian::{BailianCredentials, BailianRealtimeASR};
 pub use dashscope_multimodal::DashScopeMultimodalASR;
@@ -26,6 +27,7 @@ pub use qwen_realtime::{Qwen3RealtimeASR, Qwen3RealtimeCredentials};
 pub use stepfun_realtime::{StepfunRealtimeASR, StepfunRealtimeCredentials};
 pub use volcengine::{VolcengineCredentials, VolcengineStreamingASR};
 pub use whisper::WhisperBatchASR;
+pub use xfyun::{XfyunCredentials, XfyunStreamingASR};
 
 /// Sink for raw 16 kHz / 16-bit / mono PCM bytes coming off the recorder.
 ///

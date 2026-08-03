@@ -76,6 +76,9 @@ pub(crate) fn asr_configured_for_provider(provider: &str, snap: &CredentialsSnap
             configured(&snap.asr_endpoint) && configured(&snap.asr_model)
         }
         AsrConfiguredFields::VolcAppKey => volcengine_configured(snap),
+        AsrConfiguredFields::XfyunAppKey => {
+            configured(&snap.xfyun_app_id) && configured(&snap.xfyun_api_key)
+        }
     }
 }
 
@@ -213,6 +216,8 @@ pub async fn set_credential(
                     | CredentialAccount::AsrEndpoint
                     | CredentialAccount::AsrModel
                     | CredentialAccount::AsrVocabularyId
+                    | CredentialAccount::XfyunAppId
+                    | CredentialAccount::XfyunApiKey
             ) {
                 return Err("provider-scoped credential must be an ASR account".to_string());
             }
@@ -355,6 +360,8 @@ fn parse_account(s: &str) -> Result<CredentialAccount, String> {
         "asr.endpoint" => Ok(CredentialAccount::AsrEndpoint),
         "asr.model" => Ok(CredentialAccount::AsrModel),
         "asr.vocabulary_id" => Ok(CredentialAccount::AsrVocabularyId),
+        "xfyun.app_id" => Ok(CredentialAccount::XfyunAppId),
+        "xfyun.api_key" => Ok(CredentialAccount::XfyunApiKey),
         _ => Err(format!("unknown account: {s}")),
     }
 }

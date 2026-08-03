@@ -136,6 +136,14 @@ pub(super) fn ensure_asr_credentials() -> Result<(), String> {
                 }
             }
         }
+        AsrPreflightCredential::XfyunAppKey => {
+            let creds = read_xfyun_credentials();
+            if creds.auth_ok() {
+                Ok(())
+            } else {
+                Err("请先在设置中填写讯飞 AppID 和 API Key".to_string())
+            }
+        }
     }
 }
 
@@ -415,6 +423,10 @@ pub(super) fn is_elevenlabs_provider(id: &str) -> bool {
     id == crate::asr::elevenlabs::PROVIDER_ID
 }
 
+pub(super) fn is_xfyun_provider(id: &str) -> bool {
+    id == crate::asr::xfyun::PROVIDER_ID
+}
+
 pub(super) fn apply_chinese_script_preference(text: &str, pref: ChineseScriptPreference) -> String {
     if text.is_empty() {
         return String::new();
@@ -453,6 +465,10 @@ pub(super) enum QaAsrStart {
         asr: Arc<crate::asr::StepfunRealtimeASR>,
         bridge: Arc<DeferredAsrBridge>,
     },
+    Xfyun {
+        asr: Arc<crate::asr::XfyunStreamingASR>,
+        bridge: Arc<DeferredAsrBridge>,
+    },
     Ready {
         active: ActiveAsr,
         consumer: Arc<dyn crate::recorder::AudioConsumer>,
@@ -466,6 +482,7 @@ impl QaAsrStart {
             QaAsrStart::Bailian { asr, .. } => ActiveAsr::Bailian(Arc::clone(asr)),
             QaAsrStart::Qwen3Realtime { asr, .. } => ActiveAsr::Qwen3Realtime(Arc::clone(asr)),
             QaAsrStart::StepfunRealtime { asr, .. } => ActiveAsr::StepfunRealtime(Arc::clone(asr)),
+            QaAsrStart::Xfyun { asr, .. } => ActiveAsr::Xfyun(Arc::clone(asr)),
             QaAsrStart::Ready { active, .. } => active.clone(),
         }
     }
@@ -476,6 +493,7 @@ impl QaAsrStart {
             QaAsrStart::Bailian { bridge, .. } => Arc::clone(bridge) as _,
             QaAsrStart::Qwen3Realtime { bridge, .. } => Arc::clone(bridge) as _,
             QaAsrStart::StepfunRealtime { bridge, .. } => Arc::clone(bridge) as _,
+            QaAsrStart::Xfyun { bridge, .. } => Arc::clone(bridge) as _,
             QaAsrStart::Ready { consumer, .. } => Arc::clone(consumer),
         }
     }
@@ -513,6 +531,15 @@ impl QaAsrStart {
                 let flushed = bridge.attach(target);
                 log::info!(
                     "[coord] QA StepFun realtime ASR connected; flushed {flushed} deferred audio bytes"
+                );
+                Ok(())
+            }
+            QaAsrStart::Xfyun { asr, bridge } => {
+                asr.open_session().await.map_err(|e| e.to_string())?;
+                let target: Arc<dyn crate::asr::AudioConsumer> = Arc::clone(asr) as _;
+                let flushed = bridge.attach(target);
+                log::info!(
+                    "[coord] QA iFlytek ASR connected; flushed {flushed} deferred audio bytes"
                 );
                 Ok(())
             }
@@ -705,6 +732,17 @@ pub(super) async fn build_qa_asr_start(
             Ok((
                 QaAsrStart::Volcengine {
                     asr: Arc::new(VolcengineStreamingASR::new(creds, enabled_hotwords(inner))),
+                    bridge: Arc::new(DeferredAsrBridge::new()),
+                },
+                label,
+            ))
+        }
+        ActiveAsrProviderKind::Xfyun => {
+            let creds = read_xfyun_credentials();
+            let label = AsrCallLabel::new(effective_asr.clone(), None);
+            Ok((
+                QaAsrStart::Xfyun {
+                    asr: Arc::new(crate::asr::XfyunStreamingASR::new(creds)),
                     bridge: Arc::new(DeferredAsrBridge::new()),
                 },
                 label,

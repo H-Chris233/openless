@@ -238,6 +238,9 @@ export const ASR_PRESETS = [
   // 小米 MiMo ASR 按官方文档走 /chat/completions + input_audio，不是
   // Whisper /audio/transcriptions；后端由 asr/mimo.rs 专用 client 处理。
   { id: 'xiaomi-mimo-asr', nameKey: 'asrXiaomiMimo', baseUrl: 'https://api.xiaomimimo.com/v1',                  model: 'mimo-v2.5-asr'               },
+  // 讯飞实时语音转写（RTASR）流式：无 baseUrl/model 配置，凭据是 AppID + APIKey
+  // 两字段（asr/xfyun.rs）；音频 16k/16bit/mono，与 recorder 输出一致。
+  { id: 'iflytek',      nameKey: 'asrIflytek',      baseUrl: '',                                              model: ''                              },
   { id: 'foundry-local-whisper', nameKey: 'asrFoundryLocalWhisper', baseUrl: '',                              model: ''                              },
   // 本地引擎（Foundry / sherpa-onnx / Qwen3）：无 baseUrl/model 配置，
   // 模型在「高级 → 本地模型」里下载与切换。
