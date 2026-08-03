@@ -775,26 +775,6 @@ pub(super) async fn handle_pressed_edge(
     }
 }
 
-/// 「排队接力」放行窗口（ms）。识别中按下热键想录下一条时,那个 Pressed 在处理期间就被缓进
-/// hotkey channel,bridge 串行阻塞到本条会话收尾(Idle)才取出 —— 取出几乎在 Idle 后 0ms
-/// (bridge 立即 recv)。它和 #545「会话结束后胶囊离场动画期间误触」的区别在于物理按下时刻:
-/// 误触是会话结束后才按,处理时刻离 Idle 已隔人类反应时间(>150ms)。所以冷却期内、但距 Idle
-/// < 该窗口的按下 = 排队接力,放行开录下一条;其余冷却期按下仍按 #545 拦截。120ms 远低于
-/// 人类反应、又足够覆盖 end_session 收尾尾巴 + bridge recv 延迟。
-const HOTKEY_QUEUE_GRACE_MS: u64 = 120;
-
-/// 判断一次落在冷却期内的 Toggle 激活是否为「排队接力」按下（见 HOTKEY_QUEUE_GRACE_MS）。
-/// since_idle = POST_SESSION_COOLDOWN_MS − 剩余冷却；落在 grace 窗口内即认为是处理期间缓进、
-/// 收尾后立刻取出的接力按下。剩余冷却异常(> 全程,理论不会发生)时返回 false,从严不放行。
-fn is_queued_chain_press(now: std::time::Instant, cooldown_until: std::time::Instant) -> bool {
-    let cooldown = std::time::Duration::from_millis(POST_SESSION_COOLDOWN_MS);
-    let remaining = cooldown_until.saturating_duration_since(now);
-    cooldown
-        .checked_sub(remaining)
-        .map(|since_idle| since_idle < std::time::Duration::from_millis(HOTKEY_QUEUE_GRACE_MS))
-        .unwrap_or(false)
-}
-
 pub(super) async fn handle_pressed(
     inner: &Arc<Inner>,
     pressed_at: std::time::Instant,
@@ -805,25 +785,21 @@ pub(super) async fn handle_pressed(
     log::info!("[coord] hotkey pressed (mode={mode:?}, phase={phase:?})");
     match (mode, phase) {
         (HotkeyMode::Toggle, SessionPhase::Idle) => {
-            // 冷却检查：end_session 刚收尾时禁止短时间内再次激活，避免三连按第 3 次误触
-            // （此时胶囊仍在离场动画周期内，issue #545）。例外「排队接力」：识别中按下想录
-            // 下一条的 Pressed 被缓在 channel 里、会话收尾后立刻取出（距 Idle < grace），放行
-            // 直接开录下一条（用户选的「安全版排队接力」）。
+            // 冷却检查：end_session / 取消收尾后禁止短时间内再次激活，避免三连按第 3 次误触
+            // （此时胶囊仍在离场动画周期内，issue #545）。识别中按下想录下一条的 Pressed 会被
+            // 缓在 hotkey channel 里、会话收尾后（距 Idle 落在冷却期内）才取出 —— 一律静默
+            // 丢弃，不再放行开录（issue #856：无反馈排队 + 延迟开录的惊吓成本大于收益）。
             let now = std::time::Instant::now();
-            let cooldown_until = *inner.session_cooldown_until.lock();
-            if let Some(deadline) = cooldown_until {
-                if now < deadline {
-                    if is_queued_chain_press(now, deadline) {
-                        log::info!(
-                            "[coord] queued-chain activation: 识别中按下，会话收尾后接力开录下一条"
-                        );
-                    } else {
-                        log::info!(
-                            "[coord] toggle activation blocked by cooldown (session still winding down)"
-                        );
-                        return;
-                    }
-                }
+            let on_cooldown = inner
+                .session_cooldown_until
+                .lock()
+                .map(|deadline| now < deadline)
+                .unwrap_or(false);
+            if on_cooldown {
+                log::info!(
+                    "[coord] toggle activation blocked by cooldown (session still winding down)"
+                );
+                return;
             }
             begin_session_from_press(inner, press_id).await;
         }
@@ -841,22 +817,18 @@ pub(super) async fn handle_pressed(
         // Auto 模式：按下即开录（与 Hold 一样不丢首字）。是短按还是长按要到松手时才知道，
         // 所以这里只负责「开始」并记下按下时刻，语义交给 handle_released 判定。
         (HotkeyMode::Auto, SessionPhase::Idle) => {
-            // 复用 Toggle 的冷却 / 排队接力检查：#545 离场动画期间误触保护。
+            // 复用 Toggle 的冷却检查：#545 离场动画期间误触保护；识别中排队的按下同样丢弃（#856）。
             let now = std::time::Instant::now();
-            let cooldown_until = *inner.session_cooldown_until.lock();
-            if let Some(deadline) = cooldown_until {
-                if now < deadline {
-                    if is_queued_chain_press(now, deadline) {
-                        log::info!(
-                            "[coord] queued-chain activation (auto): 识别中按下，会话收尾后接力开录下一条"
-                        );
-                    } else {
-                        log::info!(
-                            "[coord] auto activation blocked by cooldown (session still winding down)"
-                        );
-                        return;
-                    }
-                }
+            let on_cooldown = inner
+                .session_cooldown_until
+                .lock()
+                .map(|deadline| now < deadline)
+                .unwrap_or(false);
+            if on_cooldown {
+                log::info!(
+                    "[coord] auto activation blocked by cooldown (session still winding down)"
+                );
+                return;
             }
             *inner.hotkey_press_at.lock() = Some(pressed_at);
             begin_session_from_press(inner, press_id).await;
@@ -932,7 +904,7 @@ async fn begin_session_from_press(inner: &Arc<Inner>, press_id: u64) {
 ///
 /// 只对 modifier-only 触发键等待 —— 自定义组合键（Cmd+Shift+D 之类）本身就没有歧义，
 /// 让它白等这一下纯粹是掉延迟。等待放在防抖 / 冷却判定之后，那些判定用的仍是未被本
-/// 窗口推迟的时刻（尤其别把「排队接力」窗口挤掉，见 is_queued_chain_press）。
+/// 窗口推迟的时刻。
 async fn press_resolves_to_combo(inner: &Arc<Inner>, press_id: u64) -> bool {
     let binding = inner.prefs.get().dictation_hotkey;
     if crate::shortcut_binding::legacy_modifier_trigger(&binding).is_none() {
@@ -2601,6 +2573,14 @@ fn fail_dictation(
     );
     restore_prepared_windows_ime_session(inner, session_id);
     inner.state.lock().phase = SessionPhase::Idle;
+    // 与成功 / 取消收尾一致：回 Idle 即设冷却，把识别中缓存在 hotkey channel 里的 Pressed
+    // 一并静默丢弃（issue #856）——否则失败收尾后那条排队按下会立刻开出一条新录音，用户以为
+    // 「全部停下了」却再次弹出胶囊；同时覆盖错误胶囊离场动画期间的误触（issue #545）。
+    {
+        let now = std::time::Instant::now();
+        *inner.session_cooldown_until.lock() =
+            Some(now + std::time::Duration::from_millis(POST_SESSION_COOLDOWN_MS));
+    }
     schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
     Err(err)
 }
@@ -3368,6 +3348,12 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         );
         restore_prepared_windows_ime_session(inner, current_session_id);
         inner.state.lock().phase = SessionPhase::Idle;
+        // 与成功 / 取消 / 失败收尾一致：回 Idle 即设冷却，识别中排队的热键按下同样丢弃（#856）。
+        {
+            let now = std::time::Instant::now();
+            *inner.session_cooldown_until.lock() =
+                Some(now + std::time::Duration::from_millis(POST_SESSION_COOLDOWN_MS));
+        }
         schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
         return Err("ASR returned empty transcript".to_string());
     }
@@ -4245,33 +4231,6 @@ mod tests {
         assert_eq!(pcm_duration_ms(16_000), 500); // 0.5s
         assert_eq!(pcm_duration_ms(32), 1); // 1ms
         assert_eq!(pcm_duration_ms(0), 0);
-    }
-
-    #[test]
-    fn queued_chain_press_allowed_within_grace_blocked_after() {
-        use super::{is_queued_chain_press, HOTKEY_QUEUE_GRACE_MS};
-        use std::time::{Duration, Instant};
-        let cooldown_ms = crate::coordinator::POST_SESSION_COOLDOWN_MS;
-        // 模拟 end_session 收尾：cooldown_until = idle + POST_SESSION_COOLDOWN_MS。
-        let idle = Instant::now();
-        let cooldown_until = idle + Duration::from_millis(cooldown_ms);
-        // 排队接力：识别中按下、会话收尾后 ~0ms 被取出处理 → 放行开录下一条。
-        assert!(is_queued_chain_press(idle, cooldown_until));
-        // grace 窗口边缘内 → 仍放行。
-        assert!(is_queued_chain_press(
-            idle + Duration::from_millis(HOTKEY_QUEUE_GRACE_MS - 1),
-            cooldown_until
-        ));
-        // #545 误触：会话结束后隔了人类反应时间才物理按下 → 仍在冷却期但超出 grace → 拦截。
-        assert!(!is_queued_chain_press(
-            idle + Duration::from_millis(300),
-            cooldown_until
-        ));
-        // 冷却已过：函数对超期返回 false（此时调用方本就放行，从严也安全）。
-        assert!(!is_queued_chain_press(
-            idle + Duration::from_millis(cooldown_ms + 10),
-            cooldown_until
-        ));
     }
 
     #[test]
