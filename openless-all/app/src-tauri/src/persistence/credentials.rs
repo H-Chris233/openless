@@ -1483,11 +1483,7 @@ impl CredentialsVault {
         let _guard = credentials_lock().lock();
         let headers = parse_extra_headers_json(value)?;
         let mut root = load_credentials_for_update()?;
-        let entry = root
-            .providers
-            .llm
-            .entry(root.active.llm.clone())
-            .or_default();
+        let entry = root.providers.llm.entry(root.active.llm.clone()).or_default();
         entry.extraHeaders = if headers.is_empty() {
             None
         } else {
