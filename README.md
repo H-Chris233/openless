@@ -159,7 +159,7 @@ The closest alternatives are subscription SaaS products: a monthly fee, no optio
 OpenLess targets the same end-user experience, but:
 
 - **Fully open source, local-first.** The code lives in this repository, and all of your data stays on your machine.
-- **Bring your own cloud credentials.** Volcengine streaming ASR with Ark / DeepSeek-compatible chat completions. No vendor lock-in.
+- **Bring your own cloud credentials.** A dozen-plus ASR and polish providers — Volcengine, iFlytek, Alibaba Cloud Bailian, StepFun, OpenAI-compatible endpoints, and more — or any endpoint you bring. No vendor lock-in.
 - **Tuned for AI prompts.** The structured mode reshapes loose speech into a prompt complete with context, constraints, and requests — ready to paste into ChatGPT, Claude, or Cursor.
 - **It will not answer for you.** The model only cleans up your text. If you say "what features does this app still need?", it returns that as a clean question — it does not hand you a feature list. For that, ask the AI itself.
 
@@ -198,7 +198,7 @@ OpenLess does one thing: it **turns speech into usable written text — AI promp
 | [Lazy](https://heylazy.com) | Closed-source notes / capture tool | Not a notes container — inserts straight into any input field |
 | [Superwhisper](https://superwhisper.com) | Closed-source macOS, subscription | Open source; cloud ASR today, local ASR on the roadmap |
 
-## Status (v1.3.6)
+## Status
 
 Every item below is one more layer sedimented into a default — a capability you authorize once and then never manage again. This is the infrastructure you stand on after launch:
 
@@ -206,9 +206,9 @@ Every item below is one more layer sedimented into a default — a capability yo
 - 🎨 **Style Pack Marketplace** — browse, install, and like community **style packs** from the in-app Marketplace, and publish your own (custom system prompt per pack, switchable by hotkey). Backed by a moderated marketplace backend; uploads are reviewed before they go public.
 - ⚡ **Streaming insertion** — polished text is written to the cursor character by character to reduce perceived latency, with an automatic one-shot-paste fallback. Toggle in Settings → Recording.
 - **Toggle and push-to-talk** recording modes, plus a **MediaPlayPause trigger** so wired-earbud inline controls can start and stop recording. `Esc` cancels at any phase, including polish and insertion.
-- **Cloud ASR**: Volcengine streaming ASR, OpenAI Whisper-compatible batch ASR, Apple Speech (macOS).
-- **Local ASR**: bundled Qwen3-ASR (0.6B / 1.7B) via vendored `Open-Less/qwen-asr`; Windows Foundry Local Whisper variants.
-- **Polish providers**: Ark / DeepSeek / OpenAI / Doubao / Anthropic-compatible chat completions, plus any OpenAI-compatible endpoint you bring.
+- **Cloud ASR**: Volcengine streaming ASR (bigasr), iFlytek realtime ASR (RTASR), Alibaba Cloud Bailian (classic realtime / Qwen3 realtime / Fun-ASR-Flash file transcription), StepFun StepAudio (batch + realtime), Zhipu GLM-ASR, Xiaomi MiMo ASR, ElevenLabs Scribe, OpenAI-compatible batch transcription (OpenAI Whisper / Groq / SiliconFlow SenseVoice / OpenRouter), and Apple Speech (macOS).
+- **Local ASR**: bundled Qwen3-ASR (0.6B / 1.7B) via vendored `Open-Less/qwen-asr` (macOS); Windows Foundry Local Whisper and sherpa-onnx (experimental) variants.
+- **Polish providers**: Ark (Volcengine), DeepSeek, OpenAI, Google Gemini, Codex OAuth, SiliconFlow, Atlas Cloud, Xiaomi MiMo, CometAPI, OpenRouter, Alibaba Cloud Coding Plan, CodingPlanX, MiniMax, and StepFun — plus any OpenAI-compatible endpoint you bring.
 - **Four output modes**: raw, light polish, structured (**AI-prompt mode**), and formal. Plus a **translation hotkey** that converts speech directly into the configured target language ([#43](../../issues/43)).
 - **Selection-ask QA panel** — a separate hotkey opens a floating panel that runs voice Q&A against the highlighted text in any app ([#118](../../issues/118)).
 - **Main window**: Overview / History / Vocab / Style / Marketplace / Settings. Persistent tray icon, plus a mini status capsule that floats on screen and follows the display you are typing on (multi-monitor).
@@ -337,6 +337,7 @@ New credential writes do not persist plaintext secrets. The repository contains 
 You will need:
 
 - **Volcengine streaming ASR**: APP ID, Access Token, Resource ID.
+- **iFlytek realtime ASR (RTASR)**: AppID, API Key. See [docs/xfyun-asr.md](docs/xfyun-asr.md).
 - **Ark polish**: API Key, Model ID, Endpoint. The Ark default endpoint is `https://ark.cn-beijing.volces.com/api/v3/chat/completions`.
 
 ## Prompt-handling principles
@@ -363,7 +364,7 @@ Long-term reference rewrites are stored as `raw → polished → rule` triples a
 The dictionary handles your proper nouns, product names, names of people, and new words. Today it supports:
 
 - Manually adding the correct spelling, a category, and notes. You do not need to maintain misspellings or context hints.
-- Enabled entries are sent as Volcengine ASR `context.hotwords` so they are recognized correctly during transcription.
+- Enabled entries are sent to the ASR provider that supports hotwords (Volcengine `context.hotwords`, StepFun `hotwords`, Whisper-compatible `prompt`, Bailian vocabulary ID) so they are recognized correctly during transcription. iFlytek realtime ASR has no request-level hotword parameter — configure personalized hotwords in the iFlytek console instead.
 - Entries are also injected into the polish prompt: the model decides per sentence whether to substitute. If "Cloud" clearly refers to the AI product `Claude` in context, it is corrected; if it genuinely means cloud computing, it is left as is.
 - The app auto-learns candidate corrections such as `Claude`, `ChatGPT`, and `OpenLess` from your history and offers them later.
 
@@ -379,7 +380,7 @@ The active implementation is Tauri 2 (`openless-all/app/`). Releases are split i
 types.rs         Pure value types: DictationSession, PolishMode, HotkeyBinding, errors
 hotkey.rs        Global hotkey (CGEventTap on macOS, WH_KEYBOARD_LL on Windows, rdev on Linux)
 recorder.rs      Mic → 16 kHz mono Int16 PCM, RMS callback
-asr/             Volcengine streaming ASR (WebSocket) + Whisper HTTP
+asr/             Streaming ASR clients (Volcengine / Bailian / Qwen3 / StepFun / iFlytek over WebSocket) + Whisper-compatible batch HTTP
 polish.rs        OpenAI-compatible chat completions (Ark / DeepSeek / etc.)
 insertion.rs     AX focused-element → clipboard + Cmd+V → copy-only fallback
 persistence.rs   History / preferences / vocab JSON + platform credential vault
@@ -398,7 +399,6 @@ See [CLAUDE.md](CLAUDE.md) for invariants and module-wiring rules.
 
 Planned but not yet shipped:
 
-- Dictation translation mode: hold a separate hotkey, speak in your language, insert in the target language ([#43](../../issues/43)).
 - Cross-session style memory: polish learns the user's tone over time ([#46](../../issues/46)).
 - Snippets (no UI or trigger logic yet).
 - History enhancements: copy button, search, re-polish, re-insert.

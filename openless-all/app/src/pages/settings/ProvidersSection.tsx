@@ -588,6 +588,27 @@ export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
                 : t('settings.providers.volcengineMappingNote')}
             </div>
           </>
+        ) : committedAsrProvider === 'iflytek' ? (
+          <>
+            <CredentialField
+              key={`${committedAsrProvider}:app_id`}
+              label={t('settings.providers.xfyunAppIdLabel')}
+              account="xfyun.app_id"
+              provider={committedAsrProvider}
+              mono
+            />
+            <CredentialField
+              key={`${committedAsrProvider}:api_key`}
+              label={t('settings.providers.xfyunApiKeyLabel')}
+              account="xfyun.api_key"
+              provider={committedAsrProvider}
+              mono
+              mask
+            />
+            <div style={{ marginTop: 2, fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.6 }}>
+              {t('settings.providers.xfyunNote')}
+            </div>
+          </>
         ) : committedAsrProvider === 'local-qwen3' || committedAsrProvider === 'foundry-local-whisper' || committedAsrProvider === 'sherpa-onnx-local' || committedAsrProvider === 'apple-speech' ? (
           // 用户已经在用本地 ASR——dropdown 行的 asrProviderTakenOver 已经把
           // "在高级中切换或禁用"讲清楚了，body 不再重复。

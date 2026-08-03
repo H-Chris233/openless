@@ -220,6 +220,12 @@ struct CredsAsrEntry {
     volcengineApiKey: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     vocabularyId: Option<String>,
+    /// 讯飞开放平台应用 ID（RTASR/IFASR 鉴权用）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    xfyunAppId: Option<String>,
+    /// 讯飞实时语音转写 APIKey（接口密钥）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    xfyunApiKey: Option<String>,
 }
 
 impl CredsAsrEntry {
@@ -233,6 +239,8 @@ impl CredsAsrEntry {
             && self.authMode.as_deref().unwrap_or("").is_empty()
             && self.volcengineApiKey.as_deref().unwrap_or("").is_empty()
             && self.vocabularyId.as_deref().unwrap_or("").is_empty()
+            && self.xfyunAppId.as_deref().unwrap_or("").is_empty()
+            && self.xfyunApiKey.as_deref().unwrap_or("").is_empty()
     }
 }
 
@@ -1126,6 +1134,8 @@ fn lookup_account(root: &CredsRoot, account: CredentialAccount) -> Option<String
         CredentialAccount::AsrEndpoint => asr.and_then(|e| pick(&e.baseURL)),
         CredentialAccount::AsrModel => asr.and_then(|e| pick(&e.model)),
         CredentialAccount::AsrVocabularyId => asr.and_then(|e| pick(&e.vocabularyId)),
+        CredentialAccount::XfyunAppId => asr.and_then(|e| pick(&e.xfyunAppId)),
+        CredentialAccount::XfyunApiKey => asr.and_then(|e| pick(&e.xfyunApiKey)),
     }
 }
 
@@ -1182,6 +1192,14 @@ fn write_account(root: &mut CredsRoot, account: CredentialAccount, value: Option
             let entry = root.providers.asr.entry(asr_id).or_default();
             entry.vocabularyId = normalized;
         }
+        CredentialAccount::XfyunAppId => {
+            let entry = root.providers.asr.entry(asr_id).or_default();
+            entry.xfyunAppId = normalized;
+        }
+        CredentialAccount::XfyunApiKey => {
+            let entry = root.providers.asr.entry(asr_id).or_default();
+            entry.xfyunApiKey = normalized;
+        }
     }
 }
 
@@ -1204,6 +1222,10 @@ pub enum CredentialAccount {
     AsrModel,
     /// Active ASR provider's optional hotword vocabulary ID.
     AsrVocabularyId,
+    /// 讯飞开放平台应用 ID。
+    XfyunAppId,
+    /// 讯飞实时语音转写 APIKey。
+    XfyunApiKey,
 }
 
 impl CredentialAccount {
@@ -1224,6 +1246,8 @@ impl CredentialAccount {
             CredentialAccount::AsrEndpoint => "asr.endpoint",
             CredentialAccount::AsrModel => "asr.model",
             CredentialAccount::AsrVocabularyId => "asr.vocabulary_id",
+            CredentialAccount::XfyunAppId => "xfyun.app_id",
+            CredentialAccount::XfyunApiKey => "xfyun.api_key",
         }
     }
 
@@ -1241,6 +1265,8 @@ impl CredentialAccount {
             CredentialAccount::AsrEndpoint,
             CredentialAccount::AsrModel,
             CredentialAccount::AsrVocabularyId,
+            CredentialAccount::XfyunAppId,
+            CredentialAccount::XfyunApiKey,
         ]
     }
 }
@@ -1256,6 +1282,8 @@ pub struct CredentialsSnapshot {
     pub asr_api_key: Option<String>,
     pub asr_endpoint: Option<String>,
     pub asr_model: Option<String>,
+    pub xfyun_app_id: Option<String>,
+    pub xfyun_api_key: Option<String>,
     pub ark_api_key: Option<String>,
     pub ark_model_id: Option<String>,
     pub ark_endpoint: Option<String>,
@@ -1476,6 +1504,8 @@ impl CredentialsVault {
             asr_api_key: lookup_account(&root, CredentialAccount::AsrApiKey),
             asr_endpoint: lookup_account(&root, CredentialAccount::AsrEndpoint),
             asr_model: lookup_account(&root, CredentialAccount::AsrModel),
+            xfyun_app_id: lookup_account(&root, CredentialAccount::XfyunAppId),
+            xfyun_api_key: lookup_account(&root, CredentialAccount::XfyunApiKey),
             ark_api_key: lookup_account(&root, CredentialAccount::ArkApiKey),
             ark_model_id: lookup_account(&root, CredentialAccount::ArkModelId),
             ark_endpoint: lookup_account(&root, CredentialAccount::ArkEndpoint),

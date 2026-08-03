@@ -35,6 +35,8 @@
 不会配火山 ASR 的话，先看这篇图文引导：  
 [OpenLess 火山 ASR 配置](docs/volcengine-setup.md)
 
+用讯飞实时语音转写的话，看 [OpenLess 讯飞 ASR 配置](docs/xfyun-asr.md)（AppID + API Key，设置 → 语音提供商 → 讯飞实时语音转写）。
+
 打开 OpenLess → **设置**，填入以下字段：
 
 | 字段 | 说明 |

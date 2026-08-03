@@ -459,6 +459,21 @@ pub(super) async fn transcribe_overlay_dictation_asr(
                 }
             }
         }
+        ActiveAsr::Xfyun(asr) => {
+            debug_assert!(uses_global_timeout);
+            if let Err(error) = asr.send_last_frame().await {
+                log::error!("[coord] overlay QA: iFlytek ASR send last frame failed: {error}");
+            }
+            let timeout_duration = std::time::Duration::from_secs(COORDINATOR_GLOBAL_TIMEOUT_SECS);
+            match tokio::time::timeout(timeout_duration, asr.await_final_result()).await {
+                Ok(Ok(raw)) => Ok(raw),
+                Ok(Err(error)) => Err(error.to_string()),
+                Err(_) => {
+                    asr.cancel();
+                    Err("xfyun global timeout".to_string())
+                }
+            }
+        }
         ActiveAsr::Whisper(whisper) => {
             debug_assert!(uses_global_timeout);
             let timeout_duration = std::time::Duration::from_secs(COORDINATOR_GLOBAL_TIMEOUT_SECS);
@@ -1082,6 +1097,30 @@ pub(super) async fn end_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
                     asr.cancel();
                     finish_qa_with_error_if_current(inner, session_id, "识别超时".to_string());
                     return Err("stepfun realtime global timeout".to_string());
+                }
+            }
+        }
+        ActiveAsr::Xfyun(asr) => {
+            debug_assert!(uses_global_timeout);
+            if let Err(e) = asr.send_last_frame().await {
+                log::error!("[coord] QA: iFlytek ASR send last frame failed: {e}");
+            }
+            let timeout_duration = std::time::Duration::from_secs(COORDINATOR_GLOBAL_TIMEOUT_SECS);
+            match tokio::time::timeout(timeout_duration, asr.await_final_result()).await {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => {
+                    log::error!("[coord] QA: iFlytek ASR await final failed: {e}");
+                    finish_qa_with_error_if_current(inner, session_id, format!("识别失败: {e}"));
+                    return Err(e.to_string());
+                }
+                Err(_) => {
+                    log::error!(
+                        "[coord] QA: iFlytek ASR 全局超时 {} 秒",
+                        COORDINATOR_GLOBAL_TIMEOUT_SECS
+                    );
+                    asr.cancel();
+                    finish_qa_with_error_if_current(inner, session_id, "识别超时".to_string());
+                    return Err("xfyun global timeout".to_string());
                 }
             }
         }

@@ -194,6 +194,8 @@ enum ActiveAsr {
     Qwen3Realtime(Arc<Qwen3RealtimeASR>),
     /// 阶跃星辰 StepAudio 实时（OpenAI Realtime 风格 WS，收尾靠静音帧驱动 VAD）。
     StepfunRealtime(Arc<crate::asr::StepfunRealtimeASR>),
+    /// 讯飞开放平台实时语音转写（RTASR）流式。
+    Xfyun(Arc<crate::asr::XfyunStreamingASR>),
     #[cfg(target_os = "windows")]
     FoundryLocalWhisper(Arc<FoundryLocalWhisperAsr>),
     /// Windows sherpa-onnx 本地 ASR（offline batch + 实验 online streaming）。
@@ -237,6 +239,7 @@ pub(crate) enum ActiveAsrProviderKind {
     ElevenLabs,
     WhisperCompatible,
     Volcengine,
+    Xfyun,
 }
 
 /// 「能否开始一次会话」所需的凭据形态（对应 `ensure_asr_credentials` 预检门）。
@@ -246,6 +249,8 @@ pub(crate) enum AsrPreflightCredential {
     AsrApiKey,
     /// 需要火山引擎 App Key + Access Key。
     VolcAppKey,
+    /// 需要讯飞 AppID + APIKey。
+    XfyunAppKey,
 }
 
 /// 概览页「已配置 / 未配置」状态所需的字段（对应 `asr_configured_for_provider`）。
@@ -260,6 +265,8 @@ pub(crate) enum AsrConfiguredFields {
     EndpointModelOnly,
     /// 火山引擎三件套。
     VolcAppKey,
+    /// 讯飞 AppID + APIKey。
+    XfyunAppKey,
 }
 
 impl ActiveAsrProviderKind {
@@ -273,6 +280,7 @@ impl ActiveAsrProviderKind {
             | ActiveAsrProviderKind::ElevenLabs
             | ActiveAsrProviderKind::WhisperCompatible => AsrPreflightCredential::AsrApiKey,
             ActiveAsrProviderKind::Volcengine => AsrPreflightCredential::VolcAppKey,
+            ActiveAsrProviderKind::Xfyun => AsrPreflightCredential::XfyunAppKey,
         }
     }
 
@@ -292,6 +300,7 @@ impl ActiveAsrProviderKind {
             ActiveAsrProviderKind::WhisperCompatible
             | ActiveAsrProviderKind::StepfunRealtime => AsrConfiguredFields::EndpointModelOnly,
             ActiveAsrProviderKind::Volcengine => AsrConfiguredFields::VolcAppKey,
+            ActiveAsrProviderKind::Xfyun => AsrConfiguredFields::XfyunAppKey,
         }
     }
 }
@@ -311,6 +320,8 @@ pub(crate) fn active_asr_provider_kind(id: &str) -> ActiveAsrProviderKind {
         ActiveAsrProviderKind::ElevenLabs
     } else if is_whisper_compatible_provider(id) {
         ActiveAsrProviderKind::WhisperCompatible
+    } else if is_xfyun_provider(id) {
+        ActiveAsrProviderKind::Xfyun
     } else {
         ActiveAsrProviderKind::Volcengine
     }
@@ -2046,6 +2057,13 @@ impl Coordinator {
                     .map_err(|_| "重新转录超时".to_string())?
                     .map_err(|e| e.to_string())?
             }
+            ActiveAsr::Xfyun(asr) => {
+                asr.send_last_frame().await.map_err(|e| e.to_string())?;
+                tokio::time::timeout(timeout, asr.await_final_result())
+                    .await
+                    .map_err(|_| "重新转录超时".to_string())?
+                    .map_err(|e| e.to_string())?
+            }
             ActiveAsr::Whisper(w) => tokio::time::timeout(timeout, w.transcribe())
                 .await
                 .map_err(|_| "重新转录超时".to_string())?
@@ -2662,6 +2680,18 @@ fn read_volc_credentials() -> VolcengineCredentials {
     }
 }
 
+fn read_xfyun_credentials() -> crate::asr::XfyunCredentials {
+    let app_id = CredentialsVault::get(CredentialAccount::XfyunAppId)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let api_key = CredentialsVault::get(CredentialAccount::XfyunApiKey)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    crate::asr::XfyunCredentials { app_id, api_key }
+}
+
 fn enabled_hotwords(inner: &Arc<Inner>) -> Vec<DictionaryHotword> {
     inner
         .vocab
@@ -3185,6 +3215,7 @@ mod tests {
         assert_eq!(ElevenLabs.preflight_credential(), AsrApiKey);
         assert_eq!(WhisperCompatible.preflight_credential(), AsrApiKey);
         assert_eq!(Volcengine.preflight_credential(), VolcAppKey);
+        assert_eq!(Xfyun.preflight_credential(), XfyunAppKey);
     }
 
     #[test]
@@ -3326,6 +3357,7 @@ mod tests {
         assert_eq!(ElevenLabs.configured_fields(), ApiKeyOnly);
         assert_eq!(WhisperCompatible.configured_fields(), EndpointModelOnly);
         assert_eq!(Volcengine.configured_fields(), VolcAppKey);
+        assert_eq!(Xfyun.configured_fields(), XfyunAppKey);
     }
 
     #[cfg(target_os = "windows")]
