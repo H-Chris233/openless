@@ -151,7 +151,7 @@ impl WhisperBatchASR {
             .collect();
         let wav = encode_wav_16k_mono(&samples);
         let url = transcription_url(&self.base_url)?;
-        let client = reqwest::Client::new();
+        let client = crate::net::http();
 
         let request = match self.request_format {
             AsrRequestFormat::Multipart => {

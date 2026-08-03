@@ -152,7 +152,7 @@ mod imp {
         fs::create_dir_all(&staging_dir)
             .with_context(|| format!("create {}", staging_dir.display()))?;
 
-        let client = reqwest::Client::new();
+        let client = crate::net::http();
         let (native_start, native_end) = native_runtime_progress_range();
         let native_span = native_end - native_start;
         for (index, package) in PACKAGES.iter().enumerate() {
@@ -348,7 +348,7 @@ mod imp {
             .with_context(|| format!("create {}", installer_dir.display()))?;
         let installer_path = installer_dir.join(WINDOWS_APP_RUNTIME_INSTALLER_FILE);
 
-        let bytes = reqwest::Client::new()
+        let bytes = crate::net::http()
             .get(WINDOWS_APP_RUNTIME_INSTALLER_URL)
             .send()
             .await

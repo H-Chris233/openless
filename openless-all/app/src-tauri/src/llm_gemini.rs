@@ -71,13 +71,17 @@ pub struct GeminiProvider {
 impl GeminiProvider {
     pub fn new(config: GeminiConfig) -> Self {
         // Reuse a cached client keyed by timeout so the connection pool survives
-        // across utterances instead of re-handshaking every polish.
+        // across utterances instead of re-handshaking every polish. 代理开关
+        // 切换时 net::set_use_system_proxy 会清空缓存，这里按新策略重建。
         let timeout = config.request_timeout_secs;
-        let client = crate::net::cached_client((timeout, false), || {
-            reqwest::Client::builder()
-                .timeout(Duration::from_secs(timeout))
-                .build()
-                .unwrap_or_else(|_| reqwest::Client::new())
+        let no_proxy =
+            crate::net::should_bypass_proxy(&config.base_url, crate::net::use_system_proxy());
+        let client = crate::net::cached_client((timeout, no_proxy), || {
+            let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(timeout));
+            if no_proxy {
+                builder = builder.no_proxy();
+            }
+            builder.build().unwrap_or_else(|_| reqwest::Client::new())
         });
         Self { config, client }
     }
