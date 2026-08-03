@@ -112,6 +112,21 @@ pub(super) fn ensure_asr_credentials() -> Result<(), String> {
         }
     }
 
+    // `openai-compatible` 通用预设没有厂商默认值：endpoint 与 model 必须由用户
+    // 填写，缺一即明确报错（不再静默回落 whisper-1）。API Key 允许留空——
+    // LAN 自建端点（llama.cpp 等）常无需鉴权，故直接跳过下方 AsrApiKey 检查。
+    if active_asr == OPENAI_COMPATIBLE_ASR_PROVIDER_ID {
+        let endpoint = CredentialsVault::get(CredentialAccount::AsrEndpoint)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let model = CredentialsVault::get(CredentialAccount::AsrModel)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        return require_openai_compatible_fields(&endpoint, &model);
+    }
+
     // 云端 provider 的预检凭据由 ActiveAsrProviderKind 统一判定（穷尽 match，
     // 编译器保证新增 kind 不会被漏掉 —— 取代旧的「provider 白名单 + 火山兜底」，
     // 那个静默 else 曾让新通道误落到火山分支）。
@@ -153,6 +168,18 @@ pub(super) fn ensure_asr_credentials() -> Result<(), String> {
             }
         }
     }
+}
+
+/// `openai-compatible` 预设的必填字段校验：endpoint / model 均须非空（trim），
+/// 返回明确的中文错误。API Key 是否必填由调用方决定（本预设允许留空）。
+pub(super) fn require_openai_compatible_fields(endpoint: &str, model: &str) -> Result<(), String> {
+    if endpoint.trim().is_empty() {
+        return Err("自定义 OpenAI 兼容 ASR：请先在设置中填写服务端地址（endpoint）".to_string());
+    }
+    if model.trim().is_empty() {
+        return Err("自定义 OpenAI 兼容 ASR：请先在设置中填写模型名（model）".to_string());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -348,6 +375,8 @@ pub(super) fn build_apple_speech(
 
 /// `whisper` 是 OpenAI 原生；`siliconflow` / `zhipu` / `groq` / `stepfun`
 /// 都暴露 OpenAI 兼容的 `/audio/transcriptions`，统一走 `WhisperBatchASR`。
+/// `openai-compatible` 是通用预设：任意 OpenAI 兼容端点（自建 / LAN llama.cpp
+/// 等），无默认 endpoint/model，高级选项见 `AdvancedAsrConfig`。
 /// 新增 OpenAI 兼容 ASR 时只需在这里加一项。
 ///
 /// 注：DashScope 的 Qwen3-ASR-Flash 不在此列——它用 MultiModalConversation
@@ -357,7 +386,7 @@ pub(super) fn is_whisper_compatible_provider(id: &str) -> bool {
     matches!(
         id,
         "whisper" | "siliconflow" | "zhipu" | "groq" | "openrouter" | "stepfun"
-    )
+    ) || id == OPENAI_COMPATIBLE_ASR_PROVIDER_ID
 }
 
 /// 用户词典该走 `prompt` 还是一等 `hotwords` 参数。
@@ -403,8 +432,14 @@ pub(super) fn whisper_request_format(provider_id: &str) -> crate::asr::whisper::
 ///   发送 verbose_json 可能被拒，**保持关闭**走旧的 `json`。
 /// - `zhipu`（GLM-ASR）：虽接受 verbose_json，但不产出上述指标，过滤是空转；
 ///   为最小化行为变更，这里也**保持关闭**，仅对确证有收益的 whisper/groq 开启。
+/// - `openai-compatible`：由用户高级配置（`AdvancedAsrConfig.verbose_json`）决定，
+///   默认关闭，与服务端能力对齐。
 pub(super) fn whisper_supports_verbose_json(provider_id: &str) -> bool {
-    matches!(provider_id, "whisper" | "groq")
+    match provider_id {
+        "whisper" | "groq" => true,
+        // openai-compatible 由用户高级配置决定；其余厂商保持关闭。
+        _ => read_advanced_asr_config(provider_id).verbose_json,
+    }
 }
 
 pub(super) fn is_bailian_provider(id: &str) -> bool {
@@ -756,5 +791,31 @@ pub(super) async fn build_qa_asr_start(
                 label,
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn require_openai_compatible_fields_errors_on_missing_endpoint_or_model() {
+        // endpoint 缺失（含纯空白）→ 明确报错，绝不静默回落 whisper-1。
+        assert!(require_openai_compatible_fields("", "qwen3-asr")
+            .unwrap_err()
+            .contains("endpoint"));
+        assert!(require_openai_compatible_fields("   ", "qwen3-asr")
+            .unwrap_err()
+            .contains("endpoint"));
+        // model 缺失 → 明确报错。
+        assert!(
+            require_openai_compatible_fields("http://192.168.9.31:8090/v1", "")
+                .unwrap_err()
+                .contains("模型")
+        );
+        // 两者都填 → 通过；API Key 必填与否由调用方决定，不在此函数内。
+        assert!(
+            require_openai_compatible_fields("http://192.168.9.31:8090/v1", "qwen3-asr").is_ok()
+        );
     }
 }

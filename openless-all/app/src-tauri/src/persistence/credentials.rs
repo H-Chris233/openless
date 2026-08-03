@@ -220,6 +220,11 @@ struct CredsAsrEntry {
     volcengineApiKey: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     vocabularyId: Option<String>,
+    /// 通用 OpenAI 兼容 ASR(openai-compatible)的高级配置 JSON:
+    /// `{"verboseJson": bool, "chunkDurationMs": number|null}`。
+    /// 仅该预设读取;命名厂商的怪癖开关保持硬编码,不受此字段影响。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    advancedConfig: Option<String>,
     /// 讯飞开放平台应用 ID（RTASR/IFASR 鉴权用）。
     #[serde(skip_serializing_if = "Option::is_none")]
     xfyunAppId: Option<String>,
@@ -239,6 +244,7 @@ impl CredsAsrEntry {
             && self.authMode.as_deref().unwrap_or("").is_empty()
             && self.volcengineApiKey.as_deref().unwrap_or("").is_empty()
             && self.vocabularyId.as_deref().unwrap_or("").is_empty()
+            && self.advancedConfig.as_deref().unwrap_or("").is_empty()
             && self.xfyunAppId.as_deref().unwrap_or("").is_empty()
             && self.xfyunApiKey.as_deref().unwrap_or("").is_empty()
     }
@@ -1134,6 +1140,7 @@ fn lookup_account(root: &CredsRoot, account: CredentialAccount) -> Option<String
         CredentialAccount::AsrEndpoint => asr.and_then(|e| pick(&e.baseURL)),
         CredentialAccount::AsrModel => asr.and_then(|e| pick(&e.model)),
         CredentialAccount::AsrVocabularyId => asr.and_then(|e| pick(&e.vocabularyId)),
+        CredentialAccount::AsrAdvancedConfig => asr.and_then(|e| pick(&e.advancedConfig)),
         CredentialAccount::XfyunAppId => asr.and_then(|e| pick(&e.xfyunAppId)),
         CredentialAccount::XfyunApiKey => asr.and_then(|e| pick(&e.xfyunApiKey)),
     }
@@ -1192,6 +1199,10 @@ fn write_account(root: &mut CredsRoot, account: CredentialAccount, value: Option
             let entry = root.providers.asr.entry(asr_id).or_default();
             entry.vocabularyId = normalized;
         }
+        CredentialAccount::AsrAdvancedConfig => {
+            let entry = root.providers.asr.entry(asr_id).or_default();
+            entry.advancedConfig = normalized;
+        }
         CredentialAccount::XfyunAppId => {
             let entry = root.providers.asr.entry(asr_id).or_default();
             entry.xfyunAppId = normalized;
@@ -1222,6 +1233,8 @@ pub enum CredentialAccount {
     AsrModel,
     /// Active ASR provider's optional hotword vocabulary ID.
     AsrVocabularyId,
+    /// 通用 OpenAI 兼容 ASR 的高级配置 JSON（verboseJson / chunkDurationMs）。
+    AsrAdvancedConfig,
     /// 讯飞开放平台应用 ID。
     XfyunAppId,
     /// 讯飞实时语音转写 APIKey。
@@ -1246,6 +1259,7 @@ impl CredentialAccount {
             CredentialAccount::AsrEndpoint => "asr.endpoint",
             CredentialAccount::AsrModel => "asr.model",
             CredentialAccount::AsrVocabularyId => "asr.vocabulary_id",
+            CredentialAccount::AsrAdvancedConfig => "asr.advanced_config",
             CredentialAccount::XfyunAppId => "xfyun.app_id",
             CredentialAccount::XfyunApiKey => "xfyun.api_key",
         }
@@ -1265,6 +1279,7 @@ impl CredentialAccount {
             CredentialAccount::AsrEndpoint,
             CredentialAccount::AsrModel,
             CredentialAccount::AsrVocabularyId,
+            CredentialAccount::AsrAdvancedConfig,
             CredentialAccount::XfyunAppId,
             CredentialAccount::XfyunApiKey,
         ]
@@ -1519,8 +1534,9 @@ mod tests {
         android_persistable_credentials, chunk_json_payload, credentials_cache,
         get_android_marketplace_token_at, load_android_credentials_from_path,
         load_android_credentials_from_path_with_crypto, load_android_credentials_into_cache_with,
-        lookup_marketplace_github_token, parse_extra_headers_json, parse_llm_temperature,
-        reset_credentials_cache_for_tests, write_marketplace_github_token, CredsRoot,
+        lookup_account, lookup_marketplace_github_token, parse_extra_headers_json,
+        parse_llm_temperature, reset_credentials_cache_for_tests, write_account,
+        write_marketplace_github_token, CredentialAccount, CredsAsrEntry, CredsRoot,
         MarketplaceGithubToken, KEYRING_CHUNK_MAX_UTF16_UNITS,
     };
     #[cfg(not(windows))]
@@ -1575,6 +1591,31 @@ mod tests {
         );
         assert!(root.providers.asr.is_empty());
         assert!(root.providers.llm.is_empty());
+    }
+
+    #[test]
+    fn asr_advanced_config_round_trips_through_provider_entry() {
+        let mut root = CredsRoot::default();
+        root.active.asr = "openai-compatible".into();
+        write_account(
+            &mut root,
+            CredentialAccount::AsrAdvancedConfig,
+            Some(r#"{"verboseJson":true,"chunkDurationMs":30000}"#.into()),
+        );
+        assert_eq!(
+            lookup_account(&root, CredentialAccount::AsrAdvancedConfig).as_deref(),
+            Some(r#"{"verboseJson":true,"chunkDurationMs":30000}"#)
+        );
+
+        // 清空即移除该字段，且只影响对应 provider 的 entry。
+        write_account(&mut root, CredentialAccount::AsrAdvancedConfig, None);
+        assert_eq!(lookup_account(&root, CredentialAccount::AsrAdvancedConfig), None);
+        assert!(root.providers.asr["openai-compatible"].advancedConfig.is_none());
+
+        // 旧条目（无 advancedConfig 字段）反序列化为 None，不破坏既有数据。
+        let legacy: CredsAsrEntry = serde_json::from_str(r#"{"apiKey":"k"}"#).unwrap();
+        assert!(legacy.advancedConfig.is_none());
+        assert!(!legacy.is_empty());
     }
 
     #[test]

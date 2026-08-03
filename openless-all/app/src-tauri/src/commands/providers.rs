@@ -114,6 +114,8 @@ pub(crate) struct ProviderConfig {
 }
 
 fn read_openai_provider_config(kind: &str) -> Result<ProviderConfig, String> {
+    // `openai-compatible` 允许 API Key 留空（LAN 无鉴权端点）；其余 ASR 提供商
+    // 仍必填，与运行时门禁 ensure_asr_credentials 保持一致。
     let (api_key_account, endpoint_account, api_key_required) = match kind {
         "llm" => (
             CredentialAccount::ArkApiKey,
@@ -123,7 +125,8 @@ fn read_openai_provider_config(kind: &str) -> Result<ProviderConfig, String> {
         "asr" => (
             CredentialAccount::AsrApiKey,
             CredentialAccount::AsrEndpoint,
-            true,
+            CredentialsVault::get_active_asr()
+                != crate::coordinator::OPENAI_COMPATIBLE_ASR_PROVIDER_ID,
         ),
         _ => return Err(format!("unknown provider kind: {kind}")),
     };
@@ -693,13 +696,13 @@ async fn validate_asr_transcription(config: &ProviderConfig, model: &str) -> Res
         let form = reqwest::multipart::Form::new()
             .part("file", wav_part)
             .text("model", model.to_string());
-        match client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", config.api_key))
-            .multipart(form)
-            .send()
-            .await
-        {
+        // `openai-compatible` 允许 API Key 留空：此时不带 Authorization 头，
+        // 避免空 Bearer 被服务端 401 拒绝（与 fetch_provider_models 一致）。
+        let mut request = client.post(&url);
+        if !config.api_key.trim().is_empty() {
+            request = request.header("Authorization", format!("Bearer {}", config.api_key));
+        }
+        match request.multipart(form).send().await {
             Ok(resp) => break resp,
             Err(e) if e.is_timeout() => return Err("providerRequestTimeout".to_string()),
             Err(e) if (e.is_connect() || e.is_request()) && attempt < MAX_ATTEMPTS => {

@@ -19,6 +19,11 @@ import { useHotkeySettings } from '../../state/HotkeySettingsContext';
 import { SelectLite, type SelectOption } from '../../components/ui/SelectLite';
 import { Card } from '../_atoms';
 import { SettingRow, SectionTitle, Toggle, inputStyle, ASR_PRESETS, type AsrPresetId } from './shared';
+import {
+  parseAdvancedAsrConfig,
+  serializeAdvancedAsrConfig,
+  type AdvancedAsrConfig,
+} from '../../lib/advancedAsrConfig';
 
 function LlmThinkingToggle({ enabled, onToggle }: { enabled: boolean; onToggle: (next: boolean) => void }) {
   const { t } = useTranslation();
@@ -196,7 +201,7 @@ const OPENAI_COMPAT_ASR_MODELS: string[] = [
 // 走 Whisper 兼容 /audio/transcriptions 协议的厂商（与后端
 // coordinator.rs::is_whisper_compatible_provider 保持一致）。其余非百炼厂商
 // （zhipu / stepfun / mimo / elevenlabs 等）协议不同，不给预设下拉，保持输入框。
-const WHISPER_COMPAT_ASR_PROVIDERS: AsrPresetId[] = ['whisper', 'groq', 'siliconflow', 'openrouter'];
+const WHISPER_COMPAT_ASR_PROVIDERS: AsrPresetId[] = ['whisper', 'groq', 'siliconflow', 'openrouter', 'openai-compatible'];
 
 /** 模型预设下拉里的「自定义模型…」哨兵值：选中即切回输入框手输。 */
 const CUSTOM_MODEL_OPTION_VALUE = '__custom_model__';
@@ -656,9 +661,118 @@ export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
             )}
             {/* 统一百炼「拉取模型」只写 model，不覆盖用户选择的区域或工作空间 endpoint。 */}
             <ProviderTools kind="asr" modelAccount="asr.model" provider={committedAsrProvider} onModelSelected={() => setAsrModelRevision(v => v + 1)} />
+            {committedAsrProvider === 'openai-compatible' && (
+              <AsrAdvancedOptions provider={committedAsrProvider} />
+            )}
           </>
         )}
       </Card>
+      )}
+    </>
+  );
+}
+
+// 通用 OpenAI 兼容 ASR 的高级选项：仅对 openai-compatible 预设显示。
+// 命名厂商预设的怪癖开关（verbose_json / 分片等）是测过的硬编码行为，不开放。
+function AsrAdvancedOptions({ provider }: { provider: string }) {
+  const { t } = useTranslation();
+  const [verboseJson, setVerboseJson] = useState(false);
+  const [chunkDraft, setChunkDraft] = useState('');
+  const [status, setStatus] = useState<'idle' | 'saving' | 'error'>('idle');
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    setStatus('idle');
+    setError('');
+    void (async () => {
+      try {
+        const raw = await readCredential('asr.advanced_config', provider);
+        if (cancelled) return;
+        const config = parseAdvancedAsrConfig(raw);
+        setVerboseJson(config.verboseJson);
+        setChunkDraft(config.chunkDurationMs ? String(config.chunkDurationMs) : '');
+      } catch (err) {
+        if (!cancelled) {
+          setStatus('error');
+          setError(err instanceof Error ? err.message : String(err));
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [provider]);
+
+  const parseChunkDraft = (draft: string): number | null => {
+    const value = Number(draft);
+    if (draft.trim() === '' || !Number.isFinite(value) || value <= 0) return null;
+    return Math.floor(value);
+  };
+
+  const save = async (partial: { verboseJson?: boolean; chunkDurationMs?: number | null }) => {
+    setStatus('saving');
+    setError('');
+    const next: AdvancedAsrConfig = {
+      verboseJson: partial.verboseJson ?? verboseJson,
+      chunkDurationMs:
+        partial.chunkDurationMs !== undefined
+          ? partial.chunkDurationMs
+          : parseChunkDraft(chunkDraft),
+    };
+    try {
+      await setCredential('asr.advanced_config', serializeAdvancedAsrConfig(next), provider);
+      setVerboseJson(next.verboseJson);
+      setChunkDraft(next.chunkDurationMs ? String(next.chunkDurationMs) : '');
+      setStatus('idle');
+    } catch (err) {
+      setStatus('error');
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  return (
+    <>
+      <div
+        role="note"
+        style={{
+          fontSize: 11.5,
+          color: 'var(--ol-ink-4)',
+          lineHeight: 1.6,
+          margin: '2px 0 8px',
+        }}
+      >
+        {t('settings.providers.asrAdvancedNote')}
+      </div>
+      <SettingRow
+        label={t('settings.providers.asrAdvancedVerboseJsonLabel')}
+        desc={t('settings.providers.asrAdvancedVerboseJsonHint')}
+      >
+        <Toggle on={verboseJson} onToggle={(next) => void save({ verboseJson: next })} />
+      </SettingRow>
+      <SettingRow
+        label={t('settings.providers.asrAdvancedChunkLabel')}
+        desc={t('settings.providers.asrAdvancedChunkHint')}
+      >
+        <input
+          type="number"
+          min={0}
+          step={1000}
+          value={chunkDraft}
+          placeholder="0"
+          disabled={status === 'saving'}
+          onChange={(e) => setChunkDraft(e.target.value)}
+          onBlur={() => void save({ chunkDurationMs: parseChunkDraft(chunkDraft) })}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+          }}
+          style={inputStyle}
+        />
+      </SettingRow>
+      {status === 'error' && (
+        <div style={{ fontSize: 11, color: 'var(--ol-warn)', lineHeight: 1.4 }}>
+          {t('common.operationFailed')}: {error}
+        </div>
       )}
     </>
   );

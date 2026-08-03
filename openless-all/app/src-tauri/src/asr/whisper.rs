@@ -126,10 +126,6 @@ impl WhisperBatchASR {
     }
 
     async fn transcribe_inner(&self, pcm: &[u8]) -> Result<RawTranscript> {
-        if self.api_key.is_empty() {
-            anyhow::bail!("Whisper API key missing");
-        }
-
         let duration_ms = pcm_duration_ms(pcm);
         let chunks = split_pcm_by_duration(pcm, self.max_chunk_duration_ms);
         let mut texts = Vec::with_capacity(chunks.len());
@@ -197,10 +193,13 @@ impl WhisperBatchASR {
                     }
                 }
 
-                client
-                    .post(&url)
-                    .header("Authorization", format!("Bearer {}", self.api_key))
-                    .multipart(form)
+                // `openai-compatible` 允许 API Key 留空（LAN 无鉴权端点）：此时
+                // 不带 Authorization 头，避免空 Bearer 被服务端 401 拒绝。
+                let mut request = client.post(&url);
+                if !self.api_key.trim().is_empty() {
+                    request = request.header("Authorization", format!("Bearer {}", self.api_key));
+                }
+                request.multipart(form)
             }
             AsrRequestFormat::OpenRouterJson => {
                 // OpenRouter /audio/transcriptions：application/json，音频走标准
@@ -213,10 +212,11 @@ impl WhisperBatchASR {
                         "format": "wav",
                     },
                 });
-                client
-                    .post(&url)
-                    .header("Authorization", format!("Bearer {}", self.api_key))
-                    .json(&body)
+                let mut request = client.post(&url);
+                if !self.api_key.trim().is_empty() {
+                    request = request.header("Authorization", format!("Bearer {}", self.api_key));
+                }
+                request.json(&body)
             }
         };
 
@@ -855,6 +855,56 @@ mod tests {
 
         let transcript = asr.transcribe().await.unwrap();
         assert_eq!(transcript.text, "openrouter ok");
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn empty_api_key_omits_authorization_header() {
+        // openai-compatible 允许 API Key 留空（LAN 无鉴权端点）：请求不得携带
+        // 空 Bearer 头，避免被服务端 401 拒绝。
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            Instant::now() < deadline,
+                            "timed out waiting for ASR test request"
+                        );
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(err) => panic!("accept ASR test request failed: {err}"),
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let request = read_http_request(&mut stream);
+            let request_text = String::from_utf8_lossy(&request);
+            assert!(request_text.starts_with("POST /audio/transcriptions HTTP/1.1"));
+            assert!(!request_text.to_ascii_lowercase().contains("authorization:"));
+            write_json_response(&mut stream, r#"{"text":"no-auth ok"}"#);
+        });
+        let base_url = format!("http://{}", addr);
+
+        let asr = WhisperBatchASR::new(
+            String::new(),
+            base_url,
+            "qwen3-asr".to_string(),
+            None,
+            None,
+            false,
+        );
+        let pcm = vec![0u8; 32_000 * 2];
+        asr.consume_pcm_chunk(&pcm);
+
+        let transcript = asr.transcribe().await.unwrap();
+        assert_eq!(transcript.text, "no-auth ok");
         server.join().unwrap();
     }
 
