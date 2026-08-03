@@ -16,9 +16,9 @@ import {
 import { emitSaved } from '../../lib/savedEvent';
 import { useMobileLayout } from '../../lib/useMobileLayout';
 import { useHotkeySettings } from '../../state/HotkeySettingsContext';
-import { SelectLite } from '../../components/ui/SelectLite';
+import { SelectLite, type SelectOption } from '../../components/ui/SelectLite';
 import { Card } from '../_atoms';
-import { SettingRow, SectionTitle, Toggle, inputStyle, type AsrPresetId } from './shared';
+import { SettingRow, SectionTitle, Toggle, inputStyle, ASR_PRESETS, type AsrPresetId } from './shared';
 
 function LlmThinkingToggle({ enabled, onToggle }: { enabled: boolean; onToggle: (next: boolean) => void }) {
   const { t } = useTranslation();
@@ -47,7 +47,7 @@ function LlmThinkingToggle({ enabled, onToggle }: { enabled: boolean; onToggle: 
   );
 }
 
-const LLM_PRESETS = [
+export const LLM_PRESETS = [
   {
     id: 'ark',
     nameKey: 'ark',
@@ -65,6 +65,12 @@ const LLM_PRESETS = [
     nameKey: 'siliconflow',
     baseUrl: 'https://api.siliconflow.cn/v1',
     modelPlaceholder: 'Qwen/Qwen2.5-7B-Instruct',
+  },
+  {
+    id: 'atlascloud',
+    nameKey: 'atlascloud',
+    baseUrl: 'https://api.atlascloud.ai/v1',
+    modelPlaceholder: 'qwen/qwen3.5-flash',
   },
   {
     id: 'openai',
@@ -88,7 +94,9 @@ const LLM_PRESETS = [
     id: 'codex_oauth',
     nameKey: 'codexOAuth',
     baseUrl: '',
-    modelPlaceholder: 'gpt-5.3-codex-spark',
+    // gpt-5.3-codex-spark 对 ChatGPT 账号的 Codex 通道会被 400 拒绝，
+    // 默认与占位一律用实测可用的 gpt-5.5（见 polish.rs::CODEX_DEFAULT_MODEL）。
+    modelPlaceholder: 'gpt-5.5',
   },
   {
     id: 'mimo',
@@ -133,6 +141,19 @@ const LLM_PRESETS = [
     modelPlaceholder: 'MiniMax-M3',
   },
   {
+    // StepFun（阶跃星辰）OpenAI 兼容 /v1/chat/completions。
+    // 默认模型选 step-1o-turbo-vision：step-3.x-flash 系列是推理模型且思考无法关闭
+    // （reasoning_effort 只能调档，正式内容要等隐藏思考结束，润色场景 TTFT 2s+），
+    // 而 step-1o-turbo-vision 无思考、TTFT ~0.3s，润色忠实度实测更适合听写链路。
+    // provider_id 在后端 polish.rs::openai_compatible_thinking_control 命中
+    // "stepfun" → ReasoningEffort 分支；走"自定义"preset 接入时由 base_url
+    // 含 "stepfun" 兜底识别，见 polish.rs。
+    id: 'stepfun',
+    nameKey: 'stepfun',
+    baseUrl: 'https://api.stepfun.com/v1',
+    modelPlaceholder: 'step-1o-turbo-vision',
+  },
+  {
     id: 'custom',
     nameKey: 'custom',
     baseUrl: '',
@@ -144,35 +165,41 @@ type LlmPresetId = typeof LLM_PRESETS[number]['id'];
 
 const ASR_DEFAULT_RESOURCE_ID = 'volc.seedasr.sauc.duration';
 
-// `volcengine` / `bailian` 走自建流式客户端；其余走 OpenAI 兼容
-// `/audio/transcriptions`（`coordinator.rs::is_whisper_compatible_provider`）。
-// 新增兼容厂商：
-//   1. 在这里加一项 `{ id, nameKey, baseUrl, model }`；
-//   2. 若走 Whisper 协议，`coordinator.rs::is_whisper_compatible_provider` 加同名 id；
-//      若是专有协议，新增独立 ASR client 与 provider kind；
-//   3. 在 i18n 的 `settings.providers.presets.<nameKey>` 加文案。
-// `AsrPresetId` 定义在 settings/shared.tsx，LocalModelSection / ProvidersSection 共用同一份。
-const ASR_PRESETS: ReadonlyArray<{ id: AsrPresetId; nameKey: string; baseUrl: string; model: string }> = [
-  { id: 'volcengine',   nameKey: 'asrVolcengine',   baseUrl: '',                                              model: ''                              },
-  { id: 'bailian',      nameKey: 'asrBailian',     baseUrl: 'wss://dashscope.aliyuncs.com/api-ws/v1/inference/', model: 'fun-asr-realtime'             },
-  { id: 'siliconflow',  nameKey: 'asrSiliconflow',  baseUrl: 'https://api.siliconflow.cn/v1',                  model: 'FunAudioLLM/SenseVoiceSmall' },
-  { id: 'zhipu',        nameKey: 'asrZhipu',        baseUrl: 'https://open.bigmodel.cn/api/paas/v4',           model: 'glm-asr-2512'                },
-  { id: 'groq',         nameKey: 'asrGroq',         baseUrl: 'https://api.groq.com/openai/v1',                 model: 'whisper-large-v3-turbo'      },
-  { id: 'whisper',      nameKey: 'asrWhisper',      baseUrl: 'https://api.openai.com/v1',                      model: 'whisper-1'                   },
-  // OpenRouter 的 /audio/transcriptions 走 application/json + base64（issue #582），
-  // 后端 coordinator.rs::whisper_request_format 对该 id 切换到 OpenRouterJson 编码。
-  { id: 'openrouter',   nameKey: 'asrOpenrouter',   baseUrl: 'https://openrouter.ai/api/v1',                   model: 'openai/whisper-large-v3-turbo' },
-  // 小米 MiMo ASR 按官方文档走 /chat/completions + input_audio，不是
-  // Whisper /audio/transcriptions；后端由 asr/mimo.rs 专用 client 处理。
-  { id: 'xiaomi-mimo-asr', nameKey: 'asrXiaomiMimo', baseUrl: 'https://api.xiaomimimo.com/v1',                  model: 'mimo-v2.5-asr'               },
-  { id: 'foundry-local-whisper', nameKey: 'asrFoundryLocalWhisper', baseUrl: '',                              model: ''                              },
-  // 本地引擎（Foundry / sherpa-onnx / Qwen3）：无 baseUrl/model 配置，
-  // 模型在「高级 → 本地模型」里下载与切换。
-  { id: 'sherpa-onnx-local',     nameKey: 'asrSherpaOnnxLocal',     baseUrl: '',                              model: ''                              },
-  { id: 'local-qwen3',  nameKey: 'asrLocalQwen3',   baseUrl: '',                                              model: ''                              },
-  // Apple 系统语音识别（macOS）：无 baseUrl/model、无下载、无凭据。
-  { id: 'apple-speech', nameKey: 'asrAppleSpeech',  baseUrl: '',                                              model: ''                              },
+// ASR_PRESETS 已上移到 settings/shared.tsx 作为单一来源（AsrPresetId 由其派生，
+// Overview 的显示名映射也从那里取）。新增厂商的步骤见 shared.tsx 的注释。
+
+// 云端 ASR 模型预设（下拉可选）——千问新发布的 ASR 优先：qwen3-asr-flash 是
+// Qwen-ASR 的 OpenAI 兼容 HTTP 形态，另有实时变体（flash-realtime）；fun-asr
+// 系列是百炼原生推荐，paraformer 为老一代兜底。
+// 注意：qwen3-asr-flash-filetrans 官方只接受公网音频 URL，与本地录音链路不兼容，
+// 后端会显式拒绝（coordinator.rs::resolve_effective_asr_provider），不放预设。
+const BAILIAN_ASR_MODELS: string[] = [
+  'qwen3-asr-flash-realtime',
+  'qwen3-asr-flash',
+  'fun-asr-realtime',
+  'fun-asr',
+  'fun-asr-flash-2026-06-15',
+  'fun-asr-mtl',
+  'paraformer-realtime-v2',
+  'paraformer-v2',
 ];
+
+// OpenAI 兼容（/audio/transcriptions）厂商共用的模型预设。
+const OPENAI_COMPAT_ASR_MODELS: string[] = [
+  'whisper-large-v3-turbo',
+  'whisper-large-v3',
+  'whisper-1',
+  'FunAudioLLM/SenseVoiceSmall',
+  'qwen3-asr-flash',
+];
+
+// 走 Whisper 兼容 /audio/transcriptions 协议的厂商（与后端
+// coordinator.rs::is_whisper_compatible_provider 保持一致）。其余非百炼厂商
+// （zhipu / stepfun / mimo / elevenlabs 等）协议不同，不给预设下拉，保持输入框。
+const WHISPER_COMPAT_ASR_PROVIDERS: AsrPresetId[] = ['whisper', 'groq', 'siliconflow', 'openrouter'];
+
+/** 模型预设下拉里的「自定义模型…」哨兵值：选中即切回输入框手输。 */
+const CUSTOM_MODEL_OPTION_VALUE = '__custom_model__';
 
 type ProvidersSectionKind = 'all' | 'llm' | 'asr';
 
@@ -200,6 +227,24 @@ export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
   const [llmModelRevision, setLlmModelRevision] = useState(0);
   const [asrModelRevision, setAsrModelRevision] = useState(0);
   const os = detectOS();
+  const unifiedBailian = committedAsrProvider === 'bailian';
+  const [bailianModel, setBailianModel] = useState('');
+  const [volcengineAuthMode, setVolcengineAuthMode] = useState<'app_id_token' | 'api_key'>('app_id_token');
+
+  useEffect(() => {
+    if (committedAsrProvider === 'volcengine') {
+      readCredential('volcengine.auth_mode', 'volcengine')
+        .then(v => {
+          if (v === 'api_key') setVolcengineAuthMode('api_key');
+          else setVolcengineAuthMode('app_id_token');
+        })
+        .catch(() => setVolcengineAuthMode('app_id_token'));
+    }
+  }, [committedAsrProvider]);
+
+  useEffect(() => {
+    if (committedAsrProvider !== 'bailian') setBailianModel('');
+  }, [committedAsrProvider]);
   // 本地重引擎（qwen3 / sherpa / foundry）仍只在「高级 → 本地模型」里启用，
   // 防止新手在主下拉误开 CPU 推理。Apple 语音是系统自带、零凭据、轻量，
   // 在 macOS 上直接作为常规选项放进主下拉，方便随时选用 / 切走。
@@ -207,7 +252,12 @@ export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
     p => p.id !== 'foundry-local-whisper'
       && p.id !== 'local-qwen3'
       && p.id !== 'sherpa-onnx-local'
-      && (p.id !== 'apple-speech' || os === 'mac'),
+      && (p.id !== 'apple-speech' || os === 'mac')
+      // 百炼三协议收成一个「阿里云百炼」入口(id=bailian)+ 模型下拉。qwen3 / fun-asr-flash
+      // 两个旧 id 作隐藏别名:新用户下拉里看不到,只有已经停在该 id 上的老用户仍显示,
+      // 保证其配置不被打断(见 coordinator::resolve_effective_asr_provider 的向后兼容)。
+      && (p.id !== 'bailian-qwen3-realtime' || asrProvider === 'bailian-qwen3-realtime')
+      && (p.id !== 'bailian-fun-asr-flash' || asrProvider === 'bailian-fun-asr-flash'),
   );
 
   useEffect(() => {
@@ -304,18 +354,20 @@ export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
         await updatePrefs(next);
         if (seq !== asrSwitchSeqRef.current) return;
       }
-      // asr.endpoint / asr.model 是所有 ASR 厂商共用的一对凭据槽（persistence.rs
-      // 未做 per-provider 隔离）。若只在槽空时填默认值，老用户从 A 厂商切到 B 厂商
-      // 时槽里仍是 A 的 endpoint/model —— dropdown 切了、实际还打 A 的地址。改成切到
-      // 有默认值的预设就强制覆盖，让切换真切到位。volcengine 走另一套凭据、本地引擎
-      // 无 baseUrl，都被 if 守卫天然跳过。与 onLlmProviderChange 同款修法。
+      // 凭据按 provider 隔离。切换回来时优先保留该 provider 已保存的自定义值，
+      // 仅在当前 entry 为空时写入 preset 默认值。
       const preset = ASR_PRESETS.find(p => p.id === id);
-      if (preset && preset.baseUrl) {
-        await setCredential('asr.endpoint', preset.baseUrl);
+      const [storedEndpoint, storedModel] = await Promise.all([
+        readCredential('asr.endpoint', id),
+        readCredential('asr.model', id),
+      ]);
+      if (seq !== asrSwitchSeqRef.current) return;
+      if (preset?.baseUrl && !storedEndpoint?.trim()) {
+        await setCredential('asr.endpoint', preset.baseUrl, id);
         if (seq !== asrSwitchSeqRef.current) return;
       }
-      if (preset && preset.model) {
-        await setCredential('asr.model', preset.model);
+      if (preset?.model && !storedModel?.trim()) {
+        await setCredential('asr.model', preset.model, id);
         if (seq !== asrSwitchSeqRef.current) return;
       }
       setCommittedAsrProvider(id);
@@ -467,28 +519,94 @@ export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
         </SettingRow>
         {committedAsrProvider === 'volcengine' ? (
           <>
-            <CredentialField
-              key={`${committedAsrProvider}:app_key`}
-              label={t('settings.providers.volcengineAppKeyLabel')}
-              account="volcengine.app_key"
-              mono
-              mask
-            />
-            <CredentialField
-              key={`${committedAsrProvider}:access_key`}
-              label={t('settings.providers.volcengineAccessKeyLabel')}
-              account="volcengine.access_key"
-              mono
-              mask
-            />
+            <SettingRow label={t('settings.providers.volcengineAuthModeLabel')}>
+              <SelectLite
+                value={volcengineAuthMode}
+                onChange={async (v) => {
+                  const mode = v as 'app_id_token' | 'api_key';
+                  const prev = volcengineAuthMode;
+                  setVolcengineAuthMode(mode);
+                  try {
+                    await setCredential('volcengine.auth_mode', mode, committedAsrProvider);
+                  } catch (error) {
+                    // 写入失败必须回滚 UI 并提示：否则模式看着已切换、重启后却静默回退，
+                    // 配合独立 API Key 槽会造成「Key 存在但模式不对」的混乱。
+                    console.error('[settings] failed to save volcengine auth mode', error);
+                    setVolcengineAuthMode(prev);
+                    emitSaved('failed', t('common.operationFailed'));
+                  }
+                }}
+                options={[
+                  { value: 'app_id_token', label: t('settings.providers.volcengineAuthModeAppIdToken') },
+                  { value: 'api_key', label: t('settings.providers.volcengineAuthModeApiKey') },
+                ]}
+                ariaLabel={t('settings.providers.volcengineAuthModeLabel')}
+                style={{ ...inputStyle, width: '100%', maxWidth: mobile ? '100%' : 260 }}
+              />
+            </SettingRow>
+            {/* 两种模式使用各自独立的凭据槽位：旧版 Access Token（volcengine.access_key）
+                与方舟 API Key（volcengine.api_key）互不预填，切换模式不会残留混淆。 */}
+            {volcengineAuthMode === 'app_id_token' ? (
+              <>
+                <CredentialField
+                  key={`${committedAsrProvider}:app_key`}
+                  label={t('settings.providers.volcengineAppKeyLabel')}
+                  account="volcengine.app_key"
+                  provider={committedAsrProvider}
+                  mono
+                  mask
+                />
+                <CredentialField
+                  key={`${committedAsrProvider}:access_key`}
+                  label={t('settings.providers.volcengineAccessKeyLabel')}
+                  account="volcengine.access_key"
+                  provider={committedAsrProvider}
+                  mono
+                  mask
+                />
+              </>
+            ) : (
+              <CredentialField
+                key={`${committedAsrProvider}:api_key`}
+                label={t('settings.providers.volcengineApiKeyLabel')}
+                account="volcengine.api_key"
+                provider={committedAsrProvider}
+                mono
+                mask
+              />
+            )}
             <CredentialField
               key={`${committedAsrProvider}:resource_id`}
               label={t('settings.providers.volcengineResourceIdLabel')}
               account="volcengine.resource_id"
+              provider={committedAsrProvider}
               mono
               placeholder={ASR_DEFAULT_RESOURCE_ID} defaultValue={ASR_DEFAULT_RESOURCE_ID} />
             <div style={{ marginTop: 2, fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.6 }}>
-              {t('settings.providers.volcengineMappingNote')}
+              {volcengineAuthMode === 'api_key'
+                ? t('settings.providers.volcengineApiKeyNote')
+                : t('settings.providers.volcengineMappingNote')}
+            </div>
+          </>
+        ) : committedAsrProvider === 'iflytek' ? (
+          <>
+            <CredentialField
+              key={`${committedAsrProvider}:app_id`}
+              label={t('settings.providers.xfyunAppIdLabel')}
+              account="xfyun.app_id"
+              provider={committedAsrProvider}
+              mono
+            />
+            <CredentialField
+              key={`${committedAsrProvider}:api_key`}
+              label={t('settings.providers.xfyunApiKeyLabel')}
+              account="xfyun.api_key"
+              provider={committedAsrProvider}
+              mono
+              mask
+            />
+            <div style={{ marginTop: 2, fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.6 }}>
+              {t('settings.providers.xfyunNote')}
             </div>
           </>
         ) : committedAsrProvider === 'local-qwen3' || committedAsrProvider === 'foundry-local-whisper' || committedAsrProvider === 'sherpa-onnx-local' || committedAsrProvider === 'apple-speech' ? (
@@ -498,18 +616,31 @@ export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
           null
         ) : (
           <>
-            <CredentialField key={`${committedAsrProvider}:api_key`} label={t('settings.providers.apiKeyLabel')} account="asr.api_key" mono mask />
+            <CredentialField key={`${committedAsrProvider}:api_key`} label={t('settings.providers.apiKeyLabel')} account="asr.api_key" provider={committedAsrProvider} mono mask />
+            {/* 统一百炼保留 endpoint 供用户选择区域或工作空间域名；后端按模型转换协议与路径。 */}
             <CredentialField key={`${committedAsrProvider}:endpoint`} label={t('settings.providers.baseUrlLabel')} account="asr.endpoint"
+              provider={committedAsrProvider}
               placeholder={asrPreset?.baseUrl || 'https://api.openai.com/v1'}
               defaultValue={asrPreset?.baseUrl || undefined} />
             <CredentialField key={`${committedAsrProvider}:model:${asrModelRevision}`} label={t('settings.providers.modelLabel')} account="asr.model"
-              placeholder={asrPreset?.model || 'whisper-1'} />
-            {committedAsrProvider === 'bailian' && (
+              provider={committedAsrProvider}
+              placeholder={unifiedBailian ? 'fun-asr-realtime' : (asrPreset?.model || 'whisper-1')}
+              onValueChange={unifiedBailian ? setBailianModel : undefined}
+              options={unifiedBailian
+                ? BAILIAN_ASR_MODELS.map(m => ({ value: m, label: m }))
+                : WHISPER_COMPAT_ASR_PROVIDERS.includes(committedAsrProvider)
+                  ? OPENAI_COMPAT_ASR_MODELS.map(m => ({ value: m, label: m }))
+                  : undefined} />
+            {unifiedBailian && (
+              <BailianProtocolHint key={`${committedAsrProvider}:proto:${asrModelRevision}`} currentModel={bailianModel} />
+            )}
+            {unifiedBailian && bailianModelSupportsVocabulary(bailianModel) && (
               <>
                 <CredentialField
                   key={`${committedAsrProvider}:vocabulary_id`}
                   label={t('settings.providers.bailianVocabularyIdLabel')}
                   account="asr.vocabulary_id"
+                  provider={committedAsrProvider}
                   mono
                   placeholder="vocab-..."
                 />
@@ -518,7 +649,13 @@ export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
                 </div>
               </>
             )}
-            <ProviderTools kind="asr" modelAccount="asr.model" onModelSelected={() => setAsrModelRevision(v => v + 1)} />
+            {committedAsrProvider === 'elevenlabs' && (
+              <div role="note" style={{ marginTop: 2, fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.6 }}>
+                {t('settings.providers.elevenLabsUploadNotice')}
+              </div>
+            )}
+            {/* 统一百炼「拉取模型」只写 model，不覆盖用户选择的区域或工作空间 endpoint。 */}
+            <ProviderTools kind="asr" modelAccount="asr.model" provider={committedAsrProvider} onModelSelected={() => setAsrModelRevision(v => v + 1)} />
           </>
         )}
       </Card>
@@ -527,9 +664,67 @@ export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
   );
 }
 
+// 统一「阿里云百炼」下,按模型名判断走哪种协议(与后端
+// coordinator::resolve_effective_asr_provider 保持一致):qwen3-asr-flash-realtime* 与
+// fun-asr-realtime* 与 fun-asr-flash-8k-realtime* 都是实时模型；fun-asr-flash-2026-06-15
+// 与 qwen-audio-3.0-asr-flash 是「录音文件·说完转写」（同步）。
+function bailianModelProtocol(model: string): 'realtime' | 'sync' | 'async' {
+  const m = model.trim();
+  if (!m || m.includes('realtime')) return 'realtime';
+  // qwen3-asr-flash-filetrans 仅接受公网 URL，暂不支持（后端 protocol_for_model
+  // 显式拒绝），前端不再归为 async 提示。
+  if (m === 'fun-asr'
+    || m.startsWith('fun-asr-') && !m.startsWith('fun-asr-flash')
+    || m.startsWith('paraformer')) return 'async';
+  // 其余（fun-asr-flash-*、qwen3-asr-flash、qwen-audio-3.0-asr-flash）为同步录音模型。
+  return 'sync';
+}
+
+// qwen-audio-3.0-asr-flash 官方支持热词，但批量协议尚未把该设置写入请求体；
+// 在后端接入前不展示一个实际不生效的热词输入框。
+function bailianModelSupportsVocabulary(model: string): boolean {
+  const m = model.trim();
+  return !m
+    || m.startsWith('fun-asr-realtime')
+    || m.startsWith('paraformer-realtime')
+    || m.startsWith('sensevoice-realtime');
+}
+
+// 模型框下的一行协议提示,解决「三种模型看不出区别」——告诉用户当前模型是实时还是
+// 录音文件、行为差异如何。随 asrModelRevision(拉取/选择模型时)与挂载时重读 asr.model。
+function BailianProtocolHint({ currentModel }: { currentModel: string }) {
+  const { t } = useTranslation();
+  const [model, setModel] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    readCredential('asr.model')
+      .then(v => { if (!cancelled) setModel(v || 'fun-asr-realtime'); })
+      .catch(() => { /* 读失败按默认实时提示 */ });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    setModel(currentModel || 'fun-asr-realtime');
+  }, [currentModel]);
+
+  const protocol = bailianModelProtocol(model);
+  const hint = protocol === 'realtime'
+    ? t('settings.providers.bailianModelRealtimeHint')
+    : protocol === 'async'
+      ? t('settings.providers.bailianModelAsyncFileHint')
+      : t('settings.providers.bailianModelSyncFileHint');
+
+  return (
+    <div style={{ marginTop: 2, fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.6 }}>
+      {hint}
+    </div>
+  );
+}
+
 type ProviderToolStatus = 'idle' | 'loading' | 'success' | 'empty' | 'error';
 
-function ProviderTools({ kind, modelAccount, onModelSelected }: { kind: 'llm' | 'asr'; modelAccount: string; onModelSelected: () => void }) {
+function ProviderTools({ kind, modelAccount, provider, onModelSelected, showFetchModels = true }: { kind: 'llm' | 'asr'; modelAccount: string; provider?: string; onModelSelected: () => void; showFetchModels?: boolean }) {
   const { t } = useTranslation();
   const mobile = useMobileLayout();
   const [models, setModels] = useState<string[]>([]);
@@ -586,7 +781,7 @@ function ProviderTools({ kind, modelAccount, onModelSelected }: { kind: 'llm' | 
   const applyModel = async (model: string) => {
     setResult('loading', t('common.saving'));
     try {
-      await setCredential(modelAccount, model);
+      await setCredential(modelAccount, model, provider);
       setSelectedModel(model);
       onModelSelected();
       setResult('success', t('settings.providers.modelSaved', { model }));
@@ -600,8 +795,10 @@ function ProviderTools({ kind, modelAccount, onModelSelected }: { kind: 'llm' | 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8, width: '100%', maxWidth: mobile ? '100%' : 420 }}>
         <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', width: '100%' }}>
           <button onClick={validate} style={miniBtnStyle} disabled={status === 'loading'}>{t('settings.providers.validate')}</button>
-          <button onClick={loadModels} style={miniBtnStyle} disabled={status === 'loading'}>{t('settings.providers.fetchModels')}</button>
-          {models.length > 0 && (
+          {showFetchModels && (
+            <button onClick={loadModels} style={miniBtnStyle} disabled={status === 'loading'}>{t('settings.providers.fetchModels')}</button>
+          )}
+          {showFetchModels && models.length > 0 && (
             <SelectLite
               value={selectedModel}
               onChange={applyModel}
@@ -630,6 +827,8 @@ function providerErrorMessage(error: unknown, t: ReturnType<typeof useTranslatio
   }
   if (message === 'endpointMustUseHttps') return t('settings.providers.endpointMustUseHttps');
   if (message === 'endpointInvalid') return t('settings.providers.endpointInvalid');
+  if (message === 'bailianEndpointSchemeInvalid') return t('settings.providers.bailianEndpointSchemeInvalid');
+  if (message === 'qwen3EndpointSchemeInvalid') return t('settings.providers.qwen3EndpointSchemeInvalid');
   if (message === 'providerResponseTooLarge') return t('settings.providers.responseTooLarge');
   if (message === 'asrInvalidJson') return t('settings.providers.asrInvalidJson');
   if (message === 'asrMissingTextField') return t('settings.providers.asrMissingTextField');
@@ -639,6 +838,9 @@ function providerErrorMessage(error: unknown, t: ReturnType<typeof useTranslatio
   if (message.includes('API Key')) return t('settings.providers.apiKeyMissing');
   if (message.includes('Endpoint')) return t('settings.providers.endpointMissing');
   if (message.includes('timeout') || message.includes('超时')) return t('settings.providers.requestTimeout');
+  if (message.startsWith('task failed:') || message.startsWith('connection failed:') || message.startsWith('send failed:')) {
+    return message;
+  }
   return t('common.operationFailed');
 }
 
@@ -647,14 +849,18 @@ type CredentialFieldStatus = 'idle' | 'saving' | 'saved' | 'readError' | 'saveEr
 interface CredentialFieldProps {
   label: string;
   account: string;
+  provider?: string;
   placeholder?: string;
   mono?: boolean;
   mask?: boolean;
   defaultValue?: string;
   trailing?: ReactNode;
+  onValueChange?: (value: string) => void;
+  /** 提供则渲染为下拉（预设选择）代替输入框；当前值不在预设里时附加为自定义项。 */
+  options?: SelectOption[];
 }
 
-function CredentialField({ label, account, placeholder, mono, mask, defaultValue, trailing }: CredentialFieldProps) {
+function CredentialField({ label, account, provider, placeholder, mono, mask, defaultValue, trailing, onValueChange, options }: CredentialFieldProps) {
   const { t } = useTranslation();
   const mobile = useMobileLayout();
   const [value, setValue] = useState('');
@@ -662,6 +868,8 @@ function CredentialField({ label, account, placeholder, mono, mask, defaultValue
   const [loaded, setLoaded] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [status, setStatus] = useState<CredentialFieldStatus>('idle');
+  // 预设下拉的「自定义模型…」逃生口：选中后切回输入框，保证后端支持的任意模型名都能手输。
+  const [customModelMode, setCustomModelMode] = useState(false);
   const debounceRef = useRef<number | null>(null);
   const statusRef = useRef<number | null>(null);
   const mountedRef = useRef(true);
@@ -672,26 +880,29 @@ function CredentialField({ label, account, placeholder, mono, mask, defaultValue
     setDirty(false);
     setStatus('idle');
     setValue('');
+    onValueChange?.('');
     if (debounceRef.current) {
       clearTimeout(debounceRef.current);
       debounceRef.current = null;
     }
-    readCredential(account)
+    readCredential(account, provider)
       .then(v => {
         if (cancelled) return;
         setValue(v ?? '');
+        onValueChange?.(v ?? '');
         setLoaded(true);
       })
       .catch(error => {
         if (cancelled) return;
         console.error('[settings] failed to read credential', account, error);
+        onValueChange?.('');
         setLoaded(true);
         setStatus('readError');
       });
     return () => {
       cancelled = true;
     };
-  }, [account]);
+  }, [account, provider, onValueChange]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -728,7 +939,7 @@ function CredentialField({ label, account, placeholder, mono, mask, defaultValue
     setStatus('saving');
     emitSaved('saving', t('common.saving'));
     try {
-      await setCredential(account, v);
+      await setCredential(account, v, provider);
       if (!mountedRef.current) return;
       setDirty(false);
       showTemporaryStatus('saved');
@@ -742,6 +953,7 @@ function CredentialField({ label, account, placeholder, mono, mask, defaultValue
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const v = e.target.value;
     setValue(v);
+    onValueChange?.(v);
     if (!loaded) return;
     setDirty(true);
     if (debounceRef.current) clearTimeout(debounceRef.current);
@@ -760,6 +972,7 @@ function CredentialField({ label, account, placeholder, mono, mask, defaultValue
   const fillDefault = async () => {
     if (!loaded || !defaultValue) return;
     setValue(defaultValue);
+    onValueChange?.(defaultValue);
     setDirty(true);
     await save(defaultValue, true);
   };
@@ -787,15 +1000,52 @@ function CredentialField({ label, account, placeholder, mono, mask, defaultValue
     <SettingRow label={label}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 5, width: '100%', maxWidth: mobile ? '100%' : 420 }}>
         <div style={{ display: 'flex', gap: 6, alignItems: 'center', width: '100%', flexWrap: mobile ? 'wrap' : 'nowrap' }}>
-          <input
-            type={inputType}
-            value={value}
-            placeholder={loaded ? placeholder : t('common.loading')}
-            onChange={handleChange}
-            onBlur={onBlur}
-            disabled={disabled}
-            style={{ ...inputStyle, flex: mobile ? '1 1 180px' : 1, minWidth: 0, maxWidth: '100%', fontFamily: mono ? 'var(--ol-font-mono)' : 'inherit' }}
-          />
+          {options && !customModelMode ? (
+            <SelectLite
+              value={value}
+              onChange={(v) => {
+                // 「自定义模型…」逃生口：切回输入框手输任意模型名。
+                if (v === CUSTOM_MODEL_OPTION_VALUE) {
+                  setCustomModelMode(true);
+                  return;
+                }
+                setValue(v);
+                onValueChange?.(v);
+                if (!loaded) return;
+                setDirty(true);
+                void save(v, true);
+              }}
+              options={[
+                ...(value && !options.some(o => o.value === value) ? [{ value, label: value }] : []),
+                ...options,
+                { value: CUSTOM_MODEL_OPTION_VALUE, label: t('settings.providers.customModelLabel', 'Custom model…') },
+              ]}
+              placeholder={loaded ? placeholder : t('common.loading')}
+              disabled={disabled}
+              ariaLabel={label}
+              style={{ ...inputStyle, flex: mobile ? '1 1 180px' : 1, minWidth: 0, maxWidth: '100%', fontFamily: mono ? 'var(--ol-font-mono)' : 'inherit' }}
+            />
+          ) : (
+            <input
+              type={inputType}
+              value={value}
+              placeholder={loaded ? placeholder : t('common.loading')}
+              onChange={handleChange}
+              onBlur={onBlur}
+              disabled={disabled}
+              style={{ ...inputStyle, flex: mobile ? '1 1 180px' : 1, minWidth: 0, maxWidth: '100%', fontFamily: mono ? 'var(--ol-font-mono)' : 'inherit' }}
+            />
+          )}
+          {options && customModelMode && (
+            <button
+              onClick={() => setCustomModelMode(false)}
+              title={t('settings.providers.presetListLabel', 'Back to presets')}
+              style={iconBtnStyle}
+              disabled={disabled}
+            >
+              <Icon name="chevDown" size={13} />
+            </button>
+          )}
           {defaultValue && !value && loaded && (
             <button onClick={fillDefault} title={t('settings.providers.fillDefault')} style={iconBtnStyle} disabled={!loaded}>
               <Icon name="check" size={13} />
@@ -849,7 +1099,7 @@ const miniBtnStyle: CSSProperties = {
   height: 32, padding: '0 12px',
   border: '0.5px solid var(--ol-line-strong)',
   borderRadius: 8, background: 'var(--ol-surface)',
-  boxShadow: '0 1px 2px rgba(0,0,0,0.04), 0 0 0 0.5px rgba(255,255,255,0.2) inset',
+  boxShadow: '0 1px 2px rgba(0,0,0,0.04)',
   color: 'var(--ol-ink-2)', cursor: 'default', flexShrink: 0,
   fontSize: 12.5, fontWeight: 500, letterSpacing: '0.01em',
   transition: 'background 0.16s var(--ol-motion-quick), border-color 0.16s var(--ol-motion-quick), color 0.16s var(--ol-motion-quick), box-shadow 0.16s var(--ol-motion-quick)',
@@ -859,7 +1109,7 @@ const iconBtnStyle: CSSProperties = {
   width: 32, height: 32,
   border: '0.5px solid var(--ol-line-strong)',
   borderRadius: 8, background: 'var(--ol-surface)',
-  boxShadow: '0 1px 2px rgba(0,0,0,0.04), 0 0 0 0.5px rgba(255,255,255,0.2) inset',
+  boxShadow: '0 1px 2px rgba(0,0,0,0.04)',
   display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
   color: 'var(--ol-ink-3)', cursor: 'default', flexShrink: 0,
   transition: 'background 0.16s var(--ol-motion-quick), border-color 0.16s var(--ol-motion-quick), color 0.16s var(--ol-motion-quick), transform 0.12s var(--ol-motion-quick)',

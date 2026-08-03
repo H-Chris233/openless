@@ -24,7 +24,8 @@ use uuid::Uuid;
 use super::frame::{self, Flags, MessageType, Serialization};
 use super::{AudioConsumer, DictionaryHotword, RawTranscript};
 
-const ENDPOINT: &str = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async";
+const ENDPOINT_APP_ID_TOKEN: &str = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async";
+const ENDPOINT_API_KEY: &str = "wss://openspeech.bytedance.com/api/v3/plan/sauc/bigmodel_async";
 /// 200 ms of 16 kHz / 16-bit / mono PCM.
 const TARGET_AUDIO_CHUNK_BYTES: usize = 6_400;
 /// 16 kHz · 16-bit · mono = 32 000 bytes/sec → 32 bytes/ms.
@@ -32,9 +33,64 @@ const BYTES_PER_MS: f64 = 32.0;
 const HOTWORD_CAP: usize = 80;
 const FINAL_RESULT_TIMEOUT: Duration = Duration::from_secs(12);
 
+/// 弱网下 TLS/WebSocket 握手可能一直挂到 OS 级 TCP 超时（几十秒），期间用户卡在
+/// 「Starting」无法语音输入。协调器的全局超时只覆盖 `await_final_result`，**不**覆盖
+/// `open_session`，所以这里必须自己给握手设上限：超时即快速失败并重试，而不是冻结。
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// 单次网络抖动（连接被重置 / 瞬时 DNS 失败）以前会直接让整次听写失败。重试几次让
+/// 抖动可恢复。`AuthRejected`（凭据被拒）不在重试之列——重试也不会变好，只会拖慢报错。
+const CONNECT_MAX_ATTEMPTS: usize = 3;
+const CONNECT_RETRY_BACKOFF: Duration = Duration::from_millis(250);
+
+/// Volcengine ASR 鉴权模式。
+///
+/// - `AppIdToken`：旧版语音控制台应用，使用 `X-Api-App-Key` + `X-Api-Access-Key` 双表头鉴权。
+/// - `ApiKey`：新版方舟（Ark）语音模型，使用单个 `X-Api-Key` 表头鉴权。
+///
+/// 两种模式共享完全相同的 WebSocket 端点与二进制帧协议，仅握手鉴权头不同。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VolcengineAuthMode {
+    AppIdToken,
+    ApiKey,
+}
+
+impl VolcengineAuthMode {
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "api_key" => Self::ApiKey,
+            _ => Self::AppIdToken,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::AppIdToken => "app_id_token",
+            Self::ApiKey => "api_key",
+        }
+    }
+
+    /// 当前模式下所需凭据是否齐备（统一 trim 语义）。
+    ///
+    /// `secret` 的语义随模式：AppIdToken = Access Token（旧版语音控制台），
+    /// ApiKey = 方舟语音模型 API Key。`app_id` 仅在 AppIdToken 模式要求非空。
+    ///
+    /// 所有按模式判定凭据完整性的入口（`open_session`、`volcengine_configured`、
+    /// `ensure_asr_credentials`）都应复用此方法，避免三处规则漂移。
+    pub fn auth_ok(&self, app_id: &str, secret: &str) -> bool {
+        let app_id_ok = match self {
+            Self::AppIdToken => !app_id.trim().is_empty(),
+            Self::ApiKey => true,
+        };
+        app_id_ok && !secret.trim().is_empty()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct VolcengineCredentials {
+    pub auth_mode: VolcengineAuthMode,
+    /// App ID（AppIdToken 模式使用；ApiKey 模式下为空）。
     pub app_id: String,
+    /// Access Token（AppIdToken 模式下）或 API Key（ApiKey 模式下）。
     pub access_token: String,
     pub resource_id: String,
 }
@@ -42,6 +98,11 @@ pub struct VolcengineCredentials {
 impl VolcengineCredentials {
     pub fn default_resource_id() -> &'static str {
         "volc.seedasr.sauc.duration"
+    }
+
+    /// 凭据是否满足当前鉴权模式的要求（统一 trim 语义，见 [`VolcengineAuthMode::auth_ok`]）。
+    pub fn auth_ok(&self) -> bool {
+        self.auth_mode.auth_ok(&self.app_id, &self.access_token)
     }
 }
 
@@ -57,6 +118,12 @@ pub enum VolcengineASRError {
     /// 文案简短，原因在文档里说明，capsule 不堆长引导。
     #[error("凭据被拒（{0}）")]
     AuthRejected(u16),
+    /// WebSocket 握手阶段服务端返回 429：请求过多 / 账号被限流。
+    /// 单独归类而非落入 `ConnectionFailed` —— 后者会被 `connect_with_retry` 当网络抖动
+    /// 立即重试 3 次，反而加剧限流、且文案含糊指向「网络失败」误导用户。此类与
+    /// `AuthRejected` 一样**短路不重试**：立即回带明确文案，让用户知道是限流不是断网。
+    #[error("请求过多，账号被限流（{0}）")]
+    RateLimited(u16),
     #[error("no final result")]
     NoFinalResult,
     #[error("final result timed out")]
@@ -123,42 +190,15 @@ impl VolcengineStreamingASR {
     }
 
     pub async fn open_session(self: &Arc<Self>) -> Result<(), VolcengineASRError> {
-        if self.credentials.app_id.is_empty()
-            || self.credentials.access_token.is_empty()
-            || self.credentials.resource_id.is_empty()
-        {
+        let creds = &self.credentials;
+        // 统一走 VolcengineCredentials::auth_ok（trim 语义），与概览页凭据状态检测、
+        // dictation 预检保持同一判定规则。
+        if !creds.auth_ok() || creds.resource_id.trim().is_empty() {
             return Err(VolcengineASRError::CredentialsMissing);
         }
 
         let connect_id = Uuid::new_v4().to_string();
-        let mut request = ENDPOINT
-            .into_client_request()
-            .map_err(|e| VolcengineASRError::ConnectionFailed(e.to_string()))?;
-        let headers = request.headers_mut();
-        headers.insert(
-            "X-Api-App-Key",
-            HeaderValue::from_str(&self.credentials.app_id)
-                .map_err(|e| VolcengineASRError::ConnectionFailed(e.to_string()))?,
-        );
-        headers.insert(
-            "X-Api-Access-Key",
-            HeaderValue::from_str(&self.credentials.access_token)
-                .map_err(|e| VolcengineASRError::ConnectionFailed(e.to_string()))?,
-        );
-        headers.insert(
-            "X-Api-Resource-Id",
-            HeaderValue::from_str(&self.credentials.resource_id)
-                .map_err(|e| VolcengineASRError::ConnectionFailed(e.to_string()))?,
-        );
-        headers.insert(
-            "X-Api-Connect-Id",
-            HeaderValue::from_str(&connect_id)
-                .map_err(|e| VolcengineASRError::ConnectionFailed(e.to_string()))?,
-        );
-
-        let (ws, _resp) = connect_async(request)
-            .await
-            .map_err(classify_connect_error)?;
+        let ws = self.connect_with_retry(&connect_id).await?;
         let (write, read) = ws.split();
 
         let (tx, rx) = oneshot::channel();
@@ -258,6 +298,98 @@ impl VolcengineStreamingASR {
         });
 
         Ok(())
+    }
+
+    /// Build the WebSocket handshake request (endpoint + auth headers). Rebuilt
+    /// per connect attempt because `connect_async` consumes the request and
+    /// `http::Request` is not `Clone`.
+    fn build_connect_request(
+        &self,
+        connect_id: &str,
+    ) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request, VolcengineASRError>
+    {
+        let endpoint = match &self.credentials.auth_mode {
+            VolcengineAuthMode::AppIdToken => ENDPOINT_APP_ID_TOKEN,
+            VolcengineAuthMode::ApiKey => ENDPOINT_API_KEY,
+        };
+        let mut request = endpoint
+            .into_client_request()
+            .map_err(|e| VolcengineASRError::ConnectionFailed(e.to_string()))?;
+        let headers = request.headers_mut();
+
+        // 根据鉴权模式选择表头：
+        // - AppIdToken：X-Api-App-Key + X-Api-Access-Key（旧版语音控制台）
+        // - ApiKey：X-Api-Key（新版方舟语音模型，单头即可）
+        match &self.credentials.auth_mode {
+            VolcengineAuthMode::AppIdToken => {
+                headers.insert(
+                    "X-Api-App-Key",
+                    HeaderValue::from_str(&self.credentials.app_id)
+                        .map_err(|e| VolcengineASRError::ConnectionFailed(e.to_string()))?,
+                );
+                headers.insert(
+                    "X-Api-Access-Key",
+                    HeaderValue::from_str(&self.credentials.access_token)
+                        .map_err(|e| VolcengineASRError::ConnectionFailed(e.to_string()))?,
+                );
+            }
+            VolcengineAuthMode::ApiKey => {
+                headers.insert(
+                    "X-Api-Key",
+                    HeaderValue::from_str(&self.credentials.access_token)
+                        .map_err(|e| VolcengineASRError::ConnectionFailed(e.to_string()))?,
+                );
+            }
+        }
+
+        headers.insert(
+            "X-Api-Resource-Id",
+            HeaderValue::from_str(&self.credentials.resource_id)
+                .map_err(|e| VolcengineASRError::ConnectionFailed(e.to_string()))?,
+        );
+        headers.insert(
+            "X-Api-Connect-Id",
+            HeaderValue::from_str(connect_id)
+                .map_err(|e| VolcengineASRError::ConnectionFailed(e.to_string()))?,
+        );
+        Ok(request)
+    }
+
+    /// Connect with a per-attempt timeout and bounded retries so a poor network
+    /// (hung handshake or a transient blip) doesn't kill the whole dictation.
+    /// `AuthRejected` / `RateLimited` short-circuit — bad credentials never heal on
+    /// retry, and hammering a rate-limited account only makes the throttle worse.
+    async fn connect_with_retry(&self, connect_id: &str) -> Result<WsStream, VolcengineASRError> {
+        let mut attempt = 0usize;
+        loop {
+            attempt += 1;
+            let request = self.build_connect_request(connect_id)?;
+            match tokio::time::timeout(CONNECT_TIMEOUT, connect_async(request)).await {
+                Ok(Ok((ws, _resp))) => return Ok(ws),
+                Ok(Err(e)) => {
+                    let classified = classify_connect_error(e);
+                    if is_non_retryable(&classified) || attempt >= CONNECT_MAX_ATTEMPTS {
+                        return Err(classified);
+                    }
+                    log::warn!(
+                        "[asr] 连接尝试 {attempt}/{CONNECT_MAX_ATTEMPTS} 失败: {classified}；重试中"
+                    );
+                }
+                Err(_) => {
+                    if attempt >= CONNECT_MAX_ATTEMPTS {
+                        return Err(VolcengineASRError::ConnectionFailed(format!(
+                            "连接超时（{} ms）",
+                            CONNECT_TIMEOUT.as_millis()
+                        )));
+                    }
+                    log::warn!(
+                        "[asr] 连接尝试 {attempt}/{CONNECT_MAX_ATTEMPTS} 超时（{} ms）；重试中",
+                        CONNECT_TIMEOUT.as_millis()
+                    );
+                }
+            }
+            tokio::time::sleep(CONNECT_RETRY_BACKOFF * attempt as u32).await;
+        }
     }
 
     pub async fn send_last_frame(&self) -> Result<(), VolcengineASRError> {
@@ -393,6 +525,7 @@ impl VolcengineStreamingASR {
             "enable_itn": true,
             "enable_punc": true,
             "show_utterances": true,
+            "enable_speaker_info": true,
         });
         if let Some(context) = hotword_context(&self.hotwords) {
             request["context"] = Value::String(context);
@@ -474,13 +607,59 @@ impl VolcengineStreamingASR {
             .to_string();
 
         if let Some(utterances) = result.get("utterances").and_then(|v| v.as_array()) {
-            // 优先用 utterances 拼接的文本（包含全部分段，不论 definite 与否）
-            let pieces: Vec<&str> = utterances
+            // --- 声纹过滤：只保留主要说话人（说话时长最长的） ---
+            // 1. 统计每个 speaker 的说话时长
+            let mut speaker_durations: std::collections::HashMap<String, u64> =
+                std::collections::HashMap::new();
+            for u in utterances.iter() {
+                if let (Some(speaker), Some(start), Some(end)) = (
+                    u.get("speaker").and_then(|s| s.as_str()),
+                    u.get("start_time").and_then(|t| t.as_u64()),
+                    u.get("end_time").and_then(|t| t.as_u64()),
+                ) {
+                    let dur = end.saturating_sub(start);
+                    *speaker_durations.entry(speaker.to_string()).or_insert(0) += dur;
+                }
+            }
+
+            // 2. 找到说话时长最长的 speaker（即"主要说话人"）
+            let primary_speaker: Option<String> = speaker_durations
                 .iter()
-                .filter_map(|u| u.get("text").and_then(|t| t.as_str()))
-                .collect();
+                .max_by_key(|(_, &dur)| dur)
+                .map(|(s, _)| s.clone());
+
+            // 3. 只拼接主要说话人的文本；如果没有任何 speaker 标签，回退到全量拼接
+            let pieces: Vec<&str> = if let Some(ref primary) = primary_speaker {
+                utterances
+                    .iter()
+                    .filter(|u| {
+                        u.get("speaker")
+                            .and_then(|s| s.as_str())
+                            .map(|s| s == primary.as_str())
+                            .unwrap_or(true) // 无 speaker 字段的 utterance 保留
+                    })
+                    .filter_map(|u| u.get("text").and_then(|t| t.as_str()))
+                    .collect()
+            } else {
+                utterances
+                    .iter()
+                    .filter_map(|u| u.get("text").and_then(|t| t.as_str()))
+                    .collect()
+            };
+
             if !pieces.is_empty() {
                 full_text = pieces.join("");
+                if let Some(ref primary) = primary_speaker {
+                    let filtered_count = utterances.len().saturating_sub(pieces.len());
+                    if filtered_count > 0 {
+                        log::info!(
+                            "[asr] speaker filter: primary={}, kept={}, filtered={}",
+                            primary,
+                            pieces.len(),
+                            filtered_count
+                        );
+                    }
+                }
             }
         }
 
@@ -639,7 +818,8 @@ fn normalized_result(json: &Value) -> Option<&Value> {
 }
 
 /// 把 tokio-tungstenite 的 connect 错误分类：握手收到 HTTP 401 / 403 → `AuthRejected`
-/// （凭据被拒，要 user 检查 App ID / Access Token / 账号资源开通状态）；其它 → 通用
+/// （凭据被拒，要 user 检查 App ID / Access Token / 账号资源开通状态）；429 →
+/// `RateLimited`（请求过多 / 限流，重试只会火上浇油，短路报明确文案）；其它 → 通用
 /// `ConnectionFailed`（DNS / TLS / 网络层）。让 capsule 文案能跟泛泛 HTTP error 区分。
 fn classify_connect_error(err: tokio_tungstenite::tungstenite::Error) -> VolcengineASRError {
     use tokio_tungstenite::tungstenite::Error as WsError;
@@ -648,8 +828,21 @@ fn classify_connect_error(err: tokio_tungstenite::tungstenite::Error) -> Volceng
         if status == 401 || status == 403 {
             return VolcengineASRError::AuthRejected(status);
         }
+        if status == 429 {
+            return VolcengineASRError::RateLimited(status);
+        }
     }
     VolcengineASRError::ConnectionFailed(err.to_string())
+}
+
+/// 握手错误是否「重试也无益」，`connect_with_retry` 据此短路。凭据被拒（401/403）
+/// 与限流（429）都属此类：前者重试不会变对，后者重试只会加剧限流。其余（网络层）
+/// 才值得在抖动时重试。
+fn is_non_retryable(err: &VolcengineASRError) -> bool {
+    matches!(
+        err,
+        VolcengineASRError::AuthRejected(_) | VolcengineASRError::RateLimited(_)
+    )
 }
 
 fn hotword_context(entries: &[DictionaryHotword]) -> Option<String> {
@@ -738,10 +931,152 @@ mod tests {
         );
     }
 
+    #[test]
+    fn auth_mode_from_str_roundtrips() {
+        assert_eq!(VolcengineAuthMode::from_str("api_key"), VolcengineAuthMode::ApiKey);
+        assert_eq!(VolcengineAuthMode::from_str("app_id_token"), VolcengineAuthMode::AppIdToken);
+        assert_eq!(VolcengineAuthMode::from_str(""), VolcengineAuthMode::AppIdToken); // 默认回退
+        assert_eq!(VolcengineAuthMode::ApiKey.as_str(), "api_key");
+        assert_eq!(VolcengineAuthMode::AppIdToken.as_str(), "app_id_token");
+    }
+
+    #[test]
+    fn auth_ok_matches_mode_requirements() {
+        let app_id_token = VolcengineAuthMode::AppIdToken;
+        let api_key = VolcengineAuthMode::ApiKey;
+        // AppIdToken：需要 app_id + secret 都非空。
+        assert!(app_id_token.auth_ok("app", "token"));
+        assert!(!app_id_token.auth_ok("", "token"));
+        assert!(!app_id_token.auth_ok("app", ""));
+        // 全空格视为未配置（统一 trim 语义，与 volcengine_configured / 预检一致）。
+        assert!(!app_id_token.auth_ok("   ", "   "));
+        // ApiKey：只需 API Key，app_id 可为空。
+        assert!(api_key.auth_ok("", "key"));
+        assert!(api_key.auth_ok("app", "key"));
+        assert!(!api_key.auth_ok("app", ""));
+        assert!(!api_key.auth_ok("", "   "));
+    }
+
+    #[test]
+    fn build_connect_request_selects_endpoint_and_headers_per_mode() {
+        let cases = [
+            (
+                VolcengineAuthMode::AppIdToken,
+                ENDPOINT_APP_ID_TOKEN,
+                true,  // 双表头（X-Api-App-Key / X-Api-Access-Key）
+                false, // 不应带 X-Api-Key
+            ),
+            (
+                VolcengineAuthMode::ApiKey,
+                ENDPOINT_API_KEY,
+                false, // 不应带双表头
+                true,  // 单表头 X-Api-Key
+            ),
+        ];
+        for (mode, endpoint, expects_app_headers, expects_api_key) in cases {
+            let asr = VolcengineStreamingASR::new(
+                VolcengineCredentials {
+                    auth_mode: mode.clone(),
+                    app_id: "app".into(),
+                    access_token: "secret".into(),
+                    resource_id: VolcengineCredentials::default_resource_id().into(),
+                },
+                vec![],
+            );
+            let req = asr.build_connect_request("connect-id").unwrap();
+            assert_eq!(
+                req.uri().to_string(),
+                endpoint,
+                "端点应随鉴权模式切换（mode={mode:?}）"
+            );
+            let headers = req.headers();
+            assert_eq!(
+                headers.contains_key("X-Api-App-Key"),
+                expects_app_headers,
+                "mode={mode:?} X-Api-App-Key"
+            );
+            assert_eq!(
+                headers.contains_key("X-Api-Access-Key"),
+                expects_app_headers,
+                "mode={mode:?} X-Api-Access-Key"
+            );
+            assert_eq!(
+                headers.contains_key("X-Api-Key"),
+                expects_api_key,
+                "mode={mode:?} X-Api-Key"
+            );
+            // 两种模式都必须携带资源与连接标识头。
+            assert!(headers.contains_key("X-Api-Resource-Id"));
+            assert!(headers.contains_key("X-Api-Connect-Id"));
+        }
+    }
+
+    /// 构造一个握手阶段返回给定 HTTP 状态码的 tungstenite 错误，用于分类测试。
+    fn http_ws_error(status: u16) -> tokio_tungstenite::tungstenite::Error {
+        use tokio_tungstenite::tungstenite::http::Response;
+        let resp = Response::builder()
+            .status(status)
+            .body(None)
+            .expect("build test http response");
+        tokio_tungstenite::tungstenite::Error::Http(resp)
+    }
+
+    #[test]
+    fn classify_429_is_rate_limited_not_connection_failed() {
+        let classified = classify_connect_error(http_ws_error(429));
+        assert!(
+            matches!(classified, VolcengineASRError::RateLimited(429)),
+            "429 应归类为 RateLimited 而非 ConnectionFailed，避免被当网络抖动重试"
+        );
+    }
+
+    #[test]
+    fn rate_limited_is_non_retryable_like_auth_rejected() {
+        assert!(
+            is_non_retryable(&VolcengineASRError::RateLimited(429)),
+            "限流不可重试：重试只会加剧限流"
+        );
+        assert!(
+            is_non_retryable(&VolcengineASRError::AuthRejected(401)),
+            "凭据被拒不可重试"
+        );
+    }
+
+    #[test]
+    fn network_errors_stay_retryable() {
+        // 通用网络失败仍应重试（抖动可恢复）——不能被误判成短路。
+        assert!(!is_non_retryable(&VolcengineASRError::ConnectionFailed(
+            "dns fail".into()
+        )));
+        assert!(!is_non_retryable(&VolcengineASRError::FinalResultTimeout));
+    }
+
+    #[test]
+    fn classify_401_403_still_auth_rejected() {
+        // 回归：新增 429 分类不影响既有 401 / 403 → AuthRejected。
+        assert!(matches!(
+            classify_connect_error(http_ws_error(401)),
+            VolcengineASRError::AuthRejected(401)
+        ));
+        assert!(matches!(
+            classify_connect_error(http_ws_error(403)),
+            VolcengineASRError::AuthRejected(403)
+        ));
+    }
+
+    #[test]
+    fn rate_limited_message_mentions_throttling_not_network() {
+        // 文案必须明确指向「限流/请求过多」，不是含糊的「网络失败」。
+        let msg = VolcengineASRError::RateLimited(429).to_string();
+        assert!(msg.contains("限流") || msg.contains("请求过多"), "文案: {msg}");
+        assert!(!msg.contains("网络"), "限流文案不应误导为网络失败: {msg}");
+    }
+
     #[tokio::test]
     async fn await_final_result_returns_error_when_final_frame_never_arrives() {
         let asr = VolcengineStreamingASR::new(
             VolcengineCredentials {
+                auth_mode: VolcengineAuthMode::AppIdToken,
                 app_id: "app".into(),
                 access_token: "token".into(),
                 resource_id: VolcengineCredentials::default_resource_id().into(),

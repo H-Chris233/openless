@@ -16,7 +16,7 @@
 <p align="center">
   <a href="https://openless.top"><strong>官网</strong></a>
   &nbsp;·&nbsp;
-  <a href="https://github.com/appergb/openless/releases/latest"><strong>下载</strong></a>
+  <a href="https://github.com/Open-Less/openless/releases/latest"><strong>下载</strong></a>
   &nbsp;·&nbsp;
   <a href="README.md">English</a>
   &nbsp;/&nbsp;
@@ -24,9 +24,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/appergb/openless/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/appergb/openless?style=flat-square&color=2c5282" /></a>
-  <a href="https://github.com/appergb/openless/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/github/license/appergb/openless?style=flat-square&color=2f855a" /></a>
-  <a href="https://github.com/appergb/openless/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/appergb/openless?style=flat-square&color=805ad5" /></a>
+  <a href="https://github.com/Open-Less/openless/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/Open-Less/openless?style=flat-square&color=2c5282" /></a>
+  <a href="https://github.com/Open-Less/openless/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/github/license/Open-Less/openless?style=flat-square&color=2f855a" /></a>
+  <a href="https://github.com/Open-Less/openless/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/Open-Less/openless?style=flat-square&color=805ad5" /></a>
   <a href="https://discord.gg/vTZHTFGFm"><img alt="Discord" src="https://img.shields.io/badge/Discord-Join-5865F2?style=flat-square&logo=discord&logoColor=white" /></a>
 </p>
 
@@ -112,9 +112,22 @@ OpenLess 是一款跨平台(macOS 与 Windows)语音输入应用,是 [Typeless](
 
 与只产出逐字转写稿的听写工具不同,OpenLess 的核心能力是 **AI Prompt 模式**:你自由地说,它来补充结构、整理你的约束条件,生成一段包含上下文的提示词,可直接粘贴进 ChatGPT、Claude 或 Cursor。
 
+## 从工具到基础设施
+
+真正高级的系统都在做同一件事:**把今天的沟通,变成明天的默认规则。** 互联网赢,不是因为 HTTP 更快,而是因为没人再讨论数据怎么传;Git 赢,不是因为代码更优,而是因为团队不用每天协调版本;Stripe 赢,不是因为支付更快,而是因为开发者不用再协调银行。
+
+OpenLess 做的不是“更快的听写”,而是**消灭“想法 → 干净文字”之间的每一次协调**。过去,把脑子里的话落成能用的文字,你要一遍遍临时决定:这段用什么语气?这个名字怎么拼?落到哪个输入框、复制还是粘贴?模型的钥匙放哪、谁有权限?OpenLess 把这些反复的临时协商,逐层**沉降**成默认规则:
+
+- **语气** 沉降成**风格包**——命名、可切换,热键一按即生效,不必每次重新决定。
+- **专有名词** 沉降成**词典热词**——ASR 端识别、润色端语义提示,不必逐次纠正。
+- **文字落点** 沉降成**唯一插入协议**——按住 → 说 → 落在光标处,失败自动回退剪贴板。
+- **模型与凭据** 沉降进**操作系统保管库**——开屏授权一次,此后永不重谈。
+
+这就是**开屏即授权完基础设施**:首次启动,你只授权一次麦克风、辅助功能与云端凭据;从那一刻起,“开口说话 → 光标处出现干净文字”不再是一次次的操作协商,而是一条你可以忘记它存在的默认协议。衡量 OpenLess 的价值,不在于它快了多少,而在于它替你**消灭了多少协调**。
+
 ## ✨ 更新亮点
 
-有两项功能,显著改变了 OpenLess 的日常使用体验:
+下面两项能力,把过去每天都要重复的协调,进一步沉降成了默认规则:
 
 - 🎨 **风格包市场(Style Pack Marketplace)。** OpenLess 不再只内置一种固定的“润色”语气。你可以用自定义系统提示词构建自己的**风格包**,用快捷键在它们之间切换,并**一键安装社区分享的风格包**——也可以发布自己的与他人分享。当风格与你的具体任务高度契合(冷启动邮件、commit message、小红书文案、正式报告、团队语气)时,产出的文本不只是更干净,而是*明显更好*,因为模型终于在按你真正想要的方式写作。
 - ⚡ **流式插入。** 文本现在会随润色**逐字符**写入光标,而不必等待完整结果生成。感知延迟大幅下降,听写几乎和思考一样快——当某个应用无法接受流式按键时,它会自动回退为一次性粘贴。
@@ -185,15 +198,17 @@ OpenLess 只做一件事:**把语音变成可用的书面文字(尤其是 AI 提
 | [Lazy](https://heylazy.com) | 闭源的笔记 / 速记工具 | 不是笔记容器——直接插入到任意输入框 |
 | [Superwhisper](https://superwhisper.com) | 闭源 macOS,订阅制 | 开源;目前云端 ASR,本地 ASR 在路线图中 |
 
-## 当前状态(v1.3.6)
+## 当前状态
+
+下面每一项,都是一层已经沉降为默认、你授权一次之后就不必再操心的能力——这就是开屏之后你所站立的基础设施:
 
 - Tauri 2 后端(Rust)+ React/TypeScript 前端。macOS 12+、Windows 10+。
 - 🎨 **风格包市场**——在应用内的 Marketplace 浏览、安装、点赞社区**风格包**,并发布自己的(每个包一套自定义系统提示词,可用快捷键切换)。由经过审核的市场后端支撑;上传内容公开前会经过审核。
 - ⚡ **流式插入**——润色后的文本逐字符写入光标以降低感知延迟,并带有自动的一次性粘贴回退。可在 设置 → 录音 中切换。
 - **切换式与按住说话(push-to-talk)** 两种录音模式,外加 **MediaPlayPause 触发**,让有线耳机的线控也能开始 / 停止录音。`Esc` 可在任意阶段取消,包括润色与插入。
-- **云端 ASR**:Volcengine 流式 ASR、OpenAI Whisper 兼容的批量 ASR、Apple Speech(macOS)。
-- **本地 ASR**:通过 vendored 的 `Open-Less/qwen-asr` 内置 Qwen3-ASR(0.6B / 1.7B);Windows 上的 Foundry Local Whisper 变体。
-- **润色提供方**:Ark / DeepSeek / OpenAI / Doubao / Anthropic 兼容的 chat completions,以及你自带的任意 OpenAI 兼容端点。
+- **云端 ASR**:Volcengine 流式 ASR(bigasr)、讯飞实时语音转写(RTASR)、阿里云百炼(经典实时 / Qwen3 实时 / Fun-ASR-Flash 录音文件)、阶跃星辰 StepAudio(批式 + 实时)、智谱 GLM-ASR、小米 MiMo ASR、ElevenLabs Scribe、OpenAI 兼容批量转写(OpenAI Whisper / Groq / 硅基流动 SenseVoice / OpenRouter),以及 Apple Speech(macOS)。
+- **本地 ASR**:通过 vendored 的 `Open-Less/qwen-asr` 内置 Qwen3-ASR(0.6B / 1.7B)(macOS);Windows 上的 Foundry Local Whisper 与 sherpa-onnx(实验性)变体。
+- **润色提供方**:Ark(火山方舟)、DeepSeek、OpenAI、Google Gemini、Codex OAuth、硅基流动、Atlas Cloud、小米 MiMo、CometAPI、OpenRouter、阿里云 Coding Plan、CodingPlanX、MiniMax、StepFun,以及你自带的任意 OpenAI 兼容端点。
 - **四种输出模式**:原文、轻度润色、结构化(**AI 提示词模式**)、正式。另有一个**翻译快捷键**,将语音直接转换为所配置的目标语言([#43](../../issues/43))。
 - **选区问答面板**——一个独立快捷键打开浮动面板,针对任意应用中被高亮选中的文本进行语音问答([#118](../../issues/118))。
 - **主窗口**:概览 / 历史 / 词典 / 风格 / 市场 / 设置。常驻托盘图标,以及一个浮于屏幕、并跟随你正在输入的显示器的迷你状态胶囊(多显示器)。
@@ -203,7 +218,7 @@ OpenLess 只做一件事:**把语音变成可用的书面文字(尤其是 AI 提
 - **Beta 频道(可选加入)**——设置 → 关于 → 加入 Beta 频道,可下载最新预发布版本进行手动安装。Beta 版本绝不会自动推送给 Stable 用户(见[贡献流程](#贡献流程))。
 - **分发渠道**——从 [Releases](../../releases) 直接下载 DMG/EXE、Homebrew Cask(`brew install --cask openless`)、Windows 安装包。
 - **单实例锁**——防止两个 OpenLess 进程争抢同一个快捷键边沿。
-- 词典条目作为 Volcengine ASR 的 `context.hotwords` 注入,并在润色时作为语义提示;命中次数按会话累计。
+- 词典条目注入到支持热词的 ASR 提供方(Volcengine 的 `context.hotwords`、StepFun 的 `hotwords`、Whisper 兼容的 `prompt`、百炼的 vocabulary_id),并在润色时作为语义提示;命中次数按会话累计。讯飞实时语音转写标准版没有请求级热词参数,需在讯飞控制台配置个性化热词。
 - 平台原生全局快捷键:macOS 上为 CGEventTap,Windows 上为低级键盘钩子(`WH_KEYBOARD_LL`)。
 
 ## 下载与安装(终端用户)
@@ -225,7 +240,7 @@ OpenLess 只做一件事:**把语音变成可用的书面文字(尤其是 AI 提
   - 不确定时执行 `adb shell getprop ro.product.cpu.abi`，下载对应 ABI 的包。
 - **macOS(Homebrew)**:
   ```bash
-  brew tap appergb/openless https://github.com/appergb/openless
+  brew tap Open-Less/openless https://github.com/Open-Less/openless
   brew install --cask openless
   xattr -cr /Applications/OpenLess.app
 
@@ -322,6 +337,7 @@ Windows:       %APPDATA%\OpenLess\credentials.json
 你需要准备:
 
 - **Volcengine 流式 ASR**:APP ID、Access Token、Resource ID。
+- **讯飞实时语音转写（RTASR）**:AppID、API Key。见 [docs/xfyun-asr.md](docs/xfyun-asr.md)。
 - **Ark 润色**:API Key、Model ID、Endpoint。Ark 默认端点为 `https://ark.cn-beijing.volces.com/api/v3/chat/completions`。
 
 ## 文本处理原则
@@ -364,7 +380,7 @@ OpenLess 的润色模型只重塑文本。它不回答问题、不执行任务�
 types.rs         Pure value types: DictationSession, PolishMode, HotkeyBinding, errors
 hotkey.rs        Global hotkey (CGEventTap on macOS, WH_KEYBOARD_LL on Windows, rdev on Linux)
 recorder.rs      Mic → 16 kHz mono Int16 PCM, RMS callback
-asr/             Volcengine streaming ASR (WebSocket) + Whisper HTTP
+asr/             流式 ASR 客户端(Volcengine / Bailian / Qwen3 / StepFun / iFlytek 走 WebSocket)+ Whisper 兼容批量 HTTP
 polish.rs        OpenAI-compatible chat completions (Ark / DeepSeek / etc.)
 insertion.rs     AX focused-element → clipboard + Cmd+V → copy-only fallback
 persistence.rs   History / preferences / vocab JSON + platform credential vault
@@ -383,7 +399,6 @@ commands.rs      Tauri IPC surface
 
 已规划但尚未发布:
 
-- 听写翻译模式:按住一个独立快捷键,用你的语言说,插入为目标语言([#43](../../issues/43))。
 - 跨会话风格记忆:润色随时间学习用户的语气([#46](../../issues/46))。
 - 片段(Snippets,尚无 UI 或触发逻辑)。
 - 历史增强:复制按钮、搜索、重新润色、重新插入。

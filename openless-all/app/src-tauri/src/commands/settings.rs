@@ -13,6 +13,14 @@ pub fn get_default_style_system_prompts() -> StyleSystemPrompts {
 pub(crate) trait SettingsWriter {
     fn read_settings(&self) -> UserPreferences;
     fn write_settings(&self, prefs: UserPreferences) -> Result<(), String>;
+    fn write_settings_preserving_current_style_preferences(
+        &self,
+        mut prefs: UserPreferences,
+    ) -> Result<(), String> {
+        let current = self.read_settings();
+        prefs.preserve_style_preferences_from(&current);
+        self.write_settings(prefs)
+    }
     fn sync_active_asr_provider(&self, provider: &str) -> Result<(), String>;
     fn refresh_dictation_hotkey(&self);
     fn refresh_qa_hotkey(&self);
@@ -20,6 +28,7 @@ pub(crate) trait SettingsWriter {
     fn refresh_translation_hotkey(&self);
     fn refresh_switch_style_hotkey(&self);
     fn refresh_open_app_hotkey(&self);
+    fn refresh_selection_polish_hotkey(&self);
     fn refresh_coding_agent_hotkey(&self);
 }
 
@@ -30,6 +39,15 @@ impl SettingsWriter for Coordinator {
 
     fn write_settings(&self, prefs: UserPreferences) -> Result<(), String> {
         self.prefs().set(prefs).map_err(|e| e.to_string())
+    }
+
+    fn write_settings_preserving_current_style_preferences(
+        &self,
+        prefs: UserPreferences,
+    ) -> Result<(), String> {
+        self.prefs()
+            .set_preserving_current_style_preferences(prefs)
+            .map_err(|e| e.to_string())
     }
 
     fn sync_active_asr_provider(&self, provider: &str) -> Result<(), String> {
@@ -60,6 +78,14 @@ impl SettingsWriter for Coordinator {
         self.update_open_app_hotkey_binding();
     }
 
+    #[cfg(not(mobile))]
+    fn refresh_selection_polish_hotkey(&self) {
+        self.update_selection_polish_hotkey_binding();
+    }
+
+    #[cfg(mobile)]
+    fn refresh_selection_polish_hotkey(&self) {}
+
     fn refresh_coding_agent_hotkey(&self) {
         self.update_coding_agent_hotkey_binding();
     }
@@ -72,6 +98,13 @@ impl<T: SettingsWriter + ?Sized> SettingsWriter for Arc<T> {
 
     fn write_settings(&self, prefs: UserPreferences) -> Result<(), String> {
         (**self).write_settings(prefs)
+    }
+
+    fn write_settings_preserving_current_style_preferences(
+        &self,
+        prefs: UserPreferences,
+    ) -> Result<(), String> {
+        (**self).write_settings_preserving_current_style_preferences(prefs)
     }
 
     fn sync_active_asr_provider(&self, provider: &str) -> Result<(), String> {
@@ -100,6 +133,10 @@ impl<T: SettingsWriter + ?Sized> SettingsWriter for Arc<T> {
 
     fn refresh_open_app_hotkey(&self) {
         (**self).refresh_open_app_hotkey();
+    }
+
+    fn refresh_selection_polish_hotkey(&self) {
+        (**self).refresh_selection_polish_hotkey();
     }
 
     fn refresh_coding_agent_hotkey(&self) {
@@ -133,6 +170,8 @@ pub(crate) fn persist_settings_with_keyboard_apply<T: SettingsWriter>(
     let translation_changed = previous.translation_hotkey != prefs.translation_hotkey;
     let switch_style_changed = previous.switch_style_hotkey != prefs.switch_style_hotkey;
     let open_app_changed = previous.open_app_hotkey != prefs.open_app_hotkey;
+    let selection_polish_changed =
+        previous.selection_polish_hotkey != prefs.selection_polish_hotkey;
     let coding_agent_changed = previous.coding_agent_enabled != prefs.coding_agent_enabled
         || previous.coding_agent_voice_hotkey != prefs.coding_agent_voice_hotkey;
     let windows_keyboard_list_changed = previous.windows_sendinput_insertion_only
@@ -162,7 +201,7 @@ pub(crate) fn persist_settings_with_keyboard_apply<T: SettingsWriter>(
         }
     }
 
-    if let Err(error) = coord.write_settings(prefs.clone()) {
+    if let Err(error) = coord.write_settings_preserving_current_style_preferences(prefs.clone()) {
         if active_asr_provider_changed {
             match coord.sync_active_asr_provider(&previous.active_asr_provider) {
                 Ok(()) => {
@@ -180,11 +219,13 @@ pub(crate) fn persist_settings_with_keyboard_apply<T: SettingsWriter>(
                 }
                 Err(rollback_error) => {
                     // ASR vault 无法回滚时 roll-forward prefs；键盘列表保持新状态，避免三者分叉。
-                    coord.write_settings(prefs).map_err(|roll_forward_error| {
-                        format!(
-                            "{error}; additionally failed to restore active ASR provider: {rollback_error}; additionally failed to preserve active ASR provider consistency: {roll_forward_error}"
-                        )
-                    })?;
+                    coord
+                        .write_settings_preserving_current_style_preferences(prefs)
+                        .map_err(|roll_forward_error| {
+                            format!(
+                                "{error}; additionally failed to restore active ASR provider: {rollback_error}; additionally failed to preserve active ASR provider consistency: {roll_forward_error}"
+                            )
+                        })?;
                 }
             }
         } else if windows_keyboard_list_changed {
@@ -219,6 +260,9 @@ pub(crate) fn persist_settings_with_keyboard_apply<T: SettingsWriter>(
     if open_app_changed {
         coord.refresh_open_app_hotkey();
     }
+    if selection_polish_changed {
+        coord.refresh_selection_polish_hotkey();
+    }
     if coding_agent_changed {
         coord.refresh_coding_agent_hotkey();
     }
@@ -241,7 +285,8 @@ pub fn set_settings(
     // 广播给所有 webview。issue #205：QaPanel 跑在独立 webview，
     // 没有 HotkeySettingsContext，必须靠事件感知录音键变化，否则面板可见时
     // 用户改键会让浮窗里的 "{recordHotkey}" 文案一直停留在旧值。
-    persist_settings(&*coord, prefs.clone())?;
+    persist_settings(&*coord, prefs)?;
+    let prefs = coord.prefs().get();
     #[cfg(target_os = "android")]
     coord.apply_android_overlay_settings_change(&remote_prev, &prefs);
     // refresh_tray_microphone_menu 内部会调用 NSStatusItem.set_menu，必须在主线程上跑。
@@ -284,12 +329,117 @@ pub fn set_settings(
     let packs = coord.style_packs().list().map_err(|e| e.to_string())?;
     sync_style_pack_preferences(&mut prefs, &packs);
     prefs.android_overlay_trigger = prefs.android_overlay_trigger.normalized();
-    persist_settings(&*coord, prefs.clone())?;
+    persist_settings(&*coord, prefs)?;
+    let prefs = coord.prefs().get();
     #[cfg(target_os = "android")]
     coord.apply_android_overlay_settings_change(&previous, &prefs);
     let _ = app.emit("prefs:changed", &prefs);
     let _ = app.emit_to("main", "prefs:changed", &prefs);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct RaceSettingsWriter {
+        reads: Mutex<Vec<UserPreferences>>,
+        saved: Mutex<Option<UserPreferences>>,
+    }
+
+    impl SettingsWriter for RaceSettingsWriter {
+        fn read_settings(&self) -> UserPreferences {
+            let mut reads = self.reads.lock().unwrap();
+            if reads.is_empty() {
+                return self.saved.lock().unwrap().clone().unwrap_or_default();
+            }
+            reads.remove(0)
+        }
+
+        fn write_settings(&self, prefs: UserPreferences) -> Result<(), String> {
+            *self.saved.lock().unwrap() = Some(prefs);
+            Ok(())
+        }
+
+        fn sync_active_asr_provider(&self, _provider: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn refresh_dictation_hotkey(&self) {}
+
+        fn refresh_qa_hotkey(&self) {}
+
+        fn refresh_combo_hotkey(&self) {}
+
+        fn refresh_translation_hotkey(&self) {}
+
+        fn refresh_switch_style_hotkey(&self) {}
+
+        fn refresh_open_app_hotkey(&self) {}
+        fn refresh_selection_polish_hotkey(&self) {}
+
+        fn refresh_coding_agent_hotkey(&self) {}
+    }
+
+    #[test]
+    fn settings_save_preserves_current_style_preferences_before_write() {
+        let packs = crate::types::builtin_style_packs();
+        let current = UserPreferences {
+            default_mode: PolishMode::Light,
+            active_style_pack_id: builtin_style_pack_id(PolishMode::Light).to_string(),
+            ..UserPreferences::default()
+        };
+        let mut stale_settings_payload = UserPreferences {
+            default_mode: PolishMode::Formal,
+            active_style_pack_id: builtin_style_pack_id(PolishMode::Formal).to_string(),
+            ..UserPreferences::default()
+        };
+
+        stale_settings_payload.preserve_style_preferences_from(&current);
+        sync_style_pack_preferences(&mut stale_settings_payload, &packs);
+
+        assert_eq!(
+            stale_settings_payload.active_style_pack_id,
+            builtin_style_pack_id(PolishMode::Light)
+        );
+        assert_eq!(stale_settings_payload.default_mode, PolishMode::Light);
+    }
+
+    #[test]
+    fn persist_settings_keeps_style_change_that_lands_before_write() {
+        let active_before_request = UserPreferences {
+            default_mode: PolishMode::Formal,
+            active_style_pack_id: builtin_style_pack_id(PolishMode::Formal).to_string(),
+            ..UserPreferences::default()
+        };
+        let active_before_write = UserPreferences {
+            default_mode: PolishMode::Light,
+            active_style_pack_id: builtin_style_pack_id(PolishMode::Light).to_string(),
+            ..UserPreferences::default()
+        };
+        let stale_payload = UserPreferences {
+            default_mode: PolishMode::Formal,
+            active_style_pack_id: builtin_style_pack_id(PolishMode::Formal).to_string(),
+            microphone_device_name: "External Mic".to_string(),
+            ..UserPreferences::default()
+        };
+        let writer = RaceSettingsWriter {
+            reads: Mutex::new(vec![active_before_request, active_before_write]),
+            saved: Mutex::new(None),
+        };
+
+        persist_settings(&writer, stale_payload).unwrap();
+
+        let saved = writer.saved.lock().unwrap().clone().expect("prefs saved");
+        assert_eq!(
+            saved.active_style_pack_id,
+            builtin_style_pack_id(PolishMode::Light)
+        );
+        assert_eq!(saved.default_mode, PolishMode::Light);
+        assert_eq!(saved.microphone_device_name, "External Mic");
+    }
 }
 
 // ─────────────────────────── release channel (Beta opt-in) ───────────────────────────
@@ -321,8 +471,8 @@ pub fn set_update_channel(
         return Ok(());
     }
     prefs.update_channel = channel;
-    persist_settings(&*coord, prefs.clone())?;
-    let _ = app.emit("prefs:changed", &prefs);
+    persist_settings(&*coord, prefs)?;
+    let _ = app.emit("prefs:changed", &coord.prefs().get());
     Ok(())
 }
 
@@ -334,20 +484,20 @@ pub struct LatestBetaRelease {
     pub published_at: String,
 }
 
-/// 拉 GitHub Releases atom feed 找最新 Beta release（tag 以 `-beta-tauri` 结尾）。
+/// 拉 GitHub Releases atom feed 找最新 Beta release。
 ///
 /// 历史：之前用 `api.github.com/repos/.../releases` REST 端点，**未认证 60 req/h/IP**，
 /// 多人多次切 Beta toggle 很容易撞 403 rate limit（用户报"获取 Beta 版本信息失败"
 /// 即是这个）。换成 `releases.atom` 后是公开页面 + CDN cache，没有同等 rate 限制。
-/// Atom feed 不显式标 prerelease，但项目约定 tag 后缀 `-beta-tauri` 必为 Beta，
-/// 所以只用 tag 后缀过滤就够了。
+/// Atom feed 不显式标 prerelease，所以按当前 `-Beta.N-tauri` 约定过滤，同时兼容
+/// 历史 `-beta-tauri` 后缀。
 ///
 /// 返回 `Ok(None)` = 当前没发过 Beta 版；`Err(String)` = 网络/解析故障。
 #[tauri::command]
 pub async fn fetch_latest_beta_release() -> Result<Option<LatestBetaRelease>, String> {
     let resp = net::send_with_retry(|| {
         net::http()
-            .get("https://github.com/appergb/openless/releases.atom")
+            .get("https://github.com/Open-Less/openless/releases.atom")
             .timeout(std::time::Duration::from_secs(15))
     })
     .await
@@ -381,10 +531,10 @@ pub(crate) fn parse_latest_beta_from_atom(body: &str) -> Option<LatestBetaReleas
             .find(|c: char| c == '"' || c == '<' || c == ' ' || c == '/')
             .unwrap_or(tag_after.len());
         let tag_name = tag_after[..tag_end].to_string();
-        if !tag_name.ends_with("-beta-tauri") {
+        if !is_beta_release_tag(&tag_name) {
             continue;
         }
-        let html_url = format!("https://github.com/appergb/openless/releases/tag/{tag_name}");
+        let html_url = format!("https://github.com/Open-Less/openless/releases/tag/{tag_name}");
         let published_at =
             extract_between(entry_body, "<updated>", "</updated>").unwrap_or_default();
         return Some(LatestBetaRelease {
@@ -394,6 +544,31 @@ pub(crate) fn parse_latest_beta_from_atom(body: &str) -> Option<LatestBetaReleas
         });
     }
     None
+}
+
+fn is_beta_release_tag(tag_name: &str) -> bool {
+    if tag_name.ends_with("-beta-tauri") {
+        return true;
+    }
+
+    let Some((version, beta_number)) = tag_name
+        .strip_prefix('v')
+        .and_then(|tag| tag.strip_suffix("-tauri"))
+        .and_then(|tag| tag.split_once("-Beta."))
+    else {
+        return false;
+    };
+
+    if beta_number.is_empty() || !beta_number.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+
+    let mut version_parts = version.split('.');
+    (0..3).all(|_| {
+        version_parts
+            .next()
+            .is_some_and(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
+    }) && version_parts.next().is_none()
 }
 
 fn extract_between(haystack: &str, open: &str, close: &str) -> Option<String> {
@@ -492,10 +667,10 @@ async fn resolve_beta_manifest_endpoints() -> Result<Vec<url::Url>, String> {
     // {{target}} / {{arch}} 占位符由 plugin 在 check 时替换。Rust raw string 用 r#""#
     // 不需要转义双花括号，比 format! 干净。
     let mirror = format!(
-        "https://fastgit.cc/https://github.com/appergb/openless/releases/download/{tag}/latest-{{{{target}}}}-{{{{arch}}}}-beta-mirror.json"
+        "https://fastgit.cc/https://github.com/Open-Less/openless/releases/download/{tag}/latest-{{{{target}}}}-{{{{arch}}}}-beta-mirror.json"
     );
     let direct = format!(
-        "https://github.com/appergb/openless/releases/download/{tag}/latest-{{{{target}}}}-{{{{arch}}}}-beta.json"
+        "https://github.com/Open-Less/openless/releases/download/{tag}/latest-{{{{target}}}}-{{{{arch}}}}-beta.json"
     );
     let mirror_url = url::Url::parse(&mirror).map_err(|e| format!("parse beta mirror url: {e}"))?;
     let direct_url = url::Url::parse(&direct).map_err(|e| format!("parse beta direct url: {e}"))?;
@@ -582,6 +757,7 @@ mod persist_settings_tests {
         fn refresh_translation_hotkey(&self) {}
         fn refresh_switch_style_hotkey(&self) {}
         fn refresh_open_app_hotkey(&self) {}
+        fn refresh_selection_polish_hotkey(&self) {}
         fn refresh_coding_agent_hotkey(&self) {}
     }
 
@@ -738,8 +914,8 @@ pub async fn app_download_and_install_android_update(
 ) -> Result<(), String> {
     // 安全：下载前校验 URL，防止 SSRF（如内网元数据接口、localhost 服务）。
     // 只允许已知的 GitHub 直链和 fastgit 镜像前缀。
-    const DIRECT_BASE: &str = "https://github.com/appergb/openless";
-    const MIRROR_BASE: &str = "https://fastgit.cc/https://github.com/appergb/openless";
+    const DIRECT_BASE: &str = "https://github.com/Open-Less/openless";
+    const MIRROR_BASE: &str = "https://fastgit.cc/https://github.com/Open-Less/openless";
     if !url.starts_with(DIRECT_BASE) && !url.starts_with(MIRROR_BASE) {
         return Err(format!("不信任的更新 URL，拒绝下载: {url}"));
     }

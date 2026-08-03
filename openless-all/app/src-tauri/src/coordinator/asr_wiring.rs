@@ -104,25 +104,46 @@ pub(super) fn ensure_asr_credentials() -> Result<(), String> {
         }
     }
 
-    if is_whisper_compatible_provider(&active_asr)
-        || is_bailian_provider(&active_asr)
-        || is_mimo_provider(&active_asr)
-    {
-        let api_key = CredentialsVault::get(CredentialAccount::AsrApiKey)
-            .ok()
-            .flatten()
-            .unwrap_or_default();
-        if api_key.trim().is_empty() {
-            return Err("请先在设置中填写 ASR 服务商 API Key".to_string());
+    // 云端 provider 的预检凭据由 ActiveAsrProviderKind 统一判定（穷尽 match，
+    // 编译器保证新增 kind 不会被漏掉 —— 取代旧的「provider 白名单 + 火山兜底」，
+    // 那个静默 else 曾让新通道误落到火山分支）。
+    match active_asr_provider_kind(&active_asr).preflight_credential() {
+        AsrPreflightCredential::AsrApiKey => {
+            let api_key = CredentialsVault::get(CredentialAccount::AsrApiKey)
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            if api_key.trim().is_empty() {
+                return Err("请先在设置中填写 ASR 服务商 API Key".to_string());
+            }
+            Ok(())
         }
-        return Ok(());
-    }
-
-    let creds = read_volc_credentials();
-    if creds.app_id.trim().is_empty() || creds.access_token.trim().is_empty() {
-        Err("请先在设置中填写火山引擎 ASR App Key 和 Access Key".to_string())
-    } else {
-        Ok(())
+        AsrPreflightCredential::VolcAppKey => {
+            use crate::asr::volcengine::VolcengineAuthMode;
+            let creds = read_volc_credentials();
+            // 统一走 VolcengineAuthMode::auth_ok：与 open_session / volcengine_configured
+            // 共用同一份按模式判定 + trim 语义，避免三处规则漂移。
+            if creds.auth_ok() {
+                Ok(())
+            } else {
+                match creds.auth_mode {
+                    VolcengineAuthMode::AppIdToken => {
+                        Err("请先在设置中填写火山引擎 ASR App Key 和 Access Key".to_string())
+                    }
+                    VolcengineAuthMode::ApiKey => {
+                        Err("请先在设置中填写火山方舟语音模型 API Key".to_string())
+                    }
+                }
+            }
+        }
+        AsrPreflightCredential::XfyunAppKey => {
+            let creds = read_xfyun_credentials();
+            if creds.auth_ok() {
+                Ok(())
+            } else {
+                Err("请先在设置中填写讯飞 AppID 和 API Key".to_string())
+            }
+        }
     }
 }
 
@@ -274,9 +295,11 @@ pub(super) fn schedule_sherpa_onnx_release(inner: &Arc<Inner>, session: AsrRelea
 }
 
 #[cfg(target_os = "macos")]
+/// 返回 (provider, 实际加载的模型 id)。模型 id 是 ModelId 校验归一后的值，调用方
+/// 直接用它做历史归因（构建时快照，PR #826 review）。
 pub(super) async fn build_local_qwen3(
     inner: &Arc<Inner>,
-) -> anyhow::Result<Arc<crate::asr::local::LocalQwenAsr>> {
+) -> anyhow::Result<(Arc<crate::asr::local::LocalQwenAsr>, String)> {
     let prefs = inner.prefs.get();
     let model_id = crate::asr::local::ModelId::from_str(&prefs.local_asr_active_model)
         .ok_or_else(|| anyhow::anyhow!("未知本地模型 id: {}", prefs.local_asr_active_model))?;
@@ -295,16 +318,28 @@ pub(super) async fn build_local_qwen3(
         .map_err(|e| anyhow::anyhow!("spawn_blocking join failed: {e:#}"))??;
     // 加载完成（含缓存命中刷新 last_used）后推一次状态，前端零轮询更新「已加载」。
     emit_local_asr_engine_status(inner);
-    Ok(Arc::new(crate::asr::local::LocalQwenAsr::new(app, engine)))
+    let model_label = model_id.as_str().to_string();
+    Ok((
+        Arc::new(crate::asr::local::LocalQwenAsr::new(app, engine)),
+        model_label,
+    ))
 }
 
 #[cfg(target_os = "macos")]
-pub(super) fn build_apple_speech() -> Arc<crate::asr::local::AppleSpeechAsr> {
-    Arc::new(crate::asr::local::AppleSpeechAsr::new())
+pub(super) fn build_apple_speech(
+    prefs: &crate::types::UserPreferences,
+) -> Arc<crate::asr::local::AppleSpeechAsr> {
+    // Apple 识别 locale 跟随用户工作语言主语言 —— 不显式指定 SFSpeechRecognizer 就落到
+    // 系统首选语言（常是英文），中文语音会被识别成英文且理解错误。未收录语言回退默认。
+    let locale = prefs
+        .working_languages
+        .first()
+        .and_then(|name| crate::asr::local::native_name_to_apple_locale(name));
+    Arc::new(crate::asr::local::AppleSpeechAsr::new(locale))
 }
 
-/// `whisper` 是 OpenAI 原生；`siliconflow` / `zhipu` / `groq` 都暴露
-/// OpenAI 兼容的 `/audio/transcriptions`，统一走 `WhisperBatchASR`。
+/// `whisper` 是 OpenAI 原生；`siliconflow` / `zhipu` / `groq` / `stepfun`
+/// 都暴露 OpenAI 兼容的 `/audio/transcriptions`，统一走 `WhisperBatchASR`。
 /// 新增 OpenAI 兼容 ASR 时只需在这里加一项。
 ///
 /// 注：DashScope 的 Qwen3-ASR-Flash 不在此列——它用 MultiModalConversation
@@ -313,8 +348,33 @@ pub(super) fn build_apple_speech() -> Arc<crate::asr::local::AppleSpeechAsr> {
 pub(super) fn is_whisper_compatible_provider(id: &str) -> bool {
     matches!(
         id,
-        "whisper" | "siliconflow" | "zhipu" | "groq" | "openrouter"
+        "whisper" | "siliconflow" | "zhipu" | "groq" | "openrouter" | "stepfun"
     )
+}
+
+/// 用户词典该走 `prompt` 还是一等 `hotwords` 参数。
+///
+/// StepFun 的 `/audio/transcriptions` **静默忽略** `prompt`（实测 2026-07：带
+/// prompt 返回 200 但不参与偏置），词汇偏置走专门的 `hotwords` 字段（可解析的
+/// JSON 数组字符串）。其余兼容厂商维持 Whisper 惯例的 `prompt`。
+pub(super) fn whisper_uses_hotwords(provider_id: &str) -> bool {
+    provider_id == "stepfun"
+}
+
+/// 词典启用词条 → (prompt, hotwords) 二选一路由，QA 与听写两处构造点共用。
+/// hotwords 厂商不再拼 prompt（免得白占请求体），prompt 厂商 hotwords 恒空。
+pub(super) fn whisper_vocab_for_provider(
+    provider_id: &str,
+    phrases: Vec<String>,
+) -> (Option<String>, Vec<String>) {
+    if whisper_uses_hotwords(provider_id) {
+        (None, phrases)
+    } else {
+        (
+            crate::asr::whisper::build_prompt_from_phrases(&phrases),
+            Vec::new(),
+        )
+    }
 }
 
 /// 该 provider 的请求体编码方式。OpenRouter 的 `/audio/transcriptions` 是
@@ -343,8 +403,28 @@ pub(super) fn is_bailian_provider(id: &str) -> bool {
     id == crate::asr::bailian::PROVIDER_ID
 }
 
+pub(super) fn is_qwen3_realtime_provider(id: &str) -> bool {
+    id == crate::asr::qwen_realtime::PROVIDER_ID
+}
+
+pub(super) fn is_stepfun_realtime_provider(id: &str) -> bool {
+    id == crate::asr::stepfun_realtime::PROVIDER_ID
+}
+
 pub(super) fn is_mimo_provider(id: &str) -> bool {
     id == crate::asr::mimo::PROVIDER_ID
+}
+
+pub(super) fn is_dashscope_multimodal_provider(id: &str) -> bool {
+    id == crate::asr::dashscope_multimodal::PROVIDER_ID
+}
+
+pub(super) fn is_elevenlabs_provider(id: &str) -> bool {
+    id == crate::asr::elevenlabs::PROVIDER_ID
+}
+
+pub(super) fn is_xfyun_provider(id: &str) -> bool {
+    id == crate::asr::xfyun::PROVIDER_ID
 }
 
 pub(super) fn apply_chinese_script_preference(text: &str, pref: ChineseScriptPreference) -> String {
@@ -377,6 +457,18 @@ pub(super) enum QaAsrStart {
         asr: Arc<BailianRealtimeASR>,
         bridge: Arc<DeferredAsrBridge>,
     },
+    Qwen3Realtime {
+        asr: Arc<Qwen3RealtimeASR>,
+        bridge: Arc<DeferredAsrBridge>,
+    },
+    StepfunRealtime {
+        asr: Arc<crate::asr::StepfunRealtimeASR>,
+        bridge: Arc<DeferredAsrBridge>,
+    },
+    Xfyun {
+        asr: Arc<crate::asr::XfyunStreamingASR>,
+        bridge: Arc<DeferredAsrBridge>,
+    },
     Ready {
         active: ActiveAsr,
         consumer: Arc<dyn crate::recorder::AudioConsumer>,
@@ -388,6 +480,9 @@ impl QaAsrStart {
         match self {
             QaAsrStart::Volcengine { asr, .. } => ActiveAsr::Volcengine(Arc::clone(asr)),
             QaAsrStart::Bailian { asr, .. } => ActiveAsr::Bailian(Arc::clone(asr)),
+            QaAsrStart::Qwen3Realtime { asr, .. } => ActiveAsr::Qwen3Realtime(Arc::clone(asr)),
+            QaAsrStart::StepfunRealtime { asr, .. } => ActiveAsr::StepfunRealtime(Arc::clone(asr)),
+            QaAsrStart::Xfyun { asr, .. } => ActiveAsr::Xfyun(Arc::clone(asr)),
             QaAsrStart::Ready { active, .. } => active.clone(),
         }
     }
@@ -396,6 +491,9 @@ impl QaAsrStart {
         match self {
             QaAsrStart::Volcengine { bridge, .. } => Arc::clone(bridge) as _,
             QaAsrStart::Bailian { bridge, .. } => Arc::clone(bridge) as _,
+            QaAsrStart::Qwen3Realtime { bridge, .. } => Arc::clone(bridge) as _,
+            QaAsrStart::StepfunRealtime { bridge, .. } => Arc::clone(bridge) as _,
+            QaAsrStart::Xfyun { bridge, .. } => Arc::clone(bridge) as _,
             QaAsrStart::Ready { consumer, .. } => Arc::clone(consumer),
         }
     }
@@ -418,12 +516,44 @@ impl QaAsrStart {
                 );
                 Ok(())
             }
+            QaAsrStart::Qwen3Realtime { asr, bridge } => {
+                asr.open_session().await.map_err(|e| e.to_string())?;
+                let target: Arc<dyn crate::asr::AudioConsumer> = Arc::clone(asr) as _;
+                let flushed = bridge.attach(target);
+                log::info!(
+                    "[coord] QA Qwen3 realtime ASR connected; flushed {flushed} deferred audio bytes"
+                );
+                Ok(())
+            }
+            QaAsrStart::StepfunRealtime { asr, bridge } => {
+                asr.open_session().await.map_err(|e| e.to_string())?;
+                let target: Arc<dyn crate::asr::AudioConsumer> = Arc::clone(asr) as _;
+                let flushed = bridge.attach(target);
+                log::info!(
+                    "[coord] QA StepFun realtime ASR connected; flushed {flushed} deferred audio bytes"
+                );
+                Ok(())
+            }
+            QaAsrStart::Xfyun { asr, bridge } => {
+                asr.open_session().await.map_err(|e| e.to_string())?;
+                let target: Arc<dyn crate::asr::AudioConsumer> = Arc::clone(asr) as _;
+                let flushed = bridge.attach(target);
+                log::info!(
+                    "[coord] QA iFlytek ASR connected; flushed {flushed} deferred audio bytes"
+                );
+                Ok(())
+            }
             QaAsrStart::Ready { .. } => Ok(()),
         }
     }
 }
 
-pub(super) async fn build_qa_asr_start(inner: &Arc<Inner>, active_asr: &str) -> Result<QaAsrStart, String> {
+/// 返回 (启动器, 构建时 (provider, model) 快照)。快照供 QA / 重转录把「实际用了哪个
+/// 模型」写回历史（PR #826 review：归因必须来自构建现场，不能事后重读设置）。
+pub(super) async fn build_qa_asr_start(
+    inner: &Arc<Inner>,
+    active_asr: &str,
+) -> Result<(QaAsrStart, AsrCallLabel), String> {
     #[cfg(target_os = "windows")]
     if foundry::is_foundry_local_whisper(active_asr) {
         let prefs = inner.prefs.get();
@@ -440,13 +570,14 @@ pub(super) async fn build_qa_asr_start(inner: &Arc<Inner>, active_asr: &str) -> 
         };
         let local = Arc::new(FoundryLocalWhisperAsr::new(
             Arc::clone(&inner.foundry_local_runtime),
-            model_alias,
+            model_alias.clone(),
             prefs.foundry_local_runtime_source.clone(),
             language_hint,
         ));
         let active = ActiveAsr::FoundryLocalWhisper(Arc::clone(&local));
         let consumer: Arc<dyn crate::recorder::AudioConsumer> = local;
-        return Ok(QaAsrStart::Ready { active, consumer });
+        let label = AsrCallLabel::new(foundry::PROVIDER_ID, Some(model_alias));
+        return Ok((QaAsrStart::Ready { active, consumer }, label));
     }
 
     #[cfg(target_os = "windows")]
@@ -472,7 +603,7 @@ pub(super) async fn build_qa_asr_start(inner: &Arc<Inner>, active_asr: &str) -> 
         });
         let local = SherpaOnnxAsr::new_for_model(
             Arc::clone(&inner.sherpa_onnx_runtime),
-            model_alias,
+            model_alias.clone(),
             language_hint,
             token_handler,
         )
@@ -481,43 +612,101 @@ pub(super) async fn build_qa_asr_start(inner: &Arc<Inner>, active_asr: &str) -> 
         let local = Arc::new(local);
         let active = ActiveAsr::SherpaOnnxLocal(Arc::clone(&local));
         let consumer: Arc<dyn crate::recorder::AudioConsumer> = local;
-        return Ok(QaAsrStart::Ready { active, consumer });
+        let label = AsrCallLabel::new(sherpa::PROVIDER_ID, Some(model_alias));
+        return Ok((QaAsrStart::Ready { active, consumer }, label));
     }
 
     #[cfg(target_os = "macos")]
     if crate::asr::local::is_local_qwen3(active_asr) {
-        let local = build_local_qwen3(inner)
+        let (local, model) = build_local_qwen3(inner)
             .await
             .map_err(|e| format!("local ASR init failed: {e}"))?;
         let active = ActiveAsr::Local(Arc::clone(&local));
         let consumer: Arc<dyn crate::recorder::AudioConsumer> = local;
-        return Ok(QaAsrStart::Ready { active, consumer });
+        let label = AsrCallLabel::new(crate::asr::local::PROVIDER_ID, Some(model));
+        return Ok((QaAsrStart::Ready { active, consumer }, label));
     }
 
     #[cfg(target_os = "macos")]
     if crate::asr::local::is_apple_speech(active_asr) {
-        let local = build_apple_speech();
+        let local = build_apple_speech(&inner.prefs.get());
         let active = ActiveAsr::AppleSpeech(Arc::clone(&local));
         let consumer: Arc<dyn crate::recorder::AudioConsumer> = local;
-        return Ok(QaAsrStart::Ready { active, consumer });
+        let label = AsrCallLabel::new(crate::asr::local::APPLE_SPEECH_PROVIDER_ID, None);
+        return Ok((QaAsrStart::Ready { active, consumer }, label));
     }
 
-    match active_asr_provider_kind(active_asr) {
-        ActiveAsrProviderKind::Bailian => Ok(QaAsrStart::Bailian {
-            asr: Arc::new(BailianRealtimeASR::new(read_bailian_credentials())),
-            bridge: Arc::new(DeferredAsrBridge::new()),
-        }),
+    // 统一百炼:按所选模型把 build 分发重定向到具体协议（凭据仍读真实 active
+    // `bailian` 的那把 key；endpoint 由前端按模型同步好）。别名 id 原样返回。
+    let asr_model = CredentialsVault::get(CredentialAccount::AsrModel)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let effective_asr = resolve_effective_asr_provider(active_asr, &asr_model)?;
+    match active_asr_provider_kind(&effective_asr) {
+        ActiveAsrProviderKind::Bailian => {
+            let creds = read_bailian_credentials();
+            let label = AsrCallLabel::new(effective_asr.clone(), Some(creds.model.clone()));
+            Ok((
+                QaAsrStart::Bailian {
+                    asr: Arc::new(BailianRealtimeASR::new(creds)),
+                    bridge: Arc::new(DeferredAsrBridge::new()),
+                },
+                label,
+            ))
+        }
+        ActiveAsrProviderKind::Qwen3Realtime => {
+            let creds = read_qwen3_realtime_credentials();
+            let label = AsrCallLabel::new(effective_asr.clone(), Some(creds.model.clone()));
+            Ok((
+                QaAsrStart::Qwen3Realtime {
+                    asr: Arc::new(Qwen3RealtimeASR::new(creds)),
+                    bridge: Arc::new(DeferredAsrBridge::new()),
+                },
+                label,
+            ))
+        }
+        ActiveAsrProviderKind::StepfunRealtime => {
+            let prompt = crate::asr::whisper::build_prompt_from_phrases(&enabled_phrases(inner));
+            let creds = read_stepfun_realtime_credentials(prompt);
+            let label = AsrCallLabel::new(effective_asr.clone(), Some(creds.model.clone()));
+            Ok((
+                QaAsrStart::StepfunRealtime {
+                    asr: Arc::new(crate::asr::StepfunRealtimeASR::new(creds)),
+                    bridge: Arc::new(DeferredAsrBridge::new()),
+                },
+                label,
+            ))
+        }
         ActiveAsrProviderKind::Mimo => {
             let (api_key, base_url, model) = read_mimo_credentials();
+            let label = AsrCallLabel::new(effective_asr.clone(), Some(model.clone()));
             let mimo = Arc::new(MimoBatchASR::new(api_key, base_url, model));
             let active = ActiveAsr::Mimo(Arc::clone(&mimo));
             let consumer: Arc<dyn crate::recorder::AudioConsumer> = mimo;
-            Ok(QaAsrStart::Ready { active, consumer })
+            Ok((QaAsrStart::Ready { active, consumer }, label))
+        }
+        ActiveAsrProviderKind::DashScopeMultimodal => {
+            let (api_key, base_url, model) = read_dashscope_multimodal_credentials();
+            let label = AsrCallLabel::new(effective_asr.clone(), Some(model.clone()));
+            let asr = Arc::new(DashScopeMultimodalASR::new(api_key, base_url, model));
+            let active = ActiveAsr::DashScopeMultimodal(Arc::clone(&asr));
+            let consumer: Arc<dyn crate::recorder::AudioConsumer> = asr;
+            Ok((QaAsrStart::Ready { active, consumer }, label))
+        }
+        ActiveAsrProviderKind::ElevenLabs => {
+            let (api_key, base_url, model) = read_elevenlabs_credentials();
+            let label = AsrCallLabel::new(effective_asr.clone(), Some(model.clone()));
+            let asr = Arc::new(ElevenLabsBatchASR::new(api_key, base_url, model));
+            let active = ActiveAsr::ElevenLabs(Arc::clone(&asr));
+            let consumer: Arc<dyn crate::recorder::AudioConsumer> = asr;
+            Ok((QaAsrStart::Ready { active, consumer }, label))
         }
         ActiveAsrProviderKind::WhisperCompatible => {
             let (api_key, base_url, model) = read_whisper_credentials();
-            let whisper_prompt =
-                crate::asr::whisper::build_prompt_from_phrases(&enabled_phrases(inner));
+            let label = AsrCallLabel::new(effective_asr.clone(), Some(model.clone()));
+            let (whisper_prompt, hotwords) =
+                whisper_vocab_for_provider(active_asr, enabled_phrases(inner));
             let whisper = Arc::new(
                 WhisperBatchASR::new(
                     api_key,
@@ -527,18 +716,37 @@ pub(super) async fn build_qa_asr_start(inner: &Arc<Inner>, active_asr: &str) -> 
                     batch_asr_chunk_limit_ms(active_asr),
                     whisper_supports_verbose_json(active_asr),
                 )
-                .with_request_format(whisper_request_format(active_asr)),
+                .with_request_format(whisper_request_format(active_asr))
+                .with_hotwords(hotwords),
             );
             let active = ActiveAsr::Whisper(Arc::clone(&whisper));
             let consumer: Arc<dyn crate::recorder::AudioConsumer> = whisper;
-            Ok(QaAsrStart::Ready { active, consumer })
+            Ok((QaAsrStart::Ready { active, consumer }, label))
         }
-        ActiveAsrProviderKind::Volcengine => Ok(QaAsrStart::Volcengine {
-            asr: Arc::new(VolcengineStreamingASR::new(
-                read_volc_credentials(),
-                enabled_hotwords(inner),
-            )),
-            bridge: Arc::new(DeferredAsrBridge::new()),
-        }),
+        ActiveAsrProviderKind::Volcengine => {
+            let creds = read_volc_credentials();
+            let label = AsrCallLabel::new(
+                effective_asr.clone(),
+                volc_resource_history_label(&creds.resource_id),
+            );
+            Ok((
+                QaAsrStart::Volcengine {
+                    asr: Arc::new(VolcengineStreamingASR::new(creds, enabled_hotwords(inner))),
+                    bridge: Arc::new(DeferredAsrBridge::new()),
+                },
+                label,
+            ))
+        }
+        ActiveAsrProviderKind::Xfyun => {
+            let creds = read_xfyun_credentials();
+            let label = AsrCallLabel::new(effective_asr.clone(), None);
+            Ok((
+                QaAsrStart::Xfyun {
+                    asr: Arc::new(crate::asr::XfyunStreamingASR::new(creds)),
+                    bridge: Arc::new(DeferredAsrBridge::new()),
+                },
+                label,
+            ))
+        }
     }
 }

@@ -1,31 +1,50 @@
-import { memo, useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from 'react';
 import { useTranslation } from 'react-i18next';
 import { detectOS, type OS } from './WindowChrome';
+import { SiriGL, warmUpSiriShaders } from './SiriGL';
+import { cancelDictation, stopDictation } from '../lib/ipc/dictation';
 import {
   getCapsuleHostMetrics,
   getCapsuleMessageLayout,
   getCapsulePillMetrics,
 } from '../lib/capsuleLayout';
-import { invokeOrMock, isTauri } from '../lib/ipc';
-import type { CapsulePayload, CapsuleState } from '../lib/types';
+import { isTauri } from '../lib/ipc';
+import type { CapsulePayload, CapsuleState, CapsuleStyle } from '../lib/types';
 
 // 胶囊 keyframes 注入一次到 document.head，而不是放在组件 JSX 里。否则录音时音量
 // 每帧（~60Hz）setLevel 都会让 React 重新创建/reconcile 这个 <style> 元素 —— 纯属
 // 浪费，因为这些 keyframes 是静态的。与 QaPanel / LessComputerPanel 注入方式一致。
 const CAPSULE_KEYFRAMES = `
-  /* 入场：从中央很窄的一小条（scaleX 0.18）+ 略压扁（scaleY 0.95）+ 透明，
-     长出到 scaleX 1 / scaleY 1 / 不透明。配合 wrapper 的 transformOrigin:center，
-     视觉上是「从中心向左右展开」。 */
   @keyframes capsule-in {
-    from { opacity: 0; transform: scale(.78) translateY(8px); }
-    to   { opacity: 1; transform: scale(1)   translateY(0); }
+    from { opacity: 0; transform: scale(.46) translateY(18px); }
+    70%  { opacity: 1; transform: scale(1.035) translateY(-1px); }
+    to   { opacity: 1; transform: scale(1)    translateY(0); }
   }
-  /* 离场：scaleX 由 1 收回 0.18 + 整体向下偏移 8px + 淡出。
-     forwards 让最终帧（opacity:0、scaleX:.18）保持到组件被卸载。 */
   @keyframes capsule-out {
-    from { opacity: 1; transform: scaleX(1)   translateY(0); }
-    to   { opacity: 0; transform: scaleX(.18) translateY(8px); }
+    from { opacity: 1; transform: scale(1)   translateY(0); }
+    to   { opacity: 0; transform: scale(.46) translateY(18px); }
   }
+  /* 思考圆点（fluid dots）出场：纯淡入接住光条汇聚成的光点 —— 圆点自身的
+     「从圆心散开」动画由 shader 的 uGather 驱动，这里不做任何缩放冲击。 */
+  @keyframes siri-orb-in {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+  }
+  @keyframes selection-polish-spinner {
+    to { transform: rotate(360deg); }
+  }
+  /* 经典药丸（Openless 默认风格）专属：
+     - cap-shine：转写/润色中"thinking" 文字的蓝光扫过；
+     - cap-state-enter：状态内容切换时的淡入。 */
   @keyframes cap-shine {
     0%   { background-position: 200% center; }
     100% { background-position: -200% center; }
@@ -43,11 +62,248 @@ if (typeof document !== 'undefined' && !document.getElementById('capsule-keyfram
   document.head.appendChild(tag);
 }
 
-interface AudioBarsProps {
+interface VoiceOrbStageProps {
+  os: OS;
+  state: CapsuleState;
   level: number;
+  /** 预备态：录音光条渲染成「待命」呼吸形态，不接真实电平。见 CapsulePayload.warming。 */
+  warming?: boolean;
+  /** 预备→就绪的平均耗时（ms），驱动展开动画的预测节奏。见 SiriGL warmupMs。 */
+  warmupMs?: number;
+  message?: string;
 }
 
-function AudioBars({ level }: AudioBarsProps) {
+/**
+ * 纯光效舞台（siri-glsl 完整克隆，无壳无按钮无底）：
+ *   - recording：彩虹光谱声波横贯舞台，振幅随真实麦克风电平起伏；
+ *   - transcribing / polishing：波形从两端向中间收缩汇聚，流体圆点环淡入加速转动；
+ *   - done / cancelled：转速回落标准，六点合并成中央一颗圆，由外层 capsule-out 淡出；
+ *   - error：冻结光效 + 浮一行发光红字说明原因（唯一保留的文字信息）。
+ * 刻意没有任何垫底/暗晕（用户拍板）：白底界面上宁可对比度弱，也不要黑色遮挡。
+ */
+function VoiceOrbStage({ os, state, level, warming, warmupMs, message }: VoiceOrbStageProps) {
+  const { t } = useTranslation();
+  const metrics = useMemo(() => getCapsulePillMetrics(os), [os]);
+
+  // done / cancelled / error 冻结最后形态淡出，不再切换 phase。
+  const lastPhaseRef = useRef<'wave' | 'orb'>('wave');
+  let phase = lastPhaseRef.current;
+  if (state === 'recording') phase = 'wave';
+  else if (state === 'transcribing' || state === 'polishing') phase = 'orb';
+  lastPhaseRef.current = phase;
+  const isOrb = phase === 'orb';
+
+  // 性能：波形淡出彻底结束（.55s delay + .6s duration）后卸载它的绘制循环 ——
+  // 思考期间不再为一块不可见的 canvas 每帧跑 fragment。回到录音态立即重挂
+  //（shader 编译已被驱动缓存，重建近零耗时）。
+  const [waveAlive, setWaveAlive] = useState(true);
+  useEffect(() => {
+    if (!isOrb) {
+      setWaveAlive(true);
+      return undefined;
+    }
+    const timer = setTimeout(() => setWaveAlive(false), 1300);
+    return () => clearTimeout(timer);
+  }, [isOrb]);
+
+  return (
+    <div
+      style={{
+        width: metrics.width,
+        height: metrics.height,
+        boxSizing: metrics.boxSizing,
+        fontFamily: 'var(--ol-font-sans)',
+        position: 'relative',
+        pointerEvents: 'none',
+      }}
+    >
+      {waveAlive && (
+        <SiriGL
+          mode="wave"
+          level={level}
+          resolved={!isOrb}
+          warming={warming}
+          warmupMs={warmupMs}
+          style={{
+            position: 'absolute',
+            inset: 0,
+            width: '100%',
+            height: '100%',
+            // 收缩汇聚进行时波形保持可见，收成中央光点后再淡出，与圆点环的淡入交叠。
+            opacity: isOrb ? 0 : 1,
+            transition: isOrb ? 'opacity .6s ease-out .55s' : 'opacity .25s ease-out',
+          }}
+        />
+      )}
+      {isOrb && (
+        <SiriGL
+          mode="orb"
+          // 思考中（LLM 接收）加速转动；插入/取消/出错时回落到标准速度，
+          // 同时六点合并成中央一颗圆，随外层淡出一起消失。
+          speed={state === 'transcribing' || state === 'polishing' ? 1.5 : 1.0}
+          merging={state !== 'transcribing' && state !== 'polishing'}
+          style={{
+            position: 'absolute',
+            left: '50%',
+            top: '50%',
+            width: 170,
+            height: 170,
+            marginLeft: -85,
+            marginTop: -85,
+            animation: 'siri-orb-in .7s ease-out .3s both',
+          }}
+        />
+      )}
+      {state === 'error' && (
+        <span style={errorGlowTextStyle}>{message || t('capsule.error')}</span>
+      )}
+    </div>
+  );
+}
+
+const errorGlowTextStyle: CSSProperties = {
+  position: 'absolute',
+  bottom: 24,
+  left: '50%',
+  transform: 'translateX(-50%)',
+  maxWidth: 400,
+  fontSize: 12,
+  fontWeight: 600,
+  lineHeight: 1.4,
+  textAlign: 'center',
+  color: '#ff7a70',
+  textShadow: '0 0 14px rgba(255,70,60,0.5), 0 1px 6px rgba(0,0,0,0.6)',
+  whiteSpace: 'nowrap',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+};
+
+interface SelectionPolishNoticeProps {
+  state: CapsuleState;
+  message?: string;
+}
+
+/**
+ * 选区润色专用的一行无交互提示。它处在同一扇 Windows no-activate + mouse-passthrough
+ * capsule 窗口中，因此不会把焦点从用户当前输入框抢走，也不会遮挡点击。
+ */
+function SelectionPolishNotice({ state, message }: SelectionPolishNoticeProps) {
+  const { t } = useTranslation();
+  const processing = state === 'polishing';
+  const failed = state === 'error';
+  const completed = state === 'done';
+  const cancelled = state === 'cancelled';
+  const label = message
+    ?? (processing
+      ? t('capsule.selectionPolish.polishing')
+      : completed
+        ? t('capsule.selectionPolish.replaced')
+        : cancelled
+          ? t('capsule.selectionPolish.noSelection')
+          : t('capsule.selectionPolish.failed'));
+  const color = failed
+    ? '#ff8278'
+    : completed
+      ? '#63d596'
+      : cancelled
+        ? 'var(--ol-capsule-center-ink)'
+        : '#8fc0ff';
+  const symbol = completed ? '✓' : failed ? '!' : cancelled ? '·' : null;
+
+  return (
+    <div
+      role={failed ? 'alert' : 'status'}
+      aria-live="polite"
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 8,
+        maxWidth: 360,
+        padding: '8px 14px',
+        borderRadius: 999,
+        border: failed
+          ? '1px solid rgba(255, 112, 102, 0.42)'
+          : '1px solid var(--ol-capsule-pill-border)',
+        background: 'var(--ol-capsule-pill-bg)',
+        boxShadow: 'var(--ol-capsule-pill-shadow)',
+        color,
+        fontFamily: 'var(--ol-font-sans)',
+        fontSize: 13,
+        fontWeight: 600,
+        lineHeight: 1.25,
+        letterSpacing: '0.01em',
+        pointerEvents: 'none',
+      }}
+    >
+      {processing ? (
+        <span
+          aria-hidden="true"
+          style={{
+            width: 12,
+            height: 12,
+            flex: '0 0 auto',
+            border: '2px solid rgba(143, 192, 255, 0.32)',
+            borderTopColor: color,
+            borderRadius: '50%',
+            animation: 'selection-polish-spinner .75s linear infinite',
+          }}
+        />
+      ) : (
+        <span
+          aria-hidden="true"
+          style={{
+            display: 'inline-flex',
+            width: 13,
+            justifyContent: 'center',
+            flex: '0 0 auto',
+            color,
+            fontSize: completed ? 15 : 16,
+            fontWeight: 800,
+            lineHeight: 1,
+          }}
+        >
+          {symbol}
+        </span>
+      )}
+      <span
+        style={{
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+        }}
+      >
+        {label}
+      </span>
+    </div>
+  );
+}
+
+// ───────── 经典药丸（Openless 默认风格）───────────────────────────────
+// 从 1.3.14 的胶囊实现恢复：毛玻璃药丸 + 音量条 + 取消/确认按钮。尺寸与当时
+// capsuleLayout 的常量保持一致（Siri 光效舞台是 460×180 全幅，经典版是居中小药丸）。
+
+interface ClassicPillMetrics {
+  width: number;
+  height: number;
+  textWidth: number;
+}
+
+const CLASSIC_PILL_METRICS: ClassicPillMetrics = {
+  width: 176,
+  height: 42,
+  textWidth: 84,
+};
+const CLASSIC_PILL_METRICS_WIN: ClassicPillMetrics = {
+  width: 196,
+  height: 52,
+  textWidth: 104,
+};
+
+function classicPillMetrics(os: OS): ClassicPillMetrics {
+  return os === 'win' ? CLASSIC_PILL_METRICS_WIN : CLASSIC_PILL_METRICS;
+}
+
+function AudioBars({ level }: { level: number }) {
   const envelope = [0.55, 0.85, 1.0, 0.85, 0.55];
   const base = 2;
   const max = 24;
@@ -98,7 +354,7 @@ interface CenterTextProps {
 }
 
 function CenterText({ os, kind, text, color = 'var(--ol-capsule-center-ink)' }: CenterTextProps) {
-  const metrics = getCapsulePillMetrics(os);
+  const metrics = classicPillMetrics(os);
   const layout = getCapsuleMessageLayout(os, kind);
   return (
     <span
@@ -176,7 +432,7 @@ const CircleButton = memo(function CircleButton({ variant, enabled, onClick }: C
   );
 });
 
-interface PillProps {
+interface ClassicPillProps {
   os: OS;
   state: CapsuleState;
   level: number;
@@ -187,9 +443,9 @@ interface PillProps {
   onConfirm: () => void;
 }
 
-function Pill({ os, state, level, insertedChars, message, operating, onCancel, onConfirm }: PillProps) {
+function ClassicPill({ os, state, level, insertedChars, message, operating, onCancel, onConfirm }: ClassicPillProps) {
   const { t } = useTranslation();
-  const metrics = useMemo(() => getCapsulePillMetrics(os), [os]);
+  const metrics = classicPillMetrics(os);
   const processingLayout = useMemo(() => getCapsuleMessageLayout(os, 'processing'), [os]);
   const cancelEnabled = state === 'recording' || state === 'transcribing' || state === 'polishing';
   const confirmEnabled = state === 'recording';
@@ -208,7 +464,7 @@ function Pill({ os, state, level, insertedChars, message, operating, onCancel, o
     return undefined;
   }, [state]);
 
-  let center: JSX.Element;
+  let center: ReactNode;
   switch (state) {
     case 'recording':
       center = <AudioBars level={level} />;
@@ -296,7 +552,7 @@ function Pill({ os, state, level, insertedChars, message, operating, onCancel, o
         padding: '0 8px',
         width: metrics.width,
         height: metrics.height,
-        boxSizing: metrics.boxSizing,
+        boxSizing: 'border-box',
         borderRadius: 999,
         border: '1px solid var(--ol-capsule-pill-border)',
         boxShadow: `${os === 'win' ? `0 10px 24px -14px rgba(0, 0, 0, ${(0.24 + ambient * 0.06).toFixed(3)})` : `0 18px 50px -10px rgba(0, 0, 0, ${shadowAlpha.toFixed(3)})`}, 0 0 0 0.5px rgba(0, 0, 0, 0.24), var(--ol-capsule-pill-inset)`,
@@ -317,142 +573,41 @@ function Pill({ os, state, level, insertedChars, message, operating, onCancel, o
   );
 }
 
-// 与 @keyframes capsule-out 的 0.36s 时长一致——必须同步，否则定时器先于
-// 动画结束就 unmount → 用户看到半截动画被截断。
-// v1.3.1-6: 从 240ms 加到 360ms 让用户看清退出动画（240ms 太快感知不到）。
-const EXIT_ANIM_MS = 360;
-// #470 诊断 v2：模块级一次性门，只在 webview 收到第一个 capsule:state 事件时打 log。
-let capsuleStateFirstLogged = false;
+interface ClassicCapsuleProps {
+  os: OS;
+  state: CapsuleState;
+  level: number;
+  insertedChars: number;
+  message?: string;
+  operating?: boolean;
+  translation: boolean;
+}
 
-// 初始可见 state：Tauri 内运行从 idle 开始（等后端 capsule:state 事件），
-// 浏览器 dev 模式从 recording 开始以便直接看到胶囊。
-const INITIAL_VISIBLE_STATE: CapsuleState = isTauri ? 'idle' : 'recording';
-
-export function Capsule() {
+/**
+ * 经典药丸 + 「正在翻译」徽章（与 1.3.14 一致）。取消/确认按钮直接调 dictation
+ * 命令（胶囊窗口本身不抢焦点，按钮交互只出现在录音进行中）。
+ */
+function ClassicCapsule({
+  os,
+  state,
+  level,
+  insertedChars,
+  message,
+  operating,
+  translation,
+}: ClassicCapsuleProps) {
   const { t } = useTranslation();
-  const os = detectOS();
-  const metrics = getCapsulePillMetrics(os);
-  const [state, setState] = useState<CapsuleState>(INITIAL_VISIBLE_STATE);
-  const [level, setLevel] = useState<number>(isTauri ? 0 : 0.6);
-  const [insertedChars, setInsertedChars] = useState<number>(0);
-  const [message, setMessage] = useState<string | undefined>();
-  const [translation, setTranslation] = useState<boolean>(false);
-  const [operating, setOperating] = useState<boolean>(false);
-  // `leaving` 与 `lastVisibleState` 协同实现「退出动画」：
-  // - 当 state 从非 idle 变成 idle 时，不立即卸载，而是把 leaving 置为 true 并保留
-  //   最后一帧的可见 state（lastVisibleState），让胶囊用 capsule-out 动画收缩淡出。
-  // - 动画结束（EXIT_ANIM_MS）后再把 leaving 置回 false，组件回到「真正未挂载」分支。
-  // - 若期间 state 又切回非 idle（例如用户连按热键），立刻中止 leaving 并恢复显示。
-  const [leaving, setLeaving] = useState<boolean>(false);
-  const [lastVisibleState, setLastVisibleState] = useState<CapsuleState>(INITIAL_VISIBLE_STATE);
-  // Windows 端 host 在翻译模式从 84 长到 118；macOS / Linux 上 capsuleLayout 已固定 42 忽略此参数。
-  const hostMetrics = getCapsuleHostMetrics(os, translation);
-
-  useEffect(() => {
-    if (!isTauri) return;
-    let unlisten: (() => void) | undefined;
-    let cancelled = false;
-    (async () => {
-      const { listen } = await import('@tauri-apps/api/event');
-      const handle = await listen<CapsulePayload>('capsule:state', event => {
-        const p = event.payload;
-        if (!capsuleStateFirstLogged) {
-          capsuleStateFirstLogged = true;
-          // #470 诊断 v2：确认 capsule webview 确实收到了后端事件 —— 区分「后端没
-          // emit」与「emit 了但窗口没显示/没渲染」。配合后端 [capsule] 日志定位根因。
-          console.info('[capsule] first capsule:state received in webview, state=', p.state);
-        }
-        setState(p.state);
-        setLevel(p.level ?? 0);
-        setMessage(p.message ?? undefined);
-        if (p.insertedChars != null) setInsertedChars(p.insertedChars);
-        setTranslation(p.translation === true);
-        setOperating(p.operating === true);
-      });
-      if (cancelled) handle();
-      else unlisten = handle;
-    })();
-    return () => {
-      cancelled = true;
-      if (unlisten) unlisten();
-    };
-  }, []);
-
-  // 退出动画调度：在 state 真正进入 idle 时，先用 capsule-out 播放 EXIT_ANIM_MS，再卸载。
-  // 设计要点：
-  // 1. 进入非 idle：清掉 leaving，记录最新可见 state；
-  // 2. 进入 idle 且之前可见：开启 leaving 并启动定时器；
-  // 3. 期间又被打回非 idle：cleanup 直接 clearTimeout，定时器不会触发，
-  //    新一轮 effect 会立即恢复可见态，避免错误地把可见状态切到 idle。
-  useEffect(() => {
-    if (state !== 'idle') {
-      // 立即恢复可见，并取消上一轮可能挂着的离场。
-      if (leaving) setLeaving(false);
-      setLastVisibleState(state);
-      return undefined;
-    }
-    // state === 'idle'：判断是不是从可见态过渡过来。
-    if (lastVisibleState === 'idle') return undefined;
-    setLeaving(true);
-    const timer = setTimeout(() => {
-      setLeaving(false);
-      setLastVisibleState('idle');
-    }, EXIT_ANIM_MS);
-    return () => clearTimeout(timer);
-    // 故意只依赖 state —— lastVisibleState / leaving 是内部派生量，
-    // 把它们加进依赖会让定时器被反复重建。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state]);
-
+  const metrics = classicPillMetrics(os);
+  const hostMetrics = getCapsuleHostMetrics(os, false);
   const onCancel = useCallback(() => {
-    void invokeOrMock<void>('cancel_dictation', undefined, () => undefined);
+    void cancelDictation();
   }, []);
-
   const onConfirm = useCallback(() => {
-    void invokeOrMock<void>('stop_dictation', undefined, () => undefined);
+    void stopDictation();
   }, []);
-
-  // 真正卸载：state 已是 idle，且不在离场动画中。
-  if (state === 'idle' && !leaving) {
-    return <div style={{ width: 0, height: 0 }} />;
-  }
-
-  // 离场时用 lastVisibleState 渲染最后一帧内容，避免把 idle 当作 fallback 走到 AudioBars(0)。
-  const renderedState: CapsuleState = state === 'idle' ? lastVisibleState : state;
 
   return (
-    <div
-      style={{
-        width: '100%',
-        height: '100%',
-        position: 'relative',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        paddingLeft: hostMetrics.horizontalInset,
-        paddingRight: hostMetrics.horizontalInset,
-        boxSizing: hostMetrics.boxSizing,
-        paddingTop: os === 'win'
-          ? Math.max(0, hostMetrics.height - metrics.height - hostMetrics.bottomInset)
-          : 0,
-        paddingBottom: os === 'win' ? hostMetrics.bottomInset : 0,
-        background: 'transparent',
-        // 入场：中央 scaleX 由 0.18 长到 1（视觉上像从中心向两端展开）+ 淡入。
-        // 离场：scaleX 由 1 收缩回 0.18 + 向下偏移 8px + 淡出。
-        // 三平台一致 —— 旧版 Windows 走 animation:'none' 的分支已删除。
-        // transformOrigin 默认就是 50% 50%，所以 scaleX 天然以中央为锚点。
-        animation: leaving
-          // v1.3.1-6 调整：
-          // - 入场 .26s → .38s，cubic-bezier 加强 spring overshoot（更曲线感）
-          // - 出场 .24s → .36s（前面 EXIT_ANIM_MS 也同步到 360），曲线改成 ease-in-out 平滑
-          //   收缩 + 下移 + 淡出三段同步进行
-          ? 'capsule-out .36s cubic-bezier(.55,.06,.68,.19) forwards'
-          // 入场改成弹性"弹出"：整体 scale 从 .78 弹到 1，back-out 曲线带回弹 overshoot。
-          : 'capsule-in .46s cubic-bezier(.34,1.56,.64,1) both',
-        transformOrigin: 'center',
-        willChange: 'transform, opacity',
-      }}
-    >
+    <>
       {/* "正在翻译" 徽章 — 嵌套两层：
           外层只负责"绝对定位 + 水平居中（translateX(-50%)）"，不参与动画；
           内层只负责"垂直位移 + 渐变透明度"——这样不会跟 translateX(-50%) 冲突，
@@ -461,8 +616,8 @@ export function Capsule() {
         style={{
           position: 'absolute',
           left: '50%',
-          // macOS / Linux：胶囊窗口 220×110、pill 居中，badge 锚到 pill 中线上方 21+8。
-          // Windows：host 比 pill 多出左右 12px / 底部 12px 的阴影空间，pill 仍保持居中。
+          // macOS / Linux：pill 居中在 460×180 host，badge 锚到 pill 中线上方 21+8。
+          // Windows：pill 更高（52），badge 锚到 pill 上沿（bottomInset + height + gap）。
           bottom: os === 'win'
             ? `${hostMetrics.bottomInset + metrics.height + hostMetrics.badgeGap}px`
             : 'calc(50% + 21px + 8px)',
@@ -482,12 +637,12 @@ export function Capsule() {
             color: 'var(--ol-blue)',
             background: 'var(--ol-capsule-badge-bg)',
             // issue #470：去掉无效的 backdrop-filter —— webview 模糊不了透明窗口背后的桌面
-            // （Tauri 上游限制，同本文件上方 pill 注释），纯空耗合成，删除零视觉变化。
+            // （Tauri 上游限制，同 pill 注释），纯空耗合成，删除零视觉变化。
             border: '0.5px solid var(--ol-capsule-badge-border)',
             boxShadow: '0 4px 12px -4px rgba(37, 99, 235, 0.25), 0 0 0 0.5px rgba(0,0,0,0.04)',
             letterSpacing: '0.02em',
             whiteSpace: 'nowrap',
-            // 隐藏：从 pill 中线偏下出发；显示：归位到 wrapper（pill 上方 25px）
+            // 隐藏：从 pill 中线偏下出发；显示：归位到 pill 上方。
             opacity: translation ? 1 : 0,
             transform: translation ? 'translateY(0) scale(1)' : 'translateY(40px) scale(.88)',
             transformOrigin: 'center bottom',
@@ -499,16 +654,333 @@ export function Capsule() {
           {t('capsule.translating')}
         </div>
       </div>
-      <Pill
+      <ClassicPill
         os={os}
-        state={renderedState}
-        level={leaving ? 0 : level}
+        state={state}
+        level={level}
         insertedChars={insertedChars}
         message={message}
         operating={operating}
         onCancel={onCancel}
         onConfirm={onConfirm}
       />
+    </>
+  );
+}
+
+// 与 @keyframes capsule-out 的时长一致——必须同步，否则定时器先于动画结束就 unmount →
+// 用户看到半截动画被截断。两种样式沿用同一组 capsule-in/out keyframes，只是时长不同：
+// Siri 光效 520ms（现状），经典药丸 360ms（与 1.3.14 一致）。
+const EXIT_ANIM_MS_SIRI = 520;
+const EXIT_ANIM_MS_CLASSIC = 360;
+
+// 胶囊「预备→就绪」的平均耗时（ms），驱动入场展开动画的预测节奏（见 SiriGL warmProgress）：
+// 每次录音就绪后按 EMA 更新并存 localStorage 跨会话学习。默认 150ms，clamp [60,600]。
+const WARMUP_MS_KEY = 'ol-capsule-warmup-ms';
+const WARMUP_MS_DEFAULT = 150;
+function readWarmupMs(): number {
+  if (typeof localStorage === 'undefined') return WARMUP_MS_DEFAULT;
+  const raw = Number(localStorage.getItem(WARMUP_MS_KEY));
+  return Number.isFinite(raw) && raw > 0 ? Math.min(600, Math.max(60, raw)) : WARMUP_MS_DEFAULT;
+}
+// #470 诊断 v2：模块级一次性门，只在 webview 收到第一个 capsule:state 事件时打 log。
+let capsuleStateFirstLogged = false;
+
+const CAPSULE_PREVIEW_STATES: CapsuleState[] = [
+  'idle',
+  'recording',
+  'transcribing',
+  'polishing',
+  'done',
+  'cancelled',
+  'error',
+];
+
+function getPreviewCapsulePayload() {
+  if (isTauri || typeof window === 'undefined') {
+    return {
+      state: 'idle' as CapsuleState,
+      level: 0,
+      message: undefined,
+      translation: false,
+      warming: false,
+      selectionPolish: false,
+      style: 'siri' as CapsuleStyle,
+    };
+  }
+
+  const params = new URLSearchParams(window.location.search);
+  const stateParam = params.get('state');
+  const previewState = CAPSULE_PREVIEW_STATES.includes(stateParam as CapsuleState)
+    ? (stateParam as CapsuleState)
+    : 'recording';
+  const previewLevel = Number(params.get('level') ?? 0.6);
+  return {
+    state: previewState,
+    level: Number.isFinite(previewLevel) ? Math.min(1, Math.max(0, previewLevel)) : 0.6,
+    message: params.get('message') ?? undefined,
+    translation: params.get('translation') === '1',
+    warming: params.get('warming') === '1',
+    selectionPolish: params.get('selectionPolish') === '1',
+    // 浏览器预览：?style=classic 直接看经典药丸。
+    style: params.get('style') === 'classic' ? ('classic' as CapsuleStyle) : ('siri' as CapsuleStyle),
+  };
+}
+
+interface CapsuleProps {
+  os?: OS | null;
+}
+
+export function Capsule({ os: forcedOs }: CapsuleProps = {}) {
+  const { t } = useTranslation();
+  const os = forcedOs ?? detectOS();
+  const preview = useMemo(() => getPreviewCapsulePayload(), []);
+  const metrics = getCapsulePillMetrics(os);
+  const [state, setState] = useState<CapsuleState>(preview.state);
+  const [level, setLevel] = useState<number>(preview.level);
+  const [message, setMessage] = useState<string | undefined>(preview.message);
+  const [translation, setTranslation] = useState<boolean>(preview.translation);
+  const [selectionPolish, setSelectionPolish] = useState<boolean>(preview.selectionPolish);
+  // 胶囊样式（siri / classic）：随 capsule:state payload 下发，设置里切换后下一次录音生效。
+  const [capsuleStyle, setCapsuleStyle] = useState<CapsuleStyle>(preview.style);
+  const isClassic = capsuleStyle === 'classic';
+  // 预备态：麦克风尚未吐第一帧 PCM。true 时录音光条走「待命」呼吸形态（见 SiriGL warming）。
+  const [warming, setWarming] = useState<boolean>(preview.warming);
+  // 预备→就绪耗时的移动平均，驱动光条展开动画的预测节奏（见 SiriGL warmProgress）。
+  const [warmupMs, setWarmupMs] = useState<number>(() => readWarmupMs());
+  const warmStartRef = useRef<number | null>(null);
+  // 经典药丸专属：done 态的「已插入 N 字」与 thinking/using 文案。payload 只在状态变化
+  // 时到达，用 ref 保存即可 —— 触发重渲的是 setState，这里只是给渲染读取终态值。
+  const insertedCharsRef = useRef(0);
+  const operatingRef = useRef(false);
+  // `leaving` 与 `lastVisibleState` 协同实现「退出动画」：
+  // - 当 state 从非 idle 变成 idle 时，不立即卸载，而是把 leaving 置为 true 并保留
+  //   最后一帧的可见 state（lastVisibleState），让胶囊用 capsule-out 动画收缩淡出。
+  // - 动画结束（EXIT_ANIM_MS）后再把 leaving 置回 false，组件回到「真正未挂载」分支。
+  // - 若期间 state 又切回非 idle（例如用户连按热键），立刻中止 leaving 并恢复显示。
+  const [leaving, setLeaving] = useState<boolean>(false);
+  const [lastVisibleState, setLastVisibleState] = useState<CapsuleState>(preview.state);
+  const [lastVisibleSelectionPolish, setLastVisibleSelectionPolish] = useState<boolean>(
+    preview.selectionPolish,
+  );
+  const [lastVisibleMessage, setLastVisibleMessage] = useState<string | undefined>(preview.message);
+  // 退出动画时长跟随样式；leaving effect 故意只依赖 state，所以经 ref 读取最新值。
+  const exitMsRef = useRef(isClassic ? EXIT_ANIM_MS_CLASSIC : EXIT_ANIM_MS_SIRI);
+  exitMsRef.current = isClassic ? EXIT_ANIM_MS_CLASSIC : EXIT_ANIM_MS_SIRI;
+  const exitMs = exitMsRef.current;
+  // 前端 host 与原生窗口保持同一份透明语音 orb 舞台尺寸。
+  const hostMetrics = getCapsuleHostMetrics(os, translation);
+  // Windows 端 host 用「host 高 − pill 高」把 pill 垂直居中；Siri 舞台 460×180 与 host
+  // 等高（padding 0），经典药丸则在 180 高的窗口里垂直居中。
+  const pillMetrics = isClassic ? classicPillMetrics(os) : metrics;
+  const badgeBottom = Math.round(metrics.height * 0.73);
+
+  // 空闲预热 shader 编译缓存：首次按下热键时光条不用现场编译（响应延迟反馈）。
+  useEffect(() => {
+    const idle = (window as Window & { requestIdleCallback?: (cb: () => void) => number })
+      .requestIdleCallback;
+    if (idle) {
+      idle(() => warmUpSiriShaders());
+      return;
+    }
+    const timer = setTimeout(() => warmUpSiriShaders(), 1200);
+    return () => clearTimeout(timer);
+  }, []);
+
+  useEffect(() => {
+    if (!isTauri) return;
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    (async () => {
+      const { listen } = await import('@tauri-apps/api/event');
+      const handle = await listen<CapsulePayload>('capsule:state', event => {
+        const p = event.payload;
+        if (!capsuleStateFirstLogged) {
+          capsuleStateFirstLogged = true;
+          // #470 诊断 v2：确认 capsule webview 确实收到了后端事件 —— 区分「后端没
+          // emit」与「emit 了但窗口没显示/没渲染」。配合后端 [capsule] 日志定位根因。
+          console.info('[capsule] first capsule:state received in webview, state=', p.state);
+        }
+        setState(p.state);
+        setLevel(p.level ?? 0);
+        setMessage(p.message ?? undefined);
+        setTranslation(p.translation === true);
+        setWarming(p.warming === true);
+        setSelectionPolish(p.selectionPolish === true);
+        if (p.capsuleStyle != null) setCapsuleStyle(p.capsuleStyle);
+        if (p.insertedChars != null) insertedCharsRef.current = p.insertedChars;
+        operatingRef.current = p.operating === true;
+      });
+      if (cancelled) handle();
+      else unlisten = handle;
+    })();
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  }, []);
+
+  // 退出动画调度：在 state 真正进入 idle 时，先用 capsule-out 播放
+  // EXIT_ANIM_MS_SIRI / EXIT_ANIM_MS_CLASSIC（按当前样式，经 exitMsRef 读取），再卸载。
+  // 设计要点：
+  // 1. 进入非 idle：清掉 leaving，记录最新可见 state；
+  // 2. 进入 idle 且之前可见：开启 leaving 并启动定时器；
+  // 3. 期间又被打回非 idle：cleanup 直接 clearTimeout，定时器不会触发，
+  //    新一轮 effect 会立即恢复可见态，避免错误地把可见状态切到 idle。
+  useEffect(() => {
+    if (state !== 'idle') {
+      // 立即恢复可见，并取消上一轮可能挂着的离场。
+      if (leaving) setLeaving(false);
+      setLastVisibleState(state);
+      return undefined;
+    }
+    // state === 'idle'：判断是不是从可见态过渡过来。
+    if (lastVisibleState === 'idle') return undefined;
+    setLeaving(true);
+    const timer = setTimeout(() => {
+      setLeaving(false);
+      setLastVisibleState('idle');
+    }, exitMsRef.current);
+    return () => clearTimeout(timer);
+    // 故意只依赖 state —— lastVisibleState / leaving 是内部派生量，
+    // 把它们加进依赖会让定时器被反复重建。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state]);
+
+  // Idle payload 不携带终态文案。保留最近一帧可见 selection 提示，才能让 auto-hide
+  // 触发后的离场动画继续显示“已替换 / 未选中内容”等正确反馈，而不闪回语音舞台。
+  useEffect(() => {
+    if (state === 'idle') return;
+    setLastVisibleSelectionPolish(selectionPolish);
+    setLastVisibleMessage(message);
+  }, [state, selectionPolish, message]);
+
+  // 学习「预备态持续多久」= 麦克风就绪耗时，EMA 更新 warmupMs（预测展开的基准时长）。
+  useEffect(() => {
+    if (warming) {
+      warmStartRef.current = performance.now();
+      return;
+    }
+    if (warmStartRef.current == null) return;
+    const loadMs = performance.now() - warmStartRef.current;
+    warmStartRef.current = null;
+    // 过滤异常样本：<20ms 多半不是真入场；>3s 多半首次 TCC / 卡顿，不代表常态。
+    if (loadMs < 20 || loadMs > 3000) return;
+    setWarmupMs(prev => {
+      const next = Math.min(600, Math.max(60, prev * 0.7 + loadMs * 0.3));
+      try { localStorage.setItem(WARMUP_MS_KEY, String(Math.round(next))); } catch { /* ignore */ }
+      return next;
+    });
+  }, [warming]);
+
+  // 真正卸载：state 已是 idle，且不在离场动画中。
+  if (state === 'idle' && !leaving) {
+    return <div style={{ width: 0, height: 0 }} />;
+  }
+
+  // 离场时用 lastVisibleState 渲染最后一帧内容，避免把 idle 当作无波形状态。
+  const renderedState: CapsuleState = state === 'idle' ? lastVisibleState : state;
+  const renderedSelectionPolish = state === 'idle'
+    ? lastVisibleSelectionPolish
+    : selectionPolish;
+  const renderedMessage = state === 'idle' ? lastVisibleMessage : message;
+
+  return (
+    <div
+      style={{
+        width: '100%',
+        height: '100%',
+        position: 'relative',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        paddingLeft: hostMetrics.horizontalInset,
+        paddingRight: hostMetrics.horizontalInset,
+        boxSizing: hostMetrics.boxSizing,
+        paddingTop: os === 'win'
+          ? Math.max(0, hostMetrics.height - pillMetrics.height - hostMetrics.bottomInset)
+          : 0,
+        paddingBottom: os === 'win' ? hostMetrics.bottomInset : 0,
+        background: 'transparent',
+        animation: leaving
+          ? `capsule-out ${exitMs}ms cubic-bezier(.55,.06,.68,.19) forwards`
+          // .68s 的入场被反馈「按下之后有延迟」：压到 .38s，曲线保持轻微弹性，
+          // 光条几乎跟手出现。
+          : 'capsule-in .38s cubic-bezier(.3,1.2,.4,1) both',
+        transformOrigin: 'center',
+        willChange: 'transform, opacity',
+      }}
+    >
+      {!renderedSelectionPolish && (isClassic ? (
+        <ClassicCapsule
+          os={os}
+          state={renderedState}
+          level={leaving ? 0 : level}
+          insertedChars={insertedCharsRef.current}
+          message={renderedMessage}
+          operating={operatingRef.current}
+          translation={translation}
+        />
+      ) : (
+        <>
+      {/* "正在翻译" 徽章 — 嵌套两层：
+          外层只负责"绝对定位 + 水平居中（translateX(-50%)）"，不参与动画；
+          内层只负责"垂直位移 + 渐变透明度"——这样不会跟 translateX(-50%) 冲突，
+          也不存在 keyframe 与 inline transform 互相覆盖导致的视觉跳变。 */}
+      <div
+        style={{
+          position: 'absolute',
+          left: '50%',
+          bottom: `${badgeBottom}px`,
+          transform: 'translateX(-50%)',
+          pointerEvents: 'none',
+        }}
+      >
+        <div
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 5,
+            fontSize: 10.5,
+            fontWeight: 600,
+            // 纯光效语言：无壳发光小字，与波形同一气质（浮空 + 冷蓝光晕）。
+            color: 'rgba(190, 212, 255, 0.95)',
+            textShadow: '0 0 14px rgba(90, 140, 255, 0.85), 0 1px 6px rgba(0, 0, 0, 0.45)',
+            letterSpacing: '0.02em',
+            whiteSpace: 'nowrap',
+            // 隐藏：从光条附近偏下出发；显示：归位到光条上方。
+            opacity: translation ? 1 : 0,
+            transform: translation ? 'translateY(0) scale(1)' : 'translateY(40px) scale(.88)',
+            transformOrigin: 'center bottom',
+            transition: 'opacity .24s ease-out, transform .34s cubic-bezier(.2,.9,.3,1.1)',
+            willChange: 'opacity, transform',
+          }}
+        >
+          <span
+            style={{
+              width: 5,
+              height: 5,
+              borderRadius: 999,
+              background: 'rgba(150, 185, 255, 0.95)',
+              boxShadow: '0 0 8px rgba(90, 140, 255, 0.9)',
+            }}
+          />
+          {t('capsule.translating')}
+        </div>
+      </div>
+      <VoiceOrbStage
+        os={os}
+        state={renderedState}
+        level={leaving ? 0 : level}
+        warming={!leaving && warming}
+        warmupMs={warmupMs}
+        message={renderedMessage}
+      />
+        </>
+      ))}
+      {renderedSelectionPolish && (
+        <SelectionPolishNotice state={renderedState} message={renderedMessage} />
+      )}
     </div>
   );
 }

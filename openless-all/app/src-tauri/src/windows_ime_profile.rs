@@ -154,20 +154,39 @@ pub fn is_openless_language_profile_enabled() -> WindowsImeProfileResult<bool> {
     ))
 }
 
+/// TSF IME 未装（或注册损坏）时「键盘列表可见性」偏好的短路结果。
+///
+/// 返回 `Some(result)` 表示无需触碰注册表即可结束；`None` 表示已安装，需要走真正的
+/// `EnableLanguageProfile` 变更。抽成纯函数，使「未安装」这一分支能在任意平台上被测试
+/// 覆盖到（`apply_windows_openless_keyboard_list_pref` 依赖 Windows 注册表，macOS/CI
+/// 无法命中其内部分支）。
+///
+/// 关键语义：TSF IME 未安装时，键盘列表里根本没有 OpenLess 条目——
+/// - `desired == false`（不显示）是天然已满足的空操作；
+/// - `desired == true`（显示）也只能是 no-op（没东西可启用）。
+///
+/// 两支都必须是 `Ok(())`。此前「不显示 + 未安装」错误地返回 `Err`，经 settings.rs 的
+/// `apply_keyboard_list(&prefs)?` 传播，导致整个设置保存事务回滚（用户勾「仅 SendInput
+/// 插入」+「不在键盘列表显示」且未装 TSF IME 时，之后任何设置都存不进）。
+fn keyboard_list_pref_short_circuit(
+    install_state: WindowsImeInstallState,
+    _desired: bool,
+) -> Option<Result<(), String>> {
+    if install_state == WindowsImeInstallState::Installed {
+        None
+    } else {
+        Some(Ok(()))
+    }
+}
+
 /// 将「SendInput + 键盘列表可见性」偏好同步到当前用户的 TSF 语言配置文件。
 pub fn apply_windows_openless_keyboard_list_pref(prefs: &UserPreferences) -> Result<(), String> {
     let desired = desired_openless_language_profile_enabled(prefs);
     #[cfg(target_os = "windows")]
     {
         let status = get_windows_ime_status();
-        if status.state != WindowsImeInstallState::Installed {
-            if desired {
-                return Ok(());
-            }
-            return Err(
-                "OpenLess TSF IME is not installed; cannot hide it from the keyboard list"
-                    .to_string(),
-            );
+        if let Some(result) = keyboard_list_pref_short_circuit(status.state, desired) {
+            return result;
         }
         set_openless_language_profile_enabled(desired).map_err(|err| {
             let message = err.to_string();
@@ -805,6 +824,62 @@ mod tests {
             ..UserPreferences::default()
         };
         assert!(!desired_openless_language_profile_enabled(&sendinput_hide));
+    }
+
+    // ── Fix: TSF IME 未安装时「键盘列表可见性」偏好不应报错 ──
+    // 之前 `desired == false`（不显示）+ 未安装错误地返回 Err，经 settings.rs 的
+    // apply_keyboard_list(&prefs)? 传播导致整个设置保存事务回滚。这是回归护栏。
+
+    #[test]
+    fn uninstalled_hide_request_is_noop_ok() {
+        // 用户想让 OpenLess 不出现在键盘列表，但 TSF IME 没装 → 天然已满足 → Ok(())。
+        assert_eq!(
+            keyboard_list_pref_short_circuit(WindowsImeInstallState::NotInstalled, false),
+            Some(Ok(()))
+        );
+    }
+
+    #[test]
+    fn uninstalled_show_request_is_noop_ok() {
+        // 用户想显示但没装 → 只能 no-op（没东西可启用）→ Ok(())。
+        assert_eq!(
+            keyboard_list_pref_short_circuit(WindowsImeInstallState::NotInstalled, true),
+            Some(Ok(()))
+        );
+    }
+
+    #[test]
+    fn broken_registration_short_circuits_ok_for_both_desired_values() {
+        // 注册损坏同样视为「列表里没有可信条目」→ 两支都短路成 Ok(())，绝不 Err。
+        assert_eq!(
+            keyboard_list_pref_short_circuit(WindowsImeInstallState::RegistrationBroken, false),
+            Some(Ok(()))
+        );
+        assert_eq!(
+            keyboard_list_pref_short_circuit(WindowsImeInstallState::RegistrationBroken, true),
+            Some(Ok(()))
+        );
+    }
+
+    #[test]
+    fn not_windows_state_short_circuits_ok() {
+        assert_eq!(
+            keyboard_list_pref_short_circuit(WindowsImeInstallState::NotWindows, false),
+            Some(Ok(()))
+        );
+    }
+
+    #[test]
+    fn installed_state_proceeds_to_real_profile_mutation() {
+        // 已安装 → 不短路，交给真正的 EnableLanguageProfile 变更。
+        assert_eq!(
+            keyboard_list_pref_short_circuit(WindowsImeInstallState::Installed, false),
+            None
+        );
+        assert_eq!(
+            keyboard_list_pref_short_circuit(WindowsImeInstallState::Installed, true),
+            None
+        );
     }
 }
 

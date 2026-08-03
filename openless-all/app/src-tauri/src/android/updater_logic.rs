@@ -1,7 +1,7 @@
 //! Pure Android updater helpers (manifest URLs, version compare). Testable on all targets.
 
-pub const MIRROR_BASE: &str = "https://fastgit.cc/https://github.com/appergb/openless";
-pub const DIRECT_BASE: &str = "https://github.com/appergb/openless";
+pub const MIRROR_BASE: &str = "https://fastgit.cc/https://github.com/Open-Less/openless";
+pub const DIRECT_BASE: &str = "https://github.com/Open-Less/openless";
 
 /// Must match `plugins.updater.pubkey` in `tauri.conf.json` (TAURI_SIGNING_PRIVATE_KEY pair).
 pub const UPDATER_PUBKEY_B64: &str =
@@ -97,6 +97,47 @@ mod tests {
         let urls = beta_manifest_urls("aarch64", "v1.3.8-1-beta-tauri");
         assert!(urls[0].contains("/releases/download/v1.3.8-1-beta-tauri/"));
         assert!(urls[1].ends_with("latest-android-aarch64-beta.json"));
+    }
+
+    #[test]
+    fn beta_manifest_urls_use_newest_modern_beta_tag_from_atom() {
+        let body = r#"<feed>
+  <entry>
+    <updated>2026-07-15T07:00:00Z</updated>
+    <link rel="alternate" type="text/html" href="https://github.com/Open-Less/openless/releases/tag/v1.3.15-Beta.1-tauri"/>
+  </entry>
+  <entry>
+    <updated>2026-06-17T15:41:46Z</updated>
+    <link rel="alternate" type="text/html" href="https://github.com/Open-Less/openless/releases/tag/v1.3.10-4-beta-tauri"/>
+  </entry>
+</feed>"#;
+        let latest = crate::commands::parse_latest_beta_from_atom(body)
+            .expect("Android updater must discover the modern Beta tag");
+
+        let urls = beta_manifest_urls("aarch64", &latest.tag_name);
+
+        assert_eq!(latest.tag_name, "v1.3.15-Beta.1-tauri");
+        assert!(urls
+            .iter()
+            .all(|url| url.contains("/releases/download/v1.3.15-Beta.1-tauri/")));
+    }
+
+    #[test]
+    fn beta_manifest_urls_skip_malformed_modern_tags_from_atom() {
+        let body = r#"<feed>
+  <entry><link href="https://github.com/Open-Less/openless/releases/tag/v-Beta.1-tauri"/></entry>
+  <entry><link href="https://github.com/Open-Less/openless/releases/tag/garbage-Beta.1-tauri"/></entry>
+  <entry><link href="https://github.com/Open-Less/openless/releases/tag/v1.3.15-Beta.1-tauri"/></entry>
+</feed>"#;
+        let latest = crate::commands::parse_latest_beta_from_atom(body)
+            .expect("Android updater must skip malformed Beta tags");
+
+        let urls = beta_manifest_urls("aarch64", &latest.tag_name);
+
+        assert_eq!(latest.tag_name, "v1.3.15-Beta.1-tauri");
+        assert!(urls
+            .iter()
+            .all(|url| url.contains("/releases/download/v1.3.15-Beta.1-tauri/")));
     }
 
     #[test]

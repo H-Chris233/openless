@@ -6,18 +6,28 @@
 //! `volcengine.rs`.
 
 pub mod bailian;
+pub mod dashscope_multimodal;
+pub mod elevenlabs;
 mod frame;
 pub mod local;
 pub mod mimo;
 pub mod pcm;
+pub mod qwen_realtime;
+pub mod stepfun_realtime;
 pub mod volcengine;
 pub mod wav;
 pub mod whisper;
+pub mod xfyun;
 
 pub use bailian::{BailianCredentials, BailianRealtimeASR};
+pub use dashscope_multimodal::DashScopeMultimodalASR;
+pub use elevenlabs::ElevenLabsBatchASR;
 pub use mimo::MimoBatchASR;
+pub use qwen_realtime::{Qwen3RealtimeASR, Qwen3RealtimeCredentials};
+pub use stepfun_realtime::{StepfunRealtimeASR, StepfunRealtimeCredentials};
 pub use volcengine::{VolcengineCredentials, VolcengineStreamingASR};
 pub use whisper::WhisperBatchASR;
+pub use xfyun::{XfyunCredentials, XfyunStreamingASR};
 
 /// Sink for raw 16 kHz / 16-bit / mono PCM bytes coming off the recorder.
 ///

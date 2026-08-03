@@ -12,13 +12,19 @@
 //!     "providers": {
 //!       "asr": { "<id>": { "appKey", "accessKey", "resourceId", "apiKey", "baseURL", "model", "vocabularyId" } },
 //!       "llm": { "<id>": { "displayName", "apiKey", "baseURL", "model", "temperature", "extraHeaders" } }
-//!     }
+//!     },
+//!     "marketplace": { "githubAccessToken": "<desktop-only secret>" }
 //!   }
+//!
+//! Android stores the same payload in a versioned AES-GCM envelope whose key is
+//! non-exportable from Android Keystore. Marketplace OAuth remains
+//! process-memory-only and is deliberately stripped from `credentials.enc.json`.
 //!
 //! "ark.api_key"/"volcengine.app_key" 等账户名按 Swift 语义路由到 active provider。
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
@@ -29,8 +35,6 @@ use serde::{Deserialize, Serialize};
 // import keeps the Android build free of an unused-import warning.
 #[cfg(not(target_os = "android"))]
 use anyhow::anyhow;
-#[cfg(target_os = "android")]
-use std::fs;
 
 /// 旧版 plaintext JSON 凭据路径。仅作为迁移来源；成功写入系统凭据库后会删除。
 const LEGACY_CREDS_DIR: &str = ".openless";
@@ -53,8 +57,30 @@ const KEYRING_CHUNK_MAX_UTF16_UNITS: usize = 1000;
 
 static CREDENTIALS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
+// A rejected Marketplace token must become unusable before best-effort durable
+// deletion starts. Keychain/credential-manager deletion can fail or prompt, so
+// this process-local tombstone is authoritative for every read until a newly
+// verified token has been saved successfully.
+static MARKETPLACE_TOKEN_REJECTED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(target_os = "android")]
+static ANDROID_MARKETPLACE_TOKEN: OnceLock<Mutex<Option<MarketplaceGithubToken>>> = OnceLock::new();
+
+#[cfg(target_os = "android")]
+static ANDROID_MARKETPLACE_LEGACY_SCRUBBED: OnceLock<Mutex<bool>> = OnceLock::new();
+
 fn credentials_lock() -> &'static Mutex<()> {
     CREDENTIALS_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+#[cfg(target_os = "android")]
+fn android_marketplace_token() -> &'static Mutex<Option<MarketplaceGithubToken>> {
+    ANDROID_MARKETPLACE_TOKEN.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(target_os = "android")]
+fn android_marketplace_legacy_scrubbed() -> &'static Mutex<bool> {
+    ANDROID_MARKETPLACE_LEGACY_SCRUBBED.get_or_init(|| Mutex::new(false))
 }
 
 /// Process-wide credentials cache.
@@ -101,6 +127,8 @@ struct CredsRoot {
     active: CredsActive,
     #[serde(default)]
     providers: CredsProviders,
+    #[serde(default, skip_serializing_if = "CredsMarketplace::is_empty")]
+    marketplace: CredsMarketplace,
 }
 
 fn credsroot_default_version() -> u32 {
@@ -148,6 +176,29 @@ struct CredsProviders {
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
 #[allow(non_snake_case)]
+struct CredsMarketplace {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    githubAccessToken: Option<MarketplaceGithubToken>,
+}
+
+impl CredsMarketplace {
+    fn is_empty(&self) -> bool {
+        self.githubAccessToken.is_none()
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(transparent)]
+struct MarketplaceGithubToken(String);
+
+impl std::fmt::Debug for MarketplaceGithubToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("[REDACTED]")
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
+#[allow(non_snake_case)]
 struct CredsAsrEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     apiKey: Option<String>,
@@ -162,7 +213,19 @@ struct CredsAsrEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     resourceId: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    authMode: Option<String>,
+    /// 方舟（Ark）API Key —— 仅 `api_key` 鉴权模式使用，与旧版 Access Token 槽位
+    /// (`accessKey`) 隔离，避免两模式切换时残留凭据互相污染。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    volcengineApiKey: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     vocabularyId: Option<String>,
+    /// 讯飞开放平台应用 ID（RTASR/IFASR 鉴权用）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    xfyunAppId: Option<String>,
+    /// 讯飞实时语音转写 APIKey（接口密钥）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    xfyunApiKey: Option<String>,
 }
 
 impl CredsAsrEntry {
@@ -173,7 +236,11 @@ impl CredsAsrEntry {
             && self.appKey.as_deref().unwrap_or("").is_empty()
             && self.accessKey.as_deref().unwrap_or("").is_empty()
             && self.resourceId.as_deref().unwrap_or("").is_empty()
+            && self.authMode.as_deref().unwrap_or("").is_empty()
+            && self.volcengineApiKey.as_deref().unwrap_or("").is_empty()
             && self.vocabularyId.as_deref().unwrap_or("").is_empty()
+            && self.xfyunAppId.as_deref().unwrap_or("").is_empty()
+            && self.xfyunApiKey.as_deref().unwrap_or("").is_empty()
     }
 }
 
@@ -217,20 +284,24 @@ fn active_llm_extra_headers(root: &CredsRoot) -> HashMap<String, String> {
         .unwrap_or_default()
 }
 
-fn active_llm_temperature(root: &CredsRoot) -> Option<f32> {
+fn is_valid_llm_temperature(temperature: f64) -> bool {
+    temperature.is_finite() && (0.0..=2.0).contains(&temperature)
+}
+
+fn active_llm_temperature_value(root: &CredsRoot) -> Option<f64> {
     root.providers
         .llm
         .get(&root.active.llm)
         .and_then(|entry| entry.temperature)
-        .map(|value| value as f32)
+        .filter(|temperature| is_valid_llm_temperature(*temperature))
+}
+
+fn active_llm_temperature(root: &CredsRoot) -> Option<f32> {
+    active_llm_temperature_value(root).map(|temperature| temperature as f32)
 }
 
 fn active_llm_temperature_string(root: &CredsRoot) -> Option<String> {
-    root.providers
-        .llm
-        .get(&root.active.llm)
-        .and_then(|entry| entry.temperature)
-        .map(|value| value.to_string())
+    active_llm_temperature_value(root).map(|temperature| temperature.to_string())
 }
 
 fn active_llm_extra_headers_json(root: &CredsRoot) -> Result<Option<String>> {
@@ -281,10 +352,10 @@ fn parse_llm_temperature(value: &str) -> Result<Option<f64>> {
         return Ok(None);
     }
     let temperature: f64 = trimmed.parse().context("temperature must be a number")?;
-    if !temperature.is_finite() {
-        anyhow::bail!("temperature must be finite");
-    }
-    if !(0.0..=2.0).contains(&temperature) {
+    if !is_valid_llm_temperature(temperature) {
+        if !temperature.is_finite() {
+            anyhow::bail!("temperature must be finite");
+        }
         anyhow::bail!("temperature must be between 0 and 2");
     }
     Ok(Some(temperature))
@@ -354,39 +425,205 @@ fn keyring_entry_for(account: &str) -> Result<keyring::Entry> {
 
 #[cfg(target_os = "android")]
 fn android_credentials_path() -> Result<PathBuf> {
-    Ok(super::data_dir()?.join(ANDROID_CREDENTIALS_FILE))
+    let files_dir = crate::android::jni::android::app_files_dir()
+        .map_err(|error| anyhow::anyhow!("resolve Android credential directory: {error}"))?;
+    Ok(PathBuf::from(files_dir)
+        .join("OpenLess")
+        .join(ANDROID_CREDENTIALS_FILE))
+}
+
+#[cfg(target_os = "android")]
+fn android_legacy_credentials_paths(current_path: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let mut add_path = |path: PathBuf| {
+        if path != current_path && !paths.contains(&path) {
+            paths.push(path);
+        }
+    };
+    if let Ok(dir) = std::env::var("TAURI_ANDROID_APP_DATA_DIR") {
+        add_path(
+            PathBuf::from(dir)
+                .join("OpenLess")
+                .join(ANDROID_CREDENTIALS_FILE),
+        );
+    }
+    add_path(
+        std::env::temp_dir()
+            .join("OpenLess")
+            .join(ANDROID_CREDENTIALS_FILE),
+    );
+    paths
+}
+
+#[cfg(target_os = "android")]
+fn remove_migrated_android_legacy_credentials(current_path: &Path) -> Result<()> {
+    for legacy_path in android_legacy_credentials_paths(current_path) {
+        super::android_credentials::secure_remove(&legacy_path)
+            .map_err(anyhow::Error::new)
+            .with_context(|| {
+                format!(
+                    "remove migrated Android legacy envelope {}",
+                    legacy_path.display()
+                )
+            })?;
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "android")]
 fn load_android_credentials() -> Result<Option<CredsRoot>> {
     let path = android_credentials_path()?;
-    if !path.exists() {
-        return Ok(None);
+    let mut crypto = super::android_credentials::AndroidKeystoreCrypto;
+    let loaded = match load_android_credentials_from_path_with_crypto(&path, &mut crypto)? {
+        Some(root) => Some(root),
+        None => {
+            let mut migrated = None;
+            for legacy_path in android_legacy_credentials_paths(&path) {
+                if let Some(root) = load_android_credentials_from_source_with_crypto(
+                    &legacy_path,
+                    &path,
+                    &mut crypto,
+                )? {
+                    migrated = Some(root);
+                    break;
+                }
+            }
+            migrated
+        }
+    };
+    if loaded.is_some() {
+        remove_migrated_android_legacy_credentials(&path)?;
     }
-    let bytes = fs::read(&path).with_context(|| format!("read failed: {}", path.display()))?;
-    if bytes.is_empty() {
-        return Ok(None);
+    *android_marketplace_legacy_scrubbed().lock() = true;
+    Ok(loaded)
+}
+
+#[cfg(target_os = "android")]
+fn load_android_credentials_from_path(path: &Path) -> Result<Option<CredsRoot>> {
+    let mut crypto = super::android_credentials::AndroidKeystoreCrypto;
+    load_android_credentials_from_path_with_crypto(path, &mut crypto)
+}
+
+#[cfg(all(test, not(target_os = "android")))]
+fn load_android_credentials_from_path(path: &Path) -> Result<Option<CredsRoot>> {
+    let mut crypto = super::android_credentials::TestCrypto::default();
+    load_android_credentials_from_path_with_crypto(path, &mut crypto)
+}
+
+#[cfg(any(target_os = "android", test))]
+fn load_android_credentials_from_path_with_crypto(
+    path: &Path,
+    crypto: &mut impl super::android_credentials::AndroidCredentialsCrypto,
+) -> Result<Option<CredsRoot>> {
+    load_android_credentials_from_source_with_crypto(path, path, crypto)
+}
+
+#[cfg(any(target_os = "android", test))]
+fn load_android_credentials_from_source_with_crypto(
+    source_path: &Path,
+    destination_path: &Path,
+    crypto: &mut impl super::android_credentials::AndroidCredentialsCrypto,
+) -> Result<Option<CredsRoot>> {
+    use super::android_credentials::ReadOutcome;
+
+    let loaded = super::android_credentials::read(source_path, crypto)
+        .map_err(anyhow::Error::new)
+        .context("read Android credential envelope")?;
+    let (bytes, needs_rewrite) = match loaded {
+        ReadOutcome::Missing => return Ok(None),
+        ReadOutcome::Legacy(bytes) => (bytes, true),
+        ReadOutcome::Plaintext(bytes) => (bytes, false),
+    };
+    let root = serde_json::from_slice::<CredsRoot>(&bytes)
+        .context("parse Android credential payload")?;
+    let cleaned = android_persistable_credentials(&root);
+    let contained_marketplace_token = lookup_marketplace_github_token(&root).is_some();
+    if needs_rewrite && contained_marketplace_token {
+        let sanitized = serde_json::to_vec(&cleaned)
+            .context("encode bearer-free Android legacy payload")?;
+        super::android_credentials::rewrite_legacy_without_bearer(source_path, &sanitized)
+            .map_err(anyhow::Error::new)
+            .context("scrub Marketplace bearer before Android Keystore migration")?;
     }
-    // Stub: base64 envelope — replace with Keystore-backed AES when JNI lands.
-    use base64::Engine;
-    let decoded = base64::engine::general_purpose::STANDARD
-        .decode(bytes)
-        .context("decode android credentials envelope")?;
-    let root =
-        serde_json::from_slice::<CredsRoot>(&decoded).context("parse android credentials json")?;
-    Ok(Some(root))
+    if needs_rewrite || contained_marketplace_token || source_path != destination_path {
+        write_android_credentials_envelope_with_crypto(destination_path, &cleaned, crypto)
+            .context("migrate Android credential envelope")?;
+    }
+    if source_path != destination_path {
+        super::android_credentials::secure_remove(source_path)
+            .map_err(anyhow::Error::new)
+            .with_context(|| {
+                format!(
+                    "remove migrated Android legacy envelope {}",
+                    source_path.display()
+                )
+            })?;
+    }
+    Ok(Some(cleaned))
+}
+
+#[cfg(any(target_os = "android", test))]
+fn ensure_android_marketplace_legacy_scrubbed_at(
+    path: &Path,
+    completed: &Mutex<bool>,
+) -> Result<()> {
+    let mut completed = completed.lock();
+    if *completed {
+        return Ok(());
+    }
+    // Mark completion only after the durable sanitized rewrite (or confirmed
+    // absence of a legacy file) succeeds. Any error remains retryable.
+    let _ = load_android_credentials_from_path(path)?;
+    *completed = true;
+    Ok(())
+}
+
+#[cfg(any(target_os = "android", test))]
+fn get_android_marketplace_token_at(
+    path: &Path,
+    completed: &Mutex<bool>,
+    memory_token: &Mutex<Option<MarketplaceGithubToken>>,
+) -> Result<Option<String>> {
+    ensure_android_marketplace_legacy_scrubbed_at(path, completed)?;
+    Ok(memory_token.lock().as_ref().map(|token| token.0.clone()))
+}
+
+#[cfg(target_os = "android")]
+fn ensure_android_marketplace_legacy_scrubbed() -> Result<()> {
+    let _ = load_android_credentials()?;
+    Ok(())
 }
 
 #[cfg(target_os = "android")]
 fn save_android_credentials(root: &CredsRoot) -> Result<()> {
-    let cleaned = clean_credentials(root);
-    let json = serde_json::to_string(&cleaned).context("encode credentials failed")?;
-    use base64::Engine;
-    let encoded = base64::engine::general_purpose::STANDARD.encode(json.as_bytes());
     let path = android_credentials_path()?;
-    super::ensure_dir(path.parent().unwrap_or_else(|| Path::new(".")))?;
-    fs::write(&path, encoded).with_context(|| format!("write failed: {}", path.display()))?;
-    Ok(())
+    write_android_credentials_envelope(&path, root)
+}
+
+#[cfg(target_os = "android")]
+fn write_android_credentials_envelope(path: &Path, root: &CredsRoot) -> Result<()> {
+    let mut crypto = super::android_credentials::AndroidKeystoreCrypto;
+    write_android_credentials_envelope_with_crypto(path, root, &mut crypto)
+}
+
+#[cfg(any(target_os = "android", test))]
+fn write_android_credentials_envelope_with_crypto(
+    path: &Path,
+    root: &CredsRoot,
+    crypto: &mut impl super::android_credentials::AndroidCredentialsCrypto,
+) -> Result<()> {
+    let cleaned = android_persistable_credentials(root);
+    let json = serde_json::to_vec(&cleaned).context("encode Android credential payload")?;
+    super::android_credentials::write_verified(path, &json, crypto)
+        .map_err(anyhow::Error::new)
+        .context("write Android credential envelope")
+}
+
+#[cfg(any(target_os = "android", test))]
+fn android_persistable_credentials(root: &CredsRoot) -> CredsRoot {
+    let mut cleaned = clean_credentials(root);
+    write_marketplace_github_token(&mut cleaned, None);
+    cleaned
 }
 
 fn clean_credentials(root: &CredsRoot) -> CredsRoot {
@@ -394,6 +631,53 @@ fn clean_credentials(root: &CredsRoot) -> CredsRoot {
     cleaned.providers.asr.retain(|_, v| !v.is_empty());
     cleaned.providers.llm.retain(|_, v| !v.is_empty());
     cleaned
+}
+
+fn lookup_marketplace_github_token(root: &CredsRoot) -> Option<String> {
+    root.marketplace
+        .githubAccessToken
+        .as_ref()
+        .map(|token| token.0.as_str())
+        .filter(|token| !token.trim().is_empty())
+        .map(str::to_string)
+}
+
+fn write_marketplace_github_token(root: &mut CredsRoot, value: Option<String>) {
+    root.marketplace.githubAccessToken = value.and_then(|token| {
+        if token.trim().is_empty() {
+            None
+        } else {
+            Some(MarketplaceGithubToken(token))
+        }
+    });
+}
+
+fn marketplace_token_is_rejected() -> bool {
+    MARKETPLACE_TOKEN_REJECTED.load(Ordering::SeqCst)
+}
+
+fn invalidate_marketplace_token_process_local() {
+    // Publish the tombstone first. All token reads happen under
+    // `credentials_lock`, so the subsequent cache/memory clear is atomic from
+    // the command layer's point of view; the atomic also prevents accidental
+    // direct readers from observing the rejected token.
+    MARKETPLACE_TOKEN_REJECTED.store(true, Ordering::SeqCst);
+    if let Some(root) = credentials_cache().lock().as_mut() {
+        write_marketplace_github_token(root, None);
+    }
+    #[cfg(target_os = "android")]
+    {
+        *android_marketplace_token().lock() = None;
+    }
+}
+
+fn invalidate_marketplace_token_with(durable_delete: impl FnOnce() -> Result<()>) -> Result<()> {
+    invalidate_marketplace_token_process_local();
+    durable_delete()
+}
+
+fn mark_marketplace_token_verified() {
+    MARKETPLACE_TOKEN_REJECTED.store(false, Ordering::SeqCst);
 }
 
 fn read_legacy_credentials_file(path: &Path) -> Option<CredsRoot> {
@@ -482,13 +766,62 @@ fn read_chunk_manifest(json: &str) -> Option<CredsChunkManifest> {
     }
 }
 
+/// Windows Credential Manager (`CredReadW`) can transiently fail right after
+/// login / under contention when we read the manifest entry plus every chunk
+/// entry in quick succession. A single failed read makes the whole credential
+/// set look empty → `load_keyring_credentials` returns `Err` → `load_credentials`
+/// falls back to an empty default → Overview shows「火山引擎未配置」even though the
+/// secrets are present (the next dictation re-reads and succeeds, which is why the
+/// bug is *probabilistic* and the app "实际可以正常使用"). The more chunks a
+/// credential set spans, the more reads per load, the higher the odds at least
+/// one trips. Retry transient errors a few times with short backoff.
+///
+/// macOS / Linux keep the original single-shot behavior on purpose: their read
+/// errors are ACL denials that won't heal on retry, and the un-cached error path
+/// already retries on the next call — adding sleeps there would only slow the
+/// macOS first-launch Keychain authorization flow.
+#[cfg(target_os = "windows")]
+const KEYRING_READ_RETRY_ATTEMPTS: usize = 4;
+#[cfg(target_os = "windows")]
+const KEYRING_READ_RETRY_BACKOFF_MS: u64 = 60;
+
 #[cfg(not(target_os = "android"))]
 fn get_keyring_password(account: &str) -> Result<Option<String>> {
-    match keyring_entry_for(account)?.get_password() {
-        Ok(value) => Ok(Some(value)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => {
-            Err(anyhow!(e)).with_context(|| format!("read system credential vault {account}"))
+    #[cfg(target_os = "windows")]
+    {
+        let mut attempt = 0usize;
+        loop {
+            match keyring_entry_for(account)?.get_password() {
+                Ok(value) => return Ok(Some(value)),
+                // NoEntry is a definitive "not stored" answer, never a transient
+                // failure — return immediately so genuinely-unconfigured providers
+                // don't pay the retry latency.
+                Err(keyring::Error::NoEntry) => return Ok(None),
+                Err(e) => {
+                    attempt += 1;
+                    if attempt >= KEYRING_READ_RETRY_ATTEMPTS {
+                        return Err(anyhow!(e))
+                            .with_context(|| format!("read system credential vault {account}"));
+                    }
+                    log::warn!(
+                        "[vault] transient credential read for {account} failed \
+                         (attempt {attempt}/{KEYRING_READ_RETRY_ATTEMPTS}): {e}; retrying"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        KEYRING_READ_RETRY_BACKOFF_MS * attempt as u64,
+                    ));
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        match keyring_entry_for(account)?.get_password() {
+            Ok(value) => Ok(Some(value)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => {
+                Err(anyhow!(e)).with_context(|| format!("read system credential vault {account}"))
+            }
         }
     }
 }
@@ -614,6 +947,26 @@ fn migrate_legacy_sources_for_update() -> Result<CredsRoot> {
     Ok(CredsRoot::default())
 }
 
+#[cfg(any(target_os = "android", test))]
+fn load_android_credentials_into_cache_with(
+    loader: impl FnOnce() -> Result<Option<CredsRoot>>,
+) -> CredsRoot {
+    match loader() {
+        Ok(root) => {
+            let root = root.unwrap_or_default();
+            store_credentials_cache(&root);
+            root
+        }
+        Err(e) => {
+            // Do not cache the fallback. In particular, a failed legacy-token
+            // scrub must be retried by the next startup/getter call rather than
+            // hidden for the rest of the process.
+            log::warn!("[vault] android credential read failed: {e}");
+            CredsRoot::default()
+        }
+    }
+}
+
 fn load_credentials() -> CredsRoot {
     if let Some(cached) = credentials_cache().lock().as_ref().cloned() {
         return cached;
@@ -621,16 +974,7 @@ fn load_credentials() -> CredsRoot {
 
     #[cfg(target_os = "android")]
     {
-        let root = match load_android_credentials() {
-            Ok(Some(root)) => root,
-            Ok(None) => CredsRoot::default(),
-            Err(e) => {
-                log::warn!("[vault] android credential read failed: {e}");
-                CredsRoot::default()
-            }
-        };
-        store_credentials_cache(&root);
-        return root;
+        return load_android_credentials_into_cache_with(load_android_credentials);
     }
 
     #[cfg(not(target_os = "android"))]
@@ -781,6 +1125,8 @@ fn lookup_account(root: &CredsRoot, account: CredentialAccount) -> Option<String
         }
         CredentialAccount::VolcengineAccessKey => asr.and_then(|e| pick(&e.accessKey)),
         CredentialAccount::VolcengineResourceId => asr.and_then(|e| pick(&e.resourceId)),
+        CredentialAccount::VolcengineAuthMode => asr.and_then(|e| pick(&e.authMode)),
+        CredentialAccount::VolcengineApiKey => asr.and_then(|e| pick(&e.volcengineApiKey)),
         CredentialAccount::ArkApiKey => llm.and_then(|e| pick(&e.apiKey)),
         CredentialAccount::ArkModelId => llm.and_then(|e| pick(&e.model)),
         CredentialAccount::ArkEndpoint => llm.and_then(|e| pick(&e.baseURL)),
@@ -788,6 +1134,8 @@ fn lookup_account(root: &CredsRoot, account: CredentialAccount) -> Option<String
         CredentialAccount::AsrEndpoint => asr.and_then(|e| pick(&e.baseURL)),
         CredentialAccount::AsrModel => asr.and_then(|e| pick(&e.model)),
         CredentialAccount::AsrVocabularyId => asr.and_then(|e| pick(&e.vocabularyId)),
+        CredentialAccount::XfyunAppId => asr.and_then(|e| pick(&e.xfyunAppId)),
+        CredentialAccount::XfyunApiKey => asr.and_then(|e| pick(&e.xfyunApiKey)),
     }
 }
 
@@ -807,6 +1155,14 @@ fn write_account(root: &mut CredsRoot, account: CredentialAccount, value: Option
         CredentialAccount::VolcengineResourceId => {
             let entry = root.providers.asr.entry(asr_id).or_default();
             entry.resourceId = normalized;
+        }
+        CredentialAccount::VolcengineAuthMode => {
+            let entry = root.providers.asr.entry(asr_id).or_default();
+            entry.authMode = normalized;
+        }
+        CredentialAccount::VolcengineApiKey => {
+            let entry = root.providers.asr.entry(asr_id).or_default();
+            entry.volcengineApiKey = normalized;
         }
         CredentialAccount::ArkApiKey => {
             let entry = root.providers.llm.entry(llm_id).or_default();
@@ -836,6 +1192,14 @@ fn write_account(root: &mut CredsRoot, account: CredentialAccount, value: Option
             let entry = root.providers.asr.entry(asr_id).or_default();
             entry.vocabularyId = normalized;
         }
+        CredentialAccount::XfyunAppId => {
+            let entry = root.providers.asr.entry(asr_id).or_default();
+            entry.xfyunAppId = normalized;
+        }
+        CredentialAccount::XfyunApiKey => {
+            let entry = root.providers.asr.entry(asr_id).or_default();
+            entry.xfyunApiKey = normalized;
+        }
     }
 }
 
@@ -844,6 +1208,9 @@ pub enum CredentialAccount {
     VolcengineAppKey,
     VolcengineAccessKey,
     VolcengineResourceId,
+    VolcengineAuthMode,
+    /// 方舟（Ark）语音模型 API Key（`api_key` 鉴权模式使用，独立于旧版 Access Token 槽位）。
+    VolcengineApiKey,
     ArkApiKey,
     ArkModelId,
     ArkEndpoint,
@@ -855,6 +1222,10 @@ pub enum CredentialAccount {
     AsrModel,
     /// Active ASR provider's optional hotword vocabulary ID.
     AsrVocabularyId,
+    /// 讯飞开放平台应用 ID。
+    XfyunAppId,
+    /// 讯飞实时语音转写 APIKey。
+    XfyunApiKey,
 }
 
 impl CredentialAccount {
@@ -866,6 +1237,8 @@ impl CredentialAccount {
             CredentialAccount::VolcengineAppKey => "volcengine.app_key",
             CredentialAccount::VolcengineAccessKey => "volcengine.access_key",
             CredentialAccount::VolcengineResourceId => "volcengine.resource_id",
+            CredentialAccount::VolcengineAuthMode => "volcengine.auth_mode",
+            CredentialAccount::VolcengineApiKey => "volcengine.api_key",
             CredentialAccount::ArkApiKey => "ark.api_key",
             CredentialAccount::ArkModelId => "ark.model_id",
             CredentialAccount::ArkEndpoint => "ark.endpoint",
@@ -873,6 +1246,8 @@ impl CredentialAccount {
             CredentialAccount::AsrEndpoint => "asr.endpoint",
             CredentialAccount::AsrModel => "asr.model",
             CredentialAccount::AsrVocabularyId => "asr.vocabulary_id",
+            CredentialAccount::XfyunAppId => "xfyun.app_id",
+            CredentialAccount::XfyunApiKey => "xfyun.api_key",
         }
     }
 
@@ -881,6 +1256,8 @@ impl CredentialAccount {
             CredentialAccount::VolcengineAppKey,
             CredentialAccount::VolcengineAccessKey,
             CredentialAccount::VolcengineResourceId,
+            CredentialAccount::VolcengineAuthMode,
+            CredentialAccount::VolcengineApiKey,
             CredentialAccount::ArkApiKey,
             CredentialAccount::ArkModelId,
             CredentialAccount::ArkEndpoint,
@@ -888,6 +1265,8 @@ impl CredentialAccount {
             CredentialAccount::AsrEndpoint,
             CredentialAccount::AsrModel,
             CredentialAccount::AsrVocabularyId,
+            CredentialAccount::XfyunAppId,
+            CredentialAccount::XfyunApiKey,
         ]
     }
 }
@@ -898,9 +1277,13 @@ pub struct CredentialsSnapshot {
     pub volcengine_app_key: Option<String>,
     pub volcengine_access_key: Option<String>,
     pub volcengine_resource_id: Option<String>,
+    pub volcengine_auth_mode: Option<String>,
+    pub volcengine_api_key: Option<String>,
     pub asr_api_key: Option<String>,
     pub asr_endpoint: Option<String>,
     pub asr_model: Option<String>,
+    pub xfyun_app_id: Option<String>,
+    pub xfyun_api_key: Option<String>,
     pub ark_api_key: Option<String>,
     pub ark_model_id: Option<String>,
     pub ark_endpoint: Option<String>,
@@ -930,11 +1313,117 @@ impl CredentialsVault {
         save_credentials(&root)
     }
 
+    pub fn get_for_asr_provider(id: &str, account: CredentialAccount) -> Result<Option<String>> {
+        let _guard = credentials_lock().lock();
+        let mut root = load_credentials();
+        root.active.asr = id.to_string();
+        Ok(lookup_account(&root, account))
+    }
+
+    pub fn set_for_asr_provider(id: &str, account: CredentialAccount, value: &str) -> Result<()> {
+        let _guard = credentials_lock().lock();
+        let mut root = load_credentials_for_update()?;
+        let active = root.active.asr.clone();
+        root.active.asr = id.to_string();
+        let value = (!value.is_empty()).then(|| value.to_string());
+        write_account(&mut root, account, value);
+        root.active.asr = active;
+        save_credentials(&root)
+    }
+
     pub fn remove(account: CredentialAccount) -> Result<()> {
         let _guard = credentials_lock().lock();
         let mut root = load_credentials_for_update()?;
         write_account(&mut root, account, None);
         save_credentials(&root)
+    }
+
+    /// GitHub OAuth token for authenticated marketplace operations.
+    ///
+    /// This credential deliberately has no generic `CredentialAccount` and is
+    /// excluded from `CredentialsSnapshot`, so frontend IPC can never read it.
+    pub fn get_marketplace_github_token() -> Result<Option<String>> {
+        let _guard = credentials_lock().lock();
+        if marketplace_token_is_rejected() {
+            return Ok(None);
+        }
+        #[cfg(target_os = "android")]
+        {
+            let path = android_credentials_path()?;
+            return get_android_marketplace_token_at(
+                &path,
+                android_marketplace_legacy_scrubbed(),
+                android_marketplace_token(),
+            );
+        }
+        #[cfg(not(target_os = "android"))]
+        Ok(lookup_marketplace_github_token(&load_credentials()))
+    }
+
+    pub fn set_marketplace_github_token(value: &str) -> Result<()> {
+        let _guard = credentials_lock().lock();
+        #[cfg(target_os = "android")]
+        {
+            ensure_android_marketplace_legacy_scrubbed()?;
+            *android_marketplace_token().lock() =
+                (!value.trim().is_empty()).then(|| MarketplaceGithubToken(value.to_string()));
+            if value.trim().is_empty() {
+                invalidate_marketplace_token_process_local();
+            } else {
+                mark_marketplace_token_verified();
+            }
+            return Ok(());
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            let mut root = load_credentials_for_update()?;
+            write_marketplace_github_token(&mut root, Some(value.to_string()));
+            save_credentials(&root)?;
+            mark_marketplace_token_verified();
+            Ok(())
+        }
+    }
+
+    pub fn remove_marketplace_github_token() -> Result<()> {
+        let _guard = credentials_lock().lock();
+        invalidate_marketplace_token_with(|| {
+            #[cfg(target_os = "android")]
+            {
+                // Retry the durable legacy scrub on every logout until it has
+                // actually completed. Process memory is already invalidated.
+                return ensure_android_marketplace_legacy_scrubbed();
+            }
+            #[cfg(not(target_os = "android"))]
+            {
+                let mut root = load_credentials_for_update()?;
+                write_marketplace_github_token(&mut root, None);
+                save_credentials(&root)
+            }
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_marketplace_github_token_for_tests(value: &str) {
+        let _guard = credentials_lock().lock();
+        let mut root = CredsRoot::default();
+        write_marketplace_github_token(&mut root, Some(value.to_string()));
+        store_credentials_cache(&root);
+        mark_marketplace_token_verified();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reject_marketplace_github_token_for_tests(
+        durable_delete: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        let _guard = credentials_lock().lock();
+        invalidate_marketplace_token_with(durable_delete)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reset_marketplace_github_token_for_tests() {
+        let _guard = credentials_lock().lock();
+        store_credentials_cache(&CredsRoot::default());
+        MARKETPLACE_TOKEN_REJECTED.store(false, Ordering::SeqCst);
     }
 
     pub fn get_active_asr() -> String {
@@ -985,11 +1474,7 @@ impl CredentialsVault {
         let _guard = credentials_lock().lock();
         let temperature = parse_llm_temperature(value)?;
         let mut root = load_credentials_for_update()?;
-        let entry = root
-            .providers
-            .llm
-            .entry(root.active.llm.clone())
-            .or_default();
+        let entry = root.providers.llm.entry(root.active.llm.clone()).or_default();
         entry.temperature = temperature;
         save_credentials(&root)
     }
@@ -1018,9 +1503,13 @@ impl CredentialsVault {
             volcengine_app_key: lookup_account(&root, CredentialAccount::VolcengineAppKey),
             volcengine_access_key: lookup_account(&root, CredentialAccount::VolcengineAccessKey),
             volcengine_resource_id: lookup_account(&root, CredentialAccount::VolcengineResourceId),
+            volcengine_auth_mode: lookup_account(&root, CredentialAccount::VolcengineAuthMode),
+            volcengine_api_key: lookup_account(&root, CredentialAccount::VolcengineApiKey),
             asr_api_key: lookup_account(&root, CredentialAccount::AsrApiKey),
             asr_endpoint: lookup_account(&root, CredentialAccount::AsrEndpoint),
             asr_model: lookup_account(&root, CredentialAccount::AsrModel),
+            xfyun_app_id: lookup_account(&root, CredentialAccount::XfyunAppId),
+            xfyun_api_key: lookup_account(&root, CredentialAccount::XfyunApiKey),
             ark_api_key: lookup_account(&root, CredentialAccount::ArkApiKey),
             ark_model_id: lookup_account(&root, CredentialAccount::ArkModelId),
             ark_endpoint: lookup_account(&root, CredentialAccount::ArkEndpoint),
@@ -1031,9 +1520,17 @@ impl CredentialsVault {
 #[cfg(test)]
 mod tests {
     use super::{
-        chunk_json_payload, parse_extra_headers_json, parse_llm_temperature,
-        KEYRING_CHUNK_MAX_UTF16_UNITS,
+        android_persistable_credentials, chunk_json_payload, credentials_cache,
+        get_android_marketplace_token_at, load_android_credentials_from_path,
+        load_android_credentials_from_path_with_crypto, load_android_credentials_into_cache_with,
+        lookup_marketplace_github_token, parse_extra_headers_json, parse_llm_temperature,
+        reset_credentials_cache_for_tests, write_marketplace_github_token, CredsRoot,
+        MarketplaceGithubToken, KEYRING_CHUNK_MAX_UTF16_UNITS,
     };
+    #[cfg(not(windows))]
+    use super::load_android_credentials_from_source_with_crypto;
+    use anyhow::anyhow;
+    use parking_lot::Mutex;
 
     #[test]
     fn credential_payload_chunks_stay_under_windows_blob_limit() {
@@ -1070,6 +1567,274 @@ mod tests {
     }
 
     #[test]
+    fn marketplace_github_token_uses_the_credentials_payload_not_provider_accounts() {
+        let mut root = CredsRoot::default();
+        assert_eq!(lookup_marketplace_github_token(&root), None);
+
+        write_marketplace_github_token(&mut root, Some("gho_vault_only".to_string()));
+
+        assert_eq!(
+            lookup_marketplace_github_token(&root).as_deref(),
+            Some("gho_vault_only")
+        );
+        assert!(root.providers.asr.is_empty());
+        assert!(root.providers.llm.is_empty());
+    }
+
+    #[test]
+    fn legacy_credentials_payload_without_marketplace_token_remains_readable() {
+        let root: CredsRoot = serde_json::from_str(r#"{"version":1}"#)
+            .expect("pre-marketplace credentials should remain compatible");
+
+        assert_eq!(lookup_marketplace_github_token(&root), None);
+    }
+
+    #[test]
+    fn marketplace_logout_removes_only_the_marketplace_token() {
+        let mut root = CredsRoot::default();
+        root.active.llm = "configured-provider".to_string();
+        write_marketplace_github_token(&mut root, Some("gho_remove_me".to_string()));
+
+        write_marketplace_github_token(&mut root, None);
+
+        assert_eq!(lookup_marketplace_github_token(&root), None);
+        assert_eq!(root.active.llm, "configured-provider");
+    }
+
+    #[test]
+    fn marketplace_token_is_absent_from_serialized_preferences() {
+        let token = "gho_must_not_enter_preferences";
+        let mut root = CredsRoot::default();
+        write_marketplace_github_token(&mut root, Some(token.to_string()));
+
+        let credentials_json = serde_json::to_string(&root).expect("credentials should serialize");
+        let preferences_json = serde_json::to_string(&crate::types::UserPreferences::default())
+            .expect("preferences should serialize");
+
+        assert!(credentials_json.contains(token));
+        assert!(!preferences_json.contains(token));
+        assert!(!preferences_json.contains("githubAccessToken"));
+        assert!(!format!("{root:?}").contains(token));
+    }
+
+    #[test]
+    fn android_persistable_credentials_never_contains_marketplace_token_or_account() {
+        let token = "gho_android_memory_only";
+        let mut root = CredsRoot::default();
+        write_marketplace_github_token(&mut root, Some(token.to_string()));
+
+        let persisted = serde_json::to_string(&android_persistable_credentials(&root))
+            .expect("android credential payload should serialize");
+
+        assert!(!persisted.contains(token));
+        assert!(!persisted.contains("githubAccessToken"));
+        assert!(!persisted.contains("marketplace"));
+    }
+
+    #[test]
+    fn android_legacy_envelope_is_atomically_scrubbed_before_load_returns() {
+        use base64::Engine;
+
+        let token = "gho_legacy_android_secret";
+        let mut root = CredsRoot::default();
+        write_marketplace_github_token(&mut root, Some(token.to_string()));
+        let raw = serde_json::to_vec(&root).unwrap();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(raw);
+        let dir = std::env::temp_dir().join(format!(
+            "openless-android-credential-scrub-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("credentials.enc.json");
+        std::fs::write(&path, encoded).unwrap();
+        let mut crypto = super::super::android_credentials::TestCrypto::default();
+
+        let loaded = load_android_credentials_from_path_with_crypto(&path, &mut crypto)
+            .unwrap()
+            .expect("credential envelope should load");
+        let disk = std::fs::read_to_string(&path).unwrap();
+        let loaded_again = load_android_credentials_from_path_with_crypto(&path, &mut crypto)
+            .unwrap()
+            .expect("migrated credential envelope should load");
+
+        assert_eq!(lookup_marketplace_github_token(&loaded), None);
+        assert_eq!(lookup_marketplace_github_token(&loaded_again), None);
+        assert!(disk.starts_with('{'));
+        assert!(disk.contains("openless-android-credentials"));
+        assert!(!disk.contains(token));
+        assert!(!disk.contains("githubAccessToken"));
+        assert!(!disk.contains("marketplace"));
+        assert!(!path.with_extension("json.tmp").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn android_legacy_root_migrates_to_private_destination_and_is_erased() {
+        use base64::Engine;
+
+        let root_dir = std::env::temp_dir().join(format!(
+            "openless-android-cross-root-migration-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let legacy_path = root_dir.join("legacy").join("credentials.enc.json");
+        let destination_path = root_dir.join("files").join("credentials.enc.json");
+        let plaintext = br#"{"version":1,"providers":{"llm":{"ark":{"apiKey":"sk-migrate"}}}}"#;
+        std::fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &legacy_path,
+            base64::engine::general_purpose::STANDARD.encode(plaintext),
+        )
+        .unwrap();
+        let mut crypto = super::super::android_credentials::TestCrypto::default();
+
+        assert!(load_android_credentials_from_source_with_crypto(
+            &legacy_path,
+            &destination_path,
+            &mut crypto,
+        )
+        .unwrap()
+        .is_some());
+        assert!(!legacy_path.exists());
+        assert!(std::fs::read_to_string(&destination_path)
+            .unwrap()
+            .contains("openless-android-credentials"));
+        assert!(load_android_credentials_from_path_with_crypto(&destination_path, &mut crypto)
+            .unwrap()
+            .is_some());
+        std::fs::remove_dir_all(root_dir).unwrap();
+    }
+
+    fn write_legacy_android_envelope(path: &std::path::Path, token: &str) {
+        use base64::Engine;
+
+        let mut root = CredsRoot::default();
+        write_marketplace_github_token(&mut root, Some(token.to_string()));
+        let raw = serde_json::to_vec(&root).unwrap();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(raw);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, encoded).unwrap();
+    }
+
+    fn assert_android_secret_unrecoverable(path: &std::path::Path, token: &str) {
+        use base64::Engine;
+
+        for candidate in [
+            path.to_path_buf(),
+            path.with_extension("json.tmp"),
+            path.with_extension("legacy.tmp"),
+        ] {
+            let Ok(bytes) = std::fs::read(&candidate) else {
+                continue;
+            };
+            assert!(
+                !String::from_utf8_lossy(&bytes).contains(token),
+                "raw secret remained in {}",
+                candidate.display()
+            );
+            if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(&bytes) {
+                assert!(
+                    !String::from_utf8_lossy(&decoded).contains(token),
+                    "base64 secret remained in {}",
+                    candidate.display()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn android_bearer_is_scrubbed_before_failed_keystore_migration_returns() {
+        use base64::Engine;
+
+        let token = "gho_must_be_unrecoverable";
+        let provider_secret = "sk_generic_credential_survives";
+        let raw = format!(
+            r#"{{"version":1,"providers":{{"llm":{{"ark":{{"apiKey":"{provider_secret}"}}}}}},"marketplace":{{"githubAccessToken":"{token}"}}}}"#,
+        );
+        let dir = std::env::temp_dir().join(format!(
+            "openless-android-bearer-migration-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let path = dir.join("credentials.enc.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            &path,
+            base64::engine::general_purpose::STANDARD.encode(raw.as_bytes()),
+        )
+        .unwrap();
+        let mut crypto = super::super::android_credentials::TestCrypto::default();
+        crypto.fail_next_seal = Some(
+            super::super::android_credentials::CryptoErrorKind::TemporarilyUnavailable,
+        );
+
+        assert!(load_android_credentials_from_path_with_crypto(&path, &mut crypto).is_err());
+        let sanitized = std::fs::read(&path).unwrap();
+        let sanitized = base64::engine::general_purpose::STANDARD
+            .decode(sanitized)
+            .unwrap();
+        let sanitized = String::from_utf8(sanitized).unwrap();
+        assert!(!sanitized.contains(token));
+        assert!(!sanitized.contains("githubAccessToken"));
+        assert!(sanitized.contains(provider_secret));
+
+        let loaded = load_android_credentials_from_path_with_crypto(&path, &mut crypto)
+            .unwrap()
+            .expect("sanitized legacy credentials should remain retryable");
+        assert_eq!(lookup_marketplace_github_token(&loaded), None);
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("openless-android-credentials"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn android_real_getter_scrubs_legacy_disk_token_and_retries_failure() {
+        let dir =
+            std::env::temp_dir().join(format!("openless-android-getter-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("credentials.enc.json");
+        std::fs::create_dir_all(&path).unwrap();
+        let completed = Mutex::new(false);
+        let memory = Mutex::new(Some(MarketplaceGithubToken(
+            "gho_process_memory".to_string(),
+        )));
+
+        assert!(get_android_marketplace_token_at(&path, &completed, &memory).is_err());
+        assert!(!*completed.lock(), "failed scrub must remain retryable");
+
+        std::fs::remove_dir(&path).unwrap();
+        write_legacy_android_envelope(&path, "gho_legacy_getter_secret");
+        let token = get_android_marketplace_token_at(&path, &completed, &memory).unwrap();
+
+        assert_eq!(token.as_deref(), Some("gho_process_memory"));
+        assert!(*completed.lock());
+        assert_android_secret_unrecoverable(&path, "gho_legacy_getter_secret");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn android_startup_failure_does_not_cache_default_or_suppress_retry() {
+        reset_credentials_cache_for_tests();
+        let first = load_android_credentials_into_cache_with(|| {
+            Err(anyhow!("injected startup scrub failure"))
+        });
+        assert!(lookup_marketplace_github_token(&first).is_none());
+        assert!(credentials_cache().lock().is_none());
+
+        let dir =
+            std::env::temp_dir().join(format!("openless-android-startup-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("credentials.enc.json");
+        write_legacy_android_envelope(&path, "gho_legacy_startup_secret");
+        let second =
+            load_android_credentials_into_cache_with(|| load_android_credentials_from_path(&path));
+
+        assert!(lookup_marketplace_github_token(&second).is_none());
+        assert!(credentials_cache().lock().is_some());
+        assert_android_secret_unrecoverable(&path, "gho_legacy_startup_secret");
+        *credentials_cache().lock() = Some(CredsRoot::default());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn parse_llm_temperature_accepts_empty_and_valid_range() {
         assert_eq!(parse_llm_temperature("").unwrap(), None);
         assert_eq!(parse_llm_temperature(" 0.3 ").unwrap(), Some(0.3));
@@ -1084,5 +1849,36 @@ mod tests {
                 "{value} should be rejected"
             );
         }
+    }
+
+    #[test]
+    fn active_llm_temperature_ignores_invalid_persisted_values() {
+        for temperature in [-0.1, 2.5] {
+            let mut root = CredsRoot::default();
+            root.providers.llm.insert(
+                root.active.llm.clone(),
+                super::CredsLlmEntry {
+                    temperature: Some(temperature),
+                    ..Default::default()
+                },
+            );
+
+            assert_eq!(super::active_llm_temperature(&root), None);
+            assert_eq!(super::active_llm_temperature_string(&root), None);
+        }
+
+        let mut root = CredsRoot::default();
+        root.providers.llm.insert(
+            root.active.llm.clone(),
+            super::CredsLlmEntry {
+                temperature: Some(0.7),
+                ..Default::default()
+            },
+        );
+        assert_eq!(super::active_llm_temperature(&root), Some(0.7));
+        assert_eq!(
+            super::active_llm_temperature_string(&root).as_deref(),
+            Some("0.7")
+        );
     }
 }

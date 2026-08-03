@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 import { useEffect, useState } from 'react';
 import { RecordingInputSection } from './RecordingInputSection';
 import { ShortcutsSection } from './ShortcutsSection';
+import { SelectionPolishSection } from './SelectionPolishSection';
 import { LanguageSection } from './LanguageSection';
 import { ThemeSection } from './ThemeSection';
 import { ProvidersSection } from './ProvidersSection';
@@ -17,23 +18,31 @@ import { CodingAgentSection } from './CodingAgentSection';
 import { ClaudeConsoleSection } from './ClaudeConsoleSection';
 import { BetaChannelSection } from './BetaChannelSection';
 import { AutoUpdateSection } from './AutoUpdateSection';
+import { AboutSection } from './AboutSection';
 import { detectOS } from '../../components/WindowChrome';
 import { getPlatformCapabilities } from '../../lib/platform';
 import type { PlatformCapabilities } from '../../lib/types';
 
-// 通用：录音与输入 · 快捷键 · 语言。
-export function GeneralTab() {
+// 各 tab 共用的平台能力查询（决定桌面/移动、是否支持热键与自动更新等 gating）。
+function usePlatformCaps(): PlatformCapabilities | null {
   const [platformCaps, setPlatformCaps] = useState<PlatformCapabilities | null>(null);
 
   useEffect(() => {
     void getPlatformCapabilities().then(setPlatformCaps);
   }, []);
 
+  return platformCaps;
+}
+
+// 通用：录音与输入 · 快捷键 · 主题 · 语言。
+export function GeneralTab() {
+  const platformCaps = usePlatformCaps();
   const showDesktopShortcuts = platformCaps?.supportsDesktopHotkey === true;
 
   return (
     <>
       <RecordingInputSection />
+      <SelectionPolishSection />
       {showDesktopShortcuts && <ShortcutsSection />}
       <ThemeSection />
       <LanguageSection />
@@ -41,11 +50,17 @@ export function GeneralTab() {
   );
 }
 
-// 服务：AI 提供商 · 扩展市场。
+// 服务：AI 提供商 · 本地模型 · 扩展市场。
+// 本地模型是「语音识别由谁提供」的一种答案，和云端提供商属同一决策，
+// 不再藏进「高级」。
 export function ServicesTab() {
+  const platformCaps = usePlatformCaps();
+  const showLocalModel = platformCaps?.platform === 'desktop';
+
   return (
     <>
       <ProvidersSection />
+      {showLocalModel && <LocalModelSection />}
       <MarketplaceSection />
     </>
   );
@@ -84,25 +99,36 @@ export function PrivacyTab() {
   );
 }
 
-// 高级：本地模型 · 调试工具 · 加入 Beta 渠道（固定在最下面）。
+// 高级：只留真正的实验性/开发者功能 —— Less Computer · Claude 控制台 · 调试工具。
+// （本地模型移入「服务」、更新相关移入「关于」，这个 tab 不再是杂物抽屉。）
+// 调试工具本身是跨端的：Android 复用同一份 prefs / 录音导出入口；
+// 这里只做平台 gating，不把桌面特有能力耦合进移动端运行时。
 export function AdvancedTab() {
   const os = detectOS();
-  const [platformCaps, setPlatformCaps] = useState<PlatformCapabilities | null>(null);
-
-  useEffect(() => {
-    void getPlatformCapabilities().then(setPlatformCaps);
-  }, []);
-
+  const platformCaps = usePlatformCaps();
   const showDesktopAdvanced = platformCaps?.platform === 'desktop';
+  const showDebugTools =
+    platformCaps?.platform === 'desktop' || platformCaps?.platform === 'android';
 
   return (
     <>
-      {showDesktopAdvanced && <LocalModelSection />}
-      {showDesktopAdvanced && <DebugToolsSection />}
       {showDesktopAdvanced && os !== 'win' && <CodingAgentSection />}
       {showDesktopAdvanced && os !== 'win' && <ClaudeConsoleSection />}
-      {platformCaps?.supportsAutoUpdate === true && <BetaChannelSection />}
-      {platformCaps?.supportsAutoUpdate === true && <AutoUpdateSection />}
+      {showDebugTools && <DebugToolsSection />}
+    </>
+  );
+}
+
+// 关于：版本信息 · 更新渠道 · 自动更新 —— 「我用的是什么版本、怎么更新」归一处。
+export function AboutTab() {
+  const platformCaps = usePlatformCaps();
+  const showUpdateControls = platformCaps?.supportsAutoUpdate === true;
+
+  return (
+    <>
+      <AboutSection />
+      {showUpdateControls && <BetaChannelSection />}
+      {showUpdateControls && <AutoUpdateSection />}
     </>
   );
 }

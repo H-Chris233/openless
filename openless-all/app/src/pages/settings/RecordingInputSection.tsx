@@ -6,6 +6,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ShortcutRecorder } from '../../components/ShortcutRecorder';
 import { playRecordStartCue } from '../../lib/audioCue';
+import { defaultDictationHotkey } from '../../lib/hotkey';
 import { emitSaved } from '../../lib/savedEvent';
 import { isHotkeyModeMigrationNoticeActive } from '../../lib/hotkeyMigration';
 import {
@@ -15,6 +16,7 @@ import {
 } from '../../lib/ipc';
 import { getPlatformCapabilities } from '../../lib/platform';
 import type {
+  CapsuleStyle,
   HotkeyMode,
   MicrophoneDevice,
   PasteShortcut,
@@ -26,7 +28,7 @@ import type {
 import { useHotkeySettings } from '../../state/HotkeySettingsContext';
 import { SelectLite } from '../../components/ui/SelectLite';
 import { Card, Collapsible } from '../_atoms';
-import { SettingRow, Toggle, inputStyle, segmentedTrackStyle } from './shared';
+import { SectionTitle, SettingRow, Toggle, inputStyle, segmentedTrackStyle } from './shared';
 import { MicrophoneSelect } from './MicrophoneSelect';
 import { detectOS } from '../../components/WindowChrome';
 
@@ -57,6 +59,18 @@ export function RecordingInputSection() {
   useEffect(() => {
     void getPlatformCapabilities().then(setPlatformCaps);
   }, []);
+
+  // 兼容旧 Windows 配置：Shift+Insert 仍保留在跨平台类型/后端中供 Linux 使用，
+  // 但 Windows 已不再提供该选项；进入设置时迁移为 Ctrl+V，避免下拉框无匹配值。
+  useEffect(() => {
+    if (os !== 'win' || prefs?.pasteShortcut !== 'shiftInsert') return;
+    void savePrefs(current => {
+      if (current.pasteShortcut !== 'shiftInsert') return current;
+      return { ...current, pasteShortcut: 'ctrlV' };
+    }).catch(error => {
+      console.warn('[settings] migrate Windows paste shortcut failed', error);
+    });
+  }, [os, prefs?.pasteShortcut, savePrefs]);
 
   const loadMicrophoneDevices = useCallback(async (
     signal?: { cancelled: boolean },
@@ -133,6 +147,9 @@ export function RecordingInputSection() {
   const showDesktopHotkey = platformCaps?.supportsDesktopHotkey === true;
   const showDesktopInsert = showDesktopHotkey && os !== 'linux';
   const showDesktopStartup = showDesktopHotkey;
+  const effectivePasteShortcut = os === 'win' && prefs.pasteShortcut === 'shiftInsert'
+    ? 'ctrlV'
+    : prefs.pasteShortcut;
 
   const onModeChange = (mode: HotkeyMode) =>
     savePrefs({ ...prefs, hotkey: { ...prefs.hotkey, mode } });
@@ -169,6 +186,7 @@ export function RecordingInputSection() {
   const choices: Array<[HotkeyMode, string]> = [
     ['toggle', t('settings.recording.modeToggle')],
     ['hold', t('settings.recording.modeHold')],
+    ['auto', t('settings.recording.modeAuto')],
   ];
   const preferredMicrophoneAvailable = Boolean(
     prefs.microphoneDeviceName
@@ -182,11 +200,9 @@ export function RecordingInputSection() {
   return (
     <>
       <Card>
-        <div style={{ marginBottom: 6 }}>
-          <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--ol-ink)', letterSpacing: '-0.01em' }}>
-            {t('settings.recording.title')}
-          </div>
-        </div>
+        <SectionTitle hint={t('settings.recording.desc')}>
+          {t('settings.recording.title')}
+        </SectionTitle>
         {isHotkeyModeMigrationNoticeActive() && showDesktopHotkey && (
           <div
             style={{
@@ -210,9 +226,16 @@ export function RecordingInputSection() {
         <SettingRow label={t('settings.recording.hotkeyLabel')}>
           <ShortcutRecorder
             value={prefs.dictationHotkey}
-            modifierPresets={capability?.availableTriggers ?? []}
             sideSpecificModifiers
+            // 录音快捷键是核心热键，Rust 端不接受 null，不可停用——置灰并提示。
+            disableDisabled
+            disableHint={t('settings.recording.comboDisableHint')}
             onSave={async binding => {
+              await setDictationHotkey(binding);
+              await savePrefs({ ...prefs, dictationHotkey: binding });
+            }}
+            onReset={async () => {
+              const binding = defaultDictationHotkey();
               await setDictationHotkey(binding);
               await savePrefs({ ...prefs, dictationHotkey: binding });
             }}
@@ -220,7 +243,7 @@ export function RecordingInputSection() {
         </SettingRow>
         )}
         {showDesktopHotkey && (
-        <SettingRow label={t('settings.recording.modeLabel')}>
+        <SettingRow label={t('settings.recording.modeLabel')} desc={t('settings.recording.modeDesc')}>
           <div style={segmentedTrackStyle}>
             {choices.map(([v, l]) => (
               <button
@@ -242,7 +265,7 @@ export function RecordingInputSection() {
           </div>
         </SettingRow>
         )}
-        <SettingRow label={t('settings.recording.microphoneLabel')}>
+        <SettingRow label={t('settings.recording.microphoneLabel')} desc={t('settings.recording.microphoneDesc')}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
             <MicrophoneSelect
               devices={microphoneDevices}
@@ -258,11 +281,25 @@ export function RecordingInputSection() {
           </div>
         </SettingRow>
         {os !== 'linux' && !isAndroid && (
-        <SettingRow label={t('settings.recording.capsuleLabel')}>
+        <SettingRow label={t('settings.recording.capsuleLabel')} desc={t('settings.recording.capsuleDesc')}>
           <Toggle on={prefs.showCapsule} onToggle={onShowCapsuleChange} />
         </SettingRow>
         )}
-        <SettingRow label={t('settings.recording.muteDuringRecordingLabel')}>
+        {os !== 'linux' && !isAndroid && (
+        <SettingRow label={t('settings.recording.capsuleStyleLabel')}>
+          <SelectLite
+            value={prefs.capsuleStyle ?? 'siri'}
+            onChange={next => savePrefs({ ...prefs, capsuleStyle: next as CapsuleStyle })}
+            options={[
+              { value: 'siri', label: t('settings.recording.capsuleStyleSiri') },
+              { value: 'classic', label: t('settings.recording.capsuleStyleClassic') },
+            ]}
+            ariaLabel={t('settings.recording.capsuleStyleLabel')}
+            style={{ ...inputStyle, maxWidth: 220 }}
+          />
+        </SettingRow>
+        )}
+        <SettingRow label={t('settings.recording.muteDuringRecordingLabel')} desc={t('settings.recording.muteDuringRecordingDesc')}>
           <Toggle on={prefs.muteDuringRecording} onToggle={onMuteDuringRecordingChange} />
         </SettingRow>
         <SettingRow
@@ -304,18 +341,20 @@ export function RecordingInputSection() {
       {/* ─── 插入与剪贴板（折叠，仅 macOS / Windows） ──────────────── */}
       {showDesktopInsert && (
       <Collapsible title={t('settings.recording.insertGroupTitle')}>
-        <SettingRow label={t('settings.recording.restoreClipboardLabel')}>
+        <SettingRow label={t('settings.recording.restoreClipboardLabel')} desc={t('settings.recording.restoreClipboardDesc')}>
           <Toggle on={prefs.restoreClipboardAfterPaste} onToggle={onRestoreClipboardChange} />
         </SettingRow>
         {capability.adapter !== 'macEventTap' && (
-          <SettingRow label={t('settings.recording.pasteShortcutLabel')}>
+          <SettingRow label={t('settings.recording.pasteShortcutLabel')} desc={t('settings.recording.pasteShortcutDesc')}>
             <SelectLite
-              value={prefs.pasteShortcut}
+              value={effectivePasteShortcut}
               onChange={next => onPasteShortcutChange(next as PasteShortcut)}
               options={[
                 { value: 'ctrlV', label: t('settings.recording.pasteShortcutCtrlV') },
                 { value: 'ctrlShiftV', label: t('settings.recording.pasteShortcutCtrlShiftV') },
-                { value: 'shiftInsert', label: t('settings.recording.pasteShortcutShiftInsert') },
+                // 这个「粘贴与剪贴板」组只在 Windows 出现（showDesktopInsert 已排除 Linux，mac 走
+                // macEventTap 不显示本行）。Shift+Insert 是 xterm/urxvt 等 X11 终端的粘贴组合，
+                // 放在 Windows 上纯属误导，故不再作为选项（issue #786）。
               ]}
               ariaLabel={t('settings.recording.pasteShortcutLabel')}
               style={{ ...inputStyle, maxWidth: 220 }}
@@ -405,11 +444,6 @@ export function RecordingInputSection() {
         <SettingRow label={t('settings.recording.autoUpdateCheckLabel')}>
           <Toggle on={prefs.autoUpdateCheck} onToggle={onAutoUpdateCheckChange} />
         </SettingRow>
-        {capability.statusHint && (
-          <div style={{ marginTop: 6, fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.5 }}>
-            {capability.statusHint}
-          </div>
-        )}
       </Collapsible>
       )}
     </>

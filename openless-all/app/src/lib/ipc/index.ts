@@ -37,6 +37,7 @@ export {
     listHistory,
     deleteHistoryEntry,
     clearHistory,
+    getActivityStats,
     readAudioRecording,
     retranscribeRecording,
 } from "./history"
@@ -101,6 +102,7 @@ export {
     setComboHotkey,
     validateShortcutBinding,
     setDictationHotkey,
+    setSelectionPolishHotkey,
     setTranslationHotkey,
     setSwitchStyleHotkey,
     setOpenAppHotkey,
@@ -122,17 +124,27 @@ export {
     getQaHotkeyLabel,
     setQaHotkey,
     qaWindowDismiss,
-    qaWindowPin,
     qaToggleRecording,
     qaSubmitText,
 } from "./qa"
 
+export {
+    getSelectionPolishPreview,
+    confirmSelectionPolishPreview,
+    cancelSelectionPolishPreview,
+} from './selection-polish-preview'
+
 // less-computer
 export {
     lessComputerWindowDismiss,
+    lessComputerWindowOpen,
     lessComputerApprove,
-    lessComputerWindowResize,
+    lessComputerSubmitText,
+    lessComputerSync,
 } from "./less-computer"
+
+// chat-panel（QA / Less Computer 共用）
+export { chatPanelFocusKeyboard } from "./chat-panel"
 
 // updater
 export type { LatestBetaRelease, AppUpdateMetadata } from "./updater"
@@ -158,16 +170,15 @@ export type {
     CodingAgentPermissionMode,
     McpHealth,
     CodingAgentEvent,
-} from "./coding-agent"
-export type {
+    OpenCodeDetection,
     McpServerStatus,
     ClaudeDetection,
-    OpenCodeDetection,
     CodingAgentRunTestArgs,
 } from "./coding-agent"
 export {
     codingAgentDetect,
     codingAgentDetectOpencode,
+    codingAgentListOpencodeModels,
     codingAgentRunTest,
     codingAgentCancelTest,
     codingAgentCommandRisk,
@@ -186,8 +197,21 @@ export {
 } from "./marketplace"
 
 // github-oauth
-export type { GithubDeviceStartResponse, GithubDevicePollResult } from "./github-oauth"
-export { githubDeviceFlowStart, githubDeviceFlowPoll } from "./github-oauth"
+export type {
+    GithubDeviceStartResponse,
+    GithubDevicePollResult,
+    MarketplaceAuthStatus,
+} from "./github-oauth"
+export {
+    githubDeviceFlowStart,
+    githubDeviceFlowPoll,
+    githubDeviceFlowCancel,
+    githubPollIntervalMs,
+    githubSlowDownIntervalMs,
+    githubFlowExpiresAt,
+    marketplaceAuthStatus,
+    marketplaceLogout,
+} from "./github-oauth"
 
 // marketplace-cache
 export {

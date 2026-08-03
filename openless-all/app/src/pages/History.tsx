@@ -4,9 +4,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Icon } from '../components/Icon';
+import { Tooltip } from '../components/Tooltip';
 import { detectOS } from '../components/WindowChrome';
 import { formatComboLabel } from '../lib/hotkey';
-import { clearHistory, deleteHistoryEntry, listHistory, readAudioRecording, retranscribeRecording } from '../lib/ipc';
+import { clearHistory, deleteHistoryEntry, listHistory, readAudioRecording, retranscribeRecording, isTauri } from '../lib/ipc';
 import { useMobileLayout } from '../lib/useMobileLayout';
 import type { DictationSession, PolishMode } from '../lib/types';
 import { useHotkeySettings } from '../state/HotkeySettingsContext';
@@ -99,17 +100,24 @@ export function History() {
     return () => window.clearTimeout(id);
   }, [query]);
 
-  // ⌘K / Ctrl+K 聚焦搜索框（设计稿提示的快捷键）。
+  // ⌘K / Ctrl+K 聚焦搜索框（设计稿提示的快捷键）；⌘R / Ctrl+R 刷新历史列表
+  // （与浏览器「重新加载」直觉一致）。preventDefault 拦掉 webview 默认的整页
+  // reload，改为只重拉 listHistory，避免整个前端重挂载。
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
         e.preventDefault();
         searchInputRef.current?.focus();
+        return;
+      }
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'r' || e.key === 'R')) {
+        e.preventDefault();
+        void refresh();
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, []);
+  }, [refresh]);
 
   const filtered = useMemo(() => {
     const byMode = filter === 'all' ? items : items.filter(s => s.mode === filter);
@@ -193,24 +201,32 @@ export function History() {
   const onExportAudio = async () => {
     if (!item || !item.hasAudioRecording) return;
     try {
-      const bytes = await readAudioRecording(item.id);
-      if (bytes.byteLength === 0) throw new Error('empty recording');
-      const buffer = new ArrayBuffer(bytes.byteLength);
-      new Uint8Array(buffer).set(bytes);
-      const blob = new Blob([buffer], { type: 'audio/wav' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `openless-recording-${item.id}.wav`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      // 浏览器异步触发下载，立刻 revoke 偶尔被中断；延后 60s 兜底。
-      window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      // Wry/WebKit 中 data URL 的 <a download> 可能不触发保存对话框，后端直接调系统对话框
+      if (isTauri) {
+        const { invoke } = await import('@tauri-apps/api/core');
+        await invoke('export_audio_recording', { sessionId: item.id });
+      } else {
+        const dataUrl = await readAudioRecording(item.id);
+        if (!dataUrl || dataUrl === 'data:audio/wav;base64,') throw new Error('empty recording');
+        const a = document.createElement('a');
+        a.href = dataUrl;
+        a.download = `openless-recording-${item.id}.wav`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+      }
       setActionError(null);
     } catch (error) {
       console.error('[history] failed to export recording', error);
       const msg = errorMessage(error);
+      if (isUserCancelled(msg)) {
+        setActionError(null);
+        return;
+      }
+      if (msg === 'recording export failed') {
+        setActionError(t('history.exportError'));
+        return;
+      }
       // wav 已被 retention / 条数 cap 清理：把按钮隐藏，不显示错误（用户没干错事）。
       if (msg.includes('recording not found') || msg.includes('not found')) {
         markAudioMissing(item.id);
@@ -371,10 +387,11 @@ export function History() {
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                   <span style={{ fontSize: 13, fontFamily: 'var(--ol-font-mono)', color: 'var(--ol-ink-3)' }}>{formatTime(item.createdAt)}</span>
                   <Pill size="sm" tone="default">{MODE_LABEL[item.mode]}</Pill>
-                  <span style={{ fontSize: 11, color: 'var(--ol-ink-4)' }}>{formatDuration(item.durationMs, t)}</span>
+                  {/* 「录音」前缀：与下方识别/润色耗时区分——录音时长发生在松键前，
+                      不该与流水线各步耗时加总（用户反馈"时间对不上"）。 */}
+                  <span style={{ fontSize: 11, color: 'var(--ol-ink-4)' }}>{t('history.recorded', { duration: formatDuration(item.durationMs, t) })}</span>
                 </div>
                 <div style={{ display: 'flex', gap: 6 }}>
-                  <Btn icon={justCopied ? 'check' : 'copy'} variant="ghost" size="sm" onClick={() => void onCopy()}>{justCopied ? t('common.copied') : t('common.copy')}</Btn>
                   {item.hasAudioRecording && !audioMissingIds.has(item.id) && (
                     <Btn icon="download" variant="ghost" size="sm" onClick={() => void onExportAudio()}>{t('history.exportRecording')}</Btn>
                   )}
@@ -410,19 +427,58 @@ export function History() {
                   </p>
                 </div>
                 <div style={{ padding: 14, border: '0.5px solid var(--ol-blue)', borderRadius: 10, background: 'var(--ol-blue-soft)' }}>
-                  <Pill size="sm" tone="blue" style={{ marginBottom: 10 }}>{MODE_LABEL[item.mode]}</Pill>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 10 }}>
+                    <Pill size="sm" tone="blue">{MODE_LABEL[item.mode]}</Pill>
+                    <Btn icon={justCopied ? 'check' : 'copy'} variant="ghost" size="sm" onClick={() => void onCopy()}>
+                      {justCopied ? t('common.copied') : t('common.copy')}
+                    </Btn>
+                  </div>
                   <p style={{ margin: 0, fontSize: 13, lineHeight: 1.7, color: 'var(--ol-ink)', whiteSpace: 'pre-line' }}>
                     {item.finalText}
                   </p>
                 </div>
               </div>
-              <div style={{ marginTop: 18, paddingTop: 14, borderTop: '0.5px solid var(--ol-line-soft)', display: 'flex', gap: 18, fontSize: 11, color: 'var(--ol-ink-4)', flexWrap: 'wrap' }}>
-                {item.appName && <span>{t('history.insertedTo')} <b style={{ color: 'var(--ol-ink-2)' }}>{item.appName}</b></span>}
-                <span>{t('history.chars', { count: item.finalText.length })}</span>
-                {item.dictionaryEntryCount != null && item.dictionaryEntryCount > 0 && (
-                  <span>{t('history.vocabHits', { count: item.dictionaryEntryCount })}</span>
+              {/* 流水线明细：识别 / 润色 / 插入 三步各占一行 —— 左列步骤名、中列
+                  provider·model（或插入目标），右列该步耗时/状态。旧历史没有模型与
+                  耗时字段时对应行自动隐藏，只剩插入行 = 改版前的信息量。 */}
+              <div style={{ marginTop: 18, paddingTop: 14, borderTop: '0.5px solid var(--ol-line-soft)', display: 'grid', gridTemplateColumns: 'auto 1fr auto', columnGap: 14, rowGap: 7, fontSize: 11, color: 'var(--ol-ink-4)', alignItems: 'baseline' }}>
+                {(item.asrProvider || item.asrMs != null) && (
+                  <>
+                    <span style={{ display: 'flex' }}>
+                      <Tooltip content={t('history.stepAsrHint')} wrap placement="bottom" focusable>
+                        <span style={{ cursor: 'help', textDecoration: 'underline dotted', textDecorationColor: 'var(--ol-ink-4)', textUnderlineOffset: 3 }}>
+                          {t('history.stepAsr')}
+                        </span>
+                      </Tooltip>
+                    </span>
+                    <span style={{ color: 'var(--ol-ink-2)', fontFamily: 'var(--ol-font-mono)', overflowWrap: 'anywhere' }}>
+                      {[item.asrProvider, item.asrModel].filter(Boolean).join(' · ')}
+                    </span>
+                    <span style={{ fontFamily: 'var(--ol-font-mono)', textAlign: 'right' }}>
+                      {item.asrMs != null ? formatStepDuration(item.asrMs, t) : ''}
+                    </span>
+                  </>
                 )}
-                <span>{
+                {(item.llmProvider || item.llmModel || item.polishMs != null) && (
+                  <>
+                    <span>{t('history.stepPolish')}</span>
+                    <span style={{ color: 'var(--ol-ink-2)', fontFamily: 'var(--ol-font-mono)', overflowWrap: 'anywhere' }}>
+                      {[item.llmProvider, item.llmModel].filter(Boolean).join(' · ')}
+                    </span>
+                    <span style={{ fontFamily: 'var(--ol-font-mono)', textAlign: 'right' }}>
+                      {item.polishMs != null ? formatStepDuration(item.polishMs, t) : ''}
+                    </span>
+                  </>
+                )}
+                <span>{t('history.stepInsert')}</span>
+                <span style={{ color: 'var(--ol-ink-2)' }}>
+                  {item.appName && <><b>{item.appName}</b>{' · '}</>}
+                  {t('history.chars', { count: item.finalText.length })}
+                  {item.dictionaryEntryCount != null && item.dictionaryEntryCount > 0 && (
+                    <>{' · '}{t('history.vocabHits', { count: item.dictionaryEntryCount })}</>
+                  )}
+                </span>
+                <span style={{ textAlign: 'right' }}>{
                   item.insertStatus === 'inserted'
                     ? t('history.inserted')
                     : item.insertStatus === 'pasteSent'
@@ -451,6 +507,14 @@ function errorMessage(error: unknown): string {
   return String(error);
 }
 
+function isUserCancelled(message: string): boolean {
+  const normalized = message.trim().toLowerCase();
+  return normalized === 'cancelled'
+    || normalized === 'canceled'
+    || normalized === 'user cancelled'
+    || normalized === 'user canceled';
+}
+
 /** 当 session.hasAudioRecording 为 true 时渲染：一个加载按钮 + 拿到字节后切换为
  *  原生 audio controls。Blob URL 在组件 unmount 时 revoke，避免泄漏。
  *  `onMissing` 在后端返回 'recording not found'（wav 已被 prune）时触发，让父组件
@@ -463,33 +527,59 @@ function AudioRecordingPlayer({
   onMissing?: () => void;
 }) {
   const { t } = useTranslation();
-  const [url, setUrl] = useState<string | null>(null);
+  const [blobUrl, setBlobUrl] = useState<string | null>(null);
   const [status, setStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
   const [errorText, setErrorText] = useState<string | null>(null);
+  const mountedRef = useRef(true);
+  const blobUrlRef = useRef<string | null>(null);
 
+  // 组件 unmount 时释放 Blob URL，避免内存泄漏。
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
-      if (url) URL.revokeObjectURL(url);
+      mountedRef.current = false;
+      if (blobUrlRef.current) {
+        URL.revokeObjectURL(blobUrlRef.current);
+        blobUrlRef.current = null;
+      }
     };
-  }, [url]);
+  }, []);
+
+  const clearBlobUrl = () => {
+    if (blobUrlRef.current) {
+      URL.revokeObjectURL(blobUrlRef.current);
+      blobUrlRef.current = null;
+    }
+    setBlobUrl(null);
+  };
 
   const load = async () => {
     setStatus('loading');
     setErrorText(null);
     try {
-      const bytes = await readAudioRecording(sessionId);
-      if (bytes.byteLength === 0) throw new Error('empty recording');
-      // typed array 在严格 TS lib 下不直接是 BlobPart；构造独立 ArrayBuffer 后 cast。
-      const buffer = new ArrayBuffer(bytes.byteLength);
-      new Uint8Array(buffer).set(bytes);
-      const blob = new Blob([buffer], { type: 'audio/wav' });
-      const objectUrl = URL.createObjectURL(blob);
-      setUrl(objectUrl);
+      const dataUrl = await readAudioRecording(sessionId);
+      if (!mountedRef.current) return;
+      if (!dataUrl || dataUrl === 'data:audio/wav;base64,') throw new Error('empty recording');
+      // WebKitGTK <audio> 对 data: URL 解码不稳定（时长 0 / 播不动），
+      // 把 base64 解码为二进制再封装成 Blob URL，在 WebKit 里远更可靠。
+      const comma = dataUrl.indexOf(',');
+      const b64 = comma >= 0 ? dataUrl.slice(comma + 1) : '';
+      if (!b64) throw new Error('empty recording');
+      const bin = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+      const blob = new Blob([bin], { type: 'audio/wav' });
+      const url = URL.createObjectURL(blob);
+      if (!mountedRef.current) {
+        URL.revokeObjectURL(url);
+        return;
+      }
+      if (blobUrlRef.current) URL.revokeObjectURL(blobUrlRef.current);
+      blobUrlRef.current = url;
+      setBlobUrl(url);
       setStatus('ready');
     } catch (error) {
+      if (!mountedRef.current) return;
       console.error('[history] load recording failed', error);
       const msg = errorMessage(error);
-      // 文件被清理：通知父组件隐藏按钮组，自身不显示 error UI（用户没干错事）。
       if (msg.includes('recording not found') || msg.includes('not found')) {
         onMissing?.();
         return;
@@ -499,10 +589,26 @@ function AudioRecordingPlayer({
     }
   };
 
-  if (status === 'ready' && url) {
+  if (status === 'ready' && blobUrl) {
     return (
       <div style={{ marginBottom: 14 }}>
-        <audio src={url} controls preload="auto" autoPlay style={{ width: '100%' }} />
+        <audio
+          src={blobUrl}
+          controls
+          preload="auto"
+          autoPlay
+          style={{ width: '100%' }}
+          onError={(e) => {
+            if (!mountedRef.current) return;
+            const a = e.currentTarget;
+            const code = a.error?.code ?? -1;
+            const detail = a.error?.message ?? `${code}`;
+            console.error('[history] <audio> decode/play failed', { code, detail });
+            clearBlobUrl();
+            setStatus('error');
+            setErrorText(t('history.audioDecodeFailed', { err: detail }));
+          }}
+        />
       </div>
     );
   }
@@ -532,6 +638,13 @@ function formatTime(iso: string): string {
   const pad = (n: number) => String(n).padStart(2, '0');
   if (sameDay) return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
   return `${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/** 流水线单步耗时：<1s 显示整数毫秒（流式收尾常在几十 ms，0.1s 精度会把不同结果
+ *  拍成同一个值，模型对比就失真了——PR #826 review）；≥1s 沿用 0.1s 精度。 */
+function formatStepDuration(ms: number, t: ReturnType<typeof useTranslation>['t']): string {
+  if (ms < 1000) return t('common.durationMillis', { value: Math.round(ms) });
+  return formatDuration(ms, t);
 }
 
 function formatDuration(ms: number | null, t: ReturnType<typeof useTranslation>['t']): string {

@@ -26,6 +26,12 @@ export type PolishMode = 'raw' | 'light' | 'structured' | 'formal';
 
 export type InsertStatus = 'inserted' | 'pasteSent' | 'copiedFallback' | 'failed';
 
+/** 概览页年度活动热力图的单日计数（date = 本地日期 YYYY-MM-DD）。 */
+export interface ActivityDay {
+  date: string;
+  count: number;
+}
+
 export interface DictationSession {
   id: string;
   createdAt: string; // ISO-8601
@@ -44,6 +50,18 @@ export interface DictationSession {
   /** 该会话是否在录音时归档了原始 wav（取决于当时 prefs.recordAudioForDebug）。
    *  true 时前端在 History 渲染播放按钮，凭 id 通过 read_audio_recording IPC 拿字节流。 */
   hasAudioRecording: boolean | null;
+  /** 本次转写用的 ASR provider id（如 "volcengine" / "local-qwen3"）。旧历史为 null。 */
+  asrProvider: string | null;
+  /** 本次转写用的 ASR 模型 id。provider 无模型概念时为 null。 */
+  asrModel: string | null;
+  /** 本次润色用的 LLM provider id。Raw 直通（未调用 LLM）时为 null。 */
+  llmProvider: string | null;
+  /** 本次润色用的 LLM 模型 id。Raw 直通时为 null。 */
+  llmModel: string | null;
+  /** 松键后等待转写结果的实测耗时（毫秒）。流式 ASR 是收尾延迟，批式是完整转写耗时。 */
+  asrMs: number | null;
+  /** LLM 润色/翻译调用的实测耗时（毫秒）。未调用 LLM 时为 null。 */
+  polishMs: number | null;
 }
 
 export interface DictionaryEntry {
@@ -89,7 +107,7 @@ export type HotkeyTrigger =
   | 'mediaPlayPause'
   | 'custom';
 
-export type HotkeyMode = 'toggle' | 'hold' | 'doubleClick';
+export type HotkeyMode = 'toggle' | 'hold' | 'doubleClick' | 'auto';
 
 export interface HotkeyKey {
   code: string;
@@ -179,6 +197,9 @@ export type UpdateChannel = 'stable' | 'beta';
 
 export type ThemeMode = 'system' | 'light' | 'dark';
 
+/** 选区润色结果直接替换，或先在可编辑预览中确认。 */
+export type SelectionPolishOutputMode = 'directReplace' | 'previewConfirm';
+
 export interface CustomStylePrompts {
   raw: string;
   light: string;
@@ -209,6 +230,8 @@ export interface StylePack {
   version: string;
   kind: StylePackKind;
   baseMode: PolishMode;
+  /** For selected written text. Empty values in legacy packs use a safe backend default. */
+  selectionPrompt: string;
   prompt: string;
   examples: StylePackExample[];
   tags: string[];
@@ -258,6 +281,8 @@ export interface UserPreferences {
   customStylePrompts: CustomStylePrompts;
   launchAtLogin: boolean;
   showCapsule: boolean;
+  /** 录音胶囊样式（'siri' | 'classic'）。见 CapsulePayload.capsuleStyle 的运行时下发。 */
+  capsuleStyle: CapsuleStyle;
   /** 录音期间临时静音系统输出，停止/取消/出错后恢复原静音状态。 */
   muteDuringRecording: boolean;
   /** 按下录音热键进入 recording 状态时，播放一段合成提示音提醒「已开始录音」。
@@ -295,6 +320,12 @@ export interface UserPreferences {
   outputLanguagePreference: 'auto' | 'zhCn' | 'zhTw' | 'en' | 'ja' | 'ko';
   /** 划词语音问答快捷键。null = 未启用。详见 issue #118。 */
   qaHotkey: QaHotkeyBinding | null;
+  /** 选区润色快捷键。null = 已停用。 */
+  selectionPolishHotkey: ShortcutBinding | null;
+  /** The style pack used only by selected written-text polishing. */
+  selectionPolishStylePackId: string;
+  /** 选区润色结果的交付方式。 */
+  selectionPolishOutputMode: SelectionPolishOutputMode;
   /** 是否把 Q&A 历史写到本地存档。详见 issue #118。 */
   qaSaveHistory: boolean;
   /** 自定义录音组合键。当 hotkey.trigger == 'custom' 时使用。null = 未设置。 */
@@ -366,6 +397,8 @@ export interface UserPreferences {
   /** 流式输入成功后是否把最终润色文本写回剪贴板。开启后 Cmd+V 还能重复粘贴该次输出，
    *  与一次性路径行为对齐。默认 true。 */
   streamingInsertSaveClipboard: boolean;
+  /** 概览页是否显示「年度活动」热力图卡。默认 true；关闭只隐藏卡片，活动计数照常记录。 */
+  showOverviewActivityHeatmap: boolean;
   /** 主窗口启动 + 后台每 60 分钟自动检查更新。默认 true。
    *  Android：开启后自动检查并下载，校验后打开系统安装器。
    *  桌面：开启后自动检查，发现更新弹窗由用户确认安装。
@@ -381,7 +414,7 @@ export interface UserPreferences {
   audioRecordingMaxEntries: number | null;
   /** Marketplace HTTP 基地址。空 = 本地开发默认 http://127.0.0.1:8090；生产填 https://api.<domain>。 */
   marketplaceBaseUrl: string;
-  /** Marketplace dev-mode 模拟登录用户名（GitHub login 风格）。生产换 OAuth token 后此字段废弃。 */
+  /** GitHub login 展示缓存。不用于认证；OAuth token 只存在 Rust CredentialsVault。 */
   marketplaceDevLogin: string;
   /** 是否启用远程输入（局域网手机录音）HTTPS+WS 服务。默认 false。 */
   remoteInputEnabled: boolean;
@@ -452,14 +485,20 @@ export type QaStateKind =
 export interface QaChatMessage {
   role: 'user' | 'assistant';
   content: string;
+  /** 未经模型安全信封转义的选区原文，仅用于 UI 文本展示。 */
+  selectionText?: string;
 }
 
 export interface QaStatePayload {
   kind: QaStateKind;
+  /** 后端会话 token；前端用它丢弃关闭/重开后迟到的旧轮事件。 */
+  session_id?: string;
   /** 后端权威：当前已有的多轮对话历史（user → assistant 交替）。answer 事件带完整版。 */
   messages?: QaChatMessage[];
   /** recording 状态时附带的选区预览（前 60 字）。 */
   selection_preview?: string | null;
+  /** Linux 选区工具缺失时的非阻断提醒码。 */
+  selection_warning?: 'linux_selection_tools_missing' | null;
   /** error 状态时附带的提示。 */
   error?: string;
   /** answer_delta 事件时附带的本帧增量字符串。 */
@@ -470,7 +509,7 @@ export interface QaStatePayload {
  * Less Computer 语音 Agent 浮窗事件（窗口 label = "less-computer"，事件名
  * `less-computer:event`）。后端按 `kind` 标记，前端据此把交互渲染成聊天结构。
  */
-export type LessComputerEvent =
+export type LessComputerEvent = (
   /** 一轮用户气泡（语音指令转写）。fresh=true 表示新会话（清空历史）；否则追加为后续轮次。 */
   | { kind: 'user'; text: string; fresh?: boolean }
   /** Agent 启动，进入运行态。 */
@@ -479,6 +518,8 @@ export type LessComputerEvent =
   | { kind: 'delta'; text: string }
   /** 工具调用提示（来自 CodingAgentEvent::ToolUse，如 "Bash"）。 */
   | { kind: 'tool'; name: string }
+  /** 会话上下文被压缩（来自 CodingAgentEvent::Compaction），输出流对应位置内嵌提示。 */
+  | { kind: 'compaction' }
   /** 内联审批卡：高风险动作被护栏拦下，等用户 Approve / Deny。 */
   | { kind: 'approval'; token: string; command: string; reason: string }
   /** 运行完成：最终结果 + 成本（美元）。 */
@@ -486,7 +527,12 @@ export type LessComputerEvent =
   /** 用户从胶囊取消正在运行的 Agent。 */
   | { kind: 'cancelled' }
   /** 运行出错。 */
-  | { kind: 'error'; message: string };
+  | { kind: 'error'; message: string }
+) & {
+  /** 单调事件序号（后端 emit 时编）。用于 less_computer_sync 重放与实时流去重；
+   *  缓冲锁异常时后端可能省略，无 seq 的事件前端无条件应用。 */
+  seq?: number;
+};
 
 /** 内置语言列表 — 前端 Settings UI 用，后端只接收原生名字符串拼 prompt。
  *  添加新语言时直接在这里加一项（原生名），无需修改后端。 */
@@ -517,6 +563,9 @@ export type CapsuleState =
   | 'cancelled'
   | 'error';
 
+/** 录音胶囊样式：'siri' = 流光 Siri 光效版（默认）；'classic' = Openless 经典药丸版。 */
+export type CapsuleStyle = 'siri' | 'classic';
+
 export interface CapsulePayload {
   state: CapsuleState;
   level: number; // 0..1 RMS
@@ -527,6 +576,22 @@ export interface CapsulePayload {
   translation: boolean;
   /** 当前是否是 Less Computer 会话：处理态文案显示 "using" 而非 "thinking"。 */
   operating?: boolean;
+  /**
+   * 预备态：胶囊已「乐观显示」（按下热键即弹出并播入场动画），但麦克风还没吐第一帧
+   * PCM。为 true 时录音光条渲染成「待命」形态（柔和呼吸、不接真实电平），暗示用户稍候
+   * 再开口；麦克风就绪后翻 false，光条点亮进入正式录音。只对 recording 有意义。
+   */
+  warming?: boolean;
+  /**
+   * 用户选择的胶囊样式（siri / classic）。随每次状态事件下发；缺失时回落默认
+   * 'siri'，兼容旧后端 payload。
+   */
+  capsuleStyle?: CapsuleStyle;
+  /**
+   * 选区润色复用 capsule 的无焦点原生窗口，但渲染为轻量状态提示；缺失时保持原有
+   * 语音/QA 胶囊行为，兼容旧后端 payload。
+   */
+  selectionPolish?: boolean;
 }
 
 export interface CredentialsStatus {

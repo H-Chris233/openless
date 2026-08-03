@@ -603,17 +603,25 @@ mod tests {
     #[test]
     #[cfg(target_os = "windows")]
     fn crlf_sendinput_success_uses_expected_typed_count() {
+        // 期望值直接取自 expected_sendinput_typed_chars（同一分类真相），而非硬编码 3，
+        // 这样即便 classify_sendinput_char 的规则合法变更，本用例仍表达「实际==期望→Inserted」。
         let text = "a\r\nb";
-        let status = map_sendinput_type_result(text, Ok(3));
+        let expected = crate::unicode_keystroke::expected_sendinput_typed_chars(text);
+        let status = map_sendinput_type_result(text, Ok(expected));
         assert_eq!(status, InsertStatus::Inserted);
-        assert_ne!(text.chars().count(), 3);
+        // `\r` 被跳过，故期望值必然小于原始 char 数——这正是三处规则若漂移就会出错的点。
+        assert_ne!(text.chars().count(), expected);
     }
 
     #[test]
     #[cfg(target_os = "windows")]
     fn crlf_sendinput_partial_mismatch_falls_back_to_clipboard() {
+        // 实际发出的 typed char 数比期望多（把 `\r` 也算进去了）→ 视为部分失败 → 回落剪贴板。
         let text = "a\r\nb";
-        let status = map_sendinput_type_result(text, Ok(text.chars().count()));
+        let expected = crate::unicode_keystroke::expected_sendinput_typed_chars(text);
+        let mismatched = text.chars().count();
+        assert_ne!(mismatched, expected);
+        let status = map_sendinput_type_result(text, Ok(mismatched));
         assert_eq!(status, InsertStatus::CopiedFallback);
     }
 

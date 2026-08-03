@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tauri::Emitter;
 
-use crate::coordinator_state::{initial_session_id, SessionId, SessionPhase};
+use crate::coordinator_state::{initial_session_id, new_session_id, SessionId, SessionPhase};
 use crate::selection::SelectionContext;
 use crate::types::CapsuleState;
 
@@ -29,8 +29,6 @@ pub(super) struct QaSessionState {
     pub(super) qa_focus_target: Option<usize>,
     /// 用于忽略迟到的 RMS / runtime error。
     pub(super) session_id: SessionId,
-    /// QA 浮窗是否被用户钉住（pinned）。pinned=true 时不自动隐藏。
-    pub(super) pinned: bool,
     /// 浮窗是否对用户可见。Cmd+Shift+; 边沿 toggle 此 flag；
     /// 主听写 hotkey（rightOption）边沿来时，看这个 flag 决定是走 QA 还是走 dictation。
     /// 详见 issue #118 v2。
@@ -48,7 +46,6 @@ impl Default for QaSessionState {
             front_app: None,
             qa_focus_target: None,
             session_id: initial_session_id(),
-            pinned: false,
             panel_visible: false,
             messages: Vec::new(),
         }
@@ -83,7 +80,7 @@ pub(super) async fn handle_qa_option_edge(inner: &Arc<Inner>) {
 }
 
 pub(super) fn open_qa_panel(inner: &Arc<Inner>) {
-    {
+    let session_id = {
         let mut state = inner.qa_state.lock();
         state.panel_visible = true;
         state.phase = QaPhase::Idle;
@@ -94,7 +91,9 @@ pub(super) fn open_qa_panel(inner: &Arc<Inner>) {
         // 在 show_qa_window 抢前台之前抓一下：每次 begin_qa_session 抓选区时拿这个 HWND
         // 临时把焦点还回去，让 simulate_copy 跑在用户原 app 上。issue #466 focus-dance。
         state.qa_focus_target = capture_focus_target();
-    }
+        state.session_id = new_session_id();
+        state.session_id
+    };
     // 主听写 phase 是 Idle 才需要 sweep capsule —— 这里的语义是清掉「上一次 dictation
     // Done 状态残留」的 message / insertedChars，让 QA 自己的 capsule 状态从干净起跑
     // （否则 capsule UI 会出现 "已粘贴这个 0" 之类把上一次 inserted_chars 错误复用的
@@ -105,16 +104,24 @@ pub(super) fn open_qa_panel(inner: &Arc<Inner>) {
     if dictation_idle {
         emit_capsule(inner, CapsuleState::Idle, 0.0, 0, None, None);
     }
-    if let Some(app) = inner.app.lock().clone() {
-        crate::show_qa_window(&app, "idle");
-        let _ = app.emit_to(
-            qa_event_target(),
-            "qa:state",
-            serde_json::json!({
-                "kind": "idle",
-                "messages": Vec::<crate::types::QaChatMessage>::new(),
-            }),
-        );
+    {
+        let state = inner.qa_state.lock();
+        if !state.panel_visible || state.session_id != session_id {
+            return;
+        }
+        if let Some(app) = inner.app.lock().clone() {
+            crate::show_qa_window(&app, "idle");
+            let _ = app.emit_to(
+                qa_event_target(),
+                "qa:state",
+                serde_json::json!({
+                    "kind": "idle",
+                    "session_id": session_id,
+                    "selection_warning": null,
+                    "messages": Vec::<crate::types::QaChatMessage>::new(),
+                }),
+            );
+        }
     }
     log::info!("[coord] QA panel opened (awaiting Option to record)");
 }
@@ -124,13 +131,14 @@ pub(super) fn close_qa_panel(inner: &Arc<Inner>) {
     {
         let mut state = inner.qa_state.lock();
         state.panel_visible = false;
-        state.pinned = false;
         state.messages.clear();
         state.selection = None;
         state.front_app = None;
         state.qa_focus_target = None;
         state.phase = QaPhase::Idle;
         state.cancelled = false;
+        // 让仍在阻塞选区捕获或 provider await 中的旧任务无法在关闭后写回状态。
+        state.session_id = new_session_id();
     }
     if let Some(app) = inner.app.lock().clone() {
         crate::hide_qa_window(&app);
@@ -155,7 +163,6 @@ mod tests {
         assert!(st.selection.is_none());
         assert!(st.front_app.is_none());
         assert!(st.qa_focus_target.is_none());
-        assert!(!st.pinned, "新建会话不应处于 pinned");
         assert!(!st.panel_visible, "浮窗默认不可见，等用户 toggle");
         assert!(st.messages.is_empty(), "新建会话历史必须为空");
     }
