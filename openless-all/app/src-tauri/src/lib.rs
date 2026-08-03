@@ -213,6 +213,14 @@ macro_rules! app_invoke_handler_desktop {
             commands::handle_window_hotkey_event,
             #[cfg(debug_assertions)]
             commands::inject_hotkey_click_for_dev,
+            #[cfg(debug_assertions)]
+            commands::run_selection_polish_for_dev,
+            #[cfg(not(mobile))]
+            commands::get_selection_polish_preview,
+            #[cfg(not(mobile))]
+            commands::confirm_selection_polish_preview,
+            #[cfg(not(mobile))]
+            commands::cancel_selection_polish_preview,
             commands::repolish,
             commands::list_style_packs,
             commands::create_style_pack_from_template,
@@ -237,6 +245,7 @@ macro_rules! app_invoke_handler_desktop {
             commands::set_active_llm_provider,
             commands::get_qa_hotkey_label,
             commands::set_qa_hotkey,
+            commands::set_selection_polish_hotkey,
             commands::validate_shortcut_binding,
             commands::set_dictation_hotkey,
             commands::set_translation_hotkey,
@@ -745,6 +754,7 @@ fn run_desktop() {
                 let coordinator = app.state::<Arc<coordinator::Coordinator>>();
                 // 同步启动 QA hotkey listener。和 dictation hotkey 平行，互不抢状态。
                 coordinator.start_qa_hotkey_listener();
+                coordinator.start_selection_polish_hotkey_listener();
                 // 启动「快速 Agent」双热键监听（功能默认关闭，启用后才注册）。
                 coordinator.start_coding_agent_hotkey_listener();
                 // 启动自定义组合键监听器。当 trigger == Custom 时替代 modifier-only 监听器。
@@ -768,6 +778,7 @@ fn run_desktop() {
                 let coordinator = app.state::<Arc<coordinator::Coordinator>>();
                 coordinator.stop_hotkey_listener();
                 coordinator.stop_qa_hotkey_listener();
+                coordinator.stop_selection_polish_hotkey_listener();
                 coordinator.stop_coding_agent_hotkey_listener();
                 coordinator.stop_combo_hotkey_listener();
                 coordinator.stop_translation_hotkey_listener();
@@ -2207,17 +2218,17 @@ fn ensure_qa_window<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<tauri::Webv
     }
     let built = WebviewWindowBuilder::new(app, "qa", WebviewUrl::App("index.html?window=qa".into()))
         .title("OpenLess QA")
-        .inner_size(QA_WINDOW_WIDTH, QA_WINDOW_HEIGHT)
-        .decorations(false)
-        .transparent(true)
-        .shadow(true)
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .resizable(false)
-        .focused(false)
-        .visible(false)
-        .accept_first_mouse(true)
-        .build();
+            .inner_size(QA_WINDOW_WIDTH, QA_WINDOW_HEIGHT)
+            .decorations(false)
+            .transparent(true)
+            .shadow(true)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .resizable(false)
+            .focused(false)
+            .visible(false)
+            .accept_first_mouse(true)
+            .build();
     match built {
         Ok(w) => {
             // ⚠️ NSWindow 操作必须在主线程（macOS 26 硬约束）。ensure_qa_window 常从
@@ -2360,6 +2371,57 @@ pub(crate) fn hide_qa_window<R: tauri::Runtime>(app: &AppHandle<R>) {
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     hide_chat_window_animated(app, "qa", &QA_PANEL_EPOCH);
+}
+
+/// 选区润色预览是独立、可编辑的小窗：模型结果不会直接覆盖，用户确认后才回到原选区粘贴。
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn ensure_selection_polish_preview_window<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Option<tauri::WebviewWindow<R>> {
+    if let Some(window) = app.get_webview_window("selection-polish-preview") {
+        return Some(window);
+    }
+    WebviewWindowBuilder::new(
+        app,
+        "selection-polish-preview",
+        WebviewUrl::App("index.html?window=selection-polish-preview".into()),
+    )
+    .title("OpenLess 选区润色预览")
+    .inner_size(640.0, 440.0)
+    .min_inner_size(480.0, 320.0)
+    .resizable(true)
+    .always_on_top(true)
+    .visible(false)
+    .build()
+    .map(Some)
+    .unwrap_or_else(|error| {
+        log::warn!("[selection-polish] create preview window failed: {error}");
+        None
+    })
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn show_selection_polish_preview<R: tauri::Runtime>(app: &AppHandle<R>) {
+    let Some(window) = ensure_selection_polish_preview_window(app) else {
+        return;
+    };
+    if let Err(error) = window.show() {
+        log::warn!("[selection-polish] show preview failed: {error}");
+        return;
+    }
+    if let Err(error) = window.set_focus() {
+        log::warn!("[selection-polish] focus preview failed: {error}");
+    }
+    let _ = app.emit_to("selection-polish-preview", "selection-polish-preview:shown", ());
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub(crate) fn show_selection_polish_preview<R: tauri::Runtime>(_app: &AppHandle<R>) {}
+
+pub(crate) fn hide_selection_polish_preview<R: tauri::Runtime>(app: &AppHandle<R>) {
+    if let Some(window) = app.get_webview_window("selection-polish-preview") {
+        let _ = window.hide();
+    }
 }
 
 // ───────────────────────── Less Computer 浮窗 ─────────────────────────

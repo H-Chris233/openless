@@ -71,6 +71,8 @@ mod polish_flow;
 mod qa;
 mod qa_session;
 mod resources;
+#[cfg(not(mobile))]
+pub(crate) mod selection_polish;
 
 use asr_wiring::*;
 use capsule_focus::*;
@@ -512,6 +514,13 @@ struct Inner {
     translation_hotkey: Mutex<Option<ComboHotkeyMonitor>>,
     switch_style_hotkey: Mutex<Option<ComboHotkeyMonitor>>,
     open_app_hotkey: Mutex<Option<ComboHotkeyMonitor>>,
+    /// 选区润色快捷键：modifier-only 复用 `HotkeyMonitor`，其它组合键复用
+    /// `ComboHotkeyMonitor`。桌面（非 mobile）专属。
+    #[cfg(not(mobile))]
+    selection_polish_hotkey: Mutex<Option<ComboHotkeyMonitor>>,
+    /// 预览确认模式暂存的结果和原选区目标；仅在用户确认时才允许插入。
+    #[cfg(not(mobile))]
+    selection_polish_preview: Mutex<Option<selection_polish::PendingSelectionPolishPreview>>,
     /// 翻译模式触发标志。每次 begin_session 重置为 false；hotkey 监听器在
     /// Listening / Starting 阶段看到 Shift down 边沿时 set true。
     /// end_session 在调 polish/translate 前读这个 flag + translation_target_language
@@ -526,6 +535,15 @@ struct Inner {
     /// 因此无 GUI 的测试环境也能断言「按下热键 → 弹了哪种胶囊」）。写入是单次廉价
     /// 加锁，对 ~30Hz 录音回调可忽略。
     last_capsule_state: Mutex<Option<CapsuleState>>,
+    /// 每次 capsule payload 递增。选区润色的终态自动隐藏会带上该代数，防止旧 timer
+    /// 覆盖新的选区润色/语音/QA 可见状态。
+    capsule_event_epoch: AtomicU64,
+    /// 将 capsule 事件与自动隐藏线性化。这样一个旧 timer 要么在新的 payload 之前收起
+    /// 旧提示，要么发现代数已改变直接放弃，绝不会在新会话之后补发 Idle。
+    capsule_event_lock: Mutex<()>,
+    /// 选区润色的轻量提示仍在显示或处理中。已有语音/QA 的旧 auto-hide timer 必须在
+    /// 此期间让路，避免把选区润色浮窗提前收掉。
+    selection_polish_capsule_active: AtomicBool,
     /// QA 单独的 session 状态，与 dictation 的 SessionPhase 不冲突。
     qa_state: Mutex<QaSessionState>,
     /// 最近一次应用到 capsule 窗口的几何状态。避免录音 level tick 反复触发
@@ -716,11 +734,18 @@ impl Coordinator {
                     translation_hotkey: Mutex::new(None),
                     switch_style_hotkey: Mutex::new(None),
                     open_app_hotkey: Mutex::new(None),
+                    #[cfg(not(mobile))]
+                    selection_polish_hotkey: Mutex::new(None),
+                    #[cfg(not(mobile))]
+                    selection_polish_preview: Mutex::new(None),
                     translation_modifier_seen: AtomicBool::new(false),
                     qa_hotkey: Mutex::new(None),
                     coding_agent_modifier_hotkey: Mutex::new(None),
                     coding_agent_combo_hotkey: Mutex::new(None),
                     last_capsule_state: Mutex::new(None),
+                    capsule_event_epoch: AtomicU64::new(0),
+                    capsule_event_lock: Mutex::new(()),
+                    selection_polish_capsule_active: AtomicBool::new(false),
                     qa_state: Mutex::new(QaSessionState::default()),
                     capsule_layout: Mutex::new(None),
                     capsule_warming: AtomicBool::new(false),
@@ -823,11 +848,18 @@ impl Coordinator {
                 translation_hotkey: Mutex::new(None),
                 switch_style_hotkey: Mutex::new(None),
                 open_app_hotkey: Mutex::new(None),
+                #[cfg(not(mobile))]
+                selection_polish_hotkey: Mutex::new(None),
+                #[cfg(not(mobile))]
+                selection_polish_preview: Mutex::new(None),
                 translation_modifier_seen: AtomicBool::new(false),
                 qa_hotkey: Mutex::new(None),
                 coding_agent_modifier_hotkey: Mutex::new(None),
                 coding_agent_combo_hotkey: Mutex::new(None),
                 last_capsule_state: Mutex::new(None),
+                capsule_event_epoch: AtomicU64::new(0),
+                capsule_event_lock: Mutex::new(()),
+                selection_polish_capsule_active: AtomicBool::new(false),
                 qa_state: Mutex::new(QaSessionState::default()),
                 capsule_layout: Mutex::new(None),
                 capsule_warming: AtomicBool::new(false),
@@ -1080,6 +1112,32 @@ impl Coordinator {
             });
         } else {
             self.inner.qa_hotkey.lock().take();
+        }
+    }
+
+    #[cfg(not(mobile))]
+    pub fn start_selection_polish_hotkey_listener(&self) {
+        let inner = Arc::clone(&self.inner);
+        std::thread::Builder::new()
+            .name("openless-selection-polish-hotkey-supervisor".into())
+            .spawn(move || selection_polish_hotkey_supervisor_loop(inner))
+            .ok();
+    }
+
+    #[cfg(not(mobile))]
+    pub fn stop_selection_polish_hotkey_listener(&self) {
+        take_selection_polish_hotkey_on_main_thread(&self.inner);
+    }
+
+    #[cfg(not(mobile))]
+    pub fn try_update_selection_polish_hotkey_binding(&self) -> Result<(), String> {
+        try_update_selection_polish_hotkey_binding(&self.inner)
+    }
+
+    #[cfg(not(mobile))]
+    pub fn update_selection_polish_hotkey_binding(&self) {
+        if let Err(error) = self.try_update_selection_polish_hotkey_binding() {
+            log::warn!("[coord] update selection polish hotkey binding failed: {error}");
         }
     }
 
@@ -1505,7 +1563,8 @@ impl Coordinator {
                 // Linux: 启动 fcitx5 插件信号监听作为热键源。
                 #[cfg(target_os = "linux")]
                 {
-                    let (qa_trigger, translation_trigger) = modifier_shortcut_triggers(&self.inner);
+                    let (qa_trigger, _selection_polish_trigger, translation_trigger) =
+                        modifier_shortcut_triggers(&self.inner);
                     let custom_key = custom_dictation_key_string(&self.inner);
                     crate::linux_fcitx::start_dictation_signal_listener(
                         fcitx_tx,
@@ -1535,8 +1594,13 @@ impl Coordinator {
 
     pub fn update_modifier_shortcut_bindings(&self) {
         if let Some(monitor) = self.inner.hotkey.lock().as_ref() {
-            let (qa_trigger, translation_trigger) = modifier_shortcut_triggers(&self.inner);
-            monitor.update_modifier_shortcuts(qa_trigger, translation_trigger);
+            let (qa_trigger, selection_polish_trigger, translation_trigger) =
+                modifier_shortcut_triggers(&self.inner);
+            monitor.update_modifier_shortcuts(
+                qa_trigger,
+                selection_polish_trigger,
+                translation_trigger,
+            );
         }
     }
 
@@ -1810,8 +1874,8 @@ impl Coordinator {
     #[cfg(any(debug_assertions, test))]
     pub async fn inject_hotkey_click_for_dev(&self) -> Result<(), String> {
         log::info!("[coord] dev hotkey injection started");
-            handle_pressed(&self.inner, std::time::Instant::now(), 0).await;
-            handle_released(&self.inner, std::time::Instant::now()).await;
+        handle_pressed(&self.inner, std::time::Instant::now(), 0).await;
+        handle_released(&self.inner, std::time::Instant::now()).await;
         cancel_session(&self.inner);
         Ok(())
     }
@@ -1824,7 +1888,10 @@ impl Coordinator {
             .style_packs
             .get_or_default_active(&prefs.active_style_pack_id)
             .map_err(|e| e.to_string())?;
-        let style_system_prompt = pack.prompt.clone();
+        let style_system_prompt = crate::types::style_pack_prompt(
+            &pack,
+            crate::types::StylePromptKind::DictationAsr,
+        );
         let working_languages = prefs.working_languages;
         let chinese_script_preference = prefs.chinese_script_preference;
         let output_language_preference = prefs.output_language_preference;
@@ -1967,6 +2034,12 @@ impl Coordinator {
                 .await
                 .map_err(|_| "重新转录超时".to_string())?
                 .map_err(|e| e.to_string())?
+            }
+            ActiveAsr::ElevenLabs(e) => {
+                tokio::time::timeout(elevenlabs_timeout, e.transcribe())
+                    .await
+                    .map_err(|_| "重新转录超时".to_string())?
+                    .map_err(|e| e.to_string())?
             }
             ActiveAsr::ElevenLabs(e) => {
                 tokio::time::timeout(elevenlabs_timeout, e.transcribe())
@@ -2340,7 +2413,6 @@ mod non_tsf_fallback_tests {
 }
 
 // ─────────────────────────── helpers ───────────────────────────
-
 
 
 fn read_whisper_credentials() -> (String, String, String) {
@@ -4124,6 +4196,45 @@ mod tests {
 
         assert!(coordinator.inner.asr.lock().is_none());
     }
+
+    #[test]
+    fn selection_polish_capsule_epoch_rejects_stale_auto_hide() {
+        let coordinator = Coordinator::new();
+        let terminal_epoch =
+            emit_selection_polish_capsule(&coordinator.inner, CapsuleState::Done, "已替换");
+        assert!(selection_polish_capsule_epoch_is_current(
+            &coordinator.inner,
+            terminal_epoch
+        ));
+
+        let next_epoch = emit_selection_polish_capsule(
+            &coordinator.inner,
+            CapsuleState::Polishing,
+            "正在润色...",
+        );
+        assert_ne!(terminal_epoch, next_epoch);
+        assert!(
+            !selection_polish_capsule_epoch_is_current(&coordinator.inner, terminal_epoch),
+            "上一轮的终态 timer 不能收起下一轮处理中提示"
+        );
+        assert!(selection_polish_capsule_epoch_is_current(
+            &coordinator.inner,
+            next_epoch
+        ));
+
+        emit_capsule(
+            &coordinator.inner,
+            CapsuleState::Recording,
+            0.0,
+            0,
+            None,
+            None,
+        );
+        assert!(
+            !selection_polish_capsule_epoch_is_current(&coordinator.inner, next_epoch),
+            "选区终态 timer 不能在新的语音状态上调用 Idle"
+        );
+    }
 }
 
 fn enabled_phrases(inner: &Arc<Inner>) -> Vec<String> {
@@ -4218,14 +4329,21 @@ fn schedule_capsule_idle(inner: &Arc<Inner>, delay_ms: u64) {
         }
         // 必须 dictation **和** QA 同时空闲才能隐藏胶囊。否则旧 dictation Done timer
         // 的尾巴会在新 QA 录音/思考中把胶囊意外收掉（issue #118 v2 复现）。
-        let dictation_idle = inner_clone.state.lock().phase == SessionPhase::Idle;
-        let qa_idle = inner_clone.qa_state.lock().phase == QaPhase::Idle;
-        if dictation_idle && qa_idle {
-            emit_capsule(&inner_clone, CapsuleState::Idle, 0.0, 0, None, None);
-        }
+        // 选区润色进行中或出现新 payload 时，函数内部依据 capsule epoch 放弃隐藏。
+        hide_capsule_if_all_sessions_idle(&inner_clone);
     });
 }
 
+/// 选区润色终态的短暂展示。旧的 timer 只能收起自己那一代的 payload；若用户已经
+/// 触发了下一轮 selection，或在此期间开始语音/QA，会直接放弃，不碰当前 capsule。
+#[cfg(not(mobile))]
+fn schedule_selection_polish_capsule_idle(inner: &Arc<Inner>, event_epoch: u64, delay_ms: u64) {
+    let inner_clone = Arc::clone(inner);
+    async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        hide_selection_polish_capsule_if_current(&inner_clone, event_epoch);
+    });
+}
 
 // ─────────────────────────── audio bridge ───────────────────────────
 

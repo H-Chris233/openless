@@ -10,8 +10,11 @@ use super::super::style_pack_archive::{
     MAX_ENTRY_UNCOMPRESSED_BYTES, MAX_EXAMPLES_BYTES, MAX_ICON_BYTES, MAX_MANIFEST_BYTES,
     MAX_PROMPT_BYTES, MAX_TOTAL_UNCOMPRESSED_BYTES, STYLE_PACK_ARCHIVE_MAX_COMPRESSED_BYTES,
 };
-use super::{sync_style_pack_preferences, StylePackStore};
-use crate::types::{builtin_style_packs, CustomStylePrompts, StylePack, StylePackExample};
+use super::{migrate_style_packs_from_preferences, sync_style_pack_preferences, StylePackStore};
+use crate::types::{
+    builtin_style_packs, CustomStylePrompts, PolishMode, StylePack, StylePackExample,
+    StyleSystemPrompts, UserPreferences,
+};
 
 const VALID_PNG_1X1: &[u8] = &[
     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
@@ -492,6 +495,37 @@ fn style_pack_archive_round_trip_preserves_valid_pack_and_png_icon() {
         fs::read(imported_icon).expect("read imported icon"),
         VALID_PNG_1X1
     );
+}
+
+#[test]
+fn migration_fills_empty_selection_prompts_with_style_defaults() {
+    let mut packs = builtin_style_packs();
+    for pack in &mut packs {
+        pack.selection_prompt.clear();
+    }
+
+    assert!(migrate_style_packs_from_preferences(
+        &mut packs,
+        &UserPreferences::default()
+    ));
+    let prompts: Vec<_> = packs
+        .iter()
+        .map(|pack| pack.selection_prompt.as_str())
+        .collect();
+    assert_eq!(prompts.len(), 4);
+    assert_eq!(prompts.iter().collect::<std::collections::HashSet<_>>().len(), 4);
+
+    let prompt_for = |mode| {
+        packs
+            .iter()
+            .find(|pack| pack.base_mode == mode)
+            .expect("built-in pack")
+            .selection_prompt
+            .as_str()
+    };
+    assert!(prompt_for(PolishMode::Light).contains("轻度文本润色助手"));
+    assert!(prompt_for(PolishMode::Structured).contains("AI Prompt 整理助手"));
+    assert!(prompt_for(PolishMode::Formal).contains("职场与专业沟通文本编辑助手"));
 }
 
 #[test]

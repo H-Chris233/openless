@@ -314,6 +314,7 @@ impl StylePackStore {
             version: normalize_version(&manifest.version),
             kind: StylePackKind::Imported,
             base_mode: manifest.base_mode,
+            selection_prompt: manifest.selection_prompt.unwrap_or_default(),
             prompt: parsed.prompt,
             examples: parsed.examples,
             tags: normalize_tags(&manifest.tags),
@@ -380,6 +381,7 @@ impl StylePackStore {
             author: pack.author.clone(),
             version: pack.version.clone(),
             base_mode: pack.base_mode,
+            selection_prompt: (!pack.selection_prompt.trim().is_empty()).then(|| pack.selection_prompt.clone()),
             tags: pack.tags.clone(),
             prompt_file: "prompt.md".into(),
             examples_file: "examples.json".into(),
@@ -468,6 +470,12 @@ fn migrate_style_packs_from_preferences(
             }
             if pack.prompt.trim().is_empty() {
                 pack.prompt = builtin.prompt.clone();
+                changed = true;
+            }
+            // v1 风格包没有选区书面文本 Prompt 字段；为空时填充内置默认值，
+            // 非空内容（含用户自定义）一律保留。
+            if pack.selection_prompt.trim().is_empty() {
+                pack.selection_prompt = builtin.selection_prompt.clone();
                 changed = true;
             }
             if pack.examples.is_empty() {
@@ -604,6 +612,7 @@ pub fn sync_style_pack_preferences(prefs: &mut UserPreferences, packs: &[StylePa
     let previous_active_style_pack_id = prefs.active_style_pack_id.clone();
     let previous_default_mode = prefs.default_mode;
     let previous_enabled_modes = prefs.enabled_modes.clone();
+    let previous_selection_style_pack_id = prefs.selection_polish_style_pack_id.clone();
     let enabled: Vec<&StylePack> = packs.iter().filter(|pack| pack.enabled).collect();
     let active = packs
         .iter()
@@ -628,6 +637,10 @@ pub fn sync_style_pack_preferences(prefs: &mut UserPreferences, packs: &[StylePa
         prefs.default_mode = active_pack.base_mode;
         changed = true;
     }
+    if !packs.iter().any(|pack| pack.id == prefs.selection_polish_style_pack_id && pack.enabled) {
+        prefs.selection_polish_style_pack_id = active_pack.id.clone();
+        changed = true;
+    }
 
     let next_enabled_modes = enabled_modes_from_style_packs(packs);
     if prefs.enabled_modes != next_enabled_modes {
@@ -641,9 +654,11 @@ pub fn sync_style_pack_preferences(prefs: &mut UserPreferences, packs: &[StylePa
 
     if changed {
         log::info!(
-            "[style-pack] sync_prefs active:{}->{} default_mode:{:?}->{:?} enabled_modes:{:?}->{:?}",
+            "[style-pack] sync_prefs active:{}->{} selection:{}->{} default_mode:{:?}->{:?} enabled_modes:{:?}->{:?}",
             previous_active_style_pack_id,
             prefs.active_style_pack_id,
+            previous_selection_style_pack_id,
+            prefs.selection_polish_style_pack_id,
             previous_default_mode,
             prefs.default_mode,
             previous_enabled_modes,
@@ -733,6 +748,7 @@ fn merge_style_pack_update(existing: StylePack, incoming: StylePack) -> Result<S
     updated.description = incoming.description.trim().to_string();
     updated.author = normalize_optional_text(incoming.author);
     updated.version = normalize_version(&incoming.version);
+    updated.selection_prompt = incoming.selection_prompt;
     updated.prompt = incoming.prompt;
     updated.examples = normalize_examples(incoming.examples);
     updated.tags = normalize_tags(&incoming.tags);
