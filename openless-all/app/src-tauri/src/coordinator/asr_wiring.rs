@@ -104,6 +104,21 @@ pub(super) fn ensure_asr_credentials() -> Result<(), String> {
         }
     }
 
+    // `openai-compatible` 通用预设没有厂商默认值：endpoint 与 model 必须由用户
+    // 填写，缺一即明确报错（不再静默回落 whisper-1）。API Key 允许留空——
+    // LAN 自建端点（llama.cpp 等）常无需鉴权，故直接跳过下方 AsrApiKey 检查。
+    if active_asr == OPENAI_COMPATIBLE_ASR_PROVIDER_ID {
+        let endpoint = CredentialsVault::get(CredentialAccount::AsrEndpoint)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let model = CredentialsVault::get(CredentialAccount::AsrModel)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        return require_openai_compatible_fields(&endpoint, &model);
+    }
+
     // 云端 provider 的预检凭据由 ActiveAsrProviderKind 统一判定（穷尽 match，
     // 编译器保证新增 kind 不会被漏掉 —— 取代旧的「provider 白名单 + 火山兜底」，
     // 那个静默 else 曾让新通道误落到火山分支）。
@@ -145,6 +160,18 @@ pub(super) fn ensure_asr_credentials() -> Result<(), String> {
             }
         }
     }
+}
+
+/// `openai-compatible` 预设的必填字段校验：endpoint / model 均须非空（trim），
+/// 返回明确的中文错误。API Key 是否必填由调用方决定（本预设允许留空）。
+pub(super) fn require_openai_compatible_fields(endpoint: &str, model: &str) -> Result<(), String> {
+    if endpoint.trim().is_empty() {
+        return Err("自定义 OpenAI 兼容 ASR：请先在设置中填写服务端地址（endpoint）".to_string());
+    }
+    if model.trim().is_empty() {
+        return Err("自定义 OpenAI 兼容 ASR：请先在设置中填写模型名（model）".to_string());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -756,5 +783,31 @@ pub(super) async fn build_qa_asr_start(
                 label,
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn require_openai_compatible_fields_errors_on_missing_endpoint_or_model() {
+        // endpoint 缺失（含纯空白）→ 明确报错，绝不静默回落 whisper-1。
+        assert!(require_openai_compatible_fields("", "qwen3-asr")
+            .unwrap_err()
+            .contains("endpoint"));
+        assert!(require_openai_compatible_fields("   ", "qwen3-asr")
+            .unwrap_err()
+            .contains("endpoint"));
+        // model 缺失 → 明确报错。
+        assert!(
+            require_openai_compatible_fields("http://192.168.9.31:8090/v1", "")
+                .unwrap_err()
+                .contains("模型")
+        );
+        // 两者都填 → 通过；API Key 必填与否由调用方决定，不在此函数内。
+        assert!(
+            require_openai_compatible_fields("http://192.168.9.31:8090/v1", "qwen3-asr").is_ok()
+        );
     }
 }

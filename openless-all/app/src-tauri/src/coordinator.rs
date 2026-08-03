@@ -482,10 +482,15 @@ fn parse_advanced_asr_config(raw: Option<&str>) -> AdvancedAsrConfig {
             .get("verboseJson")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
-        chunk_duration_ms: value
-            .get("chunkDurationMs")
-            .and_then(|v| v.as_u64())
-            .filter(|ms| *ms > 0),
+        // 与前端 advancedAsrConfig.ts 语义一致：整数直接取；浮点（如 30000.9）
+        // 接受但向下取整。负数 / 非数字 / 缺失一律回落 None（不分片）。
+        chunk_duration_ms: value.get("chunkDurationMs").and_then(|v| {
+            v.as_u64().filter(|ms| *ms > 0).or_else(|| {
+                v.as_f64()
+                    .filter(|ms| ms.is_finite() && *ms > 0.0 && *ms <= u64::MAX as f64)
+                    .map(|ms| ms.floor() as u64)
+            })
+        }),
     }
 }
 
@@ -3231,6 +3236,23 @@ mod tests {
                 verbose_json: false,
                 chunk_duration_ms: Some(30_000),
             }
+        );
+        // 浮点分片时长与前端一致向下取整：30000.9 → 30000。
+        assert_eq!(
+            parse_advanced_asr_config(Some(r#"{"chunkDurationMs":30000.9}"#)),
+            AdvancedAsrConfig {
+                verbose_json: false,
+                chunk_duration_ms: Some(30_000),
+            }
+        );
+        // 负数 / 字符串分片时长 → 不分片。
+        assert_eq!(
+            parse_advanced_asr_config(Some(r#"{"chunkDurationMs":-1}"#)),
+            AdvancedAsrConfig::default()
+        );
+        assert_eq!(
+            parse_advanced_asr_config(Some(r#"{"chunkDurationMs":"abc"}"#)),
+            AdvancedAsrConfig::default()
         );
     }
 
