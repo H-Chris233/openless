@@ -32,6 +32,9 @@ import { SectionTitle, SettingRow, Toggle, inputStyle, segmentedTrackStyle } fro
 import { MicrophoneSelect } from './MicrophoneSelect';
 import { detectOS } from '../../components/WindowChrome';
 
+/** 「静音后自动停止」的可选静音时长（秒），见 issue #860。 */
+const silenceAutoStopOptions = [1, 1.5, 2, 3, 4, 5];
+
 async function autostartIsEnabled(): Promise<boolean> {
   const { invoke } = await import('@tauri-apps/api/core');
   return invoke<boolean>('plugin:autostart|is_enabled');
@@ -262,6 +265,35 @@ export function RecordingInputSection() {
                 {l}
               </button>
             ))}
+          </div>
+        </SettingRow>
+        )}
+        {showDesktopHotkey && prefs.hotkey.mode === 'toggle' && (
+        <SettingRow
+          label={t('settings.recording.silenceAutoStopLabel')}
+          desc={t('settings.recording.silenceAutoStopDesc')}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <Toggle
+              on={prefs.silenceAutoStopEnabled}
+              onToggle={next => savePrefs({ ...prefs, silenceAutoStopEnabled: next })}
+            />
+            {prefs.silenceAutoStopEnabled && (
+              <SelectLite
+                value={String(
+                  silenceAutoStopOptions.includes(prefs.silenceAutoStopSeconds)
+                    ? prefs.silenceAutoStopSeconds
+                    : 3,
+                )}
+                onChange={next => savePrefs({ ...prefs, silenceAutoStopSeconds: Number(next) })}
+                options={silenceAutoStopOptions.map(value => ({
+                  value: String(value),
+                  label: t('settings.recording.silenceAutoStopSecondsValue', { value }),
+                }))}
+                ariaLabel={t('settings.recording.silenceAutoStopSecondsLabel')}
+                style={{ ...inputStyle, maxWidth: 120 }}
+              />
+            )}
           </div>
         </SettingRow>
         )}

@@ -72,6 +72,7 @@ mod polish_flow;
 mod qa;
 mod qa_session;
 mod resources;
+mod silence_auto_stop;
 #[cfg(not(mobile))]
 pub(crate) mod selection_polish;
 
