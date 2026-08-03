@@ -500,9 +500,9 @@ struct Inner {
     /// 判定短按（Toggle 锁存）还是长按（Hold 松手即停）。见 dictation.rs 的
     /// AUTO_HOLD_THRESHOLD。
     hotkey_press_at: Mutex<Option<std::time::Instant>>,
-    /// end_session 成功收尾后将 phase 设为 Idle 时记录的时间戳 + POST_SESSION_COOLDOWN_MS。
-    /// handle_pressed 在 (Toggle, Idle) 分支检查此字段：未过期则忽略该次按键，
-    /// 防止胶囊离场动画期间误激活新听写（issue #545）。
+    /// 会话收尾（成功 / 取消 / 失败）将 phase 设为 Idle 时记录的时间戳 + POST_SESSION_COOLDOWN_MS。
+    /// handle_pressed 在 (Toggle, Idle) 分支检查此字段：未过期则忽略该次按键，防止胶囊离场
+    /// 动画期间误激活新听写（issue #545）；也让识别中排队的热键按下在收尾后一律静默丢弃（issue #856）。
     session_cooldown_until: Mutex<Option<std::time::Instant>>,
     shortcut_recording_active: AtomicBool,
     /// Less Computer modifier 热键的按下代次与待处理组合键事件。
@@ -3671,6 +3671,24 @@ mod tests {
         let state = coordinator.inner.state.lock();
         assert_eq!(state.phase, SessionPhase::Inserting);
         assert_eq!(state.session_id, session_id(41));
+    }
+
+    // #856：识别中按下热键想录下一条的 Pressed 会在会话收尾后被串行 bridge 取出（落在
+    // 冷却期内）—— 现在一律静默丢弃，不再像「排队接力」那样放行开录下一条（无反馈排队 +
+    // 延迟开录的惊吓成本大于省下的等待时间；Esc 取消后也不会因此再弹出一条新录音）。
+    #[tokio::test]
+    async fn toggle_press_within_cooldown_is_dropped() {
+        let coordinator = Coordinator::new();
+        // Idle + 冷却未过期：模拟「识别中按下 → 会话收尾 → bridge 取出该 Pressed」的时刻。
+        *coordinator.inner.session_cooldown_until.lock() = Some(
+            std::time::Instant::now()
+                + std::time::Duration::from_millis(POST_SESSION_COOLDOWN_MS),
+        );
+
+        handle_pressed_edge(&coordinator.inner, std::time::Instant::now(), 1).await;
+
+        // 静默丢弃：没有开录下一条（phase 仍是 Idle）。
+        assert_eq!(coordinator.inner.state.lock().phase, SessionPhase::Idle);
     }
 
     #[tokio::test]
