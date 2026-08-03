@@ -235,6 +235,9 @@ pub(crate) fn build_client() -> Result<reqwest::Client> {
         .user_agent("aria2/1.36.0")
         .connect_timeout(std::time::Duration::from_secs(30))
         .pool_idle_timeout(std::time::Duration::from_secs(60));
+    if !crate::net::use_system_proxy() {
+        builder = builder.no_proxy();
+    }
     #[cfg(not(mobile))]
     {
         builder = builder.use_native_tls();

@@ -695,6 +695,11 @@ pub struct UserPreferences {
     /// 下发官方渠道级字段；OpenAI 官方渠道会跳过普通 chat 模型不支持的字段。详见 issue #402。
     #[serde(default)]
     pub llm_thinking_enabled: bool,
+    /// 是否使用系统代理（issue #869）。默认 true 跟随系统代理，与历史行为一致；
+    /// 关闭后所有 reqwest 请求直连（国内服务通常延迟更低），GitHub 登录、更新等
+    /// 境外服务可能连不上。实时语音流（WebSocket）与 Less Computer 子进程不受此开关影响。
+    #[serde(default = "default_true")]
+    pub use_system_proxy: bool,
     /// Windows/Linux 粘贴成功后是否恢复用户原剪贴板。默认 true 跟历史行为一致；
     /// 关掉就把听写文本留在剪贴板，让 simulate_paste 实际没生效时用户能 Ctrl+V 找回。
     /// macOS 走 AX 直写，不受这个开关影响。详见 issue #111。
@@ -1050,6 +1055,8 @@ struct UserPreferencesWire {
     active_llm_provider: String,
     #[serde(default)]
     llm_thinking_enabled: bool,
+    #[serde(default = "default_true")]
+    use_system_proxy: bool,
     restore_clipboard_after_paste: bool,
     #[serde(default)]
     paste_shortcut: PasteShortcut,
@@ -1213,6 +1220,7 @@ impl Default for UserPreferencesWire {
             active_asr_provider: prefs.active_asr_provider,
             active_llm_provider: prefs.active_llm_provider,
             llm_thinking_enabled: prefs.llm_thinking_enabled,
+            use_system_proxy: prefs.use_system_proxy,
             restore_clipboard_after_paste: prefs.restore_clipboard_after_paste,
             paste_shortcut: prefs.paste_shortcut,
             allow_non_tsf_insertion_fallback: prefs.allow_non_tsf_insertion_fallback,
@@ -1337,6 +1345,7 @@ impl<'de> Deserialize<'de> for UserPreferences {
             active_asr_provider: wire.active_asr_provider,
             active_llm_provider: wire.active_llm_provider,
             llm_thinking_enabled: wire.llm_thinking_enabled,
+            use_system_proxy: wire.use_system_proxy,
             restore_clipboard_after_paste: wire.restore_clipboard_after_paste,
             paste_shortcut: wire.paste_shortcut,
             allow_non_tsf_insertion_fallback: wire.allow_non_tsf_insertion_fallback,
@@ -2155,6 +2164,7 @@ impl Default for UserPreferences {
             active_asr_provider: default_active_asr_provider(),
             active_llm_provider: "ark".into(),
             llm_thinking_enabled: false,
+            use_system_proxy: true,
             restore_clipboard_after_paste: true,
             paste_shortcut: PasteShortcut::default(),
             allow_non_tsf_insertion_fallback: true,

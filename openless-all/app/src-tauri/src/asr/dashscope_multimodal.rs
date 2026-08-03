@@ -403,7 +403,7 @@ fn retry_backoff(attempts: u32) -> Duration {
 /// `ASYNC_HTTP_RETRY_ATTEMPTS` 次且不晚于 `deadline`（GET 幂等，重试安全）。
 /// 4xx 与确定性错误立即返回；`api_key` 为 Some 时附带 Bearer 头。
 async fn get_json_with_retry(
-    client: &'static reqwest::Client,
+    client: reqwest::Client,
     url: reqwest::Url,
     api_key: Option<&str>,
     deadline: Instant,

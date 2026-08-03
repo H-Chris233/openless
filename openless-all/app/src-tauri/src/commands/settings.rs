@@ -287,6 +287,10 @@ pub fn set_settings(
     // 用户改键会让浮窗里的 "{recordHotkey}" 文案一直停留在旧值。
     persist_settings(&*coord, prefs)?;
     let prefs = coord.prefs().get();
+    // 系统代理开关变化时立即重建客户端连接池（issue #869）。
+    if remote_prev.use_system_proxy != prefs.use_system_proxy {
+        crate::net::set_use_system_proxy(prefs.use_system_proxy);
+    }
     #[cfg(target_os = "android")]
     coord.apply_android_overlay_settings_change(&remote_prev, &prefs);
     // refresh_tray_microphone_menu 内部会调用 NSStatusItem.set_menu，必须在主线程上跑。
@@ -331,6 +335,10 @@ pub fn set_settings(
     prefs.android_overlay_trigger = prefs.android_overlay_trigger.normalized();
     persist_settings(&*coord, prefs)?;
     let prefs = coord.prefs().get();
+    // 系统代理开关变化时立即重建客户端连接池（issue #869）。
+    if previous.use_system_proxy != prefs.use_system_proxy {
+        crate::net::set_use_system_proxy(prefs.use_system_proxy);
+    }
     #[cfg(target_os = "android")]
     coord.apply_android_overlay_settings_change(&previous, &prefs);
     let _ = app.emit("prefs:changed", &prefs);

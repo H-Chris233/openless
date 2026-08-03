@@ -80,7 +80,7 @@ impl MimoBatchASR {
         let wav = encode_wav_16k_mono(&samples);
         let body = mimo_chat_body(&self.model, &wav);
         let url = mimo_chat_completions_url(&self.base_url)?;
-        let client = reqwest::Client::new();
+        let client = crate::net::http();
         let resp = client
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.api_key.trim()))

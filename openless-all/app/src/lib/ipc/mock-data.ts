@@ -49,6 +49,7 @@ export let mockSettings: UserPreferences = {
     activeAsrProvider: "foundry-local-whisper",
     activeLlmProvider: "ark",
     llmThinkingEnabled: false,
+    useSystemProxy: true,
     restoreClipboardAfterPaste: true,
     pasteShortcut: "ctrlV",
     allowNonTsfInsertionFallback: true,

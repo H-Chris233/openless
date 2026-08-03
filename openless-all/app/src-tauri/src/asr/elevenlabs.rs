@@ -102,6 +102,9 @@ impl ElevenLabsBatchASR {
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(10))
             .timeout(transcribe_timeout(duration_ms as f64 / 1000.0));
+        if !crate::net::use_system_proxy() {
+            client_builder = client_builder.no_proxy();
+        }
         if let Some(resolved) = &resolved {
             client_builder = client_builder.resolve_to_addrs(&resolved.host, &resolved.addrs);
         }

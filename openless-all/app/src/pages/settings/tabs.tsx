@@ -9,6 +9,7 @@ import { SelectionPolishSection } from './SelectionPolishSection';
 import { LanguageSection } from './LanguageSection';
 import { ThemeSection } from './ThemeSection';
 import { ProvidersSection } from './ProvidersSection';
+import { NetworkSection } from './NetworkSection';
 import { MarketplaceSection } from './MarketplaceSection';
 import { PermissionsSection } from './PermissionsSection';
 import { DataStorageSection } from './DataStorageSection';
@@ -60,6 +61,7 @@ export function ServicesTab() {
   return (
     <>
       <ProvidersSection />
+      <NetworkSection />
       {showLocalModel && <LocalModelSection />}
       <MarketplaceSection />
     </>

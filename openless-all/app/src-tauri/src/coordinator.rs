@@ -697,6 +697,8 @@ impl Coordinator {
                 );
                 PreferencesStore::new_fallback()
             });
+            // 启动即同步系统代理开关（issue #869），让首个请求就按用户设置建客户端。
+            crate::net::set_use_system_proxy(prefs.get().use_system_proxy);
             let style_packs = StylePackStore::new(&prefs).unwrap_or_else(|e| {
                 log::error!(
                     "[coord] StylePackStore init failed: {e}; 降级为空样式包列表{PERSIST_DEGRADE_SUFFIX}"
@@ -817,6 +819,8 @@ impl Coordinator {
             log::error!("[coord] PreferencesStore init failed: {e}; 降级为默认偏好设置");
             PreferencesStore::new_fallback()
         });
+        // 启动即同步系统代理开关（issue #869），让首个请求就按用户设置建客户端。
+        crate::net::set_use_system_proxy(prefs.get().use_system_proxy);
         let style_packs = StylePackStore::new(&prefs).unwrap_or_else(|e| {
             log::error!("[coord] StylePackStore init failed: {e}; 降级为空样式包列表");
             StylePackStore::new_fallback()
