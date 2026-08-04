@@ -37,6 +37,8 @@ const previousPrefs: UserPreferences = {
   capsuleStyle: 'siri',
   muteDuringRecording: false,
   audioCueOnRecord: true,
+  silenceAutoStopEnabled: false,
+  silenceAutoStopSeconds: 3,
   microphoneDeviceName: '',
   activeAsrProvider: 'volcengine',
   activeLlmProvider: 'ark',

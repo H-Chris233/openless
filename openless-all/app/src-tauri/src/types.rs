@@ -638,6 +638,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_silence_auto_stop_seconds() -> f32 {
+    3.0
+}
+
 fn resolve_windows_insertion_mode(
     mode: WindowsInsertionMode,
     legacy_sendinput_only: bool,
@@ -685,6 +689,14 @@ pub struct UserPreferences {
     /// 不依赖 show_capsule —— 胶囊隐藏时仍会响。
     #[serde(default = "default_true")]
     pub audio_cue_on_record: bool,
+    /// Toggle 模式「说完自动停止」（issue #860）：检测到语音后，连续静音达到
+    /// `silence_auto_stop_seconds` 时自动停止并提交；一直没检测到语音则 10 秒后
+    /// 自动取消。默认关闭，保持既有「按两次」行为；Push-to-talk 不受影响。
+    #[serde(default)]
+    pub silence_auto_stop_enabled: bool,
+    /// 语音后的连续静音阈值（秒）。可选 1 / 1.5 / 2 / 3 / 4 / 5，默认 3。
+    #[serde(default = "default_silence_auto_stop_seconds")]
+    pub silence_auto_stop_seconds: f32,
     /// 录音输入设备名称。空字符串 = 使用系统默认麦克风。
     #[serde(default)]
     pub microphone_device_name: String,
@@ -1050,6 +1062,10 @@ struct UserPreferencesWire {
     #[serde(default = "default_true")]
     audio_cue_on_record: bool,
     #[serde(default)]
+    silence_auto_stop_enabled: bool,
+    #[serde(default = "default_silence_auto_stop_seconds")]
+    silence_auto_stop_seconds: f32,
+    #[serde(default)]
     microphone_device_name: String,
     active_asr_provider: String,
     active_llm_provider: String,
@@ -1216,6 +1232,8 @@ impl Default for UserPreferencesWire {
             capsule_style: prefs.capsule_style,
             mute_during_recording: prefs.mute_during_recording,
             audio_cue_on_record: prefs.audio_cue_on_record,
+            silence_auto_stop_enabled: prefs.silence_auto_stop_enabled,
+            silence_auto_stop_seconds: prefs.silence_auto_stop_seconds,
             microphone_device_name: prefs.microphone_device_name,
             active_asr_provider: prefs.active_asr_provider,
             active_llm_provider: prefs.active_llm_provider,
@@ -1341,6 +1359,8 @@ impl<'de> Deserialize<'de> for UserPreferences {
             capsule_style: wire.capsule_style,
             mute_during_recording: wire.mute_during_recording,
             audio_cue_on_record: wire.audio_cue_on_record,
+            silence_auto_stop_enabled: wire.silence_auto_stop_enabled,
+            silence_auto_stop_seconds: wire.silence_auto_stop_seconds,
             microphone_device_name: wire.microphone_device_name,
             active_asr_provider: wire.active_asr_provider,
             active_llm_provider: wire.active_llm_provider,
@@ -2160,6 +2180,8 @@ impl Default for UserPreferences {
             capsule_style: CapsuleStyle::Siri,
             mute_during_recording: false,
             audio_cue_on_record: true,
+            silence_auto_stop_enabled: false,
+            silence_auto_stop_seconds: default_silence_auto_stop_seconds(),
             microphone_device_name: String::new(),
             active_asr_provider: default_active_asr_provider(),
             active_llm_provider: "ark".into(),
