@@ -317,6 +317,11 @@ pub(super) async fn run_selection_polish(inner: &Arc<Inner>) -> Result<(), Strin
         None => (None, None),
     };
     let raw_chars = raw_text.chars().count();
+    // 与听写路径同口径：应用名与 bundle id 分开存。
+    let (source_app_name, source_app_bundle_id) = source_app
+        .as_deref()
+        .map(crate::types::split_front_app_label)
+        .unwrap_or((None, None));
     let session = DictationSession {
         id: Uuid::new_v4().to_string(),
         created_at: Utc::now().to_rfc3339(),
@@ -327,8 +332,8 @@ pub(super) async fn run_selection_polish(inner: &Arc<Inner>) -> Result<(), Strin
         style_pack_id: Some(pack.id.clone()),
         translation_active: false,
         polish_source: None,
-        app_bundle_id: None,
-        app_name: source_app,
+        app_bundle_id: source_app_bundle_id,
+        app_name: source_app_name,
         insert_status: status,
         error_code: (status == InsertStatus::Failed)
             .then_some("selectionPolishInsertFailed".into()),
@@ -438,6 +443,13 @@ impl Coordinator {
                 log::error!("[selection-polish] record vocabulary hits failed: {error}");
                 Some(0)
             });
+        // 与听写路径同口径：应用名与 bundle id 分开存，详情页才不会把一长串 bundle id
+        // 糊进正文。
+        let (preview_app_name, preview_app_bundle_id) = preview
+            .source_app
+            .as_deref()
+            .map(crate::types::split_front_app_label)
+            .unwrap_or((None, None));
         let session = DictationSession {
             id: Uuid::new_v4().to_string(),
             created_at: Utc::now().to_rfc3339(),
@@ -448,8 +460,8 @@ impl Coordinator {
             style_pack_id: Some(preview.style_pack_id),
             translation_active: false,
             polish_source: None,
-            app_bundle_id: None,
-            app_name: preview.source_app,
+            app_bundle_id: preview_app_bundle_id,
+            app_name: preview_app_name,
             insert_status: status,
             error_code: None,
             duration_ms: Some(preview.started_at.elapsed().as_millis() as u64),

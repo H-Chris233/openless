@@ -145,6 +145,33 @@ pub enum SelectionPolishOutputMode {
     PreviewConfirm,
 }
 
+/// 把 `capture_frontmost_app()` 的显示串拆成 (应用名, bundle id)。
+///
+/// macOS 那边拼的是 `"Claude (com.anthropic.claudefordesktop)"`；Windows 拿的是窗口
+/// 标题，没有 bundle id。历史条目有 `app_name` / `app_bundle_id` 两个字段，拆开存
+/// 才能让详情页只显示人读得懂的应用名，而不是把一长串 bundle id 也糊在正文里。
+///
+/// 认不出括号结构就整串当应用名 —— 宁可显示得啰嗦，也不要把窗口标题里的普通括号
+/// 误当成 bundle id。
+pub fn split_front_app_label(label: &str) -> (Option<String>, Option<String>) {
+    let trimmed = label.trim();
+    if trimmed.is_empty() {
+        return (None, None);
+    }
+    if let Some(open) = trimmed.rfind(" (") {
+        if trimmed.ends_with(')') {
+            let name = trimmed[..open].trim();
+            let bundle = trimmed[open + 2..trimmed.len() - 1].trim();
+            // bundle id 必然是点分的反向域名。没有点的括号内容（"记事本 (未保存)"
+            // 这类窗口标题）不是 bundle id，不能拆。
+            if !name.is_empty() && bundle.contains('.') && !bundle.contains(' ') {
+                return (Some(name.to_string()), Some(bundle.to_string()));
+            }
+        }
+    }
+    (Some(trimmed.to_string()), None)
+}
+
 /// 概览页年度活动热力图的单日计数（date = 本地日期 YYYY-MM-DD）。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -2974,6 +3001,53 @@ pub struct QaChatMessage {
     /// 仅用于前端安全展示选区原文；LLM 通道只读取 `role` / `content`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selection_text: Option<String>,
+}
+
+#[cfg(test)]
+mod split_front_app_label_tests {
+    use super::split_front_app_label;
+
+    #[test]
+    fn macos_label_splits_into_name_and_bundle() {
+        let (name, bundle) = split_front_app_label("Claude (com.anthropic.claudefordesktop)");
+        assert_eq!(name.as_deref(), Some("Claude"));
+        assert_eq!(bundle.as_deref(), Some("com.anthropic.claudefordesktop"));
+    }
+
+    #[test]
+    fn app_names_containing_spaces_and_parens_still_split_on_the_last_group() {
+        let (name, bundle) = split_front_app_label("Visual Studio Code (com.microsoft.VSCode)");
+        assert_eq!(name.as_deref(), Some("Visual Studio Code"));
+        assert_eq!(bundle.as_deref(), Some("com.microsoft.VSCode"));
+    }
+
+    /// Windows 拿的是窗口标题，里面的括号是正文的一部分，不是 bundle id。
+    /// 误拆会把标题截断，显示成半句话。
+    #[test]
+    fn window_titles_with_ordinary_parens_are_not_split() {
+        for title in [
+            "未命名文档 (未保存)",
+            "report.txt (~/Documents)",
+            "Inbox (12)",
+        ] {
+            let (name, bundle) = split_front_app_label(title);
+            assert_eq!(name.as_deref(), Some(title), "{title} should stay intact");
+            assert_eq!(bundle, None, "{title} has no bundle id");
+        }
+    }
+
+    #[test]
+    fn bare_names_pass_through() {
+        let (name, bundle) = split_front_app_label("Terminal");
+        assert_eq!(name.as_deref(), Some("Terminal"));
+        assert_eq!(bundle, None);
+    }
+
+    #[test]
+    fn blank_input_yields_nothing() {
+        assert_eq!(split_front_app_label(""), (None, None));
+        assert_eq!(split_front_app_label("   "), (None, None));
+    }
 }
 
 #[cfg(test)]

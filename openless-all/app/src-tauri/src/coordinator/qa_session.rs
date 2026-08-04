@@ -750,6 +750,11 @@ pub(super) async fn answer_qa_question_text(
     }
 
     if prefs.qa_save_history {
+        // 与听写路径同口径：应用名与 bundle id 分开存。
+        let (qa_app_name, qa_app_bundle_id) = front_app
+            .as_deref()
+            .map(crate::types::split_front_app_label)
+            .unwrap_or((None, None));
         let session = DictationSession {
             id: Uuid::new_v4().to_string(),
             created_at: Utc::now().to_rfc3339(),
@@ -760,8 +765,8 @@ pub(super) async fn answer_qa_question_text(
             style_pack_id: None,
             translation_active: false,
             polish_source: None,
-            app_bundle_id: None,
-            app_name: front_app,
+            app_bundle_id: qa_app_bundle_id,
+            app_name: qa_app_name,
             insert_status: InsertStatus::CopiedFallback,
             error_code: Some("qaSession".to_string()),
             duration_ms: Some(duration_ms),
