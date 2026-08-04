@@ -2,7 +2,8 @@
 use crate::types::InsertStatus;
 use crate::windows_ime_ipc::{ImeSubmitRequest, WindowsImeIpcServer};
 use crate::windows_ime_profile::{
-    restore_decision, ImeProfileSnapshot, ProfileRestoreDecision, WindowsImeProfileManager,
+    is_openless_profile_snapshot, restore_decision, ImeProfileSnapshot, ProfileRestoreDecision,
+    WindowsImeProfileManager,
 };
 use crate::windows_ime_protocol::ImeSubmitStatus;
 
@@ -31,6 +32,16 @@ pub fn map_ime_status_to_insert_status(status: ImeSubmitStatus) -> InsertStatus 
 
 pub fn should_fallback_after_ime_result(status: ImeSubmitStatus) -> bool {
     !matches!(status, ImeSubmitStatus::Committed)
+}
+
+fn describe_snapshot(snapshot: &ImeProfileSnapshot) -> String {
+    format!(
+        "kind={:?} lang=0x{:04X} clsid={} profile={}",
+        snapshot.kind(),
+        snapshot.lang_id(),
+        snapshot.clsid().unwrap_or("none"),
+        snapshot.profile_guid().unwrap_or("none"),
+    )
 }
 
 #[derive(Debug)]
@@ -66,10 +77,6 @@ impl PreparedWindowsImeSession {
         self.openless_activated
     }
 
-    pub fn should_restore_when_active_profile_check_fails(&self) -> bool {
-        self.has_saved_profile()
-    }
-
     pub fn activation_failed_with_saved_profile(&self) -> bool {
         self.has_saved_profile() && !self.openless_was_activated()
     }
@@ -99,6 +106,15 @@ impl WindowsImeSessionController {
                     return PreparedWindowsImeSession::unavailable();
                 }
             };
+
+            // 诊断：会话开始时 OpenLess 已是当前输入法 → 上次会话疑似恢复失败。
+            // 此时仍照常激活（幂等），restore_session 的粘滞态防护会跳过"恢复"，
+            // 避免把 OpenLess 当原输入法写死（issue #852 的失败状态自粘）。
+            if is_openless_profile_snapshot(&saved_profile) {
+                log::warn!(
+                    "[windows-ime] session began while OpenLess IME was already the active profile — previous session likely failed to restore"
+                );
+            }
 
             match self.profile_manager.activate_openless_profile() {
                 Ok(()) => PreparedWindowsImeSession {
@@ -144,36 +160,77 @@ impl WindowsImeSessionController {
     }
 
     pub fn restore_session(&self, prepared: PreparedWindowsImeSession) {
-        let should_restore = match self.profile_manager.is_openless_profile_active() {
-            Ok(openless_active) => restore_decision(
-                prepared.saved_profile.as_ref(),
-                openless_active,
-                prepared.activation_failed_with_saved_profile(),
-            ),
-            Err(error) => {
-                if prepared.should_restore_when_active_profile_check_fails() {
-                    log::warn!(
-                        "[windows-ime] check active profile before restore failed: {error}; attempting restore"
+        let saved_profile = prepared.saved_profile.as_ref();
+        let openless_was_activated = prepared.openless_was_activated();
+        let activation_failed = prepared.activation_failed_with_saved_profile();
+
+        // 诊断：记录决策依据 + 恢复前探测到的当前 profile（不影响决策）。
+        // issue #852 的恢复决策只依赖会话已知的激活事实，不依赖该探测结果。
+        let active_profile_desc = match self.profile_manager.capture_active_profile() {
+            Ok(snapshot) => describe_snapshot(&snapshot),
+            Err(error) => format!("unavailable: {error}"),
+        };
+        let saved_desc = match prepared.saved_profile.as_ref() {
+            Some(snapshot) => describe_snapshot(snapshot),
+            None => "none".to_string(),
+        };
+        let decision = restore_decision(saved_profile, openless_was_activated, activation_failed);
+        log::info!(
+            "[windows-ime] restore decision={decision:?} saved_profile={saved_desc} openless_was_activated={openless_was_activated} activation_failed={activation_failed} active_profile={active_profile_desc}"
+        );
+
+        if decision != ProfileRestoreDecision::RestoreSavedProfile {
+            return;
+        }
+
+        let Some(saved_profile) = saved_profile else {
+            return;
+        };
+
+        // 粘滞态防护：saved 本身就是 OpenLess（上次会话疑似未恢复）→ 不把 OpenLess
+        // 当原输入法写死，跳过恢复并留下诊断日志。
+        if is_openless_profile_snapshot(saved_profile) {
+            log::warn!(
+                "[windows-ime] saved profile is OpenLess itself — previous session likely failed to restore; skipping restore"
+            );
+            return;
+        }
+
+        // 第一次恢复 + 校验 + 一次重试：TSF 会话级切换偶发不生效时，短等待后重试一次。
+        for attempt in 0..2 {
+            if attempt > 0 {
+                log::info!(
+                    "[windows-ime] restore did not take effect; retrying (attempt {attempt})"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            if let Err(error) = self.profile_manager.restore_profile(saved_profile) {
+                log::warn!(
+                    "[windows-ime] restore saved profile failed (attempt {attempt}): {error}"
+                );
+            }
+            match self.profile_manager.is_openless_profile_active() {
+                Ok(false) => {
+                    log::info!(
+                        "[windows-ime] restore verified: OpenLess is no longer the active profile"
                     );
-                    ProfileRestoreDecision::RestoreSavedProfile
-                } else {
-                    log::warn!("[windows-ime] check active profile before restore failed: {error}");
-                    ProfileRestoreDecision::KeepCurrentProfile
+                    return;
+                }
+                Ok(true) => {
+                    log::warn!(
+                        "[windows-ime] restore verification: OpenLess is still active (attempt {attempt})"
+                    );
+                }
+                Err(error) => {
+                    log::warn!(
+                        "[windows-ime] restore verification check failed (attempt {attempt}): {error}"
+                    );
                 }
             }
-        };
-
-        if should_restore != ProfileRestoreDecision::RestoreSavedProfile {
-            return;
         }
-
-        let Some(saved_profile) = prepared.saved_profile.as_ref() else {
-            return;
-        };
-
-        if let Err(error) = self.profile_manager.restore_profile(saved_profile) {
-            log::warn!("[windows-ime] restore saved profile failed: {error}");
-        }
+        log::error!(
+            "[windows-ime] restore did not take effect after retry — IME may remain on OpenLess"
+        );
     }
 }
 
@@ -225,19 +282,31 @@ mod tests {
     }
 
     #[test]
-    fn active_profile_check_failure_restores_any_session_with_saved_profile() {
-        let prepared = PreparedWindowsImeSession {
+    fn restore_decision_uses_confirmed_activation_state_only() {
+        // 激活成功且有原快照 → 恢复（决策不再依赖 profile-current 探测，issue #852）。
+        let activated = PreparedWindowsImeSession {
             saved_profile: Some(ImeProfileSnapshot::keyboard_layout(0x0409, 0x0409_0409)),
             openless_activated: true,
         };
-        let activation_failed = PreparedWindowsImeSession::activation_failed(
-            ImeProfileSnapshot::keyboard_layout(0x0409, 0x0409_0409),
+        assert_eq!(
+            restore_decision(
+                activated.saved_profile.as_ref(),
+                activated.openless_was_activated(),
+                activated.activation_failed_with_saved_profile(),
+            ),
+            ProfileRestoreDecision::RestoreSavedProfile
         );
 
-        assert!(prepared.should_restore_when_active_profile_check_fails());
-        assert!(activation_failed.should_restore_when_active_profile_check_fails());
-        assert!(!PreparedWindowsImeSession::unavailable()
-            .should_restore_when_active_profile_check_fails());
+        // 从未激活（unavailable）→ 保持现状。
+        let unavailable = PreparedWindowsImeSession::unavailable();
+        assert_eq!(
+            restore_decision(
+                unavailable.saved_profile.as_ref(),
+                unavailable.openless_was_activated(),
+                unavailable.activation_failed_with_saved_profile(),
+            ),
+            ProfileRestoreDecision::KeepCurrentProfile
+        );
     }
 
     #[test]

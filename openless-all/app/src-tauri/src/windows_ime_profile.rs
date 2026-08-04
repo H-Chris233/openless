@@ -75,12 +75,49 @@ pub enum ProfileRestoreDecision {
     KeepCurrentProfile,
 }
 
+/// 判断快照是否就是 OpenLess 自己的 TSF 配置文件。
+///
+/// 用于粘滞态防护：若上次会话恢复失败，OpenLess 仍是当前输入法，下一次
+/// `prepare_session` 会把 OpenLess 本身捕获为"原输入法"；此时应跳过恢复，
+/// 避免把 OpenLess 当原输入法写死（issue #852 的失败状态自粘）。
+pub fn is_openless_profile_snapshot(snapshot: &ImeProfileSnapshot) -> bool {
+    matches!(snapshot.kind(), ImeProfileKind::TextService)
+        && snapshot.lang_id() == OPENLESS_TSF_LANG_ID
+        && snapshot.clsid().map(normalize_guid_string).as_deref()
+            == Some(OPENLESS_TEXT_SERVICE_CLSID_BRACED)
+        && snapshot
+            .profile_guid()
+            .map(normalize_guid_string)
+            .as_deref()
+            == Some(OPENLESS_PROFILE_GUID_BRACED)
+}
+
+fn normalize_guid_string(value: &str) -> String {
+    let upper = value.trim().to_ascii_uppercase();
+    if upper.starts_with('{') && upper.ends_with('}') {
+        upper
+    } else {
+        format!("{{{upper}}}")
+    }
+}
+
+/// 根据会话状态决定是否恢复原输入法。
+///
+/// - 会话确实激活过 OpenLess（`openless_was_activated`）→ 恢复；
+/// - 激活失败但捕获到了原快照（`openless_activation_failed`）→ 仍恢复，
+///   覆盖"激活半途而废"的残留状态；
+/// - 既没激活、也没有失败快照（未捕获到原输入法 / 非 Windows）→ 保持现状。
+///
+/// 注意：这里**不再**接收 `is_openless_profile_active()` 的探测结果。该探测运行在
+/// OpenLess 自己进程的后台线程上，而 OpenLess IME 激活发生在目标 App 进程，
+/// `GetActiveProfile` 可能返回线程本地的默认配置，误判为"用户已切走"而跳过恢复
+/// （issue #852）。恢复决定只应依赖我们已知的激活事实。
 pub fn restore_decision(
     saved: Option<&ImeProfileSnapshot>,
-    openless_profile_is_current: bool,
+    openless_was_activated: bool,
     openless_activation_failed: bool,
 ) -> ProfileRestoreDecision {
-    if saved.is_some() && (openless_profile_is_current || openless_activation_failed) {
+    if saved.is_some() && (openless_was_activated || openless_activation_failed) {
         ProfileRestoreDecision::RestoreSavedProfile
     } else {
         ProfileRestoreDecision::KeepCurrentProfile
@@ -406,11 +443,10 @@ mod windows_impl {
         // current language / active profile 状态，OS 仍认 OpenLess 是当前输入法 →
         // 用户的输入法切不回去。issue #469。
         //
-        // 现代 ActivateProfile 失败降级为 warn：legacy 两步成功后，OS 视觉层已经把用户
-        // 原 IME 切回（语言指示器、键盘事件路由都走 legacy 视图）；现代 API 失败只是内部
-        // bookkeeping 不同步，不会让用户看到"还停在 OpenLess"。所以这一步降级为 warn，
-        // 不让 caller 把"已经切回了但 bookkeeping 慢"误判成"切回完全失败"。pr_agent
-        // partial-restore 关注点回应。
+        // #852 加固：legacy 与现代各自独立执行并分别记录结果，legacy 失败不再短路
+        // 现代调用（此前 legacy `?` 传播会让现代 ActivateProfile 根本不执行，恢复
+        // 整体失败）。任一成功即视为整体成功：legacy 成功 → OS 视觉层（语言指示器、
+        // 键盘事件路由）已切回；现代成功 → 会话级激活已切回。两者都失败才算失败。
         match snapshot.kind() {
             ImeProfileKind::TextService => {
                 let clsid = parse_required_guid("text service CLSID", snapshot.clsid())?;
@@ -418,11 +454,10 @@ mod windows_impl {
                     parse_required_guid("text service profile GUID", snapshot.profile_guid())?;
                 let lang_id = snapshot.lang_id();
 
-                with_input_processor_profiles(|profiles| unsafe {
+                let legacy_result = with_input_processor_profiles(|profiles| unsafe {
                     profiles.ChangeCurrentLanguage(lang_id)?;
                     profiles.ActivateLanguageProfile(&clsid, lang_id, &profile_guid)
-                })?;
-
+                });
                 let modern_result = with_profile_manager(|manager| unsafe {
                     manager.ActivateProfile(
                         TF_PROFILETYPE_INPUTPROCESSOR,
@@ -433,22 +468,16 @@ mod windows_impl {
                         PROFILE_RESTORE_FLAGS,
                     )
                 });
-                if let Err(err) = modern_result {
-                    log::warn!(
-                        "[windows-ime] legacy restore OK but modern ActivateProfile failed: {err}"
-                    );
-                }
-                Ok(())
+                report_restore_step_results(legacy_result, modern_result)
             }
             ImeProfileKind::KeyboardLayout => {
                 let hkl = HKL(snapshot.hkl().unwrap_or_default() as *mut c_void);
                 let zero_guid = GUID::zeroed();
                 let lang_id = snapshot.lang_id();
 
-                with_input_processor_profiles(|profiles| unsafe {
+                let legacy_result = with_input_processor_profiles(|profiles| unsafe {
                     profiles.ChangeCurrentLanguage(lang_id)
-                })?;
-
+                });
                 let modern_result = with_profile_manager(|manager| unsafe {
                     manager.ActivateProfile(
                         TF_PROFILETYPE_KEYBOARDLAYOUT,
@@ -459,28 +488,36 @@ mod windows_impl {
                         PROFILE_RESTORE_FLAGS,
                     )
                 });
-                if let Err(err) = modern_result {
-                    log::warn!(
-                        "[windows-ime] legacy restore OK but modern ActivateProfile (keyboard) failed: {err}"
-                    );
-                }
-                Ok(())
+                report_restore_step_results(legacy_result, modern_result)
             }
+        }
+    }
+
+    pub(super) fn report_restore_step_results(
+        legacy_result: WindowsImeProfileResult<()>,
+        modern_result: WindowsImeProfileResult<()>,
+    ) -> WindowsImeProfileResult<()> {
+        if let Err(error) = &legacy_result {
+            log::warn!(
+                "[windows-ime] legacy restore failed (ChangeCurrentLanguage/ActivateLanguageProfile): {error}"
+            );
+        }
+        if let Err(error) = &modern_result {
+            log::warn!("[windows-ime] modern ActivateProfile failed: {error}");
+        }
+        match (legacy_result, modern_result) {
+            (Ok(()), _) | (_, Ok(())) => Ok(()),
+            (Err(legacy_error), Err(modern_error)) => Err(WindowsImeProfileError::WindowsApi(
+                format!(
+                    "both legacy and modern restore failed: legacy={legacy_error}; modern={modern_error}"
+                ),
+            )),
         }
     }
 
     pub fn is_openless_profile_active() -> WindowsImeProfileResult<bool> {
         let snapshot = capture_active_profile()?;
-
-        Ok(matches!(snapshot.kind(), ImeProfileKind::TextService)
-            && snapshot.lang_id() == OPENLESS_TSF_LANG_ID
-            && snapshot.clsid().map(normalize_guid_string).as_deref()
-                == Some(OPENLESS_TEXT_SERVICE_CLSID_BRACED)
-            && snapshot
-                .profile_guid()
-                .map(normalize_guid_string)
-                .as_deref()
-                == Some(OPENLESS_PROFILE_GUID_BRACED))
+        Ok(is_openless_profile_snapshot(&snapshot))
     }
 
     pub fn set_openless_language_profile_enabled(enabled: bool) -> WindowsImeProfileResult<()> {
@@ -706,15 +743,6 @@ mod windows_impl {
         Ok(ImeProfileSnapshot::keyboard_layout(lang_id, hkl_value))
     }
 
-    fn normalize_guid_string(value: &str) -> String {
-        let upper = value.trim().to_ascii_uppercase();
-        if upper.starts_with('{') && upper.ends_with('}') {
-            upper
-        } else {
-            format!("{{{upper}}}")
-        }
-    }
-
     fn hkl_to_isize(hkl: HKL) -> isize {
         hkl.0 as isize
     }
@@ -771,7 +799,7 @@ mod tests {
     }
 
     #[test]
-    fn restore_is_required_when_openless_is_active_and_snapshot_exists() {
+    fn restore_is_required_when_openless_was_activated() {
         assert_eq!(
             restore_decision(Some(&text_service_snapshot()), true, false),
             ProfileRestoreDecision::RestoreSavedProfile
@@ -795,11 +823,28 @@ mod tests {
     }
 
     #[test]
-    fn restore_is_skipped_when_user_already_changed_away_from_openless() {
+    fn restore_is_skipped_when_session_never_activated() {
         assert_eq!(
             restore_decision(Some(&text_service_snapshot()), false, false),
             ProfileRestoreDecision::KeepCurrentProfile
         );
+    }
+
+    #[test]
+    fn openless_snapshot_detection_matches_exact_profile_identifiers() {
+        // 大小写与花括号不同的 GUID 也应被归一化后识别为 OpenLess（粘滞态防护）。
+        let openless = ImeProfileSnapshot::text_service(
+            0x0804,
+            "{6b9f3f4f-5ee7-42d6-9c61-9f80b03a5d7d}".to_string(),
+            "{9b5f5e04-23f6-47da-9a26-d221f6c3f02e}".to_string(),
+        );
+        assert!(is_openless_profile_snapshot(&openless));
+
+        let other_ime = text_service_snapshot();
+        assert!(!is_openless_profile_snapshot(&other_ime));
+
+        let keyboard = ImeProfileSnapshot::keyboard_layout(0x0409, 0x0409_0409);
+        assert!(!is_openless_profile_snapshot(&keyboard));
     }
 
     #[test]
@@ -950,5 +995,43 @@ mod windows_tests {
         let ownership = windows_impl::coinitialize_result_ownership(RPC_E_CHANGED_MODE).unwrap();
 
         assert!(!ownership.should_uninitialize);
+    }
+
+    #[test]
+    fn restore_step_results_ok_when_modern_succeeds_after_legacy_failure() {
+        let result = windows_impl::report_restore_step_results(
+            Err(WindowsImeProfileError::WindowsApi(
+                "legacy failed".to_string(),
+            )),
+            Ok(()),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn restore_step_results_ok_when_legacy_succeeds_and_modern_fails() {
+        let result = windows_impl::report_restore_step_results(
+            Ok(()),
+            Err(WindowsImeProfileError::WindowsApi(
+                "modern failed".to_string(),
+            )),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn restore_step_results_err_only_when_both_fail() {
+        let result = windows_impl::report_restore_step_results(
+            Err(WindowsImeProfileError::WindowsApi(
+                "legacy failed".to_string(),
+            )),
+            Err(WindowsImeProfileError::WindowsApi(
+                "modern failed".to_string(),
+            )),
+        );
+        let err = result.unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("both legacy and modern restore failed"));
     }
 }
