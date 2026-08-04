@@ -1324,15 +1324,23 @@ impl<'de> Deserialize<'de> for UserPreferences {
         let mut selection_polish_hotkey = wire
             .selection_polish_hotkey
             .unwrap_or_else(default_selection_polish_hotkey);
-        if cfg!(target_os = "windows")
-            && selection_polish_hotkey_was_missing
-            && is_right_control_modifier_shortcut(&dictation_hotkey)
-        {
-            // Old settings cannot distinguish the historic default from a
-            // deliberate Right Ctrl choice. Preserve the existing dictation
-            // workflow and leave the new action disabled rather than silently
-            // changing a user's shortcut.
-            selection_polish_hotkey = None;
+        if selection_polish_hotkey_was_missing {
+            // 1.3.15 新增的选区润色默认键（Windows = 右 Alt）不能抢占/顶掉用户已有按键：
+            // - 老用户从未自定义录音键（仍为历史默认 Right Control）：默认关闭新功能，
+            //   避免升级后右 Alt 被全局热键占用影响既有使用习惯；
+            // - 默认键与录音键重叠（字符串可能不等但物理同键，如 legacy rightAlt
+            //   派生出 RightOption 而默认是 RightAlt）：同样关闭，否则升级后任何
+            //   设置保存都会被热键冲突校验整体拒绝，改动全部丢失（#904）。
+            let legacy_default_user = cfg!(target_os = "windows")
+                && is_right_control_modifier_shortcut(&dictation_hotkey);
+            let default_taken_by_dictation = selection_polish_hotkey
+                .as_ref()
+                .is_some_and(|binding| {
+                    crate::shortcut_binding::bindings_overlap(binding, &dictation_hotkey)
+                });
+            if legacy_default_user || default_taken_by_dictation {
+                selection_polish_hotkey = None;
+            }
         }
         let streaming_insert_default_migrated = wire.streaming_insert_default_migrated;
         let streaming_insert = if streaming_insert_default_migrated {
@@ -3059,6 +3067,38 @@ mod tests {
         .unwrap();
         assert!(prefs.selection_polish_hotkey.is_none());
         assert_eq!(prefs.dictation_hotkey.primary, "RightControl");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn legacy_right_alt_dictation_upgrade_disables_selection_polish_instead_of_colliding() {
+        // #904：录音键自定义为右 Alt 的旧配置升级时，默认注入的选区润色键（右 Alt）
+        // 与录音键相同会形成持久冲突，把后续所有设置保存挡死。迁移必须改为停用新功能。
+        let prefs: UserPreferences = serde_json::from_str(
+            r#"{
+                "hotkey": { "trigger": "rightAlt", "mode": "hold", "keys": null },
+                "dictationHotkey": { "primary": "RightAlt", "modifiers": [] }
+            }"#,
+        )
+        .unwrap();
+        assert!(prefs.selection_polish_hotkey.is_none());
+        assert_eq!(prefs.dictation_hotkey.primary, "RightAlt");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn legacy_right_alt_trigger_upgrade_disables_selection_polish_by_overlap() {
+        // #904 变体：旧文件没有 dictationHotkey，只带 legacy hotkey.trigger=rightAlt，
+        // 派生出的录音键 primary 是 "RightOption"，与默认注入的 "RightAlt" 字符串不相等
+        // 但物理同键（bindings_overlap=true）。迁移必须按重叠判定，不能按 == 字符串比较。
+        let prefs: UserPreferences = serde_json::from_str(
+            r#"{
+                "hotkey": { "trigger": "rightAlt", "mode": "hold", "keys": null }
+            }"#,
+        )
+        .unwrap();
+        assert!(prefs.selection_polish_hotkey.is_none());
+        assert_eq!(prefs.dictation_hotkey.primary, "RightOption");
     }
 
     #[cfg(target_os = "windows")]
