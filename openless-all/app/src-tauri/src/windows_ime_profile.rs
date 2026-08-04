@@ -447,48 +447,57 @@ mod windows_impl {
         // 现代调用（此前 legacy `?` 传播会让现代 ActivateProfile 根本不执行，恢复
         // 整体失败）。任一成功即视为整体成功：legacy 成功 → OS 视觉层（语言指示器、
         // 键盘事件路由）已切回；现代成功 → 会话级激活已切回。两者都失败才算失败。
+        let lang_id = snapshot.lang_id();
+
+        // legacy 与现代共用同一组解析后的参数（TextService 为 CLSID + profile GUID，
+        // KeyboardLayout 为 HKL）。GUID 解析失败直接整体失败，与旧行为一致。
+        let (profile_type, clsid, profile_guid, hkl) = modern_restore_args(snapshot)?;
+
+        // legacy 步骤：先切语言，TextService 再激活具体 profile（KeyboardLayout 无 profile）。
+        let legacy_result = with_input_processor_profiles(|profiles| unsafe {
+            profiles.ChangeCurrentLanguage(lang_id)?;
+            if profile_type == TF_PROFILETYPE_INPUTPROCESSOR {
+                profiles.ActivateLanguageProfile(&clsid, lang_id, &profile_guid)?;
+            }
+            Ok(())
+        });
+        let modern_result = with_profile_manager(|manager| unsafe {
+            manager.ActivateProfile(
+                profile_type,
+                lang_id,
+                &clsid,
+                &profile_guid,
+                hkl,
+                PROFILE_RESTORE_FLAGS,
+            )
+        });
+        report_restore_step_results(legacy_result, modern_result)
+    }
+
+    /// modern ActivateProfile 的参数：TextService 用 CLSID + profile GUID，KeyboardLayout 用 HKL。
+    fn modern_restore_args(
+        snapshot: &ImeProfileSnapshot,
+    ) -> WindowsImeProfileResult<(u32, GUID, GUID, HKL)> {
         match snapshot.kind() {
             ImeProfileKind::TextService => {
                 let clsid = parse_required_guid("text service CLSID", snapshot.clsid())?;
                 let profile_guid =
                     parse_required_guid("text service profile GUID", snapshot.profile_guid())?;
-                let lang_id = snapshot.lang_id();
-
-                let legacy_result = with_input_processor_profiles(|profiles| unsafe {
-                    profiles.ChangeCurrentLanguage(lang_id)?;
-                    profiles.ActivateLanguageProfile(&clsid, lang_id, &profile_guid)
-                });
-                let modern_result = with_profile_manager(|manager| unsafe {
-                    manager.ActivateProfile(
-                        TF_PROFILETYPE_INPUTPROCESSOR,
-                        lang_id,
-                        &clsid,
-                        &profile_guid,
-                        null_hkl(),
-                        PROFILE_RESTORE_FLAGS,
-                    )
-                });
-                report_restore_step_results(legacy_result, modern_result)
+                Ok((
+                    TF_PROFILETYPE_INPUTPROCESSOR,
+                    clsid,
+                    profile_guid,
+                    null_hkl(),
+                ))
             }
             ImeProfileKind::KeyboardLayout => {
                 let hkl = HKL(snapshot.hkl().unwrap_or_default() as *mut c_void);
-                let zero_guid = GUID::zeroed();
-                let lang_id = snapshot.lang_id();
-
-                let legacy_result = with_input_processor_profiles(|profiles| unsafe {
-                    profiles.ChangeCurrentLanguage(lang_id)
-                });
-                let modern_result = with_profile_manager(|manager| unsafe {
-                    manager.ActivateProfile(
-                        TF_PROFILETYPE_KEYBOARDLAYOUT,
-                        lang_id,
-                        &zero_guid,
-                        &zero_guid,
-                        hkl,
-                        PROFILE_RESTORE_FLAGS,
-                    )
-                });
-                report_restore_step_results(legacy_result, modern_result)
+                Ok((
+                    TF_PROFILETYPE_KEYBOARDLAYOUT,
+                    GUID::zeroed(),
+                    GUID::zeroed(),
+                    hkl,
+                ))
             }
         }
     }
