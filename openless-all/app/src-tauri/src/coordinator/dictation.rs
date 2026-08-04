@@ -2153,7 +2153,7 @@ pub(super) async fn begin_session_as(
         let (whisper_prompt, hotwords) =
             whisper_vocab_for_provider(&active_asr, enabled_phrases(inner));
         let asr_call_label = AsrCallLabel::new(effective_asr.clone(), Some(model.clone()));
-        let whisper = Arc::new(
+        let whisper = Arc::new(apply_zenmux_asr_options(
             WhisperBatchASR::new(
                 api_key,
                 base_url,
@@ -2164,7 +2164,9 @@ pub(super) async fn begin_session_as(
             )
             .with_request_format(whisper_request_format(&active_asr))
             .with_hotwords(hotwords),
-        );
+            &active_asr,
+            inner,
+        ));
         store_asr_for_session(
             inner,
             current_session_id,
