@@ -412,36 +412,10 @@ export function History() {
                   key={item.id}
                 />
               )}
-              <div style={{ display: 'grid', gridTemplateColumns: mobile ? '1fr' : '1fr 1fr', gap: 12 }}>
-                <div style={{ padding: 14, border: '0.5px solid var(--ol-line)', borderRadius: 10, background: 'var(--ol-surface-2)' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 10 }}>
-                    <Pill size="sm" tone="outline">{t('history.rawLabel')}</Pill>
-                    {item.rawTranscript && (
-                      <Btn icon={justCopiedRaw ? 'check' : 'copy'} variant="ghost" size="sm" onClick={() => void onCopyRaw()}>
-                        {justCopiedRaw ? t('common.copied') : t('common.copy')}
-                      </Btn>
-                    )}
-                  </div>
-                  <p style={{ margin: 0, fontSize: 13, lineHeight: 1.7, color: 'var(--ol-ink-2)', whiteSpace: 'pre-wrap' }}>
-                    {item.rawTranscript || t('history.rawEmpty')}
-                  </p>
-                </div>
-                <div style={{ padding: 14, border: '0.5px solid var(--ol-blue)', borderRadius: 10, background: 'var(--ol-blue-soft)' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 10 }}>
-                    <Pill size="sm" tone="blue">{MODE_LABEL[item.mode]}</Pill>
-                    <Btn icon={justCopied ? 'check' : 'copy'} variant="ghost" size="sm" onClick={() => void onCopy()}>
-                      {justCopied ? t('common.copied') : t('common.copy')}
-                    </Btn>
-                  </div>
-                  <p style={{ margin: 0, fontSize: 13, lineHeight: 1.7, color: 'var(--ol-ink)', whiteSpace: 'pre-line' }}>
-                    {item.finalText}
-                  </p>
-                </div>
-              </div>
               {/* 流水线明细：识别 / 润色 / 插入 三步各占一行 —— 左列步骤名、中列
                   provider·model（或插入目标），右列该步耗时/状态。旧历史没有模型与
                   耗时字段时对应行自动隐藏，只剩插入行 = 改版前的信息量。 */}
-              <div style={{ marginTop: 18, paddingTop: 14, borderTop: '0.5px solid var(--ol-line-soft)', display: 'grid', gridTemplateColumns: 'auto 1fr auto', columnGap: 14, rowGap: 7, fontSize: 11, color: 'var(--ol-ink-4)', alignItems: 'baseline' }}>
+              <div style={{ marginBottom: 16, paddingBottom: 14, borderBottom: '0.5px solid var(--ol-line-soft)', display: 'grid', gridTemplateColumns: 'auto 1fr auto', columnGap: 14, rowGap: 7, fontSize: 11, color: 'var(--ol-ink-4)', alignItems: 'baseline' }}>
                 {(item.asrProvider || item.asrMs != null) && (
                   <>
                     <span style={{ display: 'flex' }}>
@@ -487,6 +461,32 @@ export function History() {
                       ? t('history.copiedFallback', { shortcut: os === 'mac' ? '⌘V' : 'Ctrl+V' })
                       : t('history.insertFailed')
                 }</span>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: mobile ? '1fr' : '1fr 1fr', gap: 12 }}>
+                <div style={{ padding: 14, border: '0.5px solid var(--ol-line)', borderRadius: 10, background: 'var(--ol-surface-2)' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 10 }}>
+                    <Pill size="sm" tone="outline">{t('history.rawLabel')}</Pill>
+                    {item.rawTranscript && (
+                      <Btn icon={justCopiedRaw ? 'check' : 'copy'} variant="ghost" size="sm" onClick={() => void onCopyRaw()}>
+                        {justCopiedRaw ? t('common.copied') : t('common.copy')}
+                      </Btn>
+                    )}
+                  </div>
+                  <p style={{ margin: 0, fontSize: 13, lineHeight: 1.7, color: 'var(--ol-ink-2)', whiteSpace: 'pre-wrap' }}>
+                    {item.rawTranscript || t('history.rawEmpty')}
+                  </p>
+                </div>
+                <div style={{ padding: 14, border: '0.5px solid var(--ol-blue)', borderRadius: 10, background: 'var(--ol-blue-soft)' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 10 }}>
+                    <Pill size="sm" tone="blue">{MODE_LABEL[item.mode]}</Pill>
+                    <Btn icon={justCopied ? 'check' : 'copy'} variant="ghost" size="sm" onClick={() => void onCopy()}>
+                      {justCopied ? t('common.copied') : t('common.copy')}
+                    </Btn>
+                  </div>
+                  <p style={{ margin: 0, fontSize: 13, lineHeight: 1.7, color: 'var(--ol-ink)', whiteSpace: 'pre-line' }}>
+                    {item.finalText}
+                  </p>
+                </div>
               </div>
             </>
           ) : (
