@@ -397,6 +397,7 @@ export const zhCN = {
       noPacks: '没有可用的风格包。',
       packsLoadFailed: '读取风格包失败：{{err}}',
       failed: '重新润色失败：{{err}}',
+      timeout: '当前 LLM 提供商 30 秒内没有返回结果。换个更快的提供商，或稍后重试 —— 免费模型池经常排队。',
       resultTitle: '{{name}} 的结果',
       retryResultTitle: '重试结果',
       empty: '（模型返回了空结果）',

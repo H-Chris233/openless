@@ -399,6 +399,7 @@ export const zhTW: typeof zhCN = {
       noPacks: '沒有可用的風格包。',
       packsLoadFailed: '讀取風格包失敗：{{err}}',
       failed: '重新潤色失敗：{{err}}',
+      timeout: '當前 LLM 提供商 30 秒內沒有返回結果。換個更快的提供商，或稍後重試 —— 免費模型池經常排隊。',
       resultTitle: '{{name}} 的結果',
       retryResultTitle: '重試結果',
       empty: '（模型返回了空結果）',

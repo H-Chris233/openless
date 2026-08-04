@@ -507,6 +507,11 @@ export function History() {
   );
 }
 
+/** 后端超时错误在 IPC 边界退化成裸字符串（LLMError::Timeout → "timeout"）。 */
+function isTimeout(message: string): boolean {
+  return /timeout|timed out|超时/i.test(message);
+}
+
 function errorMessage(error: unknown): string {
   if (typeof error === 'string') return error;
   if (error instanceof Error) return error.message;
@@ -581,7 +586,15 @@ function RepolishPanel({ session, mobile }: { session: DictationSession; mobile:
       setResults(prev => [result, ...prev.filter(r => r.key !== result.key)]);
     } catch (err) {
       console.error('[history] repolish failed', err);
-      setError(t('history.repolish.failed', { err: errorMessage(err) }));
+      const msg = errorMessage(err);
+      // 后端把 LLMError::Timeout 原样透成字符串 "timeout"，直接显示等于没说 ——
+      // 用户看到「重新润色失败：timeout」只会以为是这个功能坏了，而实际是当前 LLM
+      // provider 没在 30 秒内回包（免费模型池尤其常见）。换一句能照着做的提示。
+      setError(
+        isTimeout(msg)
+          ? t('history.repolish.timeout')
+          : t('history.repolish.failed', { err: msg }),
+      );
     } finally {
       setRunning(null);
     }

@@ -401,6 +401,7 @@ export const ja: typeof zhCN = {
       noPacks: '利用できるスタイルパックがありません。',
       packsLoadFailed: 'スタイルパックの読み込みに失敗：{{err}}',
       failed: '再整文に失敗：{{err}}',
+      timeout: '現在の LLM プロバイダーが 30 秒以内に応答しませんでした。より速いプロバイダーに切り替えるか、後でもう一度お試しください（無料モデルプールは混雑しがちです）。',
       resultTitle: '{{name}} の結果',
       retryResultTitle: '再試行の結果',
       empty: '（モデルが空の結果を返しました）',

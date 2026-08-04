@@ -401,6 +401,7 @@ export const ko: typeof zhCN = {
       noPacks: '사용할 수 있는 스타일 팩이 없습니다.',
       packsLoadFailed: '스타일 팩 로드 실패: {{err}}',
       failed: '다시 다듬기 실패: {{err}}',
+      timeout: '현재 LLM 제공자가 30초 안에 응답하지 않았습니다. 더 빠른 제공자로 바꾸거나 잠시 후 다시 시도하세요 — 무료 모델 풀은 대기가 잦습니다.',
       resultTitle: '{{name}} 결과',
       retryResultTitle: '재시도 결과',
       empty: '(모델이 빈 결과를 반환했습니다)',

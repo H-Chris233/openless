@@ -399,6 +399,7 @@ export const en: typeof zhCN = {
       noPacks: 'No style packs available.',
       packsLoadFailed: 'Failed to load style packs: {{err}}',
       failed: 'Re-polish failed: {{err}}',
+      timeout: 'The current LLM provider did not respond within 30 seconds. Switch to a faster provider, or try again later — free model pools often queue.',
       resultTitle: 'Result from {{name}}',
       retryResultTitle: 'Retry result',
       empty: '(the model returned an empty result)',
