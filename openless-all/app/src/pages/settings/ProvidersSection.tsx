@@ -659,6 +659,11 @@ export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
                 {t('settings.providers.elevenLabsUploadNotice')}
               </div>
             )}
+            {committedAsrProvider === 'zenmux' && (
+              <div role="note" style={{ marginTop: 2, fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.6 }}>
+                {t('settings.providers.zenmuxVocabularyNote')}
+              </div>
+            )}
             {/* 统一百炼「拉取模型」只写 model，不覆盖用户选择的区域或工作空间 endpoint。 */}
             <ProviderTools kind="asr" modelAccount="asr.model" provider={committedAsrProvider} onModelSelected={() => setAsrModelRevision(v => v + 1)} />
             {(committedAsrProvider === 'openai-compatible' || committedAsrProvider === 'zenmux') && (

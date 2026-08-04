@@ -338,7 +338,7 @@ Long-term reference rewrites are stored as `raw → polished → rule` triples a
 The dictionary handles your proper nouns, product names, names of people, and new words. Today it supports:
 
 - Manually adding the correct spelling, a category, and notes. You do not need to maintain misspellings or context hints.
-- Enabled entries are sent to the ASR provider that supports hotwords (Volcengine `context.hotwords`, StepFun `hotwords`, Whisper-compatible `prompt`, Bailian vocabulary ID) so they are recognized correctly during transcription. iFlytek realtime ASR has no request-level hotword parameter — configure personalized hotwords in the iFlytek console instead.
+- Enabled entries are sent to the ASR provider that supports hotwords (Volcengine `context.hotwords`, StepFun `hotwords`, Whisper-compatible `prompt` — except ZenMux, whose JSON protocol does not carry `prompt`/`hotwords`, Bailian vocabulary ID) so they are recognized correctly during transcription. iFlytek realtime ASR has no request-level hotword parameter — configure personalized hotwords in the iFlytek console instead.
 - Entries are also injected into the polish prompt: the model decides per sentence whether to substitute. If "Cloud" clearly refers to the AI product `Claude` in context, it is corrected; if it genuinely means cloud computing, it is left as is.
 - The app auto-learns candidate corrections such as `Claude`, `ChatGPT`, and `OpenLess` from your history and offers them later.
 

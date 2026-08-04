@@ -879,6 +879,7 @@ export const en: typeof zhCN = {
         asrAppleSpeech: 'Apple Speech (macOS)',
       },
       elevenLabsUploadNotice: 'ElevenLabs uploads recorded audio to the configured endpoint for batch transcription.',
+      zenmuxVocabularyNote: 'ZenMux uses a JSON transcription protocol and does not receive dictionary hotwords (prompt/hotwords); the dictionary still feeds the polish step but does not bias speech recognition.',
       asrAdvancedNote: 'Advanced options below only affect the Custom OpenAI-compatible and ZenMux presets; other named provider presets keep their built-in behavior.',
       asrAdvancedVerboseJsonLabel: 'Segment metrics (verbose_json)',
       asrAdvancedVerboseJsonHint: 'Requests segment metrics for hallucination filtering when the server supports it; keep off for self-hosted servers that do not.',

@@ -417,7 +417,7 @@ pub(super) fn whisper_vocab_for_provider(
 /// 该 provider 的请求体编码方式。OpenRouter 的 `/audio/transcriptions` 是
 /// `application/json` + base64 音频（issue #582），其余兼容厂商沿用 multipart。
 /// ZenMux 同形但带 `language` / `enable_itn`（issue #837），单独走 `ZenMuxJson`。
-pub(super) fn whisper_request_format(provider_id: &str) -> crate::asr::whisper::AsrRequestFormat {
+pub(crate) fn whisper_request_format(provider_id: &str) -> crate::asr::whisper::AsrRequestFormat {
     match provider_id {
         "openrouter" => crate::asr::whisper::AsrRequestFormat::OpenRouterJson,
         "zenmux" => crate::asr::whisper::AsrRequestFormat::ZenMuxJson,

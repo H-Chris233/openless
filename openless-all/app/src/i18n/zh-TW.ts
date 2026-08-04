@@ -879,6 +879,7 @@ export const zhTW: typeof zhCN = {
         asrAppleSpeech: 'Apple 語音（macOS）',
       },
       elevenLabsUploadNotice: 'ElevenLabs 會將錄音上傳至已設定的端點進行批次轉寫。',
+      zenmuxVocabularyNote: 'ZenMux 走 JSON 轉寫協定，不傳送詞典熱詞（prompt/hotwords）；詞典仍會進入潤色鏈路，但不會參與語音辨識偏置。',
       asrAdvancedNote: '以下進階選項僅影響「自訂 OpenAI 相容」與「ZenMux」預設；其餘具名廠商預設維持內建行為。',
       asrAdvancedVerboseJsonLabel: '分段指標 (verbose_json)',
       asrAdvancedVerboseJsonHint: '服務端支援時回傳 segments 指標，用於幻聽過濾；自建服務若不支援請保持關閉。',

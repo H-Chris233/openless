@@ -77,6 +77,9 @@ mod silence_auto_stop;
 pub(crate) mod selection_polish;
 
 use asr_wiring::*;
+// providers.rs 的 ASR 验证路径按 provider 的真实请求格式发送探针（issue #837），
+// 需要跨模块访问 whisper 兼容系的格式映射，显式再导出。
+pub(crate) use asr_wiring::whisper_request_format;
 use capsule_focus::*;
 use hotkey_loops::*;
 use polish_flow::*;

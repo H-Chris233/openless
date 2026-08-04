@@ -881,6 +881,7 @@ export const ja: typeof zhCN = {
         asrAppleSpeech: 'Apple 音声認識 (macOS)',
       },
       elevenLabsUploadNotice: 'ElevenLabs は録音音声を設定済みのエンドポイントへアップロードしてバッチ文字起こしします。',
+      zenmuxVocabularyNote: 'ZenMux は JSON 文字起こしプロトコルを使用し、辞書ホットワード（prompt/hotwords）は送信されません。辞書は依然として潤色段階には渡りますが、音声認識のバイアスには使用されません。',
       asrAdvancedNote: '以下の詳細オプションは「カスタム OpenAI 互換」と「ZenMux」のプリセットのみに影響します。その他の名前付きプロバイダーのプリセットは内蔵動作のままです。',
       asrAdvancedVerboseJsonLabel: 'セグメント指標 (verbose_json)',
       asrAdvancedVerboseJsonHint: 'サーバーが対応する場合に幻聴フィルタ用の segments 指標を要求します。非対応の自前サーバーではオフのままにしてください。',

@@ -881,6 +881,7 @@ export const ko: typeof zhCN = {
         asrAppleSpeech: 'Apple 음성 (macOS)',
       },
       elevenLabsUploadNotice: 'ElevenLabs는 녹음 오디오를 설정된 엔드포인트에 업로드해 일괄 전사합니다.',
+      zenmuxVocabularyNote: 'ZenMux는 JSON 전사 프로토콜을 사용하며 사전 핫워드(prompt/hotwords)를 보내지 않습니다. 사전은 여전히 다듬기 단계에 전달되지만 음성 인식 편향에는 사용되지 않습니다.',
       asrAdvancedNote: '아래 고급 옵션은「커스텀 OpenAI 호환」및「ZenMux」프리셋에만 적용됩니다. 다른 명명된 공급자 프리셋은 내장 동작을 유지합니다.',
       asrAdvancedVerboseJsonLabel: '세그먼트 지표 (verbose_json)',
       asrAdvancedVerboseJsonHint: '서버가 지원할 때 환각 필터링용 segments 지표를 요청합니다. 지원하지 않는 자체 호스팅 서버에서는 꺼두세요.',
