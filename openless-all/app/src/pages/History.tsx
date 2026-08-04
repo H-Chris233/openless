@@ -428,7 +428,7 @@ export function History() {
                     <span style={{ color: 'var(--ol-ink-2)', fontFamily: 'var(--ol-font-mono)', overflowWrap: 'anywhere' }}>
                       {[item.asrProvider, item.asrModel].filter(Boolean).join(' · ')}
                     </span>
-                    <span style={{ fontFamily: 'var(--ol-font-mono)', textAlign: 'right' }}>
+                    <span style={{ fontFamily: 'var(--ol-font-mono)', textAlign: 'right', whiteSpace: 'nowrap' }}>
                       {item.asrMs != null ? formatStepDuration(item.asrMs, t) : ''}
                     </span>
                   </>
@@ -439,7 +439,7 @@ export function History() {
                     <span style={{ color: 'var(--ol-ink-2)', fontFamily: 'var(--ol-font-mono)', overflowWrap: 'anywhere' }}>
                       {[item.llmProvider, item.llmModel].filter(Boolean).join(' · ')}
                     </span>
-                    <span style={{ fontFamily: 'var(--ol-font-mono)', textAlign: 'right' }}>
+                    <span style={{ fontFamily: 'var(--ol-font-mono)', textAlign: 'right', whiteSpace: 'nowrap' }}>
                       {item.polishMs != null ? formatStepDuration(item.polishMs, t) : ''}
                     </span>
                   </>
@@ -452,7 +452,7 @@ export function History() {
                     <>{' · '}{t('history.vocabHits', { count: item.dictionaryEntryCount })}</>
                   )}
                 </span>
-                <span style={{ textAlign: 'right' }}>{
+                <span style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{
                   item.insertStatus === 'inserted'
                     ? t('history.inserted')
                     : item.insertStatus === 'pasteSent'
