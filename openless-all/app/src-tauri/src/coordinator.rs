@@ -1593,6 +1593,20 @@ impl Coordinator {
     pub fn prefs(&self) -> &PreferencesStore {
         &self.inner.prefs
     }
+    /// 设置保存后立即把胶囊样式同步进 Inner 原子缓存（0=Siri，1=Classic）。
+    /// emit_capsule 的 ~30Hz 主线程闭包本来也会同步，但入场帧的 payload 是在闭包
+    /// 同步之前克隆的（会带一帧旧样式），且 Windows 上主线程拥塞时闭包可能延迟
+    /// 执行——用户反馈「切换成默认风格后仍显示流光 Siri」。在保存路径直接同步后，
+    /// 任何平台的下一次录音从入场帧起就携带最新样式，不再依赖 emit 闭包的时序。
+    pub fn sync_capsule_style_from_preferences(&self) {
+        let classic = matches!(
+            self.inner.prefs.get().capsule_style,
+            CapsuleStyle::Classic
+        );
+        self.inner
+            .capsule_style
+            .store(if classic { 1 } else { 0 }, Ordering::Relaxed);
+    }
     pub fn sync_active_asr_provider_from_preferences(&self) -> Result<(), String> {
         let provider = self.inner.prefs.get().active_asr_provider;
         self.sync_active_asr_provider_to_vault(&provider)
@@ -3042,6 +3056,32 @@ mod tests {
             "按下 Less Computer 键必须进入录音并弹出可见胶囊"
         );
         std::env::remove_var("OPENLESS_HOTKEY_INJECTION_DRY_RUN");
+    }
+
+    #[test]
+    fn sync_capsule_style_from_preferences_updates_atomic_immediately() {
+        // 设置保存路径会调 sync_capsule_style_from_preferences：原子缓存必须立即反映
+        // 用户选择，让下一次录音的入场帧就携带新样式——不依赖 emit_capsule 主线程
+        // 闭包的 ~30Hz 同步（Windows 主线程拥塞时闭包延迟 → 整场显示旧样式）。
+        let coordinator = Coordinator::new();
+        coordinator.sync_capsule_style_from_preferences();
+        assert_eq!(coordinator.inner.capsule_style.load(Ordering::Relaxed), 0);
+
+        {
+            let mut prefs = coordinator.inner.prefs.get();
+            prefs.capsule_style = CapsuleStyle::Classic;
+            coordinator.inner.prefs.set(prefs).unwrap();
+        }
+        coordinator.sync_capsule_style_from_preferences();
+        assert_eq!(coordinator.inner.capsule_style.load(Ordering::Relaxed), 1);
+
+        {
+            let mut prefs = coordinator.inner.prefs.get();
+            prefs.capsule_style = CapsuleStyle::Siri;
+            coordinator.inner.prefs.set(prefs).unwrap();
+        }
+        coordinator.sync_capsule_style_from_preferences();
+        assert_eq!(coordinator.inner.capsule_style.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]

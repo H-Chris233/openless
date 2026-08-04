@@ -405,6 +405,10 @@ pub fn set_settings(
     // 用户改键会让浮窗里的 "{recordHotkey}" 文案一直停留在旧值。
     persist_settings(&*coord, prefs)?;
     let prefs = coord.prefs().get();
+    // 保存即同步胶囊样式原子：下一次录音的入场帧就携带新样式，不依赖 emit_capsule
+    // 主线程闭包的 ~30Hz 同步（Windows 主线程拥塞时闭包延迟 → 整场显示旧样式）。
+    // 前端也会通过 prefs:changed 广播收到新样式，录音中切换即时换肤。
+    coord.sync_capsule_style_from_preferences();
     // 系统代理开关变化时立即重建客户端连接池（issue #869）。
     if remote_prev.use_system_proxy != prefs.use_system_proxy {
         crate::net::set_use_system_proxy(prefs.use_system_proxy);
@@ -453,6 +457,8 @@ pub fn set_settings(
     prefs.android_overlay_trigger = prefs.android_overlay_trigger.normalized();
     persist_settings(&*coord, prefs)?;
     let prefs = coord.prefs().get();
+    // 保存即同步胶囊样式原子（Android 通知胶囊 payload 同源，见 emit_capsule）。
+    coord.sync_capsule_style_from_preferences();
     // 系统代理开关变化时立即重建客户端连接池（issue #869）。
     if previous.use_system_proxy != prefs.use_system_proxy {
         crate::net::set_use_system_proxy(prefs.use_system_proxy);

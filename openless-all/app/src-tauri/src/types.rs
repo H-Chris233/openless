@@ -3243,6 +3243,24 @@ mod tests {
     }
 
     #[test]
+    fn capsule_style_pref_defaults_to_siri_and_round_trips_wire_key() {
+        // 老用户的 preferences.json 没有 capsuleStyle 字段 → 回落默认 Siri。
+        let prefs: UserPreferences = serde_json::from_str("{}").unwrap();
+        assert_eq!(prefs.capsule_style, CapsuleStyle::Siri);
+
+        // 设置里切到 Classic 后：set_settings 存盘（camelCase wire 键）→ 重启
+        // get_settings 读回，必须保持 Classic（配置文件持久化 roundtrip）。
+        let classic = UserPreferences {
+            capsule_style: CapsuleStyle::Classic,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&classic).unwrap();
+        assert!(json.contains(r#""capsuleStyle":"classic""#));
+        let restored: UserPreferences = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.capsule_style, CapsuleStyle::Classic);
+    }
+
+    #[test]
     fn audio_cue_on_record_pref_round_trips_explicit_false() {
         // 用户在设置里关掉后，set_settings → 存盘 → get_settings 必须保住 false，
         // 否则开关一刷新又跳回 true（字段在 Wire 往返时被丢掉的经典症状）。
