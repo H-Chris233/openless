@@ -7,9 +7,9 @@ import { Icon } from '../components/Icon';
 import { Tooltip } from '../components/Tooltip';
 import { detectOS } from '../components/WindowChrome';
 import { formatComboLabel } from '../lib/hotkey';
-import { clearHistory, deleteHistoryEntry, listHistory, readAudioRecording, retranscribeRecording, isTauri } from '../lib/ipc';
+import { clearHistory, deleteHistoryEntry, listHistory, listStylePacks, readAudioRecording, repolish, retranscribeRecording, isTauri } from '../lib/ipc';
 import { useMobileLayout } from '../lib/useMobileLayout';
-import type { DictationSession, PolishMode } from '../lib/types';
+import type { DictationSession, PolishMode, StylePack } from '../lib/types';
 import { useHotkeySettings } from '../state/HotkeySettingsContext';
 import { Btn, Card, PageHeader, Pill } from './_atoms';
 import { chipSelectedStyle } from './settings/shared';
@@ -488,6 +488,12 @@ export function History() {
                   </p>
                 </div>
               </div>
+              {/* 重新润色：拿这条的原文再跑一次 LLM。没有原文就没得润色（转录失败条目），
+                  此时整块不渲染。key={item.id} 让切换记录时结果与状态一起重置，
+                  避免把上一条的结果留在新条目下面。 */}
+              {item.rawTranscript.trim() && (
+                <RepolishPanel session={item} mobile={mobile} key={item.id} />
+              )}
             </>
           ) : (
             <div style={{ padding: 40, textAlign: 'center', fontSize: 13, color: 'var(--ol-ink-4)' }}>
@@ -505,6 +511,196 @@ function errorMessage(error: unknown): string {
   if (typeof error === 'string') return error;
   if (error instanceof Error) return error.message;
   return String(error);
+}
+
+interface RepolishResult {
+  /** 结果卡片的 key。同一个风格重复应用会覆盖上一次，不无限堆卡片。 */
+  key: string;
+  title: string;
+  text: string;
+}
+
+/**
+ * 「重新润色」面板：拿这条历史的**原文**再跑一次 LLM。
+ *
+ * 两个入口共用一条后端通道（`repolish`，stylePackId 可选）：
+ * - 「用原风格重试」→ 不传 pack id，用当前激活风格再跑一遍。用来判断上次的结果是模型
+ *   抖动还是稳定行为 —— 这是用户说「AI 识别得不对」时真正想做的对照实验。
+ * - 「应用」→ 传选中的 pack id，看同一段话换个风格是什么样。
+ *
+ * 结果只在本次查看时显示，不写回历史条目：历史的 finalText 是「当时真的插进去的那段
+ * 文字」，是一条事实记录，不该被事后试算覆盖。面板顶部的说明也把这点直说了。
+ *
+ * 注意这里只重跑润色，不重跑识别 —— 成功听写的录音在插入后就删了（隐私设计），
+ * 原文是唯一还在的输入。真正的「重新转录」入口仍只对留有录音的失败条目开放。
+ */
+function RepolishPanel({ session, mobile }: { session: DictationSession; mobile: boolean }) {
+  const { t } = useTranslation();
+  const [packs, setPacks] = useState<StylePack[] | null>(null);
+  const [packsError, setPacksError] = useState<string | null>(null);
+  const [selectedPackId, setSelectedPackId] = useState<string>('');
+  const [running, setRunning] = useState<'retry' | 'apply' | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [results, setResults] = useState<RepolishResult[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    listStylePacks()
+      .then(all => {
+        if (cancelled) return;
+        // 只列启用的包：禁用的包在别处也不参与润色，这里列出来会让「应用」得到
+        // 一个用户以为已经关掉的风格。
+        const usable = all.filter(p => p.enabled);
+        setPacks(usable);
+        setSelectedPackId(current => current || usable.find(p => !p.active)?.id || usable[0]?.id || '');
+      })
+      .catch(err => {
+        if (cancelled) return;
+        console.error('[history] failed to load style packs', err);
+        setPacksError(errorMessage(err));
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  const run = async (kind: 'retry' | 'apply') => {
+    const packId = kind === 'apply' ? selectedPackId : undefined;
+    if (kind === 'apply' && !packId) return;
+    setRunning(kind);
+    setError(null);
+    try {
+      const text = await repolish(session.rawTranscript, session.mode, packId);
+      const pack = packId ? packs?.find(p => p.id === packId) : undefined;
+      const result: RepolishResult = {
+        key: packId ?? '__retry__',
+        title: pack
+          ? t('history.repolish.resultTitle', { name: pack.name })
+          : t('history.repolish.retryResultTitle'),
+        text,
+      };
+      // 同一个 key 覆盖旧结果，新 key 追加到最前面 —— 最新的试算结果离操作区最近。
+      setResults(prev => [result, ...prev.filter(r => r.key !== result.key)]);
+    } catch (err) {
+      console.error('[history] repolish failed', err);
+      setError(t('history.repolish.failed', { err: errorMessage(err) }));
+    } finally {
+      setRunning(null);
+    }
+  };
+
+  return (
+    <div style={{ marginTop: 18, paddingTop: 14, borderTop: '0.5px solid var(--ol-line-soft)' }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap', marginBottom: 4 }}>
+        <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink-2)' }}>
+          {t('history.repolish.title')}
+        </span>
+        {results.length > 0 && (
+          <Btn size="sm" variant="ghost" onClick={() => setResults([])}>
+            {t('history.repolish.clear')}
+          </Btn>
+        )}
+      </div>
+      <div style={{ fontSize: 11, color: 'var(--ol-ink-4)', lineHeight: 1.55, marginBottom: 12 }}>
+        {t('history.repolish.hint')}
+      </div>
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: results.length > 0 ? 14 : 0 }}>
+        <Btn
+          icon="refresh"
+          variant="ghost"
+          size="sm"
+          disabled={running !== null}
+          onClick={() => void run('retry')}
+        >
+          {running === 'retry' ? t('history.repolish.retrying') : t('history.repolish.retry')}
+        </Btn>
+        <span style={{ width: 1, height: 18, background: 'var(--ol-line)' }} />
+        {packsError ? (
+          <span style={{ fontSize: 11, color: 'var(--ol-red, #ef4444)' }}>
+            {t('history.repolish.packsLoadFailed', { err: packsError })}
+          </span>
+        ) : packs && packs.length === 0 ? (
+          <span style={{ fontSize: 11, color: 'var(--ol-ink-4)' }}>{t('history.repolish.noPacks')}</span>
+        ) : (
+          <>
+            <select
+              value={selectedPackId}
+              onChange={e => setSelectedPackId(e.target.value)}
+              aria-label={t('history.repolish.pickStyle')}
+              disabled={!packs || running !== null}
+              style={{
+                padding: '4px 8px',
+                fontSize: 11.5,
+                fontFamily: 'inherit',
+                color: 'var(--ol-ink-2)',
+                background: 'var(--ol-surface-2)',
+                border: '0.5px solid var(--ol-line-strong)',
+                borderRadius: 8,
+                maxWidth: mobile ? 160 : 220,
+              }}
+            >
+              {(packs ?? []).map(pack => (
+                <option key={pack.id} value={pack.id}>{pack.name}</option>
+              ))}
+            </select>
+            <Btn
+              variant="ghost"
+              size="sm"
+              disabled={!selectedPackId || running !== null}
+              onClick={() => void run('apply')}
+            >
+              {running === 'apply' ? t('history.repolish.applying') : t('history.repolish.apply')}
+            </Btn>
+          </>
+        )}
+      </div>
+
+      {error && (
+        <div style={{ marginTop: 10, padding: '8px 10px', borderRadius: 8, background: 'rgba(239,68,68,0.08)', color: 'var(--ol-red, #ef4444)', fontSize: 11.5, lineHeight: 1.45 }}>
+          {error}
+        </div>
+      )}
+
+      {results.length > 0 && (
+        <div style={{ display: 'grid', gridTemplateColumns: mobile ? '1fr' : '1fr 1fr', gap: 12 }}>
+          {results.map(result => (
+            <RepolishResultCard key={result.key} title={result.title} text={result.text} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RepolishResultCard({ title, text }: { title: string; text: string }) {
+  const { t } = useTranslation();
+  const [copied, setCopied] = useState(false);
+
+  const onCopy = async () => {
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable');
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch (error) {
+      console.error('[history] failed to copy repolish result', error);
+    }
+  };
+
+  return (
+    <div style={{ padding: 14, border: '0.5px dashed var(--ol-line-strong)', borderRadius: 10, background: 'var(--ol-surface-2)' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 10 }}>
+        <Pill size="sm" tone="default">{title}</Pill>
+        {text.trim() && (
+          <Btn icon={copied ? 'check' : 'copy'} variant="ghost" size="sm" onClick={() => void onCopy()}>
+            {copied ? t('common.copied') : t('common.copy')}
+          </Btn>
+        )}
+      </div>
+      <p style={{ margin: 0, fontSize: 13, lineHeight: 1.7, color: 'var(--ol-ink-2)', whiteSpace: 'pre-wrap' }}>
+        {text.trim() || t('history.repolish.empty')}
+      </p>
+    </div>
+  );
 }
 
 function isUserCancelled(message: string): boolean {
