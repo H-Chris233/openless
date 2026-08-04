@@ -35,6 +35,32 @@ function useModeLabel(): Record<PolishMode, string> {
   };
 }
 
+// Pill 默认 nowrap + flexShrink: 0，遇上长包名会把同一排的按钮挤变形（「复制」文字竖排）。
+// 显示包名的地方一律改成可收缩 + 省略号，全名挂在外层容器的 title 上悬停查看。
+const TRUNCATED_PILL_STYLE = {
+  minWidth: 0,
+  maxWidth: '100%',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  display: 'block',
+  flexShrink: 1,
+} as const;
+
+// 历史条目上显示「哪个风格包产出的这段文本」。session.mode 只是风格包的 baseMode
+// （四个内置分类之一），自建包全都会落进这四个桶，光看 mode 分不出是哪个包——
+// 所以优先用 stylePackId 查真实包名，跟本页「重新润色」面板里的风格命名对齐。
+//
+// 内置包例外：后端包名是硬编码中文（"轻度润色"…），直接显示会在英/日/韩界面串语言，
+// 因此内置包一律走 i18n 的 MODE_LABEL。旧历史没有 stylePackId、或包已被删除时同样回落。
+function styleLabelFor(
+  session: DictationSession,
+  packNames: Map<string, string>,
+  modeLabel: Record<PolishMode, string>,
+): string {
+  const custom = session.stylePackId ? packNames.get(session.stylePackId) : undefined;
+  return custom ?? modeLabel[session.mode];
+}
+
 export function History() {
   const { t } = useTranslation();
   const os = detectOS();
@@ -69,6 +95,12 @@ export function History() {
   const { prefs } = useHotkeySettings();
   const mobile = useMobileLayout();
   const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
+  // 风格包在本页有两个用途：给历史条目显示包名、给「重新润色」面板选风格。加载提到这里
+  // 一次拿全，两处共用，省掉切换条目时 RepolishPanel 重挂载带来的重复 IPC。
+  // 注意这里存的是**全部**包（含已禁用）：历史条目可能出自后来被禁用的包，显示名字要能查到；
+  // RepolishPanel 自己再 filter(enabled)，禁用的包不该出现在可选风格里。
+  const [allPacks, setAllPacks] = useState<StylePack[] | null>(null);
+  const [packsError, setPacksError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -89,6 +121,33 @@ export function History() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    let cancelled = false;
+    listStylePacks()
+      .then(packs => {
+        if (!cancelled) setAllPacks(packs);
+      })
+      .catch(err => {
+        if (cancelled) return;
+        console.error('[history] failed to load style packs', err);
+        setPacksError(errorMessage(err));
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  // 自定义包 id → 包名。内置包不收：它们的名字走 i18n（见 styleLabelFor）。
+  const packNames = useMemo(
+    () => new Map(
+      (allPacks ?? [])
+        .filter(pack => pack.kind !== 'builtin' && pack.name.trim())
+        .map(pack => [pack.id, pack.name.trim()] as const),
+    ),
+    [allPacks],
+  );
+  // 不缓存：MODE_LABEL 每次渲染都是新对象，用 useCallback 反而会把旧语言的标签闭包
+  // 留在缓存里，切换界面语言后 Pill 不跟着变。只在渲染里调用，重建成本可忽略。
+  const styleLabel = (session: DictationSession) => styleLabelFor(session, packNames, MODE_LABEL);
 
   const searchInputRef = useRef<HTMLInputElement>(null);
   const searchShortcut = os === 'mac' ? '⌘K' : 'Ctrl+K';
@@ -365,7 +424,12 @@ export function History() {
                 <div style={{ fontSize: 12, color: 'var(--ol-ink-2)', lineHeight: 1.45, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
                   {s.finalText.split('\n')[0]}
                 </div>
-                <div><Pill size="sm" tone={s.mode === 'raw' ? 'outline' : 'default'}>{MODE_LABEL[s.mode]}</Pill></div>
+                {/* tone 仍按 baseMode 走：颜色保留原来的粗分类信息，文字换成实际风格包名。 */}
+                <div style={{ display: 'flex', minWidth: 0 }} title={styleLabel(s)}>
+                  <Pill size="sm" tone={s.mode === 'raw' ? 'outline' : 'default'} style={TRUNCATED_PILL_STYLE}>
+                    {styleLabel(s)}
+                  </Pill>
+                </div>
               </button>
             ))}
           </div>
@@ -384,9 +448,11 @@ export function History() {
                 </div>
               )}
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14, flexWrap: 'wrap', gap: 8 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                  <span style={{ fontSize: 13, fontFamily: 'var(--ol-font-mono)', color: 'var(--ol-ink-3)' }}>{formatTime(item.createdAt)}</span>
-                  <Pill size="sm" tone="default">{MODE_LABEL[item.mode]}</Pill>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+                  <span style={{ fontSize: 13, fontFamily: 'var(--ol-font-mono)', color: 'var(--ol-ink-3)', flexShrink: 0 }}>{formatTime(item.createdAt)}</span>
+                  <span style={{ display: 'flex', minWidth: 0 }} title={styleLabel(item)}>
+                    <Pill size="sm" tone="default" style={TRUNCATED_PILL_STYLE}>{styleLabel(item)}</Pill>
+                  </span>
                   {/* 「录音」前缀：与下方识别/润色耗时区分——录音时长发生在松键前，
                       不该与流水线各步耗时加总（用户反馈"时间对不上"）。 */}
                   <span style={{ fontSize: 11, color: 'var(--ol-ink-4)' }}>{t('history.recorded', { duration: formatDuration(item.durationMs, t) })}</span>
@@ -462,8 +528,10 @@ export function History() {
                       : t('history.insertFailed')
                 }</span>
               </div>
+              {/* minWidth: 0 —— grid 子项默认 min-width: auto，任何不换行的内容（这里是风格包名
+                  Pill）都会把整列撑出卡片、逼出横向滚动条。两栏都要加，否则一栏撑宽另一栏跟着宽。 */}
               <div style={{ display: 'grid', gridTemplateColumns: mobile ? '1fr' : '1fr 1fr', gap: 12 }}>
-                <div style={{ padding: 14, border: '0.5px solid var(--ol-line)', borderRadius: 10, background: 'var(--ol-surface-2)' }}>
+                <div style={{ minWidth: 0, padding: 14, border: '0.5px solid var(--ol-line)', borderRadius: 10, background: 'var(--ol-surface-2)' }}>
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 10 }}>
                     <Pill size="sm" tone="outline">{t('history.rawLabel')}</Pill>
                     {item.rawTranscript && (
@@ -476,12 +544,17 @@ export function History() {
                     {item.rawTranscript || t('history.rawEmpty')}
                   </p>
                 </div>
-                <div style={{ padding: 14, border: '0.5px solid var(--ol-blue)', borderRadius: 10, background: 'var(--ol-blue-soft)' }}>
+                <div style={{ minWidth: 0, padding: 14, border: '0.5px solid var(--ol-blue)', borderRadius: 10, background: 'var(--ol-blue-soft)' }}>
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 10 }}>
-                    <Pill size="sm" tone="blue">{MODE_LABEL[item.mode]}</Pill>
-                    <Btn icon={justCopied ? 'check' : 'copy'} variant="ghost" size="sm" onClick={() => void onCopy()}>
-                      {justCopied ? t('common.copied') : t('common.copy')}
-                    </Btn>
+                    <span style={{ display: 'flex', minWidth: 0 }} title={styleLabel(item)}>
+                      <Pill size="sm" tone="blue" style={TRUNCATED_PILL_STYLE}>{styleLabel(item)}</Pill>
+                    </span>
+                    {/* 「复制」不能被长包名压缩：压窄后按钮文字会竖排。 */}
+                    <span style={{ flexShrink: 0 }}>
+                      <Btn icon={justCopied ? 'check' : 'copy'} variant="ghost" size="sm" onClick={() => void onCopy()}>
+                        {justCopied ? t('common.copied') : t('common.copy')}
+                      </Btn>
+                    </span>
                   </div>
                   <p style={{ margin: 0, fontSize: 13, lineHeight: 1.7, color: 'var(--ol-ink)', whiteSpace: 'pre-line' }}>
                     {item.finalText}
@@ -492,7 +565,13 @@ export function History() {
                   此时整块不渲染。key={item.id} 让切换记录时结果与状态一起重置，
                   避免把上一条的结果留在新条目下面。 */}
               {item.rawTranscript.trim() && (
-                <RepolishPanel session={item} mobile={mobile} key={item.id} />
+                <RepolishPanel
+                  session={item}
+                  mobile={mobile}
+                  allPacks={allPacks}
+                  packsError={packsError}
+                  key={item.id}
+                />
               )}
             </>
           ) : (
@@ -539,33 +618,30 @@ interface RepolishResult {
  * 注意这里只重跑润色，不重跑识别 —— 成功听写的录音在插入后就删了（隐私设计），
  * 原文是唯一还在的输入。真正的「重新转录」入口仍只对留有录音的失败条目开放。
  */
-function RepolishPanel({ session, mobile }: { session: DictationSession; mobile: boolean }) {
+function RepolishPanel({ session, mobile, allPacks, packsError }: {
+  session: DictationSession;
+  mobile: boolean;
+  /** History 顶层加载的**全部**风格包（含已禁用）；null 表示还在加载。 */
+  allPacks: StylePack[] | null;
+  packsError: string | null;
+}) {
   const { t } = useTranslation();
-  const [packs, setPacks] = useState<StylePack[] | null>(null);
-  const [packsError, setPacksError] = useState<string | null>(null);
   const [selectedPackId, setSelectedPackId] = useState<string>('');
   const [running, setRunning] = useState<'retry' | 'apply' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [results, setResults] = useState<RepolishResult[]>([]);
 
+  // 只列启用的包：禁用的包在别处也不参与润色，这里列出来会让「应用」得到
+  // 一个用户以为已经关掉的风格。
+  const packs = useMemo(
+    () => (allPacks ? allPacks.filter(p => p.enabled) : null),
+    [allPacks],
+  );
+
   useEffect(() => {
-    let cancelled = false;
-    listStylePacks()
-      .then(all => {
-        if (cancelled) return;
-        // 只列启用的包：禁用的包在别处也不参与润色，这里列出来会让「应用」得到
-        // 一个用户以为已经关掉的风格。
-        const usable = all.filter(p => p.enabled);
-        setPacks(usable);
-        setSelectedPackId(current => current || usable.find(p => !p.active)?.id || usable[0]?.id || '');
-      })
-      .catch(err => {
-        if (cancelled) return;
-        console.error('[history] failed to load style packs', err);
-        setPacksError(errorMessage(err));
-      });
-    return () => { cancelled = true; };
-  }, []);
+    if (!packs) return;
+    setSelectedPackId(current => current || packs.find(p => !p.active)?.id || packs[0]?.id || '');
+  }, [packs]);
 
   const run = async (kind: 'retry' | 'apply') => {
     const packId = kind === 'apply' ? selectedPackId : undefined;
