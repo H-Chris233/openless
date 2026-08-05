@@ -1667,14 +1667,16 @@ fn default_qa_hotkey() -> Option<ShortcutBinding> {
 }
 
 fn default_selection_polish_hotkey() -> Option<ShortcutBinding> {
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     {
+        // Windows 用右 Alt；macOS 上 RightAlt = 右 Option（CGEventTap keycode 61，
+        // 可区分左右键，且不占用 Cmd/Ctrl 常用组合）。
         Some(ShortcutBinding {
             primary: "RightAlt".into(),
             modifiers: Vec::new(),
         })
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         None
     }
