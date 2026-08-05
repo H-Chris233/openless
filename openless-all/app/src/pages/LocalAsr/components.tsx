@@ -776,6 +776,8 @@ export function ModelDetailPanel({
     onReveal,
     onTest,
     showTest,
+    testResult,
+    testing,
 }: {
     entry: SidebarModelEntry | null
     fileCount: number | null
@@ -789,6 +791,8 @@ export function ModelDetailPanel({
     onReveal: () => void
     onTest: () => void
     showTest: boolean
+    testResult: LocalAsrTestResult | { error: string } | null
+    testing: boolean
 }) {
     const { t } = useTranslation()
     if (!entry) {
@@ -808,59 +812,100 @@ export function ModelDetailPanel({
         )
     }
     return (
-        <div style={{ display: "flex", flexDirection: "column", gap: 12, minWidth: 0 }}>
-            <div>
-                <div style={{ fontSize: 14, fontWeight: 650, color: "var(--ol-ink)" }}>
-                    {entry.name}
-                </div>
-                {entry.repo && (
-                    <div style={{ fontSize: 11.5, color: "var(--ol-ink-4)", marginTop: 3 }}>
-                        {t("localAsr.detailRepo")}: {entry.repo}
+        <div
+            style={{
+                display: "flex",
+                flexDirection: "column",
+                minWidth: 0,
+                height: "100%",
+            }}
+        >
+            {/* 顶部行：模型名在左上，Hugging Face 仓库 / 镜像源在右上。 */}
+            <div
+                style={{
+                    display: "flex",
+                    alignItems: "flex-start",
+                    justifyContent: "space-between",
+                    gap: 12,
+                }}
+            >
+                <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 14, fontWeight: 650, color: "var(--ol-ink)" }}>
+                        {entry.name}
                     </div>
-                )}
+                    <div
+                        style={{
+                            display: "flex",
+                            flexWrap: "wrap",
+                            gap: 6,
+                            marginTop: 8,
+                            fontSize: 11,
+                        }}
+                    >
+                        {entry.remoteBytes != null && entry.remoteBytes > 0 && (
+                            <span
+                                style={{
+                                    padding: "2px 8px",
+                                    borderRadius: 999,
+                                    background: "rgba(0,0,0,0.05)",
+                                    color: "var(--ol-ink-2)",
+                                }}
+                            >
+                                {formatBytes(entry.remoteBytes)}
+                            </span>
+                        )}
+                        {fileCount != null && fileCount > 0 && (
+                            <span
+                                style={{
+                                    padding: "2px 8px",
+                                    borderRadius: 999,
+                                    background: "rgba(0,0,0,0.05)",
+                                    color: "var(--ol-ink-2)",
+                                }}
+                            >
+                                {fileCount} {t("localAsr.detailFiles")}
+                            </span>
+                        )}
+                        {entry.isDownloaded && (
+                            <span
+                                style={{
+                                    padding: "2px 8px",
+                                    borderRadius: 999,
+                                    background: "rgba(40,160,90,0.12)",
+                                    color: "var(--ol-ok)",
+                                }}
+                            >
+                                ✓ {t("localAsr.detailDownloaded")}
+                            </span>
+                        )}
+                    </div>
+                </div>
                 <div
                     style={{
                         display: "flex",
-                        flexWrap: "wrap",
+                        flexDirection: "column",
+                        alignItems: "flex-end",
                         gap: 6,
-                        marginTop: 8,
-                        fontSize: 11,
+                        flexShrink: 0,
+                        minWidth: 0,
                     }}
                 >
-                    {entry.remoteBytes != null && entry.remoteBytes > 0 && (
+                    {entry.repo && (
                         <span
+                            title={entry.repo}
                             style={{
+                                maxWidth: 220,
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                whiteSpace: "nowrap",
                                 padding: "2px 8px",
                                 borderRadius: 999,
                                 background: "rgba(0,0,0,0.05)",
-                                color: "var(--ol-ink-2)",
+                                color: "var(--ol-ink-4)",
+                                fontSize: 10.5,
                             }}
                         >
-                            {formatBytes(entry.remoteBytes)}
-                        </span>
-                    )}
-                    {fileCount != null && fileCount > 0 && (
-                        <span
-                            style={{
-                                padding: "2px 8px",
-                                borderRadius: 999,
-                                background: "rgba(0,0,0,0.05)",
-                                color: "var(--ol-ink-2)",
-                            }}
-                        >
-                            {fileCount} {t("localAsr.detailFiles")}
-                        </span>
-                    )}
-                    {entry.isDownloaded && (
-                        <span
-                            style={{
-                                padding: "2px 8px",
-                                borderRadius: 999,
-                                background: "rgba(40,160,90,0.12)",
-                                color: "var(--ol-ok)",
-                            }}
-                        >
-                            ✓ {t("localAsr.detailDownloaded")}
+                            {entry.repo}
                         </span>
                     )}
                     {mirrorLabel && (
@@ -870,6 +915,7 @@ export function ModelDetailPanel({
                                 borderRadius: 999,
                                 background: "rgba(0,0,0,0.05)",
                                 color: "var(--ol-ink-4)",
+                                fontSize: 10.5,
                             }}
                         >
                             {mirrorLabel}
@@ -879,7 +925,7 @@ export function ModelDetailPanel({
             </div>
 
             {downloading && progressPercent != null && (
-                <div>
+                <div style={{ marginTop: 12 }}>
                     <div style={{ height: 6, borderRadius: 999, background: "var(--ol-surface-2)", overflow: "hidden" }}>
                         <div
                             style={{
@@ -896,9 +942,21 @@ export function ModelDetailPanel({
                 </div>
             )}
 
-            {/* 第一行：下载 / 取消，或「加载并测试」——加载即作为当前模型使用，
-                不再单独设「设为默认」（激活 = 在 ASR 语音转写里选本地模型供应商）。 */}
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {testResult && <TestResultBlock result={testResult} />}
+
+            {/* 底部操作行：下载 / 加载并测试 / 打开目录 / 删除，全部并排。
+                「加载并测试」加载即作为当前模型使用（激活 = 在 ASR 语音转写里
+                选本地模型供应商，不再单独设「设为默认」）。 */}
+            <div
+                style={{
+                    marginTop: "auto",
+                    display: "flex",
+                    flexWrap: "wrap",
+                    gap: 6,
+                    borderTop: "0.5px solid var(--ol-line)",
+                    paddingTop: 12,
+                }}
+            >
                 {!entry.isDownloaded && (
                     <Btn variant="primary" size="sm" disabled={busy} onClick={onDownload}>
                         {downloading ? t("localAsr.downloading") : t("localAsr.download")}
@@ -910,22 +968,21 @@ export function ModelDetailPanel({
                     </Btn>
                 )}
                 {entry.isDownloaded && showTest && (
-                    <Btn variant="primary" size="sm" disabled={busy} onClick={onTest}>
-                        {t("localAsr.test")}
+                    <Btn variant="primary" size="sm" disabled={busy || testing} onClick={onTest}>
+                        {testing ? t("localAsr.testRunning") : t("localAsr.test")}
                     </Btn>
                 )}
+                {entry.isDownloaded && (
+                    <>
+                        <Btn variant="ghost" size="sm" onClick={onReveal}>
+                            {t("localAsr.revealDir")}
+                        </Btn>
+                        <Btn variant="ghost" size="sm" onClick={onDelete}>
+                            {t("localAsr.delete")}
+                        </Btn>
+                    </>
+                )}
             </div>
-            {/* 第二行：打开目录 + 删除（已下载模型，同一行）。 */}
-            {entry.isDownloaded && (
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                    <Btn variant="ghost" size="sm" onClick={onReveal}>
-                        {t("localAsr.revealDir")}
-                    </Btn>
-                    <Btn variant="ghost" size="sm" onClick={onDelete}>
-                        {t("localAsr.delete")}
-                    </Btn>
-                </div>
-            )}
         </div>
     )
 }
@@ -968,8 +1025,10 @@ export function DownloadDialog({
                 position: "fixed",
                 inset: 0,
                 background: "var(--ol-overlay-bg)",
+                // 与设置弹窗完全同尺寸同位置（880×600 垂直居中）：弹层盖在设置
+                // 窗口正上方，不会错位、不会比设置窗更高。
                 display: "flex",
-                alignItems: "flex-start",
+                alignItems: "center",
                 justifyContent: "center",
                 zIndex: 1000,
                 padding: 28,

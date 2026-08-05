@@ -834,6 +834,7 @@ export const zhCN = {
       localModelLabel: '本地模型',
       localModelEmpty: '尚未下载本地模型',
       appleSpeechLocalNote: 'Apple 语音识别使用系统内置引擎，无需选择模型。',
+      localEngineNote: '已下载的本地模型在上方下拉里直接选择；更多模型在「本地模型」看板下载与管理。',
       localTag: '本地',
       llmTitle: 'LLM 模型（润色）',
       llmDesc: 'OpenAI 兼容协议，支持多家供应商切换。',

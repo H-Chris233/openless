@@ -838,6 +838,7 @@ export const ko: typeof zhCN = {
       localModelLabel: '로컬 모델',
       localModelEmpty: '아직 다운로드된 로컬 모델이 없습니다',
       appleSpeechLocalNote: 'Apple 음성 인식은 시스템 내장 엔진을 사용하므로 모델 선택이 필요 없습니다.',
+      localEngineNote: '다운로드된 로컬 모델은 위의 드롭다운에서 바로 선택할 수 있습니다. 더 많은 모델은 「로컬 모델」에서 다운로드하고 관리합니다.',
       localTag: '로컬',
       llmTitle: 'LLM 모델(정리)',
       llmDesc: 'OpenAI 호환 프로토콜, 다양한 공급자 전환 지원.',

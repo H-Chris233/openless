@@ -97,7 +97,6 @@ import {
     FoundryPrepareProgressBlock,
     GlobalDownloadProgress,
     ModelDetailPanel,
-    ModelRow,
     ModelSidebar,
     type SidebarModelEntry,
     DownloadDialog,
@@ -1881,16 +1880,6 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                 </div>
                 <div
                     style={{
-                        fontSize: 12.5,
-                        color: "var(--ol-ink-3)",
-                        lineHeight: 1.55,
-                        marginBottom: 12,
-                    }}
-                >
-                    {t("localAsr.modelSelectDesc")}
-                </div>
-                <div
-                    style={{
                         display: "grid",
                         gridTemplateColumns: "minmax(0, 240px) minmax(0, 1fr)",
                         gap: 16,
@@ -1946,6 +1935,15 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                                 void handleTest(selectedEntry.id)
                             }
                             showTest={selectedEntry?.engine === "qwen3"}
+                            testResult={
+                                selectedEntry
+                                    ? (testResults[selectedEntry.id] ?? null)
+                                    : null
+                            }
+                            testing={
+                                selectedEntry?.engine === "qwen3" &&
+                                testingModelId === selectedEntry.id
+                            }
                         />
                     </div>
                 </div>

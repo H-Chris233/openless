@@ -838,6 +838,7 @@ export const ja: typeof zhCN = {
       localModelLabel: 'ローカルモデル',
       localModelEmpty: 'ローカルモデル未ダウンロード',
       appleSpeechLocalNote: 'Apple 音声認識はシステム内蔵エンジンを使用するため、モデル選択は不要です。',
+      localEngineNote: 'ダウンロード済みのローカルモデルは上のドロップダウンで直接選択できます。他のモデルは「ローカルモデル」でダウンロード・管理します。',
       localTag: 'ローカル',
       llmTitle: 'LLM モデル（整文）',
       llmDesc: 'OpenAI 互換プロトコル、複数のサプライヤー切り替えに対応。',

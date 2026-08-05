@@ -836,6 +836,7 @@ export const zhTW: typeof zhCN = {
       localModelLabel: '本地模型',
       localModelEmpty: '尚未下載本地模型',
       appleSpeechLocalNote: 'Apple 語音辨識使用系統內建引擎，無需選擇模型。',
+      localEngineNote: '已下載的本地模型在上方下拉中直接選擇；更多模型在「本地模型」看板下載與管理。',
       localTag: '本地',
       llmTitle: 'LLM 模型（潤色）',
       llmDesc: 'OpenAI 兼容協議，支持多家供應商切換。',

@@ -836,6 +836,7 @@ export const en: typeof zhCN = {
       localModelLabel: 'Local model',
       localModelEmpty: 'No local model downloaded yet',
       appleSpeechLocalNote: 'Apple Speech uses the system built-in engine — no model selection needed.',
+      localEngineNote: 'Downloaded local models are selectable directly in the dropdown above; download and manage more under Local models.',
       localTag: 'Local',
       llmTitle: 'LLM (polishing)',
       llmDesc: 'OpenAI-compatible protocol. Multiple vendors supported.',
