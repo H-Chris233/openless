@@ -61,16 +61,20 @@ fn sleep_restore_retry(retry_delay: std::time::Duration) {
 pub(super) enum RestoreOutcome {
     /// saved 快照本身是 OpenLess（上次会话疑似未恢复）→ 跳过恢复。
     SkippedSticky,
-    /// 校验确认 OpenLess 已不再激活。
+    /// restore_profile 返回 Ok（首次或重试后）。
     Verified,
-    /// 两次尝试后 OpenLess 仍激活（或校验无法确认）。
+    /// 两次 restore_profile 均失败。
     FailedAfterRetry,
 }
 
-/// 恢复阶段完整流程：粘滞态防护 → 恢复 → 校验 → 一次重试。
+/// 恢复阶段完整流程：粘滞态防护 → 恢复 → 失败重试。
 ///
-/// 通过注入 `restore_profile` / `is_openless_active` 让校验-重试逻辑可在任意
-/// 平台被单元测试覆盖（生产路径由 `WindowsImeProfileManager` 提供实现）。
+/// 重试依据是 `restore_profile` 的返回值（legacy 与现代均失败才为 Err），
+/// 不依赖 `is_openless_active` 探测：该探测（`GetActiveProfile`）运行在
+/// OpenLess 进程后台线程，与目标 App 线程的 TSF 状态可能不一致（issue #852），
+/// 因此只保留为诊断日志，记录恢复后 OpenLess 是否仍激活，不参与控制流。
+/// 通过注入 `restore_profile` / `is_openless_active` 让该逻辑可在任意平台被
+/// 单元测试覆盖（生产路径由 `WindowsImeProfileManager` 提供实现）。
 fn run_restore_flow(
     saved_profile: &ImeProfileSnapshot,
     mut restore_profile: impl FnMut(&ImeProfileSnapshot) -> WindowsImeProfileResult<()>,
@@ -86,38 +90,58 @@ fn run_restore_flow(
         return RestoreOutcome::SkippedSticky;
     }
 
-    // 第一次恢复 + 校验 + 一次重试：TSF 会话级切换偶发不生效时，短等待后重试一次。
+    // 第一次恢复 + 失败重试一次：TSF 会话级切换偶发失败时，短等待后重试一次。
+    // 成功与否以 restore_profile 返回值为准；探测仅作诊断日志。
     for attempt in 0..2 {
         if attempt > 0 {
-            log::info!("[windows-ime] restore did not take effect; retrying (attempt {attempt})");
+            log::info!("[windows-ime] restore failed; retrying (attempt {attempt})");
             sleep_restore_retry(retry_delay);
         }
-        if let Err(error) = restore_profile(saved_profile) {
-            log::warn!("[windows-ime] restore saved profile failed (attempt {attempt}): {error}");
-        }
-        match is_openless_active() {
-            Ok(false) => {
-                log::info!(
-                    "[windows-ime] restore verified: OpenLess is no longer the active profile"
-                );
+        match restore_profile(saved_profile) {
+            Ok(()) => {
+                log::info!("[windows-ime] restore succeeded (attempt {attempt})");
+                log_restore_verification(&mut is_openless_active, attempt);
                 return RestoreOutcome::Verified;
-            }
-            Ok(true) => {
-                log::warn!(
-                    "[windows-ime] restore verification: OpenLess is still active (attempt {attempt})"
-                );
             }
             Err(error) => {
                 log::warn!(
-                    "[windows-ime] restore verification check failed (attempt {attempt}): {error}"
+                    "[windows-ime] restore saved profile failed (attempt {attempt}): {error}"
                 );
+                log_restore_verification(&mut is_openless_active, attempt);
             }
         }
     }
     log::error!(
-        "[windows-ime] restore did not take effect after retry — IME may remain on OpenLess"
+        "[windows-ime] restore failed after retry — IME may remain on OpenLess"
     );
     RestoreOutcome::FailedAfterRetry
+}
+
+/// 恢复后的诊断探测（仅日志）：记录 OpenLess 是否仍是当前 profile。
+///
+/// 该探测与决策/重试解耦——`GetActiveProfile` 运行在 OpenLess 进程后台线程，
+/// 与目标 App 线程的 TSF 状态可能不一致（issue #852），结果不可作为控制流依据。
+fn log_restore_verification(
+    is_openless_active: &mut impl FnMut() -> WindowsImeProfileResult<bool>,
+    attempt: i32,
+) {
+    match is_openless_active() {
+        Ok(false) => {
+            log::info!(
+                "[windows-ime] restore verification: OpenLess is no longer the active profile (attempt {attempt})"
+            );
+        }
+        Ok(true) => {
+            log::warn!(
+                "[windows-ime] restore verification: OpenLess is still the active profile (attempt {attempt})"
+            );
+        }
+        Err(error) => {
+            log::warn!(
+                "[windows-ime] restore verification check failed (attempt {attempt}): {error}"
+            );
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -382,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn restore_flow_verifies_without_retry_when_openless_no_longer_active() {
+    fn restore_flow_succeeds_without_retry_when_restore_returns_ok() {
         let mut restore_calls = 0;
         let outcome = run_restore_flow(
             &ImeProfileSnapshot::keyboard_layout(0x0409, 0x0409_0409),
@@ -399,7 +423,8 @@ mod tests {
     }
 
     #[test]
-    fn restore_flow_retries_once_when_openless_stays_active() {
+    fn restore_flow_succeeds_even_when_probe_still_reports_openless() {
+        // 探测显示 OpenLess 仍激活不触发重试：成功与否以 restore 返回值为准（#852）。
         let mut restore_calls = 0;
         let outcome = run_restore_flow(
             &ImeProfileSnapshot::keyboard_layout(0x0409, 0x0409_0409),
@@ -411,30 +436,13 @@ mod tests {
             std::time::Duration::ZERO,
         );
 
-        assert_eq!(outcome, RestoreOutcome::FailedAfterRetry);
-        assert_eq!(restore_calls, 2);
-    }
-
-    #[test]
-    fn restore_flow_treats_restore_error_with_verified_profile_as_success() {
-        // legacy 已生效但 API 报错时，校验确认切走仍算成功（任一成功即整体成功）。
-        let outcome = run_restore_flow(
-            &ImeProfileSnapshot::keyboard_layout(0x0409, 0x0409_0409),
-            |_| {
-                Err(WindowsImeProfileError::WindowsApi(
-                    "legacy failed".to_string(),
-                ))
-            },
-            || Ok(false),
-            std::time::Duration::ZERO,
-        );
-
         assert_eq!(outcome, RestoreOutcome::Verified);
+        assert_eq!(restore_calls, 1);
     }
 
     #[test]
-    fn restore_flow_retries_when_verification_check_errors() {
-        // 校验探测报错不能视为成功：重试一次后仍失败。
+    fn restore_flow_probe_errors_do_not_affect_outcome() {
+        // 探测报错仅记日志，不影响恢复成功判定。
         let mut restore_calls = 0;
         let outcome = run_restore_flow(
             &ImeProfileSnapshot::keyboard_layout(0x0409, 0x0409_0409),
@@ -447,6 +455,50 @@ mod tests {
                     "probe failed".to_string(),
                 ))
             },
+            std::time::Duration::ZERO,
+        );
+
+        assert_eq!(outcome, RestoreOutcome::Verified);
+        assert_eq!(restore_calls, 1);
+    }
+
+    #[test]
+    fn restore_flow_retries_when_restore_fails_then_succeeds() {
+        // 首次 restore 失败 → 重试一次 → 成功。
+        let mut restore_calls = 0;
+        let outcome = run_restore_flow(
+            &ImeProfileSnapshot::keyboard_layout(0x0409, 0x0409_0409),
+            |_| {
+                restore_calls += 1;
+                if restore_calls == 1 {
+                    Err(WindowsImeProfileError::WindowsApi(
+                        "transient failure".to_string(),
+                    ))
+                } else {
+                    Ok(())
+                }
+            },
+            || Ok(false),
+            std::time::Duration::ZERO,
+        );
+
+        assert_eq!(outcome, RestoreOutcome::Verified);
+        assert_eq!(restore_calls, 2);
+    }
+
+    #[test]
+    fn restore_flow_fails_after_two_restore_errors() {
+        // 两次 restore 都失败 → 整体失败。
+        let mut restore_calls = 0;
+        let outcome = run_restore_flow(
+            &ImeProfileSnapshot::keyboard_layout(0x0409, 0x0409_0409),
+            |_| {
+                restore_calls += 1;
+                Err(WindowsImeProfileError::WindowsApi(
+                    "restore failed".to_string(),
+                ))
+            },
+            || Ok(false),
             std::time::Duration::ZERO,
         );
 
