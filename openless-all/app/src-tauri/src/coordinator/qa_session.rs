@@ -953,10 +953,11 @@ pub(super) async fn begin_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
         }
         Err(e) => {
             log::error!("[coord] QA recorder start failed: {e}");
+            let message = e.user_message();
             cancel_qa_asr_for_session(inner, session_id);
             release_recording_mute(inner, "qa");
-            finish_qa_with_error_if_current(inner, session_id, format!("录音启动失败: {e}"));
-            return Err(e.to_string());
+            finish_qa_with_error_if_current(inner, session_id, message.clone());
+            return Err(message);
         }
     }
 

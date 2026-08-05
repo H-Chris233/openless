@@ -246,7 +246,9 @@ export function App({ isCapsule, isQa, isSelectionPolishPreview, isLessComputer,
       ]);
       if (cancelled) return;
       const aOk = a === 'granted' || a === 'notApplicable';
-      const mOk = m === 'granted' || m === 'notApplicable';
+      // noDevice（当前没有麦克风）不是权限问题：不卡 onboarding，
+      // 让用户进应用后在权限页看到“未检测到麦克风”的明确提示。见 issue #779。
+      const mOk = m === 'granted' || m === 'notApplicable' || m === 'noDevice';
       setGate(aOk && mOk ? 'ready' : 'onboarding');
     })().catch(error => {
       console.warn('[startup] permission gate failed', error);

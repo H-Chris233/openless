@@ -2153,7 +2153,7 @@ pub(super) async fn begin_session_as(
         let (whisper_prompt, hotwords) =
             whisper_vocab_for_provider(&active_asr, enabled_phrases(inner));
         let asr_call_label = AsrCallLabel::new(effective_asr.clone(), Some(model.clone()));
-        let whisper = Arc::new(
+        let whisper = Arc::new(apply_zenmux_asr_options(
             WhisperBatchASR::new(
                 api_key,
                 base_url,
@@ -2164,7 +2164,9 @@ pub(super) async fn begin_session_as(
             )
             .with_request_format(whisper_request_format(&active_asr))
             .with_hotwords(hotwords),
-        );
+            &active_asr,
+            inner,
+        ));
         store_asr_for_session(
             inner,
             current_session_id,
@@ -2344,6 +2346,59 @@ pub(super) async fn start_recorder_for_starting(
     consumer: Arc<dyn crate::recorder::AudioConsumer>,
 ) -> Result<(), String> {
     let inner_for_level = Arc::clone(inner);
+    // ── Toggle 模式「说完自动停止」（issue #860）──────────────────────────
+    // 仅在开关开启且当前热键模式为 Toggle 时启用；默认关闭，行为与旧版一致。
+    // 会话开始即快照开关与阈值，中途改设置不影响本次会话（与 asr_call_label
+    // 同一快照策略）。检测器消费 level_handler 的每一帧电平（下面的节流只作用于
+    // emit_capsule，不影响检测），产出一次性 Stop / Cancel 决策后由独立 task
+    // 执行 end_session / cancel_session。
+    let auto_stop_enabled = {
+        let prefs = inner.prefs.get();
+        prefs.hotkey.mode == HotkeyMode::Toggle && prefs.silence_auto_stop_enabled
+    };
+    let auto_stop = Arc::new(Mutex::new(auto_stop_enabled.then(|| {
+        let secs = inner.prefs.get().silence_auto_stop_seconds.clamp(0.5, 30.0);
+        silence_auto_stop::SilenceAutoStop::new(
+            std::time::Duration::from_secs_f32(secs),
+            std::time::Instant::now(),
+        )
+    })));
+    let auto_stop_tx = if auto_stop.lock().is_some() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let task_inner = Arc::clone(inner);
+        let captured_session_id = session_id;
+        tauri::async_runtime::spawn(async move {
+            let Some(decision) = rx.recv().await else {
+                return;
+            };
+            let current_session_id = task_inner.state.lock().session_id;
+            if captured_session_id != current_session_id {
+                log::info!(
+                    "[coord] silence auto-stop decision from stale session {captured_session_id} dropped (current={current_session_id})"
+                );
+                return;
+            }
+            match decision {
+                silence_auto_stop::SilenceDecision::Stop => {
+                    log::info!(
+                        "[coord] silence auto-stop: session {captured_session_id} stopped after silence"
+                    );
+                    let _ = end_session(&task_inner).await;
+                }
+                silence_auto_stop::SilenceDecision::Cancel => {
+                    log::info!(
+                        "[coord] silence auto-stop: session {captured_session_id} cancelled (no speech detected)"
+                    );
+                    cancel_session(&task_inner);
+                }
+            }
+        });
+        Some(tx)
+    } else {
+        None
+    };
+    let auto_stop_for_level = Arc::clone(&auto_stop);
+    let auto_stop_tx_for_level = auto_stop_tx.clone();
     // 节流：电平回调本身约 185 Hz（cpal 默认音频块），全部转发到前端会让 CSS
     // transition 互相覆盖、视觉上"被平均"成静止。限制为 ~30 Hz（33ms 最少间隔），
     // 配合 CSS 短 transition 让每次 emit 完整可见。
@@ -2353,6 +2408,16 @@ pub(super) async fn start_recorder_for_starting(
         let phase = inner_for_level.state.lock().phase;
         if phase != SessionPhase::Listening && phase != SessionPhase::Starting {
             return;
+        }
+        // 静音检测在节流之前：节流只压 UI 帧率，检测要看到每一帧电平。
+        if auto_stop_tx_for_level.is_some() {
+            let decision = auto_stop_for_level
+                .lock()
+                .as_mut()
+                .and_then(|detector| detector.on_level(level, Instant::now()));
+            if let (Some(decision), Some(tx)) = (decision, auto_stop_tx_for_level.as_ref()) {
+                let _ = tx.try_send(decision);
+            }
         }
         let now = Instant::now();
         {
@@ -2440,20 +2505,21 @@ pub(super) async fn start_recorder_for_starting(
         }
         Err(e) => {
             log::error!("[coord] recorder start failed: {e}");
+            let message = e.user_message();
             cancel_asr_for_session(inner, session_id);
             emit_capsule(
                 inner,
                 CapsuleState::Error,
                 0.0,
                 0,
-                Some(format!("录音启动失败: {e}")),
+                Some(message.clone()),
                 None,
             );
             restore_prepared_windows_ime_session(inner, session_id);
             release_recording_mute(inner, "dictation");
             inner.state.lock().phase = SessionPhase::Idle;
             schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-            return Err(e.to_string());
+            return Err(message);
         }
     }
 

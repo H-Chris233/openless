@@ -302,7 +302,10 @@ export function UpdateDialog({
   const installError = status === 'installError';
   const androidInstalled = isAndroid() && status === 'downloaded';
   return (
-    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.18)', display: 'grid', placeItems: 'center', zIndex: 40 }}>
+    // 遮罩刻意极淡（0.05）：用户反馈 0.18 会把设置页白底卡片盖成灰色
+    //（「通用下面的内容变灰、存在断层感」）——侧边栏/顶部渐变是深色看不出，
+    // 白色选项行最明显。保留极淡遮罩维持模态语义 + 点击外部关闭。
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.05)', display: 'grid', placeItems: 'center', zIndex: 40 }}>
       <div style={{ width: 360, borderRadius: 16, background: 'var(--ol-surface)', border: '0.5px solid var(--ol-line-strong)', boxShadow: 'var(--ol-shadow-lg)', padding: 18 }}>
         <div style={{ fontSize: 15, fontWeight: 650, marginBottom: 8 }}>{t(`settings.about.updateDialog.${status}.title`)}</div>
         <div style={{ fontSize: 12, color: 'var(--ol-ink-3)', lineHeight: 1.6, marginBottom: 14, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>

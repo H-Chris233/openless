@@ -15,62 +15,104 @@
 //!   4xx/5xx 同样不重试 —— 服务端已应答，状态码交给调用方判断。
 
 use std::collections::HashMap;
+use std::net::IpAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 
-static HTTP: Lazy<reqwest::Client> = Lazy::new(|| {
-    reqwest::Client::builder()
+/// 用户是否允许 app 使用系统代理（issue #869）。默认 true = 跟随系统代理，
+/// 与历史行为一致；关闭后所有 reqwest 客户端 `.no_proxy()` 直连。
+/// 启动时由 coordinator 用持久化设置初始化，`set_settings` 变更时同步。
+static USE_SYSTEM_PROXY: AtomicBool = AtomicBool::new(true);
+
+/// 共享 / provider 客户端的构建缓存。key = `(discriminator, no_proxy 决策)`。
+/// 代理开关变化时整表清空重建，保证「存盘即生效」。
+static CACHE: Lazy<Mutex<HashMap<(u64, bool), reqwest::Client>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// 当前是否使用系统代理（false = 所有请求直连）。
+pub(crate) fn use_system_proxy() -> bool {
+    USE_SYSTEM_PROXY.load(Ordering::Relaxed)
+}
+
+/// 更新系统代理开关并清空客户端缓存，让后续请求立即按新策略重建连接池。
+/// 在启动初始化与 `set_settings` 中设置值变化时调用。
+pub(crate) fn set_use_system_proxy(enabled: bool) {
+    USE_SYSTEM_PROXY.store(enabled, Ordering::Relaxed);
+    CACHE.lock().clear();
+}
+
+/// 判定某 base_url 是否应绕过系统代理：回环地址恒绕过（localhost 走代理没有
+/// 意义且可能自环）；全局关闭系统代理时所有地址绕过（issue #869）。
+pub(crate) fn should_bypass_proxy(base_url: &str, use_system_proxy: bool) -> bool {
+    !use_system_proxy || is_loopback_url(base_url)
+}
+
+fn is_loopback_url(base_url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(base_url.trim()) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    // url crate 对 IPv6 host 返回带方括号的形式（"[::1]"），解析前剥掉。
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+/// 共享客户端的基础 builder：握手限时 + 连接池 + UA；按需禁用系统代理。
+fn base_client_builder(no_proxy: bool) -> reqwest::ClientBuilder {
+    let mut builder = reqwest::Client::builder()
         // 握手单独限时：卡在握手上要尽快失败，好让 send_with_retry 立即重试。
         .connect_timeout(Duration::from_secs(8))
         // 连接池：一条握手成功的连接保留 90s 供后续命令复用。
         .pool_idle_timeout(Duration::from_secs(90))
         .pool_max_idle_per_host(8)
         .tcp_keepalive(Duration::from_secs(30))
-        .user_agent(concat!("OpenLess/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
-});
+        .user_agent(concat!("OpenLess/", env!("CARGO_PKG_VERSION")));
+    if no_proxy {
+        builder = builder.no_proxy();
+    }
+    builder
+}
+
+/// 进程级共享 HTTP 客户端。带连接池 —— 一次握手成功后的连接被后续请求复用；
+/// 代理开关切换后经 CACHE 清空自动按新策略重建。
+pub fn http() -> reqwest::Client {
+    let no_proxy = !use_system_proxy();
+    cached_client((0, no_proxy), || {
+        base_client_builder(no_proxy)
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
 
 /// HTTP client for requests carrying OAuth device credentials or bearer tokens.
 /// Redirects are disabled so secrets are never replayed to a different origin.
-static CREDENTIAL_HTTP: Lazy<reqwest::Client> = Lazy::new(|| {
-    reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(8))
-        .pool_idle_timeout(Duration::from_secs(90))
-        .pool_max_idle_per_host(8)
-        .tcp_keepalive(Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::none())
-        .user_agent(concat!("OpenLess/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .expect("build no-redirect credential HTTP client")
-});
+pub fn credential_http() -> reqwest::Client {
+    let no_proxy = !use_system_proxy();
+    cached_client((1, no_proxy), || {
+        base_client_builder(no_proxy)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("build no-redirect credential HTTP client")
+    })
+}
 
 /// Anonymous HTTP client for public endpoints that must fail closed on redirects.
-static ANONYMOUS_NO_REDIRECT_HTTP: Lazy<reqwest::Client> = Lazy::new(|| {
-    reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(8))
-        .pool_idle_timeout(Duration::from_secs(90))
-        .pool_max_idle_per_host(8)
-        .tcp_keepalive(Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::none())
-        .user_agent(concat!("OpenLess/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .expect("build anonymous no-redirect HTTP client")
-});
-
-/// 进程级共享 HTTP 客户端。带连接池 —— 一次握手成功后的连接被后续请求复用。
-pub fn http() -> &'static reqwest::Client {
-    &HTTP
-}
-
-pub fn credential_http() -> &'static reqwest::Client {
-    &CREDENTIAL_HTTP
-}
-
-pub fn anonymous_no_redirect_http() -> &'static reqwest::Client {
-    &ANONYMOUS_NO_REDIRECT_HTTP
+pub fn anonymous_no_redirect_http() -> reqwest::Client {
+    let no_proxy = !use_system_proxy();
+    cached_client((2, no_proxy), || {
+        base_client_builder(no_proxy)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("build anonymous no-redirect HTTP client")
+    })
 }
 
 /// 按 `(timeout_secs, no_proxy)` 缓存并复用 `reqwest::Client`。
@@ -85,8 +127,6 @@ pub fn cached_client<F>(key: (u64, bool), build: F) -> reqwest::Client
 where
     F: FnOnce() -> reqwest::Client,
 {
-    static CACHE: Lazy<Mutex<HashMap<(u64, bool), reqwest::Client>>> =
-        Lazy::new(|| Mutex::new(HashMap::new()));
     CACHE.lock().entry(key).or_insert_with(build).clone()
 }
 
@@ -161,6 +201,48 @@ mod tests {
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    #[test]
+    fn proxy_bypass_decision_is_pure() {
+        use super::should_bypass_proxy;
+        // 回环地址无论系统代理开关如何都绕过。
+        for url in [
+            "http://localhost:9000/v1",
+            "http://127.0.0.1:8080",
+            "http://[::1]:8080",
+        ] {
+            assert!(
+                should_bypass_proxy(url, true),
+                "{url} should bypass when system proxy is on"
+            );
+            assert!(
+                should_bypass_proxy(url, false),
+                "{url} should bypass when system proxy is off"
+            );
+        }
+        // 公开 host：开启系统代理时跟随代理，关闭时直连。
+        assert!(!should_bypass_proxy("https://api.example.com/v1", true));
+        assert!(should_bypass_proxy("https://api.example.com/v1", false));
+        // 非法 URL 判为不可解析：开关开时不绕过，全局关闭时一律绕过。
+        assert!(!should_bypass_proxy("not a url", true));
+        assert!(should_bypass_proxy("not a url", false));
+    }
+
+    #[test]
+    fn system_proxy_toggle_updates_flag_and_rebuilds_shared_client() {
+        use super::{http, set_use_system_proxy, use_system_proxy, CACHE};
+        set_use_system_proxy(true);
+        CACHE.lock().clear();
+        let _ = http();
+        assert!(!CACHE.lock().is_empty());
+        set_use_system_proxy(false);
+        assert!(!use_system_proxy());
+        // 下一次 http() 按「直连」决策重建（key 的 bool 位 = no_proxy）。
+        let _ = http();
+        assert!(CACHE.lock().contains_key(&(0, true)));
+        set_use_system_proxy(true);
+        assert!(use_system_proxy());
+    }
 
     #[tokio::test]
     async fn credential_client_never_follows_redirects_or_forwards_bearer() {

@@ -48,8 +48,24 @@ pub struct MicrophoneDevice {
 pub enum RecorderError {
     #[error("microphone permission denied")]
     PermissionDenied,
+    #[error("no microphone input device detected")]
+    NoInputDevice,
     #[error("audio engine failed: {0}")]
     EngineFailed(String),
+}
+
+impl RecorderError {
+    /// 面向用户的启动错误文案：无设备 / 无权限给出明确指引，
+    /// 其余保留原始引擎错误便于排查。
+    pub fn user_message(&self) -> String {
+        match self {
+            RecorderError::NoInputDevice => "未检测到麦克风，请连接麦克风后重试".to_string(),
+            RecorderError::PermissionDenied => {
+                "需要麦克风权限，请在系统设置中允许 OpenLess 使用麦克风".to_string()
+            }
+            other => format!("录音启动失败: {other}"),
+        }
+    }
 }
 
 /// 采集器句柄。Drop 时不会自动停止——必须显式调用 `stop`。
@@ -421,14 +437,16 @@ fn select_input_device(
     }
 
     host.default_input_device()
-        .ok_or_else(|| RecorderError::EngineFailed("no default input device".into()))
+        .ok_or(RecorderError::NoInputDevice)
 }
 
 /// 启动期 default_input_config 失败：依靠错误字符串关键字粗判权限问题。
 /// cpal 在 macOS 没拿到 mic 授权时通常返回 `BackendSpecific`，我们尽力识别。
 fn classify_default_config_err(msg: String) -> RecorderError {
     let lower = msg.to_lowercase();
-    if lower.contains("permission") || lower.contains("denied") || lower.contains("authoriz") {
+    if is_no_device_error(&lower) {
+        RecorderError::NoInputDevice
+    } else if lower.contains("permission") || lower.contains("denied") || lower.contains("authoriz") {
         RecorderError::PermissionDenied
     } else {
         RecorderError::EngineFailed(format!("default_input_config: {msg}"))
@@ -439,11 +457,32 @@ fn classify_default_config_err(msg: String) -> RecorderError {
 fn classify_build_stream_err(err: cpal::BuildStreamError) -> RecorderError {
     let msg = err.to_string();
     let lower = msg.to_lowercase();
-    if lower.contains("permission") || lower.contains("denied") || lower.contains("authoriz") {
+    if is_no_device_error(&lower) {
+        RecorderError::NoInputDevice
+    } else if lower.contains("permission") || lower.contains("denied") || lower.contains("authoriz") {
         RecorderError::PermissionDenied
     } else {
         RecorderError::EngineFailed(format!("build_input_stream: {msg}"))
     }
+}
+
+/// 错误字符串是否暗示“当前没有可用输入设备”（区别于权限被拒）。
+/// 与 permissions.rs::is_no_device_error 保持同一套关键字；backend-tests
+/// harness 单独编译本模块，所以不跨模块引用。
+fn is_no_device_error(lower: &str) -> bool {
+    [
+        "no default input device",
+        "no default input",
+        "no input device",
+        "no device",
+        "device not found",
+        "device not available",
+        "not connected",
+        "unplugged",
+        "disconnected",
+    ]
+    .iter()
+    .any(|pattern| lower.contains(pattern))
 }
 
 /// `SupportedStreamConfig` → 对应 SampleFormat 的具体 build 调用。

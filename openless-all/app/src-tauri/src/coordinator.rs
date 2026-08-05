@@ -72,10 +72,14 @@ mod polish_flow;
 mod qa;
 mod qa_session;
 mod resources;
+mod silence_auto_stop;
 #[cfg(not(mobile))]
 pub(crate) mod selection_polish;
 
 use asr_wiring::*;
+// providers.rs 的 ASR 验证路径按 provider 的真实请求格式发送探针（issue #837），
+// 需要跨模块访问 whisper 兼容系的格式映射，显式再导出。
+pub(crate) use asr_wiring::whisper_request_format;
 use capsule_focus::*;
 use hotkey_loops::*;
 use polish_flow::*;
@@ -443,11 +447,98 @@ pub(crate) fn derive_bailian_endpoint(
 
 fn batch_asr_chunk_limit_ms(provider_id: &str) -> Option<u64> {
     match provider_id {
-        // OpenRouter 把音频 base64 进 JSON body，体积比二进制大 ~33%，长录音易撞
-        // body/时长上限，保守按 30s 切分（与 zhipu 同）。
-        "zhipu" | "openrouter" => Some(30_000),
-        _ => None,
+        // OpenRouter / ZenMux 把音频 base64 进 JSON body，体积比二进制大 ~33%，
+        // 长录音易撞 body/时长上限，保守按 30s 切分（与 zhipu 同）。
+        "zhipu" | "openrouter" | "zenmux" => Some(30_000),
+        // 其余预设默认不分片；openai-compatible 可由用户高级配置覆盖。
+        _ => read_advanced_asr_config(provider_id).chunk_duration_ms,
     }
+}
+
+/// 通用 OpenAI 兼容 ASR 预设 id。把任意 OpenAI 兼容 `/audio/transcriptions`
+/// 端点（自建 / 局域网 llama.cpp 等）当 ASR 用，行为默认最保守；verbose_json
+/// 与分片时长由用户按 provider 配置（存凭据 vault）。
+pub(crate) const OPENAI_COMPATIBLE_ASR_PROVIDER_ID: &str = "openai-compatible";
+
+/// ZenMux ASR 预设 id（issue #837）。与前端 `ASR_PRESETS` 的 `zenmux` 条目一致，
+/// 复用 Whisper 批式管线，但请求体走 JSON + base64（`ZenMuxJson`）。
+pub(crate) const ZENMUX_ASR_PROVIDER_ID: &str = "zenmux";
+
+/// `openai-compatible` 与 `zenmux` 预设的高级配置（per-provider 存于凭据 vault）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AdvancedAsrConfig {
+    /// 是否请求 `response_format=verbose_json`（配合幻听过滤；服务端不支持时保持 false）。
+    pub(crate) verbose_json: bool,
+    /// 单次请求的音频分片时长；None = 不分片整段发送。
+    pub(crate) chunk_duration_ms: Option<u64>,
+    /// ZenMux `enable_itn`（数字/单位归一化）。默认 true，与 ZenMux 文档示例及
+    /// 中文 ASR 预期一致；仅 zenmux 消费。
+    pub(crate) enable_itn: bool,
+}
+
+impl Default for AdvancedAsrConfig {
+    fn default() -> Self {
+        Self {
+            verbose_json: false,
+            chunk_duration_ms: None,
+            enable_itn: true,
+        }
+    }
+}
+
+/// 解析 per-provider 高级配置 JSON；缺失/非法一律回落保守默认。
+fn parse_advanced_asr_config(raw: Option<&str>) -> AdvancedAsrConfig {
+    let Some(raw) = raw else {
+        return AdvancedAsrConfig::default();
+    };
+    let value: serde_json::Value = match serde_json::from_str(raw) {
+        Ok(value) => value,
+        Err(error) => {
+            log::warn!("[asr] 高级配置 JSON 解析失败，回落默认值: {error}");
+            return AdvancedAsrConfig::default();
+        }
+    };
+    AdvancedAsrConfig {
+        verbose_json: value
+            .get("verboseJson")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        // 与前端 advancedAsrConfig.ts 语义一致：整数直接取；浮点（如 30000.9）
+        // 接受但向下取整。负数 / 非数字 / 缺失一律回落 None（不分片）。
+        chunk_duration_ms: value.get("chunkDurationMs").and_then(|v| {
+            v.as_u64().filter(|ms| *ms > 0).or_else(|| {
+                v.as_f64()
+                    .filter(|ms| ms.is_finite() && *ms > 0.0 && *ms <= u64::MAX as f64)
+                    .map(|ms| ms.floor() as u64)
+            })
+        }),
+        // 缺失/非布尔回落默认 true（开启），与前端 advancedAsrConfig.ts 一致。
+        enable_itn: value
+            .get("enableItn")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+    }
+}
+
+/// 按 provider id 决定高级配置：`openai-compatible` 与 `zenmux` 采用用户配置，
+/// 其余命名厂商一律返回默认（保持硬编码行为）。
+fn advanced_asr_config_for(provider_id: &str, raw: Option<&str>) -> AdvancedAsrConfig {
+    if provider_id != OPENAI_COMPATIBLE_ASR_PROVIDER_ID && provider_id != ZENMUX_ASR_PROVIDER_ID {
+        return AdvancedAsrConfig::default();
+    }
+    parse_advanced_asr_config(raw)
+}
+
+/// 读取某 ASR provider 的高级配置。仅 `openai-compatible` / `zenmux` 读 vault；
+/// 其余命名厂商走硬编码行为（这里返回默认值），避免破坏已测通的路径。
+fn read_advanced_asr_config(provider_id: &str) -> AdvancedAsrConfig {
+    let raw = CredentialsVault::get_for_asr_provider(
+        provider_id,
+        CredentialAccount::AsrAdvancedConfig,
+    )
+    .ok()
+    .flatten();
+    advanced_asr_config_for(provider_id, raw.as_deref())
 }
 
 pub struct Coordinator {
@@ -697,6 +788,8 @@ impl Coordinator {
                 );
                 PreferencesStore::new_fallback()
             });
+            // 启动即同步系统代理开关（issue #869），让首个请求就按用户设置建客户端。
+            crate::net::set_use_system_proxy(prefs.get().use_system_proxy);
             let style_packs = StylePackStore::new(&prefs).unwrap_or_else(|e| {
                 log::error!(
                     "[coord] StylePackStore init failed: {e}; 降级为空样式包列表{PERSIST_DEGRADE_SUFFIX}"
@@ -817,6 +910,8 @@ impl Coordinator {
             log::error!("[coord] PreferencesStore init failed: {e}; 降级为默认偏好设置");
             PreferencesStore::new_fallback()
         });
+        // 启动即同步系统代理开关（issue #869），让首个请求就按用户设置建客户端。
+        crate::net::set_use_system_proxy(prefs.get().use_system_proxy);
         let style_packs = StylePackStore::new(&prefs).unwrap_or_else(|e| {
             log::error!("[coord] StylePackStore init failed: {e}; 降级为空样式包列表");
             StylePackStore::new_fallback()
@@ -1522,6 +1617,20 @@ impl Coordinator {
 
     pub fn prefs(&self) -> &PreferencesStore {
         &self.inner.prefs
+    }
+    /// 设置保存后立即把胶囊样式同步进 Inner 原子缓存（0=Siri，1=Classic）。
+    /// emit_capsule 的 ~30Hz 主线程闭包本来也会同步，但入场帧的 payload 是在闭包
+    /// 同步之前克隆的（会带一帧旧样式），且 Windows 上主线程拥塞时闭包可能延迟
+    /// 执行——用户反馈「切换成默认风格后仍显示流光 Siri」。在保存路径直接同步后，
+    /// 任何平台的下一次录音从入场帧起就携带最新样式，不再依赖 emit 闭包的时序。
+    pub fn sync_capsule_style_from_preferences(&self) {
+        let classic = matches!(
+            self.inner.prefs.get().capsule_style,
+            CapsuleStyle::Classic
+        );
+        self.inner
+            .capsule_style
+            .store(if classic { 1 } else { 0 }, Ordering::Relaxed);
     }
     pub fn sync_active_asr_provider_from_preferences(&self) -> Result<(), String> {
         let provider = self.inner.prefs.get().active_asr_provider;
@@ -2463,16 +2572,33 @@ fn read_whisper_credentials() -> (String, String, String) {
         .ok()
         .flatten()
         .unwrap_or_default();
+    let active_asr = CredentialsVault::get_active_asr();
+    let (default_endpoint, default_model) = whisper_credential_defaults(&active_asr);
     let base_url = CredentialsVault::get(CredentialAccount::AsrEndpoint)
         .ok()
         .flatten()
-        .unwrap_or_default();
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(default_endpoint);
     let model = CredentialsVault::get(CredentialAccount::AsrModel)
         .ok()
         .flatten()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "whisper-1".to_string());
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(default_model);
     (api_key, base_url, model)
+}
+
+/// whisper 兼容系 provider 的「空槽默认值」。zenmux 有厂商默认端点/模型
+/// （与前端 preset 一致）；其余预设沿用空 endpoint + `whisper-1`（默认值由
+/// 前端切换 provider 时写入 vault）。纯函数，便于单测。
+fn whisper_credential_defaults(provider_id: &str) -> (String, String) {
+    if provider_id == ZENMUX_ASR_PROVIDER_ID {
+        (
+            crate::asr::whisper::ZENMUX_DEFAULT_ENDPOINT.to_string(),
+            crate::asr::whisper::ZENMUX_DEFAULT_MODEL.to_string(),
+        )
+    } else {
+        (String::new(), "whisper-1".to_string())
+    }
 }
 
 fn read_mimo_credentials() -> (String, String, String) {
@@ -2974,6 +3100,32 @@ mod tests {
         std::env::remove_var("OPENLESS_HOTKEY_INJECTION_DRY_RUN");
     }
 
+    #[test]
+    fn sync_capsule_style_from_preferences_updates_atomic_immediately() {
+        // 设置保存路径会调 sync_capsule_style_from_preferences：原子缓存必须立即反映
+        // 用户选择，让下一次录音的入场帧就携带新样式——不依赖 emit_capsule 主线程
+        // 闭包的 ~30Hz 同步（Windows 主线程拥塞时闭包延迟 → 整场显示旧样式）。
+        let coordinator = Coordinator::new();
+        coordinator.sync_capsule_style_from_preferences();
+        assert_eq!(coordinator.inner.capsule_style.load(Ordering::Relaxed), 0);
+
+        {
+            let mut prefs = coordinator.inner.prefs.get();
+            prefs.capsule_style = CapsuleStyle::Classic;
+            coordinator.inner.prefs.set(prefs).unwrap();
+        }
+        coordinator.sync_capsule_style_from_preferences();
+        assert_eq!(coordinator.inner.capsule_style.load(Ordering::Relaxed), 1);
+
+        {
+            let mut prefs = coordinator.inner.prefs.get();
+            prefs.capsule_style = CapsuleStyle::Siri;
+            coordinator.inner.prefs.set(prefs).unwrap();
+        }
+        coordinator.sync_capsule_style_from_preferences();
+        assert_eq!(coordinator.inner.capsule_style.load(Ordering::Relaxed), 0);
+    }
+
     #[tokio::test]
     async fn begin_session_dry_run_enters_listening_and_clears_stale_edges() {
         let _guard = ENV_LOCK.lock().await;
@@ -3092,6 +3244,110 @@ mod tests {
     }
 
     #[test]
+    fn openai_compatible_preset_is_whisper_compatible_and_conservative_by_default() {
+        use crate::asr::whisper::AsrRequestFormat;
+
+        assert!(is_whisper_compatible_provider(OPENAI_COMPATIBLE_ASR_PROVIDER_ID));
+        assert_eq!(
+            active_asr_provider_kind(OPENAI_COMPATIBLE_ASR_PROVIDER_ID),
+            ActiveAsrProviderKind::WhisperCompatible
+        );
+        assert_eq!(
+            whisper_request_format(OPENAI_COMPATIBLE_ASR_PROVIDER_ID),
+            AsrRequestFormat::Multipart
+        );
+        assert!(!whisper_uses_hotwords(OPENAI_COMPATIBLE_ASR_PROVIDER_ID));
+        // 默认最保守：无 verbose_json、不分片。
+        assert_eq!(
+            advanced_asr_config_for(OPENAI_COMPATIBLE_ASR_PROVIDER_ID, None),
+            AdvancedAsrConfig::default()
+        );
+    }
+
+    #[test]
+    fn openai_compatible_advanced_config_controls_whisper_switches() {
+        assert_eq!(
+            advanced_asr_config_for(
+                OPENAI_COMPATIBLE_ASR_PROVIDER_ID,
+                Some(r#"{"verboseJson":true,"chunkDurationMs":30000}"#),
+            ),
+            AdvancedAsrConfig {
+                verbose_json: true,
+                chunk_duration_ms: Some(30_000),
+                enable_itn: true,
+            }
+        );
+        // 命名厂商忽略该配置，保持硬编码行为。
+        assert_eq!(
+            advanced_asr_config_for(
+                "siliconflow",
+                Some(r#"{"verboseJson":true,"chunkDurationMs":30000}"#),
+            ),
+            AdvancedAsrConfig::default()
+        );
+        assert!(whisper_supports_verbose_json("whisper"));
+        assert!(!whisper_supports_verbose_json("siliconflow"));
+        assert_eq!(batch_asr_chunk_limit_ms("siliconflow"), None);
+        assert_eq!(
+            batch_asr_chunk_limit_ms(OPENAI_COMPATIBLE_ASR_PROVIDER_ID),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_advanced_asr_config_falls_back_on_missing_or_invalid_json() {
+        assert_eq!(
+            parse_advanced_asr_config(None),
+            AdvancedAsrConfig::default()
+        );
+        assert_eq!(
+            parse_advanced_asr_config(Some("not-json")),
+            AdvancedAsrConfig::default()
+        );
+        assert_eq!(
+            parse_advanced_asr_config(Some(r#"{"verboseJson":true}"#)),
+            AdvancedAsrConfig {
+                verbose_json: true,
+                chunk_duration_ms: None,
+                enable_itn: true,
+            }
+        );
+        // 分片时长 0 或缺失 = 不分片。
+        assert_eq!(
+            parse_advanced_asr_config(Some(r#"{"chunkDurationMs":0}"#)),
+            AdvancedAsrConfig::default()
+        );
+        assert_eq!(
+            parse_advanced_asr_config(Some(
+                r#"{"verboseJson":false,"chunkDurationMs":30000}"#
+            )),
+            AdvancedAsrConfig {
+                verbose_json: false,
+                chunk_duration_ms: Some(30_000),
+                enable_itn: true,
+            }
+        );
+        // 浮点分片时长与前端一致向下取整：30000.9 → 30000。
+        assert_eq!(
+            parse_advanced_asr_config(Some(r#"{"chunkDurationMs":30000.9}"#)),
+            AdvancedAsrConfig {
+                verbose_json: false,
+                chunk_duration_ms: Some(30_000),
+                enable_itn: true,
+            }
+        );
+        // 负数 / 字符串分片时长 → 不分片。
+        assert_eq!(
+            parse_advanced_asr_config(Some(r#"{"chunkDurationMs":-1}"#)),
+            AdvancedAsrConfig::default()
+        );
+        assert_eq!(
+            parse_advanced_asr_config(Some(r#"{"chunkDurationMs":"abc"}"#)),
+            AdvancedAsrConfig::default()
+        );
+    }
+
+    #[test]
     fn openrouter_is_whisper_compatible_json_provider() {
         use crate::asr::whisper::AsrRequestFormat;
         // issue #582：OpenRouter 走 whisper 兼容路由，但请求体是 JSON+base64。
@@ -3110,6 +3366,38 @@ mod tests {
         assert!(!whisper_supports_verbose_json("openrouter"));
         // base64 膨胀，长录音保守按 30s 切分。
         assert_eq!(batch_asr_chunk_limit_ms("openrouter"), Some(30_000));
+    }
+
+    #[test]
+    fn zenmux_credential_defaults_and_advanced_config() {
+        use crate::asr::whisper::{ZENMUX_DEFAULT_ENDPOINT, ZENMUX_DEFAULT_MODEL};
+        // base64 进 JSON body 体积膨胀，与 OpenRouter 同按 30s 切分。
+        assert_eq!(batch_asr_chunk_limit_ms("zenmux"), Some(30_000));
+        // 空槽默认值：zenmux 回落厂商默认端点/模型（与前端 preset 一致）；
+        // 其余 whisper 兼容预设沿用空 endpoint + whisper-1。
+        assert_eq!(
+            whisper_credential_defaults("zenmux"),
+            (
+                ZENMUX_DEFAULT_ENDPOINT.to_string(),
+                ZENMUX_DEFAULT_MODEL.to_string()
+            )
+        );
+        assert_eq!(
+            whisper_credential_defaults("whisper"),
+            (String::new(), "whisper-1".to_string())
+        );
+        assert_eq!(
+            whisper_credential_defaults("openrouter"),
+            (String::new(), "whisper-1".to_string())
+        );
+
+        // enable_itn 默认 true；用户配置显式 false 可覆盖；仅 openai-compatible /
+        // zenmux 读用户配置，其余命名厂商忽略（保持硬编码行为）。
+        assert!(advanced_asr_config_for("zenmux", None).enable_itn);
+        assert!(advanced_asr_config_for("zenmux", Some(r#"{"verboseJson":true}"#)).enable_itn);
+        assert!(!advanced_asr_config_for("zenmux", Some(r#"{"enableItn":false}"#)).enable_itn);
+        assert!(advanced_asr_config_for("whisper", Some(r#"{"enableItn":false}"#)).enable_itn);
+        assert!(!advanced_asr_config_for("zenmux", Some(r#"{"enableItn":false}"#)).verbose_json);
     }
 
     #[test]

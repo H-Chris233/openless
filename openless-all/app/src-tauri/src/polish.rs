@@ -5,7 +5,6 @@
 //! 段落式结构，每个 mode 有独立的 1-shot 示例。重写背景见 issue #47。
 
 use std::collections::HashMap;
-use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -373,7 +372,8 @@ impl OpenAICompatibleLLMProvider {
         // every polish. Falls back to a default client if the builder somehow fails
         // so we still surface a useful error at request time.
         let timeout = config.request_timeout_secs;
-        let no_proxy = should_bypass_proxy_for_base_url(&config.base_url);
+        let no_proxy =
+            crate::net::should_bypass_proxy(&config.base_url, crate::net::use_system_proxy());
         let base_url = config.base_url.clone();
         let client = crate::net::cached_client((timeout, no_proxy), || {
             http_client_builder(&base_url, timeout)
@@ -988,7 +988,8 @@ impl CodexOAuthLLMProvider {
         // Reuse a cached client so the connection pool survives across utterances
         // (see OpenAICompatibleLLMProvider::new for the why).
         let timeout = config.request_timeout_secs;
-        let no_proxy = should_bypass_proxy_for_base_url(&config.base_url);
+        let no_proxy =
+            crate::net::should_bypass_proxy(&config.base_url, crate::net::use_system_proxy());
         let base_url = config.base_url.clone();
         let client = crate::net::cached_client((timeout, no_proxy), || {
             http_client_builder(&base_url, timeout)
@@ -1311,7 +1312,7 @@ fn chat_completions_url(base_url: &str) -> String {
 
 pub(crate) fn http_client_builder(base_url: &str, timeout_secs: u64) -> reqwest::ClientBuilder {
     let builder = reqwest::Client::builder().timeout(Duration::from_secs(timeout_secs));
-    if should_bypass_proxy_for_base_url(base_url) {
+    if crate::net::should_bypass_proxy(base_url, crate::net::use_system_proxy()) {
         builder.no_proxy()
     } else {
         builder
@@ -1366,19 +1367,6 @@ async fn send_with_transient_retry(
         }
         Err(e) => Err(llm_error_from_reqwest(e)),
     }
-}
-
-fn should_bypass_proxy_for_base_url(base_url: &str) -> bool {
-    let Ok(url) = reqwest::Url::parse(base_url.trim()) else {
-        return false;
-    };
-    let Some(host) = url.host_str() else {
-        return false;
-    };
-    if host.eq_ignore_ascii_case("localhost") {
-        return true;
-    }
-    host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
 fn codex_responses_url(base_url: &str) -> String {

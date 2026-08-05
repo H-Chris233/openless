@@ -31,7 +31,12 @@ pub(super) fn ensure_microphone_permission(_inner: &Arc<Inner>) -> Result<(), St
         if permissions::windows_microphone_access_explicitly_denied() {
             return Err("需要麦克风权限，当前状态: Denied".to_string());
         }
-        return Ok(());
+        // 注册表只反映隐私开关；没插麦克风时不能当成“已就绪”，
+        // 否则用户会被误导去系统设置找不存在的麦克风权限。见 issue #779。
+        if permissions::has_microphone_input_device() {
+            return Ok(());
+        }
+        return Err("未检测到麦克风，请连接麦克风后重试".to_string());
     }
 
     let status = permissions::check_microphone();
@@ -40,6 +45,9 @@ pub(super) fn ensure_microphone_permission(_inner: &Arc<Inner>) -> Result<(), St
         PermissionStatus::Granted | PermissionStatus::NotApplicable
     ) {
         return Ok(());
+    }
+    if status == PermissionStatus::NoDevice {
+        return Err("未检测到麦克风，请连接麦克风后重试".to_string());
     }
 
     // 听写路径不抢前台焦点：缺 mic 权限时直接请求系统授权，不再先 show_main_window。
@@ -104,6 +112,21 @@ pub(super) fn ensure_asr_credentials() -> Result<(), String> {
         }
     }
 
+    // `openai-compatible` 通用预设没有厂商默认值：endpoint 与 model 必须由用户
+    // 填写，缺一即明确报错（不再静默回落 whisper-1）。API Key 允许留空——
+    // LAN 自建端点（llama.cpp 等）常无需鉴权，故直接跳过下方 AsrApiKey 检查。
+    if active_asr == OPENAI_COMPATIBLE_ASR_PROVIDER_ID {
+        let endpoint = CredentialsVault::get(CredentialAccount::AsrEndpoint)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let model = CredentialsVault::get(CredentialAccount::AsrModel)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        return require_openai_compatible_fields(&endpoint, &model);
+    }
+
     // 云端 provider 的预检凭据由 ActiveAsrProviderKind 统一判定（穷尽 match，
     // 编译器保证新增 kind 不会被漏掉 —— 取代旧的「provider 白名单 + 火山兜底」，
     // 那个静默 else 曾让新通道误落到火山分支）。
@@ -145,6 +168,18 @@ pub(super) fn ensure_asr_credentials() -> Result<(), String> {
             }
         }
     }
+}
+
+/// `openai-compatible` 预设的必填字段校验：endpoint / model 均须非空（trim），
+/// 返回明确的中文错误。API Key 是否必填由调用方决定（本预设允许留空）。
+pub(super) fn require_openai_compatible_fields(endpoint: &str, model: &str) -> Result<(), String> {
+    if endpoint.trim().is_empty() {
+        return Err("自定义 OpenAI 兼容 ASR：请先在设置中填写服务端地址（endpoint）".to_string());
+    }
+    if model.trim().is_empty() {
+        return Err("自定义 OpenAI 兼容 ASR：请先在设置中填写模型名（model）".to_string());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -340,6 +375,8 @@ pub(super) fn build_apple_speech(
 
 /// `whisper` 是 OpenAI 原生；`siliconflow` / `zhipu` / `groq` / `stepfun`
 /// 都暴露 OpenAI 兼容的 `/audio/transcriptions`，统一走 `WhisperBatchASR`。
+/// `openai-compatible` 是通用预设：任意 OpenAI 兼容端点（自建 / LAN llama.cpp
+/// 等），无默认 endpoint/model，高级选项见 `AdvancedAsrConfig`。
 /// 新增 OpenAI 兼容 ASR 时只需在这里加一项。
 ///
 /// 注：DashScope 的 Qwen3-ASR-Flash 不在此列——它用 MultiModalConversation
@@ -348,8 +385,8 @@ pub(super) fn build_apple_speech(
 pub(super) fn is_whisper_compatible_provider(id: &str) -> bool {
     matches!(
         id,
-        "whisper" | "siliconflow" | "zhipu" | "groq" | "openrouter" | "stepfun"
-    )
+        "whisper" | "siliconflow" | "zhipu" | "groq" | "openrouter" | "stepfun" | "zenmux"
+    ) || id == OPENAI_COMPATIBLE_ASR_PROVIDER_ID
 }
 
 /// 用户词典该走 `prompt` 还是一等 `hotwords` 参数。
@@ -379,9 +416,11 @@ pub(super) fn whisper_vocab_for_provider(
 
 /// 该 provider 的请求体编码方式。OpenRouter 的 `/audio/transcriptions` 是
 /// `application/json` + base64 音频（issue #582），其余兼容厂商沿用 multipart。
-pub(super) fn whisper_request_format(provider_id: &str) -> crate::asr::whisper::AsrRequestFormat {
+/// ZenMux 同形但带 `language` / `enable_itn`（issue #837），单独走 `ZenMuxJson`。
+pub(crate) fn whisper_request_format(provider_id: &str) -> crate::asr::whisper::AsrRequestFormat {
     match provider_id {
         "openrouter" => crate::asr::whisper::AsrRequestFormat::OpenRouterJson,
+        "zenmux" => crate::asr::whisper::AsrRequestFormat::ZenMuxJson,
         _ => crate::asr::whisper::AsrRequestFormat::Multipart,
     }
 }
@@ -395,8 +434,64 @@ pub(super) fn whisper_request_format(provider_id: &str) -> crate::asr::whisper::
 ///   发送 verbose_json 可能被拒，**保持关闭**走旧的 `json`。
 /// - `zhipu`（GLM-ASR）：虽接受 verbose_json，但不产出上述指标，过滤是空转；
 ///   为最小化行为变更，这里也**保持关闭**，仅对确证有收益的 whisper/groq 开启。
+/// - `openai-compatible`：由用户高级配置（`AdvancedAsrConfig.verbose_json`）决定，
+///   默认关闭，与服务端能力对齐。
 pub(super) fn whisper_supports_verbose_json(provider_id: &str) -> bool {
-    matches!(provider_id, "whisper" | "groq")
+    match provider_id {
+        "whisper" | "groq" => true,
+        // ZenMux 的 JSON 请求体协议没有 response_format，恒关闭。
+        "zenmux" => false,
+        // openai-compatible 由用户高级配置决定；其余厂商保持关闭。
+        _ => read_advanced_asr_config(provider_id).verbose_json,
+    }
+}
+
+/// OpenLess 工作语言（原生名，见前端 `SUPPORTED_LANGUAGES`）→ ZenMux `language`
+/// 字段值（ISO 639-1 码）。取 `working_languages` 主语言映射；未收录的语言返回
+/// None —— 请求体省略 `language`，由 ZenMux 服务端自动检测（issue #837）。
+pub(super) fn zenmux_language_code(native_name: &str) -> Option<String> {
+    let code = match native_name.trim() {
+        "简体中文" | "繁体中文" => "zh",
+        "English" => "en",
+        "日本語" => "ja",
+        "한국어" => "ko",
+        "Français" => "fr",
+        "Deutsch" => "de",
+        "Español" => "es",
+        "Italiano" => "it",
+        "Português" => "pt",
+        "Русский" => "ru",
+        "العربية" => "ar",
+        "Tiếng Việt" => "vi",
+        "ไทย" => "th",
+        "हिन्दी" => "hi",
+        _ => return None,
+    };
+    Some(code.to_string())
+}
+
+/// 当前 prefs 的主工作语言 → ZenMux `language`（None = 不发送，自动检测）。
+pub(super) fn zenmux_language_for_prefs(prefs: &crate::types::UserPreferences) -> Option<String> {
+    prefs
+        .working_languages
+        .first()
+        .and_then(|name| zenmux_language_code(name))
+}
+
+/// 构造完的 `WhisperBatchASR` 上注入 zenmux 专属选项（`language` 跟随工作语言、
+/// `enable_itn` 读用户高级配置）。非 zenmux 原样返回，保持现有行为；QA 与听写
+/// 两处构造点共用，避免重复逻辑。
+pub(super) fn apply_zenmux_asr_options(
+    builder: crate::asr::whisper::WhisperBatchASR,
+    active_asr: &str,
+    inner: &Arc<Inner>,
+) -> crate::asr::whisper::WhisperBatchASR {
+    if active_asr != ZENMUX_ASR_PROVIDER_ID {
+        return builder;
+    }
+    builder
+        .with_language(zenmux_language_for_prefs(&inner.prefs.get()))
+        .with_enable_itn(read_advanced_asr_config(ZENMUX_ASR_PROVIDER_ID).enable_itn)
 }
 
 pub(super) fn is_bailian_provider(id: &str) -> bool {
@@ -707,7 +802,7 @@ pub(super) async fn build_qa_asr_start(
             let label = AsrCallLabel::new(effective_asr.clone(), Some(model.clone()));
             let (whisper_prompt, hotwords) =
                 whisper_vocab_for_provider(active_asr, enabled_phrases(inner));
-            let whisper = Arc::new(
+            let whisper = Arc::new(apply_zenmux_asr_options(
                 WhisperBatchASR::new(
                     api_key,
                     base_url,
@@ -718,7 +813,9 @@ pub(super) async fn build_qa_asr_start(
                 )
                 .with_request_format(whisper_request_format(active_asr))
                 .with_hotwords(hotwords),
-            );
+                active_asr,
+                inner,
+            ));
             let active = ActiveAsr::Whisper(Arc::clone(&whisper));
             let consumer: Arc<dyn crate::recorder::AudioConsumer> = whisper;
             Ok((QaAsrStart::Ready { active, consumer }, label))
@@ -748,5 +845,72 @@ pub(super) async fn build_qa_asr_start(
                 label,
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zenmux_is_whisper_compatible_json_provider() {
+        use crate::asr::whisper::AsrRequestFormat;
+        // issue #837：ZenMux 走 whisper 兼容路由，请求体 JSON+base64（ZenMuxJson），
+        // 与 OpenRouter 共用 30s 切分；JSON 协议不吃 response_format / hotwords。
+        assert!(is_whisper_compatible_provider("zenmux"));
+        assert_eq!(
+            active_asr_provider_kind("zenmux"),
+            ActiveAsrProviderKind::WhisperCompatible
+        );
+        assert_eq!(
+            whisper_request_format("zenmux"),
+            AsrRequestFormat::ZenMuxJson
+        );
+        assert!(!whisper_supports_verbose_json("zenmux"));
+        assert!(!whisper_uses_hotwords("zenmux"));
+    }
+
+    #[test]
+    fn zenmux_language_code_covers_supported_languages_and_omits_unknown() {
+        // 覆盖前端 SUPPORTED_LANGUAGES 的全部 15 种语言；未收录 → None（自动检测）。
+        assert_eq!(zenmux_language_code("简体中文").as_deref(), Some("zh"));
+        assert_eq!(zenmux_language_code("繁体中文").as_deref(), Some("zh"));
+        assert_eq!(zenmux_language_code("English").as_deref(), Some("en"));
+        assert_eq!(zenmux_language_code("日本語").as_deref(), Some("ja"));
+        assert_eq!(zenmux_language_code("한국어").as_deref(), Some("ko"));
+        assert_eq!(zenmux_language_code("Français").as_deref(), Some("fr"));
+        assert_eq!(zenmux_language_code("Deutsch").as_deref(), Some("de"));
+        assert_eq!(zenmux_language_code("Español").as_deref(), Some("es"));
+        assert_eq!(zenmux_language_code("Italiano").as_deref(), Some("it"));
+        assert_eq!(zenmux_language_code("Português").as_deref(), Some("pt"));
+        assert_eq!(zenmux_language_code("Русский").as_deref(), Some("ru"));
+        assert_eq!(zenmux_language_code("العربية").as_deref(), Some("ar"));
+        assert_eq!(zenmux_language_code("Tiếng Việt").as_deref(), Some("vi"));
+        assert_eq!(zenmux_language_code("ไทย").as_deref(), Some("th"));
+        assert_eq!(zenmux_language_code("हिन्दी").as_deref(), Some("hi"));
+        assert_eq!(zenmux_language_code(""), None);
+        assert_eq!(zenmux_language_code("Esperanto"), None);
+        assert_eq!(zenmux_language_code("   "), None);
+    }
+
+    #[test]
+    fn require_openai_compatible_fields_errors_on_missing_endpoint_or_model() {
+        // endpoint 缺失（含纯空白）→ 明确报错，绝不静默回落 whisper-1。
+        assert!(require_openai_compatible_fields("", "qwen3-asr")
+            .unwrap_err()
+            .contains("endpoint"));
+        assert!(require_openai_compatible_fields("   ", "qwen3-asr")
+            .unwrap_err()
+            .contains("endpoint"));
+        // model 缺失 → 明确报错。
+        assert!(
+            require_openai_compatible_fields("http://192.168.9.31:8090/v1", "")
+                .unwrap_err()
+                .contains("模型")
+        );
+        // 两者都填 → 通过；API Key 必填与否由调用方决定，不在此函数内。
+        assert!(
+            require_openai_compatible_fields("http://192.168.9.31:8090/v1", "qwen3-asr").is_ok()
+        );
     }
 }

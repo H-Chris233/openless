@@ -216,6 +216,7 @@ pub async fn set_credential(
                     | CredentialAccount::AsrEndpoint
                     | CredentialAccount::AsrModel
                     | CredentialAccount::AsrVocabularyId
+                    | CredentialAccount::AsrAdvancedConfig
                     | CredentialAccount::XfyunAppId
                     | CredentialAccount::XfyunApiKey
             ) {
@@ -360,6 +361,7 @@ fn parse_account(s: &str) -> Result<CredentialAccount, String> {
         "asr.endpoint" => Ok(CredentialAccount::AsrEndpoint),
         "asr.model" => Ok(CredentialAccount::AsrModel),
         "asr.vocabulary_id" => Ok(CredentialAccount::AsrVocabularyId),
+        "asr.advanced_config" => Ok(CredentialAccount::AsrAdvancedConfig),
         "xfyun.app_id" => Ok(CredentialAccount::XfyunAppId),
         "xfyun.api_key" => Ok(CredentialAccount::XfyunApiKey),
         _ => Err(format!("unknown account: {s}")),

@@ -288,12 +288,19 @@ export interface UserPreferences {
   /** 按下录音热键进入 recording 状态时，播放一段合成提示音提醒「已开始录音」。
    *  默认开启；在 capsule 窗口用 Web Audio API 合成，不依赖 showCapsule。 */
   audioCueOnRecord: boolean;
+  /** Toggle 模式「说完自动停止」（issue #860）。默认关闭；开启后检测到语音、
+   *  连续静音达到 silenceAutoStopSeconds 时自动停止并提交，一直没说话则 10 秒后取消。 */
+  silenceAutoStopEnabled: boolean;
+  /** 语音后的连续静音阈值（秒）。可选 1 / 1.5 / 2 / 3 / 4 / 5，默认 3。 */
+  silenceAutoStopSeconds: number;
   /** 录音输入设备名称。空字符串 = 使用系统默认麦克风。 */
   microphoneDeviceName: string;
   activeAsrProvider: string;
   activeLlmProvider: string;
   /** LLM 思考模式开关。默认关闭；OpenAI 普通 chat 模型会跳过不支持的字段。详见 issue #402。 */
   llmThinkingEnabled: boolean;
+  /** 是否使用系统代理（issue #869）。默认开启；关闭后所有请求直连，境外服务（GitHub 登录/更新等）可能连不上。 */
+  useSystemProxy: boolean;
   /** 仅 Windows/Linux：粘贴成功后是否恢复用户原剪贴板。默认 true。详见 issue #111。 */
   restoreClipboardAfterPaste: boolean;
   /** 仅 Windows/Linux：模拟粘贴时按下的快捷键。详见 issue #360：kitty/alacritty
@@ -616,7 +623,8 @@ export type PermissionStatus =
   | 'denied'
   | 'notDetermined'
   | 'restricted'
-  | 'notApplicable';
+  | 'notApplicable'
+  | 'noDevice';
 
 /** Runtime platform kind returned by `get_platform_capabilities`. */
 export type PlatformKind = 'desktop' | 'android' | 'mobile';

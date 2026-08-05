@@ -638,6 +638,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_silence_auto_stop_seconds() -> f32 {
+    3.0
+}
+
 fn resolve_windows_insertion_mode(
     mode: WindowsInsertionMode,
     legacy_sendinput_only: bool,
@@ -685,6 +689,14 @@ pub struct UserPreferences {
     /// 不依赖 show_capsule —— 胶囊隐藏时仍会响。
     #[serde(default = "default_true")]
     pub audio_cue_on_record: bool,
+    /// Toggle 模式「说完自动停止」（issue #860）：检测到语音后，连续静音达到
+    /// `silence_auto_stop_seconds` 时自动停止并提交；一直没检测到语音则 10 秒后
+    /// 自动取消。默认关闭，保持既有「按两次」行为；Push-to-talk 不受影响。
+    #[serde(default)]
+    pub silence_auto_stop_enabled: bool,
+    /// 语音后的连续静音阈值（秒）。可选 1 / 1.5 / 2 / 3 / 4 / 5，默认 3。
+    #[serde(default = "default_silence_auto_stop_seconds")]
+    pub silence_auto_stop_seconds: f32,
     /// 录音输入设备名称。空字符串 = 使用系统默认麦克风。
     #[serde(default)]
     pub microphone_device_name: String,
@@ -695,6 +707,11 @@ pub struct UserPreferences {
     /// 下发官方渠道级字段；OpenAI 官方渠道会跳过普通 chat 模型不支持的字段。详见 issue #402。
     #[serde(default)]
     pub llm_thinking_enabled: bool,
+    /// 是否使用系统代理（issue #869）。默认 true 跟随系统代理，与历史行为一致；
+    /// 关闭后所有 reqwest 请求直连（国内服务通常延迟更低），GitHub 登录、更新等
+    /// 境外服务可能连不上。实时语音流（WebSocket）与 Less Computer 子进程不受此开关影响。
+    #[serde(default = "default_true")]
+    pub use_system_proxy: bool,
     /// Windows/Linux 粘贴成功后是否恢复用户原剪贴板。默认 true 跟历史行为一致；
     /// 关掉就把听写文本留在剪贴板，让 simulate_paste 实际没生效时用户能 Ctrl+V 找回。
     /// macOS 走 AX 直写，不受这个开关影响。详见 issue #111。
@@ -1045,11 +1062,17 @@ struct UserPreferencesWire {
     #[serde(default = "default_true")]
     audio_cue_on_record: bool,
     #[serde(default)]
+    silence_auto_stop_enabled: bool,
+    #[serde(default = "default_silence_auto_stop_seconds")]
+    silence_auto_stop_seconds: f32,
+    #[serde(default)]
     microphone_device_name: String,
     active_asr_provider: String,
     active_llm_provider: String,
     #[serde(default)]
     llm_thinking_enabled: bool,
+    #[serde(default = "default_true")]
+    use_system_proxy: bool,
     restore_clipboard_after_paste: bool,
     #[serde(default)]
     paste_shortcut: PasteShortcut,
@@ -1209,10 +1232,13 @@ impl Default for UserPreferencesWire {
             capsule_style: prefs.capsule_style,
             mute_during_recording: prefs.mute_during_recording,
             audio_cue_on_record: prefs.audio_cue_on_record,
+            silence_auto_stop_enabled: prefs.silence_auto_stop_enabled,
+            silence_auto_stop_seconds: prefs.silence_auto_stop_seconds,
             microphone_device_name: prefs.microphone_device_name,
             active_asr_provider: prefs.active_asr_provider,
             active_llm_provider: prefs.active_llm_provider,
             llm_thinking_enabled: prefs.llm_thinking_enabled,
+            use_system_proxy: prefs.use_system_proxy,
             restore_clipboard_after_paste: prefs.restore_clipboard_after_paste,
             paste_shortcut: prefs.paste_shortcut,
             allow_non_tsf_insertion_fallback: prefs.allow_non_tsf_insertion_fallback,
@@ -1298,15 +1324,23 @@ impl<'de> Deserialize<'de> for UserPreferences {
         let mut selection_polish_hotkey = wire
             .selection_polish_hotkey
             .unwrap_or_else(default_selection_polish_hotkey);
-        if cfg!(target_os = "windows")
-            && selection_polish_hotkey_was_missing
-            && is_right_control_modifier_shortcut(&dictation_hotkey)
-        {
-            // Old settings cannot distinguish the historic default from a
-            // deliberate Right Ctrl choice. Preserve the existing dictation
-            // workflow and leave the new action disabled rather than silently
-            // changing a user's shortcut.
-            selection_polish_hotkey = None;
+        if selection_polish_hotkey_was_missing {
+            // 1.3.15 新增的选区润色默认键（Windows = 右 Alt）不能抢占/顶掉用户已有按键：
+            // - 老用户从未自定义录音键（仍为历史默认 Right Control）：默认关闭新功能，
+            //   避免升级后右 Alt 被全局热键占用影响既有使用习惯；
+            // - 默认键与录音键重叠（字符串可能不等但物理同键，如 legacy rightAlt
+            //   派生出 RightOption 而默认是 RightAlt）：同样关闭，否则升级后任何
+            //   设置保存都会被热键冲突校验整体拒绝，改动全部丢失（#904）。
+            let legacy_default_user = cfg!(target_os = "windows")
+                && is_right_control_modifier_shortcut(&dictation_hotkey);
+            let default_taken_by_dictation = selection_polish_hotkey
+                .as_ref()
+                .is_some_and(|binding| {
+                    crate::shortcut_binding::bindings_overlap(binding, &dictation_hotkey)
+                });
+            if legacy_default_user || default_taken_by_dictation {
+                selection_polish_hotkey = None;
+            }
         }
         let streaming_insert_default_migrated = wire.streaming_insert_default_migrated;
         let streaming_insert = if streaming_insert_default_migrated {
@@ -1333,10 +1367,13 @@ impl<'de> Deserialize<'de> for UserPreferences {
             capsule_style: wire.capsule_style,
             mute_during_recording: wire.mute_during_recording,
             audio_cue_on_record: wire.audio_cue_on_record,
+            silence_auto_stop_enabled: wire.silence_auto_stop_enabled,
+            silence_auto_stop_seconds: wire.silence_auto_stop_seconds,
             microphone_device_name: wire.microphone_device_name,
             active_asr_provider: wire.active_asr_provider,
             active_llm_provider: wire.active_llm_provider,
             llm_thinking_enabled: wire.llm_thinking_enabled,
+            use_system_proxy: wire.use_system_proxy,
             restore_clipboard_after_paste: wire.restore_clipboard_after_paste,
             paste_shortcut: wire.paste_shortcut,
             allow_non_tsf_insertion_fallback: wire.allow_non_tsf_insertion_fallback,
@@ -2151,10 +2188,13 @@ impl Default for UserPreferences {
             capsule_style: CapsuleStyle::Siri,
             mute_during_recording: false,
             audio_cue_on_record: true,
+            silence_auto_stop_enabled: false,
+            silence_auto_stop_seconds: default_silence_auto_stop_seconds(),
             microphone_device_name: String::new(),
             active_asr_provider: default_active_asr_provider(),
             active_llm_provider: "ark".into(),
             llm_thinking_enabled: false,
+            use_system_proxy: true,
             restore_clipboard_after_paste: true,
             paste_shortcut: PasteShortcut::default(),
             allow_non_tsf_insertion_fallback: true,
@@ -3031,6 +3071,38 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
+    fn legacy_right_alt_dictation_upgrade_disables_selection_polish_instead_of_colliding() {
+        // #904：录音键自定义为右 Alt 的旧配置升级时，默认注入的选区润色键（右 Alt）
+        // 与录音键相同会形成持久冲突，把后续所有设置保存挡死。迁移必须改为停用新功能。
+        let prefs: UserPreferences = serde_json::from_str(
+            r#"{
+                "hotkey": { "trigger": "rightAlt", "mode": "hold", "keys": null },
+                "dictationHotkey": { "primary": "RightAlt", "modifiers": [] }
+            }"#,
+        )
+        .unwrap();
+        assert!(prefs.selection_polish_hotkey.is_none());
+        assert_eq!(prefs.dictation_hotkey.primary, "RightAlt");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn legacy_right_alt_trigger_upgrade_disables_selection_polish_by_overlap() {
+        // #904 变体：旧文件没有 dictationHotkey，只带 legacy hotkey.trigger=rightAlt，
+        // 派生出的录音键 primary 是 "RightOption"，与默认注入的 "RightAlt" 字符串不相等
+        // 但物理同键（bindings_overlap=true）。迁移必须按重叠判定，不能按 == 字符串比较。
+        let prefs: UserPreferences = serde_json::from_str(
+            r#"{
+                "hotkey": { "trigger": "rightAlt", "mode": "hold", "keys": null }
+            }"#,
+        )
+        .unwrap();
+        assert!(prefs.selection_polish_hotkey.is_none());
+        assert_eq!(prefs.dictation_hotkey.primary, "RightOption");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
     fn new_preferences_keep_the_existing_dictation_default_and_use_right_alt_for_selection_polish() {
         let prefs = UserPreferences::default();
         assert_eq!(prefs.dictation_hotkey.primary, "RightControl");
@@ -3168,6 +3240,24 @@ mod tests {
         let prefs: UserPreferences = serde_json::from_str("{}").unwrap();
 
         assert!(prefs.audio_cue_on_record);
+    }
+
+    #[test]
+    fn capsule_style_pref_defaults_to_siri_and_round_trips_wire_key() {
+        // 老用户的 preferences.json 没有 capsuleStyle 字段 → 回落默认 Siri。
+        let prefs: UserPreferences = serde_json::from_str("{}").unwrap();
+        assert_eq!(prefs.capsule_style, CapsuleStyle::Siri);
+
+        // 设置里切到 Classic 后：set_settings 存盘（camelCase wire 键）→ 重启
+        // get_settings 读回，必须保持 Classic（配置文件持久化 roundtrip）。
+        let classic = UserPreferences {
+            capsule_style: CapsuleStyle::Classic,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&classic).unwrap();
+        assert!(json.contains(r#""capsuleStyle":"classic""#));
+        let restored: UserPreferences = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.capsule_style, CapsuleStyle::Classic);
     }
 
     #[test]
