@@ -24,6 +24,24 @@ import {
   serializeAdvancedAsrConfig,
   type AdvancedAsrConfig,
 } from '../../lib/advancedAsrConfig';
+import {
+  getFoundryLocalAsrCatalog,
+  getSherpaOnnxAsrCatalog,
+  listLocalAsrModels,
+  setFoundryLocalAsrModel,
+  setLocalAsrActiveModel,
+  setSherpaOnnxAsrModel,
+} from '../../lib/localAsr';
+
+// 本地模型供应商：在主下拉里标注「本地」后缀，与云端供应商区分开。
+const LOCAL_ASR_PRESET_IDS: ReadonlySet<string> = new Set([
+  'local-qwen3',
+  'foundry-local-whisper',
+  'sherpa-onnx-local',
+]);
+function isLocalAsrPreset(id: string): boolean {
+  return LOCAL_ASR_PRESET_IDS.has(id);
+}
 
 function LlmThinkingToggle({ enabled, onToggle }: { enabled: boolean; onToggle: (next: boolean) => void }) {
   const { t } = useTranslation();
@@ -250,13 +268,56 @@ export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
   useEffect(() => {
     if (committedAsrProvider !== 'bailian') setBailianModel('');
   }, [committedAsrProvider]);
-  // 本地重引擎（qwen3 / sherpa / foundry）仍只在「高级 → 本地模型」里启用，
-  // 防止新手在主下拉误开 CPU 推理。Apple 语音是系统自带、零凭据、轻量，
-  // 在 macOS 上直接作为常规选项放进主下拉，方便随时选用 / 切走。
+  // 本地引擎激活时，ASR 区块展示本地已下载模型（标注「本地」），可直接选用。
+  // selectedLocalModelId 是受控 value：只跟模型列表 / 后端 active 模型联动，
+  // 否则下拉会一直停留在第一个已下载模型（pr-agent #922 反馈）。
+  const [localAsrModels, setLocalAsrModels] = useState<{ id: string; isDownloaded: boolean }[]>([]);
+  const [selectedLocalModelId, setSelectedLocalModelId] = useState('');
+  useEffect(() => {
+    let cancelled = false;
+    const apply = (models: { id: string; isDownloaded: boolean }[]) => {
+      if (cancelled) return;
+      setLocalAsrModels(models);
+      // 优先保持后端当前激活的模型；不在已下载列表里则退回第一个已下载。
+      const activeId = committedAsrProvider === 'local-qwen3'
+        ? prefs?.localAsrActiveModel
+        : committedAsrProvider === 'sherpa-onnx-local'
+          ? prefs?.sherpaOnnxModel
+          : committedAsrProvider === 'foundry-local-whisper'
+            ? prefs?.foundryLocalAsrModel
+            : undefined;
+      setSelectedLocalModelId(
+        activeId && models.some(m => m.id === activeId && m.isDownloaded)
+          ? activeId
+          : (models.find(m => m.isDownloaded)?.id ?? ''),
+      );
+    };
+    if (committedAsrProvider === 'local-qwen3') {
+      void listLocalAsrModels().then(models => {
+        apply(models.map(m => ({ id: m.id, isDownloaded: m.isDownloaded })));
+      }).catch(() => { if (!cancelled) { setLocalAsrModels([]); setSelectedLocalModelId(''); } });
+    } else if (committedAsrProvider === 'sherpa-onnx-local') {
+      void getSherpaOnnxAsrCatalog().then(catalog => {
+        apply(catalog.map(c => ({ id: c.alias, isDownloaded: c.cached })));
+      }).catch(() => { if (!cancelled) { setLocalAsrModels([]); setSelectedLocalModelId(''); } });
+    } else if (committedAsrProvider === 'foundry-local-whisper') {
+      void getFoundryLocalAsrCatalog().then(catalog => {
+        apply(catalog.map(c => ({ id: c.alias, isDownloaded: c.cached })));
+      }).catch(() => { if (!cancelled) { setLocalAsrModels([]); setSelectedLocalModelId(''); } });
+    } else {
+      setLocalAsrModels([]);
+      setSelectedLocalModelId('');
+    }
+    return () => { cancelled = true; };
+  }, [committedAsrProvider, prefs?.localAsrActiveModel, prefs?.sherpaOnnxModel, prefs?.foundryLocalAsrModel]);
+
+  // 本地引擎（qwen3 / foundry / sherpa）直接作为常规选项放进主下拉（按平台 gating），
+  // 选项名标注「本地」——选了本地模型供应商，ASR 就用本地模型（与 Apple 语音同理），
+  // 不再需要单独的启用开关。模型下载与管理在「服务 → 本地模型」的看板里。
   const visibleAsrPresets = ASR_PRESETS.filter(
-    p => p.id !== 'foundry-local-whisper'
-      && p.id !== 'local-qwen3'
-      && p.id !== 'sherpa-onnx-local'
+    p => (p.id !== 'foundry-local-whisper' || os === 'win')
+      && (p.id !== 'sherpa-onnx-local' || os === 'win')
+      && (p.id !== 'local-qwen3' || os === 'mac')
       && (p.id !== 'apple-speech' || os === 'mac')
       // 百炼三协议收成一个「阿里云百炼」入口(id=bailian)+ 模型下拉。qwen3 / fun-asr-flash
       // 两个旧 id 作隐藏别名:新用户下拉里看不到,只有已经停在该 id 上的老用户仍显示,
@@ -421,7 +482,7 @@ export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
               label: t(`settings.providers.presets.${p.nameKey}`),
             }))}
             ariaLabel={t('settings.providers.providerLabel')}
-            style={{ ...inputStyle, width: '100%', maxWidth: mobile ? '100%' : 200 }}
+            style={{ width: mobile ? '100%' : 200, maxWidth: '100%', minWidth: 0 }}
           />
         </SettingRow>
         {codexOAuthSelected ? (
@@ -501,7 +562,9 @@ export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
                   options={[
                     ...visibleAsrPresets.map(p => ({
                       value: p.id,
-                      label: t(`settings.providers.presets.${p.nameKey}`),
+                      label: isLocalAsrPreset(p.id)
+                        ? `${t(`settings.providers.presets.${p.nameKey}`)}（${t('settings.providers.localTag')}）`
+                        : t(`settings.providers.presets.${p.nameKey}`),
                     })),
                     ...(hiddenLocalActive && hiddenLocalNameKey
                       ? [{
@@ -511,7 +574,7 @@ export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
                       : []),
                   ]}
                   ariaLabel={t('settings.providers.providerLabel')}
-                  style={{ ...inputStyle, width: '100%', maxWidth: mobile ? '100%' : 200 }}
+                  style={{ width: mobile ? '100%' : 200, maxWidth: '100%', minWidth: 0 }}
                 />
                 {hiddenLocalActive && (
                   <div style={{ fontSize: 11, color: 'var(--ol-ink-4)', lineHeight: 1.5 }}>
@@ -522,6 +585,8 @@ export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
             );
           })()}
         </SettingRow>
+        {/* 供应商切换时 ASR 板块高度 / 内容会变：keyed 淡入动画平滑过渡（ol-tab-fade）。 */}
+        <div key={committedAsrProvider} style={{ animation: 'ol-tab-fade 0.22s var(--ol-motion-soft)' }}>
         {committedAsrProvider === 'volcengine' ? (
           <>
             <SettingRow label={t('settings.providers.volcengineAuthModeLabel')}>
@@ -546,7 +611,7 @@ export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
                   { value: 'api_key', label: t('settings.providers.volcengineAuthModeApiKey') },
                 ]}
                 ariaLabel={t('settings.providers.volcengineAuthModeLabel')}
-                style={{ ...inputStyle, width: '100%', maxWidth: mobile ? '100%' : 260 }}
+                style={{ width: mobile ? '100%' : 260, maxWidth: '100%', minWidth: 0 }}
               />
             </SettingRow>
             {/* 两种模式使用各自独立的凭据槽位：旧版 Access Token（volcengine.access_key）
@@ -615,10 +680,36 @@ export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
             </div>
           </>
         ) : committedAsrProvider === 'local-qwen3' || committedAsrProvider === 'foundry-local-whisper' || committedAsrProvider === 'sherpa-onnx-local' || committedAsrProvider === 'apple-speech' ? (
-          // 用户已经在用本地 ASR——dropdown 行的 asrProviderTakenOver 已经把
-          // "在高级中切换或禁用"讲清楚了，body 不再重复。
-          // 模型管理 UI 唯一入口在「高级 → 本地模型」里的 <LocalAsr embedded />。
-          null
+          // 本地引擎激活：直接展示本地已下载模型（标注「本地下载」），可在此选用，
+          // 与「高级 → 本地模型」看板共用同一批模型数据。Apple 语音零模型选择。
+          committedAsrProvider === 'apple-speech' ? (
+            <div style={{ marginTop: 2, fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.6 }}>
+              {t('settings.providers.appleSpeechLocalNote')}
+            </div>
+          ) : (
+            <SettingRow label={t('settings.providers.localModelLabel')}>
+              <SelectLite
+                value={selectedLocalModelId}
+                onChange={(next) => {
+                  setSelectedLocalModelId(next);
+                  if (committedAsrProvider === 'local-qwen3') {
+                    void setLocalAsrActiveModel(next);
+                  } else if (committedAsrProvider === 'sherpa-onnx-local') {
+                    void setSherpaOnnxAsrModel(next);
+                  } else if (committedAsrProvider === 'foundry-local-whisper') {
+                    void setFoundryLocalAsrModel(next);
+                  }
+                }}
+                options={localAsrModels.filter(m => m.isDownloaded).map(m => ({
+                  value: m.id,
+                  label: `${m.id}（${t('settings.providers.localTag')}）`,
+                }))}
+                placeholder={t('settings.providers.localModelEmpty')}
+                ariaLabel={t('settings.providers.localModelLabel')}
+                style={{ width: '100%', maxWidth: 320, minWidth: 0 }}
+              />
+            </SettingRow>
+          )
         ) : (
           <>
             <CredentialField key={`${committedAsrProvider}:api_key`} label={t('settings.providers.apiKeyLabel')} account="asr.api_key" provider={committedAsrProvider} mono mask />
@@ -671,6 +762,7 @@ export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
             )}
           </>
         )}
+        </div>
       </Card>
       )}
     </>
@@ -945,7 +1037,7 @@ function ProviderTools({ kind, modelAccount, provider, onModelSelected, showFetc
               options={models.map(model => ({ value: model, label: model }))}
               placeholder={t('settings.providers.selectModel')}
               ariaLabel={t('settings.providers.selectModel')}
-              style={{ ...inputStyle, flex: mobile ? '1 1 100%' : '1 1 180px', maxWidth: mobile ? '100%' : 220 }}
+              style={{ flex: mobile ? '1 1 100%' : '1 1 180px', maxWidth: mobile ? '100%' : 220, minWidth: 0 }}
             />
           )}
         </div>
@@ -1162,7 +1254,7 @@ function CredentialField({ label, account, provider, placeholder, mono, mask, de
               placeholder={loaded ? placeholder : t('common.loading')}
               disabled={disabled}
               ariaLabel={label}
-              style={{ ...inputStyle, flex: mobile ? '1 1 180px' : 1, minWidth: 0, maxWidth: '100%', fontFamily: mono ? 'var(--ol-font-mono)' : 'inherit' }}
+              style={{ flex: mobile ? '1 1 180px' : 1, minWidth: 0, maxWidth: '100%', fontFamily: mono ? 'var(--ol-font-mono)' : 'inherit' }}
             />
           ) : (
             <input
