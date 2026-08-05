@@ -92,6 +92,19 @@ pub fn is_openless_profile_snapshot(snapshot: &ImeProfileSnapshot) -> bool {
             == Some(OPENLESS_PROFILE_GUID_BRACED)
 }
 
+/// 测试专用：构造 OpenLess 自己的 TSF 快照。
+///
+/// 标识由生产常量派生（转小写以覆盖 GUID 归一化路径），避免测试字面量与
+/// 生产常量漂移——若常量变更，测试仍会跟随验证新值。
+#[cfg(test)]
+pub(crate) fn openless_snapshot_for_test() -> ImeProfileSnapshot {
+    ImeProfileSnapshot::text_service(
+        OPENLESS_TSF_LANG_ID,
+        OPENLESS_TEXT_SERVICE_CLSID_BRACED.to_ascii_lowercase(),
+        OPENLESS_PROFILE_GUID_BRACED.to_ascii_lowercase(),
+    )
+}
+
 fn normalize_guid_string(value: &str) -> String {
     let upper = value.trim().to_ascii_uppercase();
     if upper.starts_with('{') && upper.ends_with('}') {
@@ -296,6 +309,30 @@ impl WindowsImeProfileManager {
     }
 }
 
+/// 汇总 legacy 与现代两条恢复路径的结果：任一成功即视为整体成功，
+/// 两者都失败才算失败，并分别记录失败原因。
+pub(super) fn report_restore_step_results(
+    legacy_result: WindowsImeProfileResult<()>,
+    modern_result: WindowsImeProfileResult<()>,
+) -> WindowsImeProfileResult<()> {
+    if let Err(error) = &legacy_result {
+        log::warn!(
+            "[windows-ime] legacy restore failed (ChangeCurrentLanguage/ActivateLanguageProfile): {error}"
+        );
+    }
+    if let Err(error) = &modern_result {
+        log::warn!("[windows-ime] modern ActivateProfile failed: {error}");
+    }
+    match (legacy_result, modern_result) {
+        (Ok(()), _) | (_, Ok(())) => Ok(()),
+        (Err(legacy_error), Err(modern_error)) => Err(WindowsImeProfileError::WindowsApi(
+            format!(
+                "both legacy and modern restore failed: legacy={legacy_error}; modern={modern_error}"
+            ),
+        )),
+    }
+}
+
 #[cfg(target_os = "windows")]
 mod windows_impl {
     use super::*;
@@ -451,76 +488,60 @@ mod windows_impl {
 
         // legacy 与现代共用同一组解析后的参数（TextService 为 CLSID + profile GUID，
         // KeyboardLayout 为 HKL）。GUID 解析失败直接整体失败，与旧行为一致。
-        let (profile_type, clsid, profile_guid, hkl) = modern_restore_args(snapshot)?;
+        let args = resolve_restore_args(snapshot)?;
 
         // legacy 步骤：先切语言，TextService 再激活具体 profile（KeyboardLayout 无 profile）。
         let legacy_result = with_input_processor_profiles(|profiles| unsafe {
             profiles.ChangeCurrentLanguage(lang_id)?;
-            if profile_type == TF_PROFILETYPE_INPUTPROCESSOR {
-                profiles.ActivateLanguageProfile(&clsid, lang_id, &profile_guid)?;
+            if args.profile_type == TF_PROFILETYPE_INPUTPROCESSOR {
+                profiles.ActivateLanguageProfile(&args.clsid, lang_id, &args.profile_guid)?;
             }
             Ok(())
         });
         let modern_result = with_profile_manager(|manager| unsafe {
             manager.ActivateProfile(
-                profile_type,
+                args.profile_type,
                 lang_id,
-                &clsid,
-                &profile_guid,
-                hkl,
+                &args.clsid,
+                &args.profile_guid,
+                args.hkl,
                 PROFILE_RESTORE_FLAGS,
             )
         });
         report_restore_step_results(legacy_result, modern_result)
     }
 
-    /// modern ActivateProfile 的参数：TextService 用 CLSID + profile GUID，KeyboardLayout 用 HKL。
-    fn modern_restore_args(
-        snapshot: &ImeProfileSnapshot,
-    ) -> WindowsImeProfileResult<(u32, GUID, GUID, HKL)> {
+    /// 单次 restore 所需的解析后参数（legacy 与现代路径共用）。
+    struct RestoreArgs {
+        profile_type: u32,
+        clsid: GUID,
+        profile_guid: GUID,
+        hkl: HKL,
+    }
+
+    /// 解析 restore 参数：TextService 用 CLSID + profile GUID，KeyboardLayout 用 HKL。
+    fn resolve_restore_args(snapshot: &ImeProfileSnapshot) -> WindowsImeProfileResult<RestoreArgs> {
         match snapshot.kind() {
             ImeProfileKind::TextService => {
                 let clsid = parse_required_guid("text service CLSID", snapshot.clsid())?;
                 let profile_guid =
                     parse_required_guid("text service profile GUID", snapshot.profile_guid())?;
-                Ok((
-                    TF_PROFILETYPE_INPUTPROCESSOR,
+                Ok(RestoreArgs {
+                    profile_type: TF_PROFILETYPE_INPUTPROCESSOR,
                     clsid,
                     profile_guid,
-                    null_hkl(),
-                ))
+                    hkl: null_hkl(),
+                })
             }
             ImeProfileKind::KeyboardLayout => {
                 let hkl = HKL(snapshot.hkl().unwrap_or_default() as *mut c_void);
-                Ok((
-                    TF_PROFILETYPE_KEYBOARDLAYOUT,
-                    GUID::zeroed(),
-                    GUID::zeroed(),
+                Ok(RestoreArgs {
+                    profile_type: TF_PROFILETYPE_KEYBOARDLAYOUT,
+                    clsid: GUID::zeroed(),
+                    profile_guid: GUID::zeroed(),
                     hkl,
-                ))
+                })
             }
-        }
-    }
-
-    pub(super) fn report_restore_step_results(
-        legacy_result: WindowsImeProfileResult<()>,
-        modern_result: WindowsImeProfileResult<()>,
-    ) -> WindowsImeProfileResult<()> {
-        if let Err(error) = &legacy_result {
-            log::warn!(
-                "[windows-ime] legacy restore failed (ChangeCurrentLanguage/ActivateLanguageProfile): {error}"
-            );
-        }
-        if let Err(error) = &modern_result {
-            log::warn!("[windows-ime] modern ActivateProfile failed: {error}");
-        }
-        match (legacy_result, modern_result) {
-            (Ok(()), _) | (_, Ok(())) => Ok(()),
-            (Err(legacy_error), Err(modern_error)) => Err(WindowsImeProfileError::WindowsApi(
-                format!(
-                    "both legacy and modern restore failed: legacy={legacy_error}; modern={modern_error}"
-                ),
-            )),
         }
     }
 
@@ -842,11 +863,7 @@ mod tests {
     #[test]
     fn openless_snapshot_detection_matches_exact_profile_identifiers() {
         // 大小写与花括号不同的 GUID 也应被归一化后识别为 OpenLess（粘滞态防护）。
-        let openless = ImeProfileSnapshot::text_service(
-            0x0804,
-            "{6b9f3f4f-5ee7-42d6-9c61-9f80b03a5d7d}".to_string(),
-            "{9b5f5e04-23f6-47da-9a26-d221f6c3f02e}".to_string(),
-        );
+        let openless = openless_snapshot_for_test();
         assert!(is_openless_profile_snapshot(&openless));
 
         let other_ime = text_service_snapshot();
@@ -935,6 +952,44 @@ mod tests {
             None
         );
     }
+
+    #[test]
+    fn restore_step_results_ok_when_modern_succeeds_after_legacy_failure() {
+        let result = report_restore_step_results(
+            Err(WindowsImeProfileError::WindowsApi(
+                "legacy failed".to_string(),
+            )),
+            Ok(()),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn restore_step_results_ok_when_legacy_succeeds_and_modern_fails() {
+        let result = report_restore_step_results(
+            Ok(()),
+            Err(WindowsImeProfileError::WindowsApi(
+                "modern failed".to_string(),
+            )),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn restore_step_results_err_only_when_both_fail() {
+        let result = report_restore_step_results(
+            Err(WindowsImeProfileError::WindowsApi(
+                "legacy failed".to_string(),
+            )),
+            Err(WindowsImeProfileError::WindowsApi(
+                "modern failed".to_string(),
+            )),
+        );
+        let err = result.unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("both legacy and modern restore failed"));
+    }
 }
 
 #[cfg(all(test, target_os = "windows"))]
@@ -1004,43 +1059,5 @@ mod windows_tests {
         let ownership = windows_impl::coinitialize_result_ownership(RPC_E_CHANGED_MODE).unwrap();
 
         assert!(!ownership.should_uninitialize);
-    }
-
-    #[test]
-    fn restore_step_results_ok_when_modern_succeeds_after_legacy_failure() {
-        let result = windows_impl::report_restore_step_results(
-            Err(WindowsImeProfileError::WindowsApi(
-                "legacy failed".to_string(),
-            )),
-            Ok(()),
-        );
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn restore_step_results_ok_when_legacy_succeeds_and_modern_fails() {
-        let result = windows_impl::report_restore_step_results(
-            Ok(()),
-            Err(WindowsImeProfileError::WindowsApi(
-                "modern failed".to_string(),
-            )),
-        );
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn restore_step_results_err_only_when_both_fail() {
-        let result = windows_impl::report_restore_step_results(
-            Err(WindowsImeProfileError::WindowsApi(
-                "legacy failed".to_string(),
-            )),
-            Err(WindowsImeProfileError::WindowsApi(
-                "modern failed".to_string(),
-            )),
-        );
-        let err = result.unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("both legacy and modern restore failed"));
     }
 }
