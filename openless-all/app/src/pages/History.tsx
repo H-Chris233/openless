@@ -8,7 +8,7 @@ import { Tooltip } from '../components/Tooltip';
 import { detectOS } from '../components/WindowChrome';
 import { formatComboLabel } from '../lib/hotkey';
 import { clearHistory, deleteHistoryEntry, listHistory, listStylePacks, readAudioRecording, repolish, retranscribeRecording, isTauri } from '../lib/ipc';
-import { resolveRepolishRetryPackId } from '../lib/history-repolish';
+import { defaultPackId, packDisplayName, resolveRepolishRetryPackIdWithFallback } from '../lib/history-repolish';
 import { useMobileLayout } from '../lib/useMobileLayout';
 import type { DictationSession, PolishMode, StylePack } from '../lib/types';
 import { useHotkeySettings } from '../state/HotkeySettingsContext';
@@ -50,16 +50,17 @@ const TRUNCATED_PILL_STYLE = {
 // 历史条目上显示「哪个风格包产出的这段文本」。session.mode 只是风格包的 baseMode
 // （四个内置分类之一），自建包全都会落进这四个桶，光看 mode 分不出是哪个包——
 // 所以优先用 stylePackId 查真实包名，跟本页「重新润色」面板里的风格命名对齐。
-//
-// 内置包例外：后端包名是硬编码中文（"轻度润色"…），直接显示会在英/日/韩界面串语言，
-// 因此内置包一律走 i18n 的 MODE_LABEL。旧历史没有 stylePackId、或包已被删除时同样回落。
+// 内置包例外与命名规则统一走 packDisplayName；旧历史没有 stylePackId、或包已被删除
+// 时同样回落到 mode 名。
 function styleLabelFor(
   session: DictationSession,
-  packNames: Map<string, string>,
+  allPacks: StylePack[] | null,
   modeLabel: Record<PolishMode, string>,
 ): string {
-  const custom = session.stylePackId ? packNames.get(session.stylePackId) : undefined;
-  return custom ?? modeLabel[session.mode];
+  const pack = session.stylePackId
+    ? allPacks?.find(candidate => candidate.id === session.stylePackId)
+    : undefined;
+  return pack ? packDisplayName(pack, modeLabel) : modeLabel[session.mode];
 }
 
 export function History() {
@@ -137,18 +138,9 @@ export function History() {
     return () => { cancelled = true; };
   }, []);
 
-  // 自定义包 id → 包名。内置包不收：它们的名字走 i18n（见 styleLabelFor）。
-  const packNames = useMemo(
-    () => new Map(
-      (allPacks ?? [])
-        .filter(pack => pack.kind !== 'builtin' && pack.name.trim())
-        .map(pack => [pack.id, pack.name.trim()] as const),
-    ),
-    [allPacks],
-  );
   // 不缓存：MODE_LABEL 每次渲染都是新对象，用 useCallback 反而会把旧语言的标签闭包
   // 留在缓存里，切换界面语言后 Pill 不跟着变。只在渲染里调用，重建成本可忽略。
-  const styleLabel = (session: DictationSession) => styleLabelFor(session, packNames, MODE_LABEL);
+  const styleLabel = (session: DictationSession) => styleLabelFor(session, allPacks, MODE_LABEL);
 
   const searchInputRef = useRef<HTMLInputElement>(null);
   const searchShortcut = os === 'mac' ? '⌘K' : 'Ctrl+K';
@@ -631,6 +623,7 @@ function RepolishPanel({ session, mobile, allPacks, packsError }: {
   packsError: string | null;
 }) {
   const { t } = useTranslation();
+  const MODE_LABEL = useModeLabel();
   const [selectedPackId, setSelectedPackId] = useState<string>('');
   const [running, setRunning] = useState<'retry' | 'apply' | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -645,12 +638,15 @@ function RepolishPanel({ session, mobile, allPacks, packsError }: {
 
   useEffect(() => {
     if (!packs) return;
-    setSelectedPackId(current => current || packs.find(p => !p.active)?.id || packs[0]?.id || '');
+    setSelectedPackId(current => current || defaultPackId(packs));
   }, [packs]);
 
   const run = async (kind: 'retry' | 'apply') => {
-    const packId =
-      kind === 'apply' ? selectedPackId : resolveRepolishRetryPackId(session, allPacks);
+    // 重试优先用产生这条记录的原包；原包已删除/旧历史/未加载时显式落到当前激活包
+    // （其次第一个可用包）——前端标注与实际执行一致，而不是让后端走 None 兜底链。
+    const packId = kind === 'apply'
+      ? selectedPackId
+      : resolveRepolishRetryPackIdWithFallback(session, allPacks, packs ?? []);
     if (kind === 'apply' && !packId) return;
     setRunning(kind);
     setError(null);
@@ -661,7 +657,7 @@ function RepolishPanel({ session, mobile, allPacks, packsError }: {
       const result: RepolishResult = {
         key: packId ?? '__retry__',
         title: pack
-          ? t('history.repolish.resultTitle', { name: pack.name })
+          ? t('history.repolish.resultTitle', { name: packDisplayName(pack, MODE_LABEL) })
           : t('history.repolish.retryResultTitle'),
         text,
       };
@@ -735,7 +731,7 @@ function RepolishPanel({ session, mobile, allPacks, packsError }: {
               }}
             >
               {(packs ?? []).map(pack => (
-                <option key={pack.id} value={pack.id}>{pack.name}</option>
+                <option key={pack.id} value={pack.id}>{packDisplayName(pack, MODE_LABEL)}</option>
               ))}
             </select>
             <Btn
@@ -783,9 +779,13 @@ function RepolishResultCard({ title, text }: { title: string; text: string }) {
   };
 
   return (
-    <div style={{ padding: 14, border: '0.5px dashed var(--ol-line-strong)', borderRadius: 10, background: 'var(--ol-surface-2)' }}>
+    // minWidth: 0 —— grid 子项默认 min-width: auto，标题 Pill 不换行时会把卡片
+    // 撑出结果网格（与详情页两栏文本卡片同一类问题）。
+    <div style={{ minWidth: 0, padding: 14, border: '0.5px dashed var(--ol-line-strong)', borderRadius: 10, background: 'var(--ol-surface-2)' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 10 }}>
-        <Pill size="sm" tone="default">{title}</Pill>
+        <span style={{ display: 'flex', minWidth: 0 }} title={title}>
+          <Pill size="sm" tone="default" style={TRUNCATED_PILL_STYLE}>{title}</Pill>
+        </span>
         {text.trim() && (
           <Btn icon={copied ? 'check' : 'copy'} variant="ghost" size="sm" onClick={() => void onCopy()}>
             {copied ? t('common.copied') : t('common.copy')}

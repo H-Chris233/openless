@@ -1,18 +1,28 @@
-import { resolveRepolishRetryPackId } from './history-repolish';
-import type { StylePack } from './types';
+import {
+  defaultPackId,
+  packDisplayName,
+  resolveRepolishRetryPackId,
+  resolveRepolishRetryPackIdWithFallback,
+} from './history-repolish';
+import type { PolishMode, StylePack } from './types';
 
 function assert(condition: boolean, message: string) {
   if (!condition) throw new Error(message);
 }
 
-function pack(id: string, enabled: boolean): StylePack {
+function pack(
+  id: string,
+  enabled: boolean,
+  kind: StylePack['kind'] = 'imported',
+  baseMode: PolishMode = 'structured',
+): StylePack {
   return {
     id,
     name: `包 ${id}`,
     description: '',
     version: '1.0.0',
-    kind: 'imported',
-    baseMode: 'structured',
+    kind,
+    baseMode,
     selectionPrompt: '',
     prompt: '',
     examples: [],
@@ -27,6 +37,13 @@ const allPacks: StylePack[] = [
   pack('custom-alive', true),
   pack('custom-disabled', false),
 ];
+
+const modeLabel: Record<PolishMode, string> = {
+  raw: 'Raw',
+  light: 'Light polish',
+  structured: 'Structured',
+  formal: 'Formal',
+};
 
 // 原风格包存在（启用）→ 返回该 id。
 assert(
@@ -62,4 +79,57 @@ assert(
 assert(
   resolveRepolishRetryPackId({ stylePackId: 'custom-alive' }, null) === undefined,
   'retry should fall back while style packs are still loading',
+);
+
+// 内置包显示名走 i18n mode 名，自定义包用原名。
+assert(
+  packDisplayName(pack('builtin.light', true, 'builtin', 'light'), modeLabel) === 'Light polish',
+  'builtin packs should display the i18n mode label',
+);
+assert(
+  packDisplayName(pack('custom-alive', true), modeLabel) === '包 custom-alive',
+  'custom packs should display their own name',
+);
+
+// 下拉默认：当前激活包优先，其次第一个包，空列表为 ''。
+assert(
+  defaultPackId([
+    pack('a', true),
+    { ...pack('b', true), active: true },
+    pack('c', true),
+  ]) === 'b',
+  'default should prefer the active pack',
+);
+assert(
+  defaultPackId([pack('a', true), pack('b', true)]) === 'a',
+  'default should fall back to the first pack when none is active',
+);
+assert(defaultPackId([]) === '', 'default should be empty for an empty list');
+
+// 重试回落：原包删除/未加载时显式落到当前激活包（其次第一个），列表全不可用才不传。
+const enabledPacks: StylePack[] = [
+  { ...pack('active-pack', true), active: true },
+  pack('idle-pack', true),
+];
+assert(
+  resolveRepolishRetryPackIdWithFallback({ stylePackId: 'custom-alive' }, allPacks, enabledPacks)
+    === 'custom-alive',
+  'retry-with-fallback should keep the original pack when it still exists',
+);
+assert(
+  resolveRepolishRetryPackIdWithFallback({ stylePackId: 'deleted-pack' }, allPacks, enabledPacks)
+    === 'active-pack',
+  'retry-with-fallback should use the active pack when the original was deleted',
+);
+assert(
+  resolveRepolishRetryPackIdWithFallback(
+    { stylePackId: null },
+    allPacks,
+    [pack('only-pack', true)],
+  ) === 'only-pack',
+  'retry-with-fallback should use the first enabled pack when none is active',
+);
+assert(
+  resolveRepolishRetryPackIdWithFallback({ stylePackId: 'custom-alive' }, null, []) === undefined,
+  'retry-with-fallback should stay undefined when no pack list is available',
 );

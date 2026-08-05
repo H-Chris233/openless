@@ -390,7 +390,7 @@ export const zhTW: typeof zhCN = {
     backToList: '返回列表',
     repolish: {
       title: '重新潤色',
-      hint: '基於上面的原文再跑一次潤色。結果只在本次查看時顯示，不寫回這條記錄。',
+      hint: '基於上面的原文再跑一次潤色。結果只在本次查看時顯示，不寫回這條記錄。原風格包已刪除或舊記錄時，重試將使用當前風格。',
       retry: '用原風格重試',
       retrying: '重試中…',
       apply: '套用',

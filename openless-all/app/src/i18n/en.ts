@@ -390,7 +390,7 @@ export const en: typeof zhCN = {
     backToList: 'Back to list',
     repolish: {
       title: 'Re-polish',
-      hint: 'Run polish again on the transcript above. Results are shown for this visit only and are not written back to the record.',
+      hint: 'Run polish again on the transcript above. Results are shown for this visit only and are not written back to the record. When the original style pack was deleted or the record predates style packs, retry uses the current style.',
       retry: 'Retry with same style',
       retrying: 'Retrying…',
       apply: 'Apply',
