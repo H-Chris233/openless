@@ -145,6 +145,56 @@ pub enum SelectionPolishOutputMode {
     PreviewConfirm,
 }
 
+/// 前台应用标签拆分结果：人读的应用名 +（macOS 的）bundle id。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrontApp {
+    pub name: Option<String>,
+    pub bundle_id: Option<String>,
+}
+
+/// 把 `capture_frontmost_app()` 的显示串拆成 `FrontApp { name, bundle_id }`。
+///
+/// macOS 那边拼的是 `"Claude (com.anthropic.claudefordesktop)"`；Windows 拿的是窗口
+/// 标题，没有 bundle id。历史条目有 `app_name` / `app_bundle_id` 两个字段，拆开存
+/// 才能让详情页只显示人读得懂的应用名，而不是把一长串 bundle id 也糊在正文里。
+///
+/// 只有 macOS 的标签才是 `"名称 (bundle.id)"` 格式；Windows 拿的是窗口标题，括号属于
+/// 标题正文。调用方必须按平台传入 `is_macos`（生产路径统一走 `split_front_app_opt`），
+/// 非 macOS 一律整串当应用名。认不出括号结构也整串当应用名 —— 宁可显示得啰嗦，
+/// 也不要把窗口标题里的普通括号误当成 bundle id。
+pub fn split_front_app_label(label: &str, is_macos: bool) -> FrontApp {
+    let trimmed = label.trim();
+    if trimmed.is_empty() {
+        return FrontApp { name: None, bundle_id: None };
+    }
+    if is_macos {
+        if let Some(open) = trimmed.rfind(" (") {
+            if trimmed.ends_with(')') {
+                let name = trimmed[..open].trim();
+                let bundle = trimmed[open + 2..trimmed.len() - 1].trim();
+                // bundle id 必然是点分的反向域名。没有点的括号内容（"记事本 (未保存)"
+                // 这类窗口标题）不是 bundle id，不能拆。
+                if !name.is_empty() && bundle.contains('.') && !bundle.contains(' ') {
+                    return FrontApp {
+                        name: Some(name.to_string()),
+                        bundle_id: Some(bundle.to_string()),
+                    };
+                }
+            }
+        }
+    }
+    FrontApp { name: Some(trimmed.to_string()), bundle_id: None }
+}
+
+/// `split_front_app_label` 的 `Option` 便捷版，平台开关收敛在这一处：
+/// 只有 macOS 的显示串才是 `"名称 (bundle.id)"`，其它平台（Windows 窗口标题、Linux）
+/// 整串当应用名，bundle id 留空。
+pub fn split_front_app_opt(label: Option<&str>) -> FrontApp {
+    label
+        .map(|l| split_front_app_label(l, cfg!(target_os = "macos")))
+        .unwrap_or(FrontApp { name: None, bundle_id: None })
+}
+
 /// 概览页活动统计的单日汇总（date = 本地日期 YYYY-MM-DD）。
 ///
 /// 年度热力图只用 `count`；`chars` / `duration_ms` 供「近 7 天 / 近 30 天」的
@@ -3017,6 +3067,75 @@ pub struct QaChatMessage {
     /// 仅用于前端安全展示选区原文；LLM 通道只读取 `role` / `content`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selection_text: Option<String>,
+}
+
+#[cfg(test)]
+mod split_front_app_label_tests {
+    use super::{split_front_app_label, split_front_app_opt, FrontApp};
+
+    #[test]
+    fn macos_label_splits_into_name_and_bundle() {
+        let split = split_front_app_label("Claude (com.anthropic.claudefordesktop)", true);
+        assert_eq!(split.name.as_deref(), Some("Claude"));
+        assert_eq!(split.bundle_id.as_deref(), Some("com.anthropic.claudefordesktop"));
+    }
+
+    #[test]
+    fn app_names_containing_spaces_and_parens_still_split_on_the_last_group() {
+        let split = split_front_app_label("Visual Studio Code (com.microsoft.VSCode)", true);
+        assert_eq!(split.name.as_deref(), Some("Visual Studio Code"));
+        assert_eq!(split.bundle_id.as_deref(), Some("com.microsoft.VSCode"));
+    }
+
+    /// Windows 拿的是窗口标题，里面的括号是正文的一部分，不是 bundle id。
+    /// 平台开关关闭时整串保留——即使括号内容恰好形如反向域名、文件路径或版本号，
+    /// 也绝不拆。误拆会把标题截断，显示成半句话，还写入错误的 bundle id。
+    #[test]
+    fn window_titles_are_never_split_outside_macos() {
+        for title in [
+            "未命名文档 (未保存)",
+            "report.txt (~/Documents)",
+            "Inbox (12)",
+            "script.py (C:\\dir\\script.py)",
+            "会议 (meet.example.com)",
+            "卸载 (2.4.1)",
+        ] {
+            let split = split_front_app_label(title, false);
+            assert_eq!(split.name.as_deref(), Some(title), "{title} should stay intact");
+            assert_eq!(split.bundle_id, None, "{title} has no bundle id");
+        }
+    }
+
+    #[test]
+    fn bare_names_pass_through() {
+        let split = split_front_app_label("Terminal", true);
+        assert_eq!(split.name.as_deref(), Some("Terminal"));
+        assert_eq!(split.bundle_id, None);
+    }
+
+    #[test]
+    fn blank_input_yields_nothing() {
+        assert_eq!(
+            split_front_app_label("", true),
+            FrontApp { name: None, bundle_id: None }
+        );
+        assert_eq!(
+            split_front_app_label("   ", true),
+            FrontApp { name: None, bundle_id: None }
+        );
+        assert_eq!(
+            split_front_app_label("", false),
+            FrontApp { name: None, bundle_id: None }
+        );
+        assert_eq!(
+            split_front_app_label("   ", false),
+            FrontApp { name: None, bundle_id: None }
+        );
+        assert_eq!(
+            split_front_app_opt(None),
+            FrontApp { name: None, bundle_id: None }
+        );
+    }
 }
 
 #[cfg(test)]

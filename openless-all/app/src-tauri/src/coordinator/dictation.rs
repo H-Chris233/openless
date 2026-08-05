@@ -2633,7 +2633,10 @@ fn build_transcribe_failed_session(
     asr_ms: u64,
     mode: PolishMode,
     has_audio_recording: bool,
+    front_app: Option<&str>,
 ) -> DictationSession {
+    // 失败条目也记前台应用：排查「在某个 app 里总是转录失败」时这一列就是线索。
+    let front = crate::types::split_front_app_opt(front_app);
     DictationSession {
         id: session_id.to_string(),
         created_at: Utc::now().to_rfc3339(),
@@ -2644,8 +2647,8 @@ fn build_transcribe_failed_session(
         style_pack_id: None,
         translation_active: false,
         polish_source: None,
-        app_bundle_id: None,
-        app_name: None,
+        app_bundle_id: front.bundle_id,
+        app_name: front.name,
         insert_status: InsertStatus::Failed,
         error_code: Some("transcribeFailed".to_string()),
         duration_ms: Some(duration_ms),
@@ -2668,12 +2671,14 @@ fn write_transcribe_failed_history(
     asr_call_label: Option<&AsrCallLabel>,
 ) {
     let prefs = inner.prefs.get();
+    let front_app = inner.state.lock().front_app.clone();
     let mut session = build_transcribe_failed_session(
         session_id,
         duration_ms,
         asr_ms,
         prefs.default_mode,
         inner.audio_archive_active.load(Ordering::Relaxed),
+        front_app.as_deref(),
     );
     // 失败条目也记下是哪个 ASR 出的错——「哪个模型转不出来」正是模型对比要看的信息。
     // 用 begin_session 的构建时快照，而不是此刻重读设置（PR #826 review）。
@@ -3468,6 +3473,10 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
     }
 
     if raw.text.trim().is_empty() {
+        // 失败条目同样记下当时的前台应用：排查「在某个 app 里总是识别不到」时，这一列
+        // 就是线索本身。
+        let empty_front =
+            crate::types::split_front_app_opt(inner.state.lock().front_app.as_deref());
         let session = DictationSession {
             // session_id 与归档 wav 同名，empty 录音才能被 read_audio_recording /
             // retranscribe_recording 凭 id 找回（之前用 Uuid::new_v4，与 `<session_id>.wav`
@@ -3481,8 +3490,8 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
             style_pack_id: None,
             translation_active: false,
             polish_source: None,
-            app_bundle_id: None,
-            app_name: None,
+            app_bundle_id: empty_front.bundle_id,
+            app_name: empty_front.name,
             insert_status: InsertStatus::Failed,
             error_code: Some("emptyTranscript".to_string()),
             duration_ms: Some(raw.duration_ms),
@@ -3900,6 +3909,10 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
     let history_session_id = current_session_id.to_string();
     let history_created_at = Utc::now().to_rfc3339();
     let prefs_snapshot = inner.prefs.get();
+    // 落字目标应用：begin_session 就采过（capture_frontmost_app），此前只喂给了 polish
+    // prompt，没写进历史 —— 于是详情页的「插入」行永远只有字数，看不出这段话落到了哪。
+    // 前端早就会渲染 app_name，缺的一直是这里的写入。
+    let insert_front = crate::types::split_front_app_opt(front_app.as_deref());
     let session = DictationSession {
         id: history_session_id.clone(),
         created_at: history_created_at.clone(),
@@ -3910,8 +3923,8 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         style_pack_id: Some(pack.id.clone()),
         translation_active,
         polish_source,
-        app_bundle_id: None,
-        app_name: None,
+        app_bundle_id: insert_front.bundle_id,
+        app_name: insert_front.name,
         insert_status: status,
         error_code,
         duration_ms: Some(raw.duration_ms),
@@ -4344,7 +4357,7 @@ mod tests {
         // 录音随 prune 丢失（用户报告「识别失败之前的语音也都丢失了」）。
         let sid = Uuid::new_v4();
         let session =
-            build_transcribe_failed_session(sid, 4200, 17_250, PolishMode::Structured, true);
+            build_transcribe_failed_session(sid, 4200, 17_250, PolishMode::Structured, true, None);
         assert_eq!(session.id, sid.to_string());
     }
 
@@ -4352,7 +4365,7 @@ mod tests {
     fn transcribe_failed_history_marks_failed_and_recoverable() {
         let sid = Uuid::new_v4();
         let session =
-            build_transcribe_failed_session(sid, 1234, 17_250, PolishMode::Structured, true);
+            build_transcribe_failed_session(sid, 1234, 17_250, PolishMode::Structured, true, None);
         assert!(matches!(session.insert_status, InsertStatus::Failed));
         assert_eq!(session.error_code.as_deref(), Some("transcribeFailed"));
         assert_eq!(session.duration_ms, Some(1234));
@@ -4366,7 +4379,7 @@ mod tests {
         // 录音归档失败（has_audio=false）→ 条目仍写（用户看得到这次失败），但不标可重转，
         // 避免前端渲染重转按钮而后端找不到 wav。
         let sid = Uuid::new_v4();
-        let session = build_transcribe_failed_session(sid, 1, 250, PolishMode::Structured, false);
+        let session = build_transcribe_failed_session(sid, 1, 250, PolishMode::Structured, false, None);
         assert_eq!(session.has_audio_recording, Some(false));
     }
 

@@ -2028,14 +2028,33 @@ impl Coordinator {
         Ok(())
     }
 
-    pub async fn repolish(&self, raw_text: String, mode: PolishMode) -> Result<String, String> {
+    /// 用某个风格包重新润色一段已有原文。
+    ///
+    /// `style_pack_id`：
+    /// - `None` → 用当前激活的风格包。历史页的「重试」走这条：同样的输入再给模型看一遍，
+    ///   用来判断上一次的结果是模型抖动还是稳定行为。
+    /// - `Some(id)` → 用指定的风格包。历史页的「换风格重润色」走这条。
+    ///
+    /// 指定的包**不需要**处于激活状态，也不会改变激活状态：这只是一次一次性试算，
+    /// 不该有把用户当前风格换掉的副作用。
+    pub async fn repolish(
+        &self,
+        raw_text: String,
+        mode: PolishMode,
+        style_pack_id: Option<String>,
+    ) -> Result<String, String> {
         let hotwords = enabled_phrases(&self.inner);
         let prefs = self.inner.prefs.get();
-        let pack = self
-            .inner
-            .style_packs
-            .get_or_default_active(&prefs.active_style_pack_id)
-            .map_err(|e| e.to_string())?;
+        let pack = match style_pack_id.as_deref() {
+            // 显式指定时按 id 精确取，不走 get_or_default_active 的兜底链——用户点的是
+            // 「用这个风格看看」，静默回落到别的包会让结果无从解释。
+            Some(id) => self.inner.style_packs.get(id).map_err(|e| e.to_string())?,
+            None => self
+                .inner
+                .style_packs
+                .get_or_default_active(&prefs.active_style_pack_id)
+                .map_err(|e| e.to_string())?,
+        };
         let style_system_prompt = crate::types::style_pack_prompt(
             &pack,
             crate::types::StylePromptKind::DictationAsr,
