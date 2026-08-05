@@ -387,6 +387,9 @@ export function History() {
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                   <span style={{ fontSize: 13, fontFamily: 'var(--ol-font-mono)', color: 'var(--ol-ink-3)' }}>{formatTime(item.createdAt)}</span>
                   <Pill size="sm" tone="default">{MODE_LABEL[item.mode]}</Pill>
+                  {item.pipelineMode === 'multimodal' && (
+                    <Pill size="sm" tone="blue">{t('history.multimodalPipeline')}</Pill>
+                  )}
                   {/* 「录音」前缀：与下方识别/润色耗时区分——录音时长发生在松键前，
                       不该与流水线各步耗时加总（用户反馈"时间对不上"）。 */}
                   <span style={{ fontSize: 11, color: 'var(--ol-ink-4)' }}>{t('history.recorded', { duration: formatDuration(item.durationMs, t) })}</span>
@@ -397,6 +400,7 @@ export function History() {
                   )}
                   {item.hasAudioRecording
                     && !audioMissingIds.has(item.id)
+                    && item.pipelineMode !== 'multimodal'
                     && (item.errorCode === 'transcribeFailed' || item.errorCode === 'emptyTranscript') && (
                     <Btn icon="refresh" variant="ghost" size="sm" disabled={retranscribing} onClick={() => void onRetranscribe()}>
                       {retranscribing ? t('history.retranscribing') : t('history.retranscribe')}

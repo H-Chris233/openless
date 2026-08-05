@@ -49,6 +49,7 @@ mod llm_gemini;
 #[cfg(mobile)]
 mod mobile_runtime;
 mod net;
+mod omni;
 mod permissions;
 mod persistence;
 mod polish;
@@ -68,14 +69,14 @@ mod selection;
 mod selection;
 #[cfg(not(mobile))]
 mod shortcut_binding;
+#[cfg(mobile)]
+#[path = "mobile_stubs/shortcut_binding.rs"]
+mod shortcut_binding;
 #[cfg(not(mobile))]
 mod side_aware_combo;
 #[cfg(mobile)]
 #[path = "mobile_stubs/side_aware_combo.rs"]
 mod side_aware_combo;
-#[cfg(mobile)]
-#[path = "mobile_stubs/shortcut_binding.rs"]
-mod shortcut_binding;
 mod types;
 #[cfg(not(mobile))]
 mod unicode_keystroke;
@@ -247,6 +248,7 @@ macro_rules! app_invoke_handler_desktop {
             commands::read_credential,
             commands::set_active_asr_provider,
             commands::set_active_llm_provider,
+            commands::set_active_omni_provider,
             commands::get_qa_hotkey_label,
             commands::set_qa_hotkey,
             commands::set_selection_polish_hotkey,
@@ -357,6 +359,7 @@ macro_rules! app_invoke_handler_mobile {
             $crate::commands::read_credential,
             $crate::commands::set_active_asr_provider,
             $crate::commands::set_active_llm_provider,
+            $crate::commands::set_active_omni_provider,
             $crate::commands::validate_provider_credentials,
             $crate::commands::list_provider_models,
             $crate::commands::list_history,
@@ -917,11 +920,7 @@ fn build_microphone_tray_menu<M: Manager<tauri::Wry>>(
     // CoreAudio device enumeration can block inside AudioUnitSetProperty while AppKit is
     // finishing launch. Tray menus must be built on the main thread, so only consume the
     // cache here; the watcher below owns every potentially blocking enumeration.
-    let devices = app
-        .state::<TrayMicrophoneDeviceCache>()
-        .0
-        .lock()
-        .clone();
+    let devices = app.state::<TrayMicrophoneDeviceCache>().0.lock().clone();
     let selected_available =
         selected.trim().is_empty() || devices.iter().any(|device| device.name == selected);
 
@@ -1066,8 +1065,10 @@ fn start_tray_microphone_watcher(app: AppHandle) {
     //    Linux 无原生路径，返回 false，纯靠下面的慢速兜底。
     //    注册失败（OSStatus≠0 / RegisterEndpoint Err）只 warn，不 panic——兜底轮询保证
     //    三平台都「永远能检测到设备」。
-    let native_registered =
-        device_watch::spawn_native_watcher(app.clone(), make_microphone_change_handler(app.clone()));
+    let native_registered = device_watch::spawn_native_watcher(
+        app.clone(),
+        make_microphone_change_handler(app.clone()),
+    );
     if native_registered {
         log::info!("[tray] OS native microphone device watcher registered");
     } else {
@@ -1185,12 +1186,7 @@ fn apply_windows_caption_theme<R: Runtime>(window: &tauri::WebviewWindow<R>, dar
             &immersive_dark,
             "immersive dark mode",
         );
-        set_dwm_window_attribute(
-            hwnd,
-            DWMWA_CAPTION_COLOR,
-            &caption_color,
-            "caption color",
-        );
+        set_dwm_window_attribute(hwnd, DWMWA_CAPTION_COLOR, &caption_color, "caption color");
         set_dwm_window_attribute(hwnd, DWMWA_TEXT_COLOR, &text_color, "text color");
         set_dwm_window_attribute(hwnd, DWMWA_BORDER_COLOR, &border_color, "border color");
     }
@@ -1676,10 +1672,7 @@ fn bottom_visual_position(
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn frame_contains_point(frame: LogicalMonitorFrame, x: f64, y: f64) -> bool {
-    x >= frame.x
-        && x < frame.x + frame.width
-        && y >= frame.y
-        && y < frame.y + frame.height
+    x >= frame.x && x < frame.x + frame.width && y >= frame.y && y < frame.y + frame.height
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -1888,11 +1881,8 @@ mod macos_capsule_ax {
 
     unsafe fn cfstring_from_static(bytes_with_nul: &[u8]) -> Option<CFStringRef> {
         let cstr = CStr::from_bytes_with_nul(bytes_with_nul).ok()?;
-        let s = CFStringCreateWithCString(
-            std::ptr::null(),
-            cstr.as_ptr(),
-            K_CF_STRING_ENCODING_UTF8,
-        );
+        let s =
+            CFStringCreateWithCString(std::ptr::null(), cstr.as_ptr(), K_CF_STRING_ENCODING_UTF8);
         if s.is_null() {
             None
         } else {
@@ -2209,7 +2199,10 @@ fn make_chat_window_panel_macos<R: tauri::Runtime>(window: &tauri::WebviewWindow
 /// 解法是把 NSWindow 的 `movableByWindowBackground` 打开——这条路径不依赖窗口是否成为
 /// key window，跟 Spotlight / Raycast 的浮窗是同一手法。设一次就够，整个生命周期保持。
 #[cfg(target_os = "macos")]
-fn make_chat_window_draggable_macos<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>, tag: &str) {
+fn make_chat_window_draggable_macos<R: tauri::Runtime>(
+    window: &tauri::WebviewWindow<R>,
+    tag: &str,
+) {
     use objc2::msg_send;
     use objc2::runtime::{AnyObject, Bool};
     let Ok(handle) = window.ns_window() else {
@@ -2250,8 +2243,9 @@ fn ensure_qa_window<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<tauri::Webv
     if let Some(w) = app.get_webview_window("qa") {
         return Some(w);
     }
-    let built = WebviewWindowBuilder::new(app, "qa", WebviewUrl::App("index.html?window=qa".into()))
-        .title("OpenLess QA")
+    let built =
+        WebviewWindowBuilder::new(app, "qa", WebviewUrl::App("index.html?window=qa".into()))
+            .title("OpenLess QA")
             .inner_size(QA_WINDOW_WIDTH, QA_WINDOW_HEIGHT)
             .decorations(false)
             .transparent(true)
@@ -2295,7 +2289,9 @@ fn ensure_qa_window<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<tauri::Webv
 
 /// 懒创建 Less Computer 浮窗（macOS only）。配置与原 tauri.conf 的 less-computer 块一致。
 #[cfg(target_os = "macos")]
-fn ensure_less_computer_window<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<tauri::WebviewWindow<R>> {
+fn ensure_less_computer_window<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Option<tauri::WebviewWindow<R>> {
     if let Some(w) = app.get_webview_window("less-computer") {
         return Some(w);
     }
@@ -2446,7 +2442,11 @@ pub(crate) fn show_selection_polish_preview<R: tauri::Runtime>(app: &AppHandle<R
     if let Err(error) = window.set_focus() {
         log::warn!("[selection-polish] focus preview failed: {error}");
     }
-    let _ = app.emit_to("selection-polish-preview", "selection-polish-preview:shown", ());
+    let _ = app.emit_to(
+        "selection-polish-preview",
+        "selection-polish-preview:shown",
+        (),
+    );
 }
 
 #[cfg(any(target_os = "android", target_os = "ios"))]
@@ -2882,8 +2882,8 @@ fn capsule_height_for_qa() -> f64 {
 mod tests {
     use super::{
         bottom_center_position, bottom_visual_position, capsule_height_for_qa,
-        capsule_visual_height, capsule_window_bounds, clamp_to_monitor, logical_monitor_frame,
-        frame_contains_point, frame_distance_to_point_squared, parse_tray_polish_mode_id,
+        capsule_visual_height, capsule_window_bounds, clamp_to_monitor, frame_contains_point,
+        frame_distance_to_point_squared, logical_monitor_frame, parse_tray_polish_mode_id,
         rotate_log_if_too_large, tray_polish_mode_menu_entries, tray_style_menu_enabled,
         LogicalMonitorFrame, LOG_ROTATE_LIMIT_BYTES,
     };
@@ -3007,10 +3007,7 @@ mod tests {
 
         assert_eq!(frame_distance_to_point_squared(frame, 100.0, -100.0), 0.0);
         assert_eq!(frame_distance_to_point_squared(frame, 100.0, 20.0), 400.0);
-        assert_eq!(
-            frame_distance_to_point_squared(frame, -10.0, -910.0),
-            200.0
-        );
+        assert_eq!(frame_distance_to_point_squared(frame, -10.0, -910.0), 200.0);
     }
 
     #[test]
