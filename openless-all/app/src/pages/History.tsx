@@ -8,6 +8,7 @@ import { Tooltip } from '../components/Tooltip';
 import { detectOS } from '../components/WindowChrome';
 import { formatComboLabel } from '../lib/hotkey';
 import { clearHistory, deleteHistoryEntry, listHistory, listStylePacks, readAudioRecording, repolish, retranscribeRecording, isTauri } from '../lib/ipc';
+import { resolveRepolishRetryPackId } from '../lib/history-repolish';
 import { useMobileLayout } from '../lib/useMobileLayout';
 import type { DictationSession, PolishMode, StylePack } from '../lib/types';
 import { useHotkeySettings } from '../state/HotkeySettingsContext';
@@ -562,9 +563,10 @@ export function History() {
                 </div>
               </div>
               {/* 重新润色：拿这条的原文再跑一次 LLM。没有原文就没得润色（转录失败条目），
-                  此时整块不渲染。key={item.id} 让切换记录时结果与状态一起重置，
+                  此时整块不渲染；QA 记录的原文是问题而不是待润色文本，同样不渲染。
+                  key={item.id} 让切换记录时结果与状态一起重置，
                   避免把上一条的结果留在新条目下面。 */}
-              {item.rawTranscript.trim() && (
+              {item.rawTranscript.trim() && item.errorCode !== 'qaSession' && (
                 <RepolishPanel
                   session={item}
                   mobile={mobile}
@@ -586,9 +588,11 @@ export function History() {
   );
 }
 
-/** 后端超时错误在 IPC 边界退化成裸字符串（LLMError::Timeout → "timeout"）。 */
+/** 后端超时错误在 IPC 边界退化成裸字符串（LLMError::Timeout → "timeout"）。
+ *  只匹配整串的常见超时形态，避免其它含 "timeout" 字样的错误被误判成超时。 */
 function isTimeout(message: string): boolean {
-  return /timeout|timed out|超时/i.test(message);
+  const trimmed = message.trim();
+  return /^(timeout|timed out|request timed out)$/i.test(trimmed) || trimmed.includes('超时');
 }
 
 function errorMessage(error: unknown): string {
@@ -608,8 +612,9 @@ interface RepolishResult {
  * 「重新润色」面板：拿这条历史的**原文**再跑一次 LLM。
  *
  * 两个入口共用一条后端通道（`repolish`，stylePackId 可选）：
- * - 「用原风格重试」→ 不传 pack id，用当前激活风格再跑一遍。用来判断上次的结果是模型
- *   抖动还是稳定行为 —— 这是用户说「AI 识别得不对」时真正想做的对照实验。
+ * - 「用原风格重试」→ 优先传产生这条记录的风格包 id（包已删除/旧历史/未加载时回落当前
+ *   激活风格）。用同一套风格再跑一遍，才能判断上次的结果是模型抖动还是稳定行为 ——
+ *   这是用户说「AI 识别得不对」时真正想做的对照实验。
  * - 「应用」→ 传选中的 pack id，看同一段话换个风格是什么样。
  *
  * 结果只在本次查看时显示，不写回历史条目：历史的 finalText 是「当时真的插进去的那段
@@ -644,13 +649,15 @@ function RepolishPanel({ session, mobile, allPacks, packsError }: {
   }, [packs]);
 
   const run = async (kind: 'retry' | 'apply') => {
-    const packId = kind === 'apply' ? selectedPackId : undefined;
+    const packId =
+      kind === 'apply' ? selectedPackId : resolveRepolishRetryPackId(session, allPacks);
     if (kind === 'apply' && !packId) return;
     setRunning(kind);
     setError(null);
     try {
       const text = await repolish(session.rawTranscript, session.mode, packId);
-      const pack = packId ? packs?.find(p => p.id === packId) : undefined;
+      // 用 allPacks 而非 packs 找包名：按已禁用原包重试时标题仍显示真实包名。
+      const pack = packId ? allPacks?.find(p => p.id === packId) : undefined;
       const result: RepolishResult = {
         key: packId ?? '__retry__',
         title: pack

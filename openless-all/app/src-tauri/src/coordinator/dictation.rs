@@ -2636,9 +2636,7 @@ fn build_transcribe_failed_session(
     front_app: Option<&str>,
 ) -> DictationSession {
     // 失败条目也记前台应用：排查「在某个 app 里总是转录失败」时这一列就是线索。
-    let (app_name, app_bundle_id) = front_app
-        .map(crate::types::split_front_app_label)
-        .unwrap_or((None, None));
+    let (app_name, app_bundle_id) = crate::types::split_front_app_opt(front_app);
     DictationSession {
         id: session_id.to_string(),
         created_at: Utc::now().to_rfc3339(),
@@ -3477,13 +3475,8 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
     if raw.text.trim().is_empty() {
         // 失败条目同样记下当时的前台应用：排查「在某个 app 里总是识别不到」时，这一列
         // 就是线索本身。
-        let (empty_app_name, empty_app_bundle_id) = inner
-            .state
-            .lock()
-            .front_app
-            .as_deref()
-            .map(crate::types::split_front_app_label)
-            .unwrap_or((None, None));
+        let (empty_app_name, empty_app_bundle_id) =
+            crate::types::split_front_app_opt(inner.state.lock().front_app.as_deref());
         let session = DictationSession {
             // session_id 与归档 wav 同名，empty 录音才能被 read_audio_recording /
             // retranscribe_recording 凭 id 找回（之前用 Uuid::new_v4，与 `<session_id>.wav`
@@ -3916,10 +3909,8 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
     // 落字目标应用：begin_session 就采过（capture_frontmost_app），此前只喂给了 polish
     // prompt，没写进历史 —— 于是详情页的「插入」行永远只有字数，看不出这段话落到了哪。
     // 前端早就会渲染 app_name，缺的一直是这里的写入。
-    let (insert_app_name, insert_app_bundle_id) = front_app
-        .as_deref()
-        .map(crate::types::split_front_app_label)
-        .unwrap_or((None, None));
+    let (insert_app_name, insert_app_bundle_id) =
+        crate::types::split_front_app_opt(front_app.as_deref());
     let session = DictationSession {
         id: history_session_id.clone(),
         created_at: history_created_at.clone(),

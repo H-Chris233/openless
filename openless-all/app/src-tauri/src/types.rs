@@ -151,25 +151,38 @@ pub enum SelectionPolishOutputMode {
 /// 标题，没有 bundle id。历史条目有 `app_name` / `app_bundle_id` 两个字段，拆开存
 /// 才能让详情页只显示人读得懂的应用名，而不是把一长串 bundle id 也糊在正文里。
 ///
-/// 认不出括号结构就整串当应用名 —— 宁可显示得啰嗦，也不要把窗口标题里的普通括号
-/// 误当成 bundle id。
-pub fn split_front_app_label(label: &str) -> (Option<String>, Option<String>) {
+/// 只有 macOS 的标签才是 `"名称 (bundle.id)"` 格式；Windows 拿的是窗口标题，括号属于
+/// 标题正文。调用方必须按平台传入 `is_macos`（生产路径统一走 `split_front_app_opt`），
+/// 非 macOS 一律整串当应用名。认不出括号结构也整串当应用名 —— 宁可显示得啰嗦，
+/// 也不要把窗口标题里的普通括号误当成 bundle id。
+pub fn split_front_app_label(label: &str, is_macos: bool) -> (Option<String>, Option<String>) {
     let trimmed = label.trim();
     if trimmed.is_empty() {
         return (None, None);
     }
-    if let Some(open) = trimmed.rfind(" (") {
-        if trimmed.ends_with(')') {
-            let name = trimmed[..open].trim();
-            let bundle = trimmed[open + 2..trimmed.len() - 1].trim();
-            // bundle id 必然是点分的反向域名。没有点的括号内容（"记事本 (未保存)"
-            // 这类窗口标题）不是 bundle id，不能拆。
-            if !name.is_empty() && bundle.contains('.') && !bundle.contains(' ') {
-                return (Some(name.to_string()), Some(bundle.to_string()));
+    if is_macos {
+        if let Some(open) = trimmed.rfind(" (") {
+            if trimmed.ends_with(')') {
+                let name = trimmed[..open].trim();
+                let bundle = trimmed[open + 2..trimmed.len() - 1].trim();
+                // bundle id 必然是点分的反向域名。没有点的括号内容（"记事本 (未保存)"
+                // 这类窗口标题）不是 bundle id，不能拆。
+                if !name.is_empty() && bundle.contains('.') && !bundle.contains(' ') {
+                    return (Some(name.to_string()), Some(bundle.to_string()));
+                }
             }
         }
     }
     (Some(trimmed.to_string()), None)
+}
+
+/// `split_front_app_label` 的 `Option` 便捷版，平台开关收敛在这一处：
+/// 只有 macOS 的显示串才是 `"名称 (bundle.id)"`，其它平台（Windows 窗口标题、Linux）
+/// 整串当应用名，bundle id 留空。
+pub fn split_front_app_opt(label: Option<&str>) -> (Option<String>, Option<String>) {
+    label
+        .map(|l| split_front_app_label(l, cfg!(target_os = "macos")))
+        .unwrap_or((None, None))
 }
 
 /// 概览页年度活动热力图的单日计数（date = 本地日期 YYYY-MM-DD）。
@@ -3005,32 +3018,38 @@ pub struct QaChatMessage {
 
 #[cfg(test)]
 mod split_front_app_label_tests {
-    use super::split_front_app_label;
+    use super::{split_front_app_label, split_front_app_opt};
 
     #[test]
     fn macos_label_splits_into_name_and_bundle() {
-        let (name, bundle) = split_front_app_label("Claude (com.anthropic.claudefordesktop)");
+        let (name, bundle) =
+            split_front_app_label("Claude (com.anthropic.claudefordesktop)", true);
         assert_eq!(name.as_deref(), Some("Claude"));
         assert_eq!(bundle.as_deref(), Some("com.anthropic.claudefordesktop"));
     }
 
     #[test]
     fn app_names_containing_spaces_and_parens_still_split_on_the_last_group() {
-        let (name, bundle) = split_front_app_label("Visual Studio Code (com.microsoft.VSCode)");
+        let (name, bundle) =
+            split_front_app_label("Visual Studio Code (com.microsoft.VSCode)", true);
         assert_eq!(name.as_deref(), Some("Visual Studio Code"));
         assert_eq!(bundle.as_deref(), Some("com.microsoft.VSCode"));
     }
 
     /// Windows 拿的是窗口标题，里面的括号是正文的一部分，不是 bundle id。
-    /// 误拆会把标题截断，显示成半句话。
+    /// 平台开关关闭时整串保留——即使括号内容恰好形如反向域名、文件路径或版本号，
+    /// 也绝不拆。误拆会把标题截断，显示成半句话，还写入错误的 bundle id。
     #[test]
-    fn window_titles_with_ordinary_parens_are_not_split() {
+    fn window_titles_are_never_split_outside_macos() {
         for title in [
             "未命名文档 (未保存)",
             "report.txt (~/Documents)",
             "Inbox (12)",
+            "script.py (C:\\dir\\script.py)",
+            "会议 (meet.example.com)",
+            "卸载 (2.4.1)",
         ] {
-            let (name, bundle) = split_front_app_label(title);
+            let (name, bundle) = split_front_app_label(title, false);
             assert_eq!(name.as_deref(), Some(title), "{title} should stay intact");
             assert_eq!(bundle, None, "{title} has no bundle id");
         }
@@ -3038,15 +3057,18 @@ mod split_front_app_label_tests {
 
     #[test]
     fn bare_names_pass_through() {
-        let (name, bundle) = split_front_app_label("Terminal");
+        let (name, bundle) = split_front_app_label("Terminal", true);
         assert_eq!(name.as_deref(), Some("Terminal"));
         assert_eq!(bundle, None);
     }
 
     #[test]
     fn blank_input_yields_nothing() {
-        assert_eq!(split_front_app_label(""), (None, None));
-        assert_eq!(split_front_app_label("   "), (None, None));
+        assert_eq!(split_front_app_label("", true), (None, None));
+        assert_eq!(split_front_app_label("   ", true), (None, None));
+        assert_eq!(split_front_app_label("", false), (None, None));
+        assert_eq!(split_front_app_label("   ", false), (None, None));
+        assert_eq!(split_front_app_opt(None), (None, None));
     }
 }
 

@@ -318,10 +318,8 @@ pub(super) async fn run_selection_polish(inner: &Arc<Inner>) -> Result<(), Strin
     };
     let raw_chars = raw_text.chars().count();
     // 与听写路径同口径：应用名与 bundle id 分开存。
-    let (source_app_name, source_app_bundle_id) = source_app
-        .as_deref()
-        .map(crate::types::split_front_app_label)
-        .unwrap_or((None, None));
+    let (source_app_name, source_app_bundle_id) =
+        crate::types::split_front_app_opt(source_app.as_deref());
     let session = DictationSession {
         id: Uuid::new_v4().to_string(),
         created_at: Utc::now().to_rfc3339(),
@@ -445,11 +443,8 @@ impl Coordinator {
             });
         // 与听写路径同口径：应用名与 bundle id 分开存，详情页才不会把一长串 bundle id
         // 糊进正文。
-        let (preview_app_name, preview_app_bundle_id) = preview
-            .source_app
-            .as_deref()
-            .map(crate::types::split_front_app_label)
-            .unwrap_or((None, None));
+        let (preview_app_name, preview_app_bundle_id) =
+            crate::types::split_front_app_opt(preview.source_app.as_deref());
         let session = DictationSession {
             id: Uuid::new_v4().to_string(),
             created_at: Utc::now().to_rfc3339(),
