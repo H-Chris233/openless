@@ -274,26 +274,56 @@ export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
   const [localModelOptions, setLocalModelOptions] = useState<
     { engine: 'qwen3' | 'sherpa' | 'foundry'; id: string; name: string; isDownloaded: boolean }[]
   >([]);
+  // 同 provider 内切换本地模型的乐观值：下拉立即显示用户点的模型，不等后端
+  // set_settings + prefs:changed 事件回来（回来前的几帧会闪回旧模型 = 闪烁）。
+  const [localAsrModelDraft, setLocalAsrModelDraft] = useState<string | null>(null);
+  useEffect(() => {
+    // 供应商切换后旧引擎的 draft 不再适用，清掉让 asrValue 回退 prefs。
+    setLocalAsrModelDraft(null);
+  }, [committedAsrProvider]);
   useEffect(() => {
     let cancelled = false;
+    // 平台分支拉取：sherpa/foundry 的 catalog 命令只在 Windows 注册，macOS 上
+    // invoke 未注册命令会 reject——Promise.all 拉三个会把 qwen3 的结果也一起
+    // 吞掉（下拉永远只剩引擎级入口）。按平台只拉本平台存在的引擎。
     const fetchAll = async () => {
       try {
-        const [qwen3, sherpa, foundry] = await Promise.all([
-          listLocalAsrModels(),
-          getSherpaOnnxAsrCatalog(),
-          getFoundryLocalAsrCatalog(),
-        ]);
+        const qwen3 = await listLocalAsrModels();
+        const extra =
+          os === 'win'
+            ? await Promise.all([
+                getSherpaOnnxAsrCatalog(),
+                getFoundryLocalAsrCatalog(),
+              ])
+            : null;
         if (cancelled) return;
-        setLocalModelOptions([
+        const next = [
           ...qwen3.map(m => ({ engine: 'qwen3' as const, id: m.id, name: m.id, isDownloaded: m.isDownloaded })),
-          ...sherpa.map(c => ({ engine: 'sherpa' as const, id: c.alias, name: c.displayName || c.alias, isDownloaded: c.cached })),
-          ...foundry.map(c => ({ engine: 'foundry' as const, id: c.alias, name: c.displayName || c.alias, isDownloaded: c.cached })),
-        ]);
+          ...(extra?.[0] ?? []).map(c => ({ engine: 'sherpa' as const, id: c.alias, name: c.displayName || c.alias, isDownloaded: c.cached })),
+          ...(extra?.[1] ?? []).map(c => ({ engine: 'foundry' as const, id: c.alias, name: c.displayName || c.alias, isDownloaded: c.cached })),
+        ];
+        // 浅比较：数据没变就不 setState，避免 3s 轮询让下拉每轮重渲染（闪烁）。
+        setLocalModelOptions(prev =>
+          prev.length === next.length &&
+          prev.every((m, i) =>
+            m.engine === next[i].engine &&
+            m.id === next[i].id &&
+            m.name === next[i].name &&
+            m.isDownloaded === next[i].isDownloaded,
+          )
+            ? prev
+            : next,
+        );
       } catch {
         if (!cancelled) setLocalModelOptions([]);
       }
     };
     void fetchAll();
+    // 3s 轮询磁盘状态：模型被外部删除（或下载完成后）下拉选项自动跟随，
+    // 用户不需要重开设置页。本地 fs 检查很轻，无感。
+    const pollTimer = window.setInterval(() => {
+      void fetchAll();
+    }, 3000);
     // 下载完成事件驱动刷新：本页下方「本地模型」看板下载完模型后，下拉立刻出现新选项。
     let unlistenQ: (() => void) | undefined;
     let unlistenS: (() => void) | undefined;
@@ -307,6 +337,7 @@ export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
     }).catch(() => {});
     return () => {
       cancelled = true;
+      window.clearInterval(pollTimer);
       unlistenQ?.();
       unlistenS?.();
     };
@@ -409,6 +440,35 @@ export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
 
   const onAsrProviderChange = async (id: AsrPresetId, modelId?: string) => {
     setAsrProvider(id);
+    // 轻量路径：供应商没变、只是换本地模型 → 不重跑 set_active_provider /
+    // 凭据回填整套流程（那些会触发 prefs:changed 全量重渲染 + 下拉闪回旧值），
+    // 只写模型命令 + prefs 字段。draft 让下拉立即显示用户点的模型。
+    if (id === committedAsrProvider && modelId && isLocalAsrPreset(id)) {
+      setLocalAsrModelDraft(modelId);
+      try {
+        if (id === 'local-qwen3') {
+          await setLocalAsrActiveModel(modelId);
+        } else if (id === 'sherpa-onnx-local') {
+          await setSherpaOnnxAsrModel(modelId);
+        } else if (id === 'foundry-local-whisper') {
+          await setFoundryLocalAsrModel(modelId);
+        }
+        if (prefs) {
+          const next = { ...prefs, activeAsrProvider: id };
+          if (id === 'local-qwen3') next.localAsrActiveModel = modelId;
+          else if (id === 'sherpa-onnx-local') next.sherpaOnnxModel = modelId;
+          else if (id === 'foundry-local-whisper') next.foundryLocalAsrModel = modelId;
+          await updatePrefs(next);
+        }
+        emitSaved('saved', t('common.saved'));
+      } catch (err) {
+        // 写入失败回滚 draft，让下拉回到 prefs 里的真实值。
+        setLocalAsrModelDraft(null);
+        emitSaved('failed', t('common.operationFailed'));
+        console.error('[settings] switch local ASR model failed', err);
+      }
+      return;
+    }
     const seq = ++asrSwitchSeqRef.current;
     emitSaved('saving', t('common.saving'));
     let backendSwitched = false;
@@ -580,6 +640,8 @@ export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
               }));
             });
             // 受控 value：本地引擎激活且 active 模型已下载时显示 "引擎:模型ID"。
+            // draft（用户刚点的模型）优先于 prefs——同 provider 换模型时后端
+            // 还没回写完成，直接读 prefs 会闪回旧模型。
             const activeModelId = committedAsrProvider === 'local-qwen3'
               ? prefs?.localAsrActiveModel
               : committedAsrProvider === 'sherpa-onnx-local'
@@ -587,11 +649,16 @@ export function ProvidersSection({ kind = 'all' }: ProvidersSectionProps = {}) {
                 : committedAsrProvider === 'foundry-local-whisper'
                   ? prefs?.foundryLocalAsrModel
                   : undefined;
+            const resolvedModelId =
+              localAsrModelDraft &&
+              localModelOptions.some(m => m.id === localAsrModelDraft && m.isDownloaded)
+                ? localAsrModelDraft
+                : activeModelId;
             const asrValue =
               isLocalAsrPreset(committedAsrProvider) &&
-              activeModelId &&
-              localModelOptions.some(m => m.id === activeModelId && m.isDownloaded)
-                ? `${committedAsrProvider}:${activeModelId}`
+              resolvedModelId &&
+              localModelOptions.some(m => m.id === resolvedModelId && m.isDownloaded)
+                ? `${committedAsrProvider}:${resolvedModelId}`
                 : asrProvider;
             // 平台不匹配的旧配置（如 Windows 上仍激活 local-qwen3）：补一个选项兜底。
             const hiddenLocalActive: AsrPresetId | null =

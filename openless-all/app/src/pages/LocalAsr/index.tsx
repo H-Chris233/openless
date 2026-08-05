@@ -95,7 +95,6 @@ import {
 import {
     DownloadProgressBlock,
     FoundryPrepareProgressBlock,
-    GlobalDownloadProgress,
     ModelDetailPanel,
     ModelSidebar,
     type SidebarModelEntry,
@@ -523,7 +522,14 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
 
     useEffect(() => {
         void refresh()
+        // 3s 轮询磁盘状态：模型被外部删除 / 下载中断时前端自动跟随（删除后
+        // 看板选中自动回落、下拉回到引擎级入口），不用等重开页面。qwen3 的
+        // list 是本地 fs walk，很轻；远端尺寸有缓存不会重复请求。
+        const pollTimer = window.setInterval(() => {
+            void refresh()
+        }, 3000)
         return () => {
+            window.clearInterval(pollTimer)
             if (scrollGuardCleanup.current) scrollGuardCleanup.current()
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1663,10 +1669,17 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
     )
 
     // ─── 两栏看板的统一模型条目（Qwen3 / sherpa-onnx / foundry 归一化） ───
-    const sidebarEntries = useMemo<SidebarModelEntry[]>(() => {
+    // allSidebarEntries = 全目录（下载弹窗用）；sidebarEntries = 只列已下载 /
+    // 下载中的模型（看板用，未下载的走「＋ 下载新模型」弹窗获取）。
+    const allSidebarEntries = useMemo<SidebarModelEntry[]>(() => {
         const entries: SidebarModelEntry[] = []
         // macOS：Qwen3 引擎
         for (const m of models) {
+            const isDownloading =
+                Boolean(progress[m.id]) &&
+                (progress[m.id]?.phase === "started" ||
+                    progress[m.id]?.phase === "progress")
+            if (!m.isDownloaded && !isDownloading) continue
             entries.push({
                 id: m.id,
                 name: m.id,
@@ -1674,9 +1687,14 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                 remoteBytes:
                     remoteSizes[m.id]?.totalBytes || m.downloadedBytes || undefined,
                 isDownloaded: m.isDownloaded,
-                isDownloading: Boolean(progress[m.id]) &&
-                    (progress[m.id]?.phase === "started" ||
-                        progress[m.id]?.phase === "progress"),
+                isDownloading,
+                percent: isDownloading
+                    ? progress[m.id] && progress[m.id]?.bytesTotal > 0
+                        ? (progress[m.id]!.bytesDownloaded /
+                              progress[m.id]!.bytesTotal) *
+                          100
+                        : 0
+                    : null,
                 isActive:
                     settings?.activeModel === m.id &&
                     prefs?.activeAsrProvider === "local-qwen3",
@@ -1685,6 +1703,11 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
         }
         // Windows：sherpa-onnx + foundry
         for (const c of sherpaCatalog) {
+            const isDownloading =
+                Boolean(sherpaDownloadProgress[c.alias]) &&
+                (sherpaDownloadProgress[c.alias]?.phase === "started" ||
+                    sherpaDownloadProgress[c.alias]?.phase === "progress")
+            if (!c.cached && !isDownloading) continue
             entries.push({
                 id: c.alias,
                 name: c.displayName || c.alias,
@@ -1692,9 +1715,15 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                     sherpaRemoteSizes[c.alias]?.totalBytes ||
                     (c.fileSizeMb != null ? c.fileSizeMb * 1024 * 1024 : undefined),
                 isDownloaded: c.cached,
-                isDownloading: Boolean(sherpaDownloadProgress[c.alias]) &&
-                    (sherpaDownloadProgress[c.alias]?.phase === "started" ||
-                        sherpaDownloadProgress[c.alias]?.phase === "progress"),
+                isDownloading,
+                percent: isDownloading
+                    ? sherpaDownloadProgress[c.alias] &&
+                      sherpaDownloadProgress[c.alias]?.bytesTotal > 0
+                        ? (sherpaDownloadProgress[c.alias]!.bytesDownloaded /
+                              sherpaDownloadProgress[c.alias]!.bytesTotal) *
+                          100
+                        : 0
+                    : null,
                 isActive:
                     sherpaStatus?.activeModel === c.alias &&
                     prefs?.activeAsrProvider === "sherpa-onnx-local",
@@ -1702,13 +1731,25 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
             })
         }
         for (const c of foundryCatalog) {
+            // foundry 下载发生在 prepare 内（runtime/model/load 阶段），cached
+            // 仍是 false，靠 prepare 进度判定「下载中」保住条目。
+            const isDownloading =
+                foundryProgress?.modelAlias === c.alias &&
+                (foundryProgress.phase === "runtime" ||
+                    foundryProgress.phase === "model" ||
+                    foundryProgress.phase === "load")
+            if (!c.cached && !isDownloading) continue
             entries.push({
                 id: c.alias,
                 name: c.displayName || c.alias,
                 remoteBytes:
                     c.fileSizeMb != null ? c.fileSizeMb * 1024 * 1024 : undefined,
                 isDownloaded: c.cached,
-                isDownloading: false,
+                isDownloading,
+                percent:
+                    isDownloading && foundryProgress?.percent != null
+                        ? foundryProgress.percent
+                        : null,
                 isActive:
                     foundryStatus?.activeModel === c.alias &&
                     prefs?.activeAsrProvider === "foundry-local-whisper",
@@ -1727,14 +1768,24 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
         sherpaDownloadProgress,
         sherpaStatus?.activeModel,
         foundryCatalog,
+        foundryProgress,
         foundryStatus?.activeModel,
     ])
+
+    // 看板只展示已下载 / 下载中的模型（下载中必须有实时进度可见）。
+    const sidebarEntries = useMemo<SidebarModelEntry[]>(
+        () => allSidebarEntries.filter((e) => e.isDownloaded || e.isDownloading),
+        [allSidebarEntries],
+    )
 
     const selectedEntry =
         sidebarEntries.find((e) => e.id === selectedModelId) ?? null
 
     // 侧栏选中默认：首次渲染后若没有选中项，选中第一个已下载模型。
     useLayoutEffect(() => {
+        // 下载弹窗打开时弹窗内高亮未下载模型是合法的（选中即准备下载），
+        // 不能让看板的回落逻辑把弹窗高亮抢走；弹窗关闭后再回落。
+        if (downloadDialogOpen) return
         // 选中项被删除（或从未选中）时回落到第一个已下载模型，避免侧栏无高亮、
         // 详情面板停在空态。
         const stillExists =
@@ -1743,7 +1794,7 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
         if (stillExists) return
         const firstDownloaded = sidebarEntries.find((e) => e.isDownloaded)
         setSelectedModelId(firstDownloaded?.id ?? sidebarEntries[0]?.id ?? null)
-    }, [sidebarEntries, selectedModelId])
+    }, [sidebarEntries, selectedModelId, downloadDialogOpen])
 
     // 从侧栏/看板分派引擎动作。不再有 setActive——激活 = 在 ASR 语音转写里
     // 选本地模型供应商，「加载并测试」负责把模型设为当前使用。
@@ -1776,9 +1827,12 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
     }
 
     // 下载弹框「开始下载」：把弹框当前选中项分派到对应引擎的下载入口。
+    // 弹框列表是全目录（allSidebarEntries），选中项可能不在看板过滤列表里。
     const startDownloadFromDialog = () => {
-        if (!selectedEntry || selectedEntry.isDownloaded) return
-        dispatchEntryAction(selectedEntry, "download")
+        const dialogEntry =
+            allSidebarEntries.find((e) => e.id === selectedModelId) ?? null
+        if (!dialogEntry || dialogEntry.isDownloaded) return
+        dispatchEntryAction(dialogEntry, "download")
         setDownloadDialogOpen(false)
     }
 
@@ -1812,37 +1866,9 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                 />
             )}
 
-            {/* ─── 右上角下载进度浮层：所有引擎的下载进度聚合显示，完成即消失。 ─── */}
-            <GlobalDownloadProgress
-                items={[
-                    // Qwen3（macOS）
-                    ...Object.entries(progress).map(([id, p]) => ({
-                        id: `qwen3:${id}`,
-                        name: id,
-                        percent:
-                            p.bytesTotal > 0
-                                ? (p.bytesDownloaded / p.bytesTotal) * 100
-                                : 0,
-                        finished:
-                            p.phase === "finished" ||
-                            p.phase === "cancelled" ||
-                            p.phase === "failed",
-                    })),
-                    // sherpa-onnx（Windows）
-                    ...Object.entries(sherpaDownloadProgress).map(([alias, p]) => ({
-                        id: `sherpa:${alias}`,
-                        name: alias,
-                        percent:
-                            p.bytesTotal > 0
-                                ? (p.bytesDownloaded / p.bytesTotal) * 100
-                                : 0,
-                        finished:
-                            p.phase === "finished" ||
-                            p.phase === "cancelled" ||
-                            p.phase === "failed",
-                    })),
-                ]}
-            />
+            {/* ─── 右上角下载进度浮层已全局化（App 根挂载，任何页面常驻），
+                 此处不再渲染；页面内进度仍由 progress / sherpaDownloadProgress
+                 驱动看板详情条。 ─── */}
 
             {!embedded && (
                 /* 性能/质量预期警告 —— embedded 模式下由 AdvancedSection 自己渲染，避免重复。 */
@@ -1888,11 +1914,15 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                     <ModelSidebar
                         entries={sidebarEntries}
                         selectedId={selectedModelId}
-                        onSelect={setSelectedModelId}
+                        onSelect={(id) => {
+                            setSelectedModelId(id)
+                            // 选中瞬间校验磁盘状态（模型文件可能已被外部删除），
+                            // 立刻反映到列表与详情，不等 3s 轮询。
+                            void refresh()
+                        }}
                         onOpenDownload={() => setDownloadDialogOpen(true)}
                         downloadDisabled={busyModelId !== null || sherpaBusy !== null}
-                    />
-                    <div
+                    />                    <div
                         style={{
                             paddingLeft: 16,
                             borderLeft: "0.5px solid var(--ol-line)",
@@ -2259,15 +2289,15 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
 {/* ─── 下载弹框：左侧模型选择 + 右侧详情，最下方开始下载。 ─── */}
             {downloadDialogOpen && (
                 <DownloadDialog
-                    entries={sidebarEntries}
+                    entries={allSidebarEntries}
                     selectedId={selectedModelId}
                     onSelect={setSelectedModelId}
                     sizeOf={(id) => {
-                        const entry = sidebarEntries.find((e) => e.id === id)
+                        const entry = allSidebarEntries.find((e) => e.id === id)
                         return entry?.remoteBytes ?? null
                     }}
                     fileCountOf={(id) => {
-                        const entry = sidebarEntries.find((e) => e.id === id)
+                        const entry = allSidebarEntries.find((e) => e.id === id)
                         if (!entry) return null
                         const remote =
                             entry.engine === "qwen3"
