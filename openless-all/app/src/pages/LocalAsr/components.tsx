@@ -570,6 +570,8 @@ export interface SidebarModelEntry {
     isDownloaded: boolean
     /** 下载中（有进度条/取消入口）。 */
     isDownloading: boolean
+    /** 下载中实时百分比（0-100；仅 isDownloading 时有值）。 */
+    percent?: number | null
     /** 当前激活（设为默认的本地模型）。 */
     isActive: boolean
     /** 引擎标识，决定右侧动作按钮分派。 */
@@ -621,7 +623,8 @@ export function ModelSidebar({
                             display: "flex",
                             alignItems: "center",
                             gap: 8,
-                            padding: "8px 10px",
+                            // 行距加大：列表可容纳约 4 个模型，竖排更长、横向不变。
+                            padding: "11px 14px",
                             borderRadius: 8,
                             border: "0.5px solid var(--ol-line-soft)",
                             background: selected
@@ -632,7 +635,7 @@ export function ModelSidebar({
                                 : "none",
                             color: "var(--ol-ink)",
                             fontFamily: "inherit",
-                            fontSize: 12.5,
+                            fontSize: 13,
                             textAlign: "left",
                             cursor: "pointer",
                             transition:
@@ -703,7 +706,17 @@ export function ModelSidebar({
                                 {t("localAsr.activePill")}
                             </span>
                         )}
-                        {entry.remoteBytes != null && entry.remoteBytes > 0 && (
+                        {entry.percent != null && entry.percent >= 0 ? (
+                            <span
+                                style={{
+                                    fontSize: 10.5,
+                                    color: "var(--ol-ink-4)",
+                                    flexShrink: 0,
+                                }}
+                            >
+                                {Math.round(entry.percent)}%
+                            </span>
+                        ) : entry.remoteBytes != null && entry.remoteBytes > 0 ? (
                             <span
                                 style={{
                                     fontSize: 10.5,
@@ -713,7 +726,7 @@ export function ModelSidebar({
                             >
                                 {formatBytes(entry.remoteBytes)}
                             </span>
-                        )}
+                        ) : null}
                     </button>
                 )
             })}
@@ -1259,80 +1272,6 @@ export function DownloadDialog({
                     </div>
                 </div>
             </div>
-        </div>,
-        document.body,
-    )
-}
-
-/** 右上角下载进度浮层：多个下载条目叠放，直到各自下载完成才消失。
- *  同样 portal 到 document.body——fixed 定位必须相对视口（见 DownloadDialog 注释）。 */
-export function GlobalDownloadProgress({
-    items,
-}: {
-    items: {
-        id: string
-        name: string
-        percent: number | null
-        finished: boolean
-    }[]
-}) {
-    const { t } = useTranslation()
-    const visible = items.filter((item) => !item.finished)
-    if (visible.length === 0) return null
-    return createPortal(
-        <div
-            style={{
-                position: "fixed",
-                top: 14,
-                right: 14,
-                zIndex: 900,
-                display: "flex",
-                flexDirection: "column",
-                gap: 8,
-                maxWidth: 260,
-            }}
-        >
-            {visible.map((item) => (
-                <div
-                    key={item.id}
-                    style={{
-                        padding: "10px 12px",
-                        borderRadius: 10,
-                        background: "var(--ol-surface)",
-                        border: "0.5px solid var(--ol-line-strong)",
-                        boxShadow: "var(--ol-shadow-lg)",
-                        animation: "ol-select-pop .18s var(--ol-motion-quick) both",
-                    }}
-                >
-                    <div
-                        style={{
-                            display: "flex",
-                            justifyContent: "space-between",
-                            gap: 8,
-                            fontSize: 11.5,
-                            color: "var(--ol-ink)",
-                            marginBottom: 6,
-                        }}
-                    >
-                        <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                            {item.name}
-                        </span>
-                        <span style={{ color: "var(--ol-ink-4)", flexShrink: 0 }}>
-                            {item.percent != null ? `${Math.round(item.percent)}%` : t("localAsr.downloading")}
-                        </span>
-                    </div>
-                    <div style={{ height: 5, borderRadius: 999, background: "var(--ol-surface-2)", overflow: "hidden" }}>
-                        <div
-                            style={{
-                                height: "100%",
-                                width: `${item.percent ?? 0}%`,
-                                background: "var(--ol-blue)",
-                                transition: "width 0.18s var(--ol-motion-soft)",
-                            }}
-                        />
-                    </div>
-                </div>
-            ))}
         </div>,
         document.body,
     )
