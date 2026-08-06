@@ -4120,8 +4120,11 @@ async fn finish_dictation_multimodal(
     };
     let mode = pack.base_mode;
     let translation_target = prefs.translation_target_language.trim().to_string();
-    let translation_active =
-        inner.translation_modifier_seen.load(Ordering::SeqCst) && !translation_target.is_empty();
+    let translation_active = crate::types::translation_effective(
+        inner.translation_active.load(Ordering::SeqCst),
+        &translation_target,
+        &prefs.working_languages,
+    );
     let voice_agent = inner.state.lock().voice_agent;
 
     let system_prompt = if voice_agent {
@@ -4352,10 +4355,11 @@ async fn finish_dictation_multimodal(
     ) {
         log::error!("[coord] history append failed: {e}");
     }
-    if let Err(e) = inner
-        .activity
-        .bump(&chrono::Local::now().format("%Y-%m-%d").to_string())
-    {
+    if let Err(e) = inner.activity.bump(
+        &chrono::Local::now().format("%Y-%m-%d").to_string(),
+        polished.chars().count() as u64,
+        duration_ms,
+    ) {
         log::warn!("[coord] activity bump failed: {e}");
     }
     if !polished.trim().is_empty() {
@@ -4408,12 +4412,14 @@ fn fail_dictation_multimodal(
     err: String,
 ) -> Result<(), String> {
     let prefs = inner.prefs.get();
+    let front_app = inner.state.lock().front_app.clone();
     let mut session = build_transcribe_failed_session(
         session_id,
         elapsed,
         0,
         prefs.default_mode,
         inner.audio_archive_active.load(Ordering::Relaxed),
+        front_app.as_deref(),
     );
     session.pipeline_mode = Some("multimodal".to_string());
     if let Err(e) = inner.history.append_with_retention(
