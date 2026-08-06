@@ -1706,7 +1706,7 @@ impl Coordinator {
                 // Linux: 启动 fcitx5 插件信号监听作为热键源。
                 #[cfg(target_os = "linux")]
                 {
-                    let (qa_trigger, _selection_polish_trigger, translation_trigger) =
+                    let (qa_trigger, selection_polish_trigger, translation_trigger) =
                         modifier_shortcut_triggers(&self.inner);
                     let custom_key = custom_dictation_key_string(&self.inner);
                     crate::linux_fcitx::start_dictation_signal_listener(
@@ -1714,6 +1714,7 @@ impl Coordinator {
                         combo_tx_for_fcitx,
                         fcitx_binding.clone(),
                         qa_trigger,
+                        selection_polish_trigger,
                         translation_trigger,
                         custom_key,
                     );
