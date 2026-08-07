@@ -234,25 +234,14 @@ pub async fn set_credential(
         }
         let acc = parsed.expect("non-extra credential account must be parsed");
         if let Some(provider) = provider {
-            if !matches!(
-                acc,
-                CredentialAccount::VolcengineAppKey
-                    | CredentialAccount::VolcengineAccessKey
-                    | CredentialAccount::VolcengineResourceId
-                    | CredentialAccount::VolcengineAuthMode
-                    | CredentialAccount::VolcengineApiKey
-                    | CredentialAccount::AsrApiKey
-                    | CredentialAccount::AsrEndpoint
-                    | CredentialAccount::AsrModel
-                    | CredentialAccount::AsrVocabularyId
-                    | CredentialAccount::AsrAdvancedConfig
-                    | CredentialAccount::XfyunAppId
-                    | CredentialAccount::XfyunApiKey
-            ) {
-                return Err("provider-scoped credential must be an ASR account".to_string());
+            // 渠道化后 `provider` 是**渠道 id**，LLM 侧同样需要按 id 定位 —— 用户编辑
+            // 的可能是列表里第 3 张卡片，而不是当前生效的那张。
+            match account_channel_kind(acc) {
+                ChannelKind::Asr => CredentialsVault::set_for_asr_provider(&provider, acc, &value)
+                    .map_err(|e| e.to_string()),
+                ChannelKind::Llm => CredentialsVault::set_for_llm_provider(&provider, acc, &value)
+                    .map_err(|e| e.to_string()),
             }
-            CredentialsVault::set_for_asr_provider(&provider, acc, &value)
-                .map_err(|e| e.to_string())
         } else if value.is_empty() {
             CredentialsVault::remove(acc).map_err(|e| e.to_string())
         } else {
@@ -373,7 +362,12 @@ pub async fn read_credential(
         }
         let acc = parsed.expect("non-extra credential account must be parsed");
         if let Some(provider) = provider {
-            CredentialsVault::get_for_asr_provider(&provider, acc).map_err(|e| e.to_string())
+            match account_channel_kind(acc) {
+                ChannelKind::Asr => CredentialsVault::get_for_asr_provider(&provider, acc)
+                    .map_err(|e| e.to_string()),
+                ChannelKind::Llm => CredentialsVault::get_for_llm_provider(&provider, acc)
+                    .map_err(|e| e.to_string()),
+            }
         } else {
             CredentialsVault::get(acc).map_err(|e| e.to_string())
         }
@@ -382,7 +376,33 @@ pub async fn read_credential(
     .map_err(|e| format!("credential read worker failed: {e}"))?
 }
 
-fn ensure_main_window(window: &Window) -> Result<(), String> {
+/// 一个凭据账户属于 ASR 面还是 LLM 面 —— 决定按渠道 id 定位时查哪张 map。
+fn account_channel_kind(account: CredentialAccount) -> ChannelKind {
+    match account {
+        CredentialAccount::ArkApiKey
+        | CredentialAccount::ArkModelId
+        | CredentialAccount::ArkEndpoint => ChannelKind::Llm,
+        CredentialAccount::VolcengineAppKey
+        | CredentialAccount::VolcengineAccessKey
+        | CredentialAccount::VolcengineResourceId
+        | CredentialAccount::VolcengineAuthMode
+        | CredentialAccount::VolcengineApiKey
+        | CredentialAccount::AsrApiKey
+        | CredentialAccount::AsrEndpoint
+        | CredentialAccount::AsrModel
+        | CredentialAccount::AsrVocabularyId
+        | CredentialAccount::AsrAdvancedConfig
+        | CredentialAccount::XfyunAppId
+        | CredentialAccount::XfyunApiKey => ChannelKind::Asr,
+        // Omni 凭据走独立命名空间、从不按渠道 id 定位（前端写入不带 provider）；
+        // 映射到 Asr 只为穷尽 match，实际调用点不可达。
+        CredentialAccount::OmniApiKey
+        | CredentialAccount::OmniEndpoint
+        | CredentialAccount::OmniModel => ChannelKind::Asr,
+    }
+}
+
+pub(crate) fn ensure_main_window(window: &Window) -> Result<(), String> {
     if window.label() == "main" {
         Ok(())
     } else {

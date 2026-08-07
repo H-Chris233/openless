@@ -245,9 +245,71 @@ impl std::fmt::Debug for MarketplaceGithubToken {
     }
 }
 
+/// 渠道卡片的公共元信息 —— ASR / LLM 两侧共用同一套语义：
+///   - `providerType` 是**协议路由 key**（deepseek / volcengine / bailian ...），
+///     必须独立于 map key：一个供应商可以有多张卡片（多把 key），此时 map key 是
+///     uuid，而 providerType 仍指向同一个厂商实现。
+///     `None` = v1 老数据，此时 map key 本身就是 providerType（见 `channel_provider_type`）。
+///   - `order` 越小越优先，启用列表的第一个即"当前使用"。
+///   - 关闭的渠道会被自动排到末尾（见 `commands::channels::toggle`）。
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[allow(non_snake_case)]
+struct ChannelMeta {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    providerType: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    order: Option<u32>,
+    /// 缺省 `true`：v1 老数据迁移后一律视为启用。
+    #[serde(default = "channel_default_enabled", skip_serializing_if = "is_true")]
+    enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lastTest: Option<ChannelTest>,
+}
+
+/// 手写 `Default` 而不是 derive：`bool::default()` 是 `false`，而 `write_account`
+/// 用 `map.entry(id).or_default()` 创建 entry —— derive 会让新写入的渠道一出生就是
+/// 禁用状态，`sync_active_channels` 直接忽略它，表现为"填了 key 却不生效"。
+impl Default for ChannelMeta {
+    fn default() -> Self {
+        Self {
+            providerType: None,
+            order: None,
+            enabled: channel_default_enabled(),
+            lastTest: None,
+        }
+    }
+}
+
+fn channel_default_enabled() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
+/// 「测试连通」的结果，持久化以便重启后仍能看到上次测试的延迟。
+/// `error` 同时承担 P0 的失败标红（测试失败）与 P2 的运行时失败标红。
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[allow(non_snake_case)]
+struct ChannelTest {
+    ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    latencyMs: Option<u32>,
+    /// Unix 秒。
+    at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
 #[allow(non_snake_case)]
 struct CredsAsrEntry {
+    #[serde(flatten)]
+    channel: ChannelMeta,
+    /// 用户给这张卡片取的名字；空则前端回落到 preset 显示名。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    displayName: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     apiKey: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -283,7 +345,20 @@ struct CredsAsrEntry {
 
 impl CredsAsrEntry {
     fn is_empty(&self) -> bool {
-        self.apiKey.as_deref().unwrap_or("").is_empty()
+        // 渠道卡片（providerType 已写入）永远不算空：用户可能刚点「添加渠道」、
+        // 名字都取好了还没填 key，此时被 clean_credentials 的 retain 静默删掉
+        // 就是"卡片自己消失了"。渠道只能由用户显式删除（或由
+        // `delete_channel_if_blank` 回收一张什么都没填的草稿）。
+        if self.channel.providerType.is_some() {
+            return false;
+        }
+        self.has_no_content()
+    }
+
+    /// 除渠道元信息外，用户是否一个字都没填。草稿回收用。
+    fn has_no_content(&self) -> bool {
+        self.displayName.as_deref().unwrap_or("").is_empty()
+            && self.apiKey.as_deref().unwrap_or("").is_empty()
             && self.baseURL.as_deref().unwrap_or("").is_empty()
             && self.model.as_deref().unwrap_or("").is_empty()
             && self.appKey.as_deref().unwrap_or("").is_empty()
@@ -301,6 +376,8 @@ impl CredsAsrEntry {
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
 #[allow(non_snake_case)]
 struct CredsLlmEntry {
+    #[serde(flatten)]
+    channel: ChannelMeta,
     #[serde(skip_serializing_if = "Option::is_none")]
     displayName: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -317,6 +394,15 @@ struct CredsLlmEntry {
 
 impl CredsLlmEntry {
     fn is_empty(&self) -> bool {
+        // 同 CredsAsrEntry::is_empty —— 渠道卡片只能由用户显式删除。
+        if self.channel.providerType.is_some() {
+            return false;
+        }
+        self.has_no_content()
+    }
+
+    /// 除渠道元信息外，用户是否一个字都没填。草稿回收用。
+    fn has_no_content(&self) -> bool {
         self.displayName.as_deref().unwrap_or("").is_empty()
             && self.apiKey.as_deref().unwrap_or("").is_empty()
             && self.baseURL.as_deref().unwrap_or("").is_empty()
@@ -327,6 +413,199 @@ impl CredsLlmEntry {
                 .as_ref()
                 .map(|h| h.is_empty())
                 .unwrap_or(true)
+    }
+}
+
+/// ASR / LLM 两种 entry 共享渠道元信息的读写口子，让迁移与排序逻辑只写一遍。
+trait HasChannelMeta {
+    fn meta(&self) -> &ChannelMeta;
+    fn meta_mut(&mut self) -> &mut ChannelMeta;
+    /// 用户是否往这张卡里填过东西 —— 迁移排序时用来避免把空卡片排到第一。
+    fn is_blank(&self) -> bool;
+}
+
+impl HasChannelMeta for CredsAsrEntry {
+    fn meta(&self) -> &ChannelMeta {
+        &self.channel
+    }
+    fn meta_mut(&mut self) -> &mut ChannelMeta {
+        &mut self.channel
+    }
+    fn is_blank(&self) -> bool {
+        self.has_no_content()
+    }
+}
+
+impl HasChannelMeta for CredsLlmEntry {
+    fn meta(&self) -> &ChannelMeta {
+        &self.channel
+    }
+    fn meta_mut(&mut self) -> &mut ChannelMeta {
+        &mut self.channel
+    }
+    fn is_blank(&self) -> bool {
+        self.has_no_content()
+    }
+}
+
+/// 渠道的协议路由 key。v1 老数据没有 `providerType`，此时 map key 本身就是厂商 id。
+///
+/// **这是渠道化最容易漏的一处**：`coordinator::resolve_effective_asr_provider` 和
+/// `commands/providers.rs` 里几十处 `== PROVIDER_ID` 的比较全都依赖它，
+/// 拿成 channel id（uuid）会让整个 ASR 路由失效。
+fn channel_provider_type<'a, V: HasChannelMeta>(key: &'a str, entry: &'a V) -> &'a str {
+    entry.meta().providerType.as_deref().unwrap_or(key)
+}
+
+/// 「当前使用」= 启用渠道里 order 最小的那个；order 相同则按 id 字母序，保证确定性。
+fn current_channel_id<V: HasChannelMeta>(map: &HashMap<String, V>) -> Option<String> {
+    map.iter()
+        .filter(|(_, entry)| entry.meta().enabled)
+        .min_by(|(left_key, left), (right_key, right)| {
+            let left_order = left.meta().order.unwrap_or(u32::MAX);
+            let right_order = right.meta().order.unwrap_or(u32::MAX);
+            left_order
+                .cmp(&right_order)
+                .then_with(|| left_key.as_str().cmp(right_key.as_str()))
+        })
+        .map(|(key, _)| key.clone())
+}
+
+/// v1（一个 preset 一个槽）→ v2（渠道卡片）。
+///
+/// 幂等的两个支点：
+///   1. 迁移出来的渠道 **id 直接沿用原 preset id**，不生成 uuid —— 老用户的 map key
+///      一个字节都不变，重复执行结果完全一致（新建卡片才用 uuid）。
+///   2. 已带 `providerType` 的 entry 一律跳过。
+///
+/// order 按「原 active 排第一，其余按 id 字母序」分配。用字母序而不是 preset 表顺序，
+/// 是因为后端不知道前端 LLM_PRESETS / ASR_PRESETS 的排列，而字母序是确定的。
+fn migrate_channel_map<V: HasChannelMeta>(map: &mut HashMap<String, V>, active: &str) -> bool {
+    if map.is_empty()
+        || map
+            .values()
+            .all(|entry| entry.meta().providerType.is_some())
+    {
+        return false;
+    }
+
+    let mut keys: Vec<String> = map.keys().cloned().collect();
+    // 排序优先级（false < true，所以"是"排前面）：
+    //   1. 原来的 active —— 升级前用哪个，升级后还用哪个；
+    //   2. **填过凭据的** —— `active` 指向一个已不存在的 entry 是真实会发生的
+    //      （前端 prefs 与凭据库里的 active 是两份数据，历史上可能不同步）。这时若纯按
+    //      字母序挑，很容易把一张空卡排到第一，用户升级后就看到"未配置"，而他配好的
+    //      那张其实还在列表下面躺着；
+    //   3. 字母序 —— 兜底，保证结果确定、迁移幂等。
+    let is_blank: std::collections::HashMap<&String, bool> = map
+        .iter()
+        .map(|(key, entry)| (key, entry.is_blank()))
+        .collect();
+    keys.sort_by(|left, right| {
+        let key_of = |key: &String| {
+            (
+                key != active,
+                is_blank.get(key).copied().unwrap_or(true),
+                key.clone(),
+            )
+        };
+        key_of(left).cmp(&key_of(right))
+    });
+
+    let mut changed = false;
+    for (index, key) in keys.iter().enumerate() {
+        let provider_type = key.clone();
+        let Some(entry) = map.get_mut(key) else {
+            continue;
+        };
+        let meta = entry.meta_mut();
+        if meta.providerType.is_none() {
+            meta.providerType = Some(provider_type);
+            changed = true;
+        }
+        if meta.order.is_none() {
+            meta.order = Some(index as u32);
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// 渠道 schema 版本：1 = 一个 preset 一个槽；2 = 渠道卡片。
+const CHANNELS_SCHEMA_VERSION: u32 = 2;
+
+/// 就地把 v1 数据补成渠道卡片。返回是否有实际改动（调用方据此决定要不要落盘）。
+fn migrate_channels(root: &mut CredsRoot) -> bool {
+    let active_asr = root.active.asr.clone();
+    let active_llm = root.active.llm.clone();
+    let asr_changed = migrate_channel_map(&mut root.providers.asr, &active_asr);
+    let llm_changed = migrate_channel_map(&mut root.providers.llm, &active_llm);
+
+    let seeded = if root.version < CHANNELS_SCHEMA_VERSION {
+        let seeded = seed_default_channels(root);
+        root.version = CHANNELS_SCHEMA_VERSION;
+        seeded
+    } else {
+        false
+    };
+
+    asr_changed || llm_changed || seeded
+}
+
+/// 全新安装的平台预置。
+///
+/// 只有 Windows 需要：那里的默认 ASR 是本地 Foundry，无需任何 key、装上就能用
+/// （见 `creds_default_asr`）。渠道化后列表完全由用户添加，不预置的话 Windows 新用户
+/// 开箱会一个 ASR 都没有。mac / Linux 的默认是要填 key 的云端厂商，预置一张空卡片
+/// 没有意义，交给新手引导。
+///
+/// 靠 `version < 2` 把"全新安装"和"用户把渠道全删了"区分开：后者 version 已经是 2，
+/// 不会被重新种回来。version 的落盘发生在下一次真实写入时（见 `load_credentials`
+/// 关于不主动落盘的说明），在此之前每次冷启动都会在内存里重新预置，正是期望行为。
+fn seed_default_channels(root: &mut CredsRoot) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        if root.providers.asr.is_empty() {
+            let id = crate::asr::local::foundry::PROVIDER_ID.to_string();
+            root.providers.asr.insert(
+                id.clone(),
+                CredsAsrEntry {
+                    channel: ChannelMeta {
+                        providerType: Some(id.clone()),
+                        order: Some(0),
+                        enabled: true,
+                        lastTest: None,
+                    },
+                    ..Default::default()
+                },
+            );
+            root.active.asr = id;
+            return true;
+        }
+    }
+    let _ = root;
+    false
+}
+
+/// 把 `active.asr` / `active.llm` 重算成"启用列表的第一个渠道 id"。
+///
+/// `active` 字段在渠道化后不再是用户直接选择的厂商，而是排序与开关的**派生结果**；
+/// `lookup_account` / `write_account` 仍然读它，因此每次改动排序、开关或删除渠道后
+/// 都必须调用本函数，否则会出现"列表第一张是 A、实际请求打的是 B"。
+///
+/// 一个渠道都没启用时清空 active —— 让 `lookup_account` 落到 `None`（未配置），
+/// 而不是保留指向已禁用渠道的旧 id（entry 仍在，运行时照常读得到凭据）。
+fn sync_active_channels(root: &mut CredsRoot) {
+    match current_channel_id(&root.providers.asr) {
+        Some(id) => root.active.asr = id,
+        // 全部禁用时**清空**而不是保留旧 id：旧 id 对应的 entry 还在（只是 enabled
+        // 为 false），`lookup_account` 会命中它，运行时就会继续用已禁用渠道的凭据，
+        // 与「第一个启用的 = 当前生效」的心智相悖。清空后 lookup 落到 None（未配置）。
+        None => root.active.asr.clear(),
+    }
+    match current_channel_id(&root.providers.llm) {
+        Some(id) => root.active.llm = id,
+        None => root.active.llm.clear(),
     }
 }
 
@@ -1057,7 +1336,26 @@ fn load_android_credentials_into_cache_with(
     }
 }
 
+/// 读凭据并就地补成渠道卡片。
+///
+/// 迁移**只在内存里做，不主动落盘**：`migrate_channels` 是幂等的（id 沿用原 preset
+/// id，不生成 uuid），所以每次读的结果都一致；而启动时写 keyring 会在 macOS 上触发
+/// 「OpenLess 想使用钥匙串」的 ACL 弹窗。留给下一次真实写入（用户改配置）顺带固化。
 fn load_credentials() -> CredsRoot {
+    let mut root = load_credentials_raw();
+    migrate_channels(&mut root);
+    sync_active_channels(&mut root);
+    root
+}
+
+fn load_credentials_for_update() -> Result<CredsRoot> {
+    let mut root = load_credentials_for_update_raw()?;
+    migrate_channels(&mut root);
+    sync_active_channels(&mut root);
+    Ok(root)
+}
+
+fn load_credentials_raw() -> CredsRoot {
     if let Some(cached) = credentials_cache().lock().as_ref().cloned() {
         return cached;
     }
@@ -1100,7 +1398,7 @@ fn load_credentials() -> CredsRoot {
     }
 }
 
-fn load_credentials_for_update() -> Result<CredsRoot> {
+fn load_credentials_for_update_raw() -> Result<CredsRoot> {
     if let Some(cached) = credentials_cache().lock().as_ref().cloned() {
         return Ok(cached);
     }
@@ -1138,7 +1436,11 @@ fn load_credentials_for_update() -> Result<CredsRoot> {
 }
 
 fn save_credentials(root: &CredsRoot) -> Result<()> {
-    let cleaned = clean_credentials(root);
+    let mut cleaned = clean_credentials(root);
+    // 落盘的 active 必须与"启用列表第一个"一致：删除或关闭当前渠道后若不重算，
+    // 磁盘上会留下指向已消失渠道的 active，下次冷启动直接读成"未配置"。
+    sync_active_channels(&mut cleaned);
+    let cleaned = cleaned;
 
     #[cfg(target_os = "android")]
     {
@@ -1421,6 +1723,188 @@ pub struct CredentialsSnapshot {
     pub omni_model: Option<String>,
 }
 
+/// 渠道所属的功能面。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChannelKind {
+    Asr,
+    Llm,
+}
+
+impl ChannelKind {
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "asr" => Ok(ChannelKind::Asr),
+            "llm" => Ok(ChannelKind::Llm),
+            other => anyhow::bail!("unknown channel kind: {other}"),
+        }
+    }
+}
+
+/// 一张渠道卡片对前端的投影。凭据本身不在这里 —— 前端按 id 走
+/// `read_credential(account, provider = id)` 单独取，避免密钥随列表批量出栈。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelSummary {
+    pub id: String,
+    /// 用户取的名字；空字符串表示未命名，由前端回落到 preset 显示名。
+    pub name: String,
+    pub provider_type: String,
+    pub enabled: bool,
+    pub order: u32,
+    pub last_test: Option<ChannelTestSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelTestSummary {
+    pub ok: bool,
+    pub latency_ms: Option<u32>,
+    pub at: i64,
+    pub error: Option<String>,
+}
+
+impl From<&ChannelTest> for ChannelTestSummary {
+    fn from(value: &ChannelTest) -> Self {
+        Self {
+            ok: value.ok,
+            latency_ms: value.latencyMs,
+            at: value.at,
+            error: value.error.clone(),
+        }
+    }
+}
+
+fn channel_summaries<V: HasChannelMeta>(
+    map: &HashMap<String, V>,
+    name_of: impl Fn(&V) -> String,
+) -> Vec<ChannelSummary> {
+    let mut list: Vec<ChannelSummary> = map
+        .iter()
+        .map(|(id, entry)| {
+            let meta = entry.meta();
+            ChannelSummary {
+                id: id.clone(),
+                name: name_of(entry),
+                provider_type: channel_provider_type(id, entry).to_string(),
+                enabled: meta.enabled,
+                order: meta.order.unwrap_or(u32::MAX),
+                last_test: meta.lastTest.as_ref().map(ChannelTestSummary::from),
+            }
+        })
+        .collect();
+    // 与 current_channel_id 同序：order 升序，同 order 按 id 字母序。
+    list.sort_by(|left, right| {
+        left.order
+            .cmp(&right.order)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    list
+}
+
+/// 生成一个未被占用的渠道 id：首选厂商 id 本身，冲突则 `-2` / `-3` 递增。
+///
+/// 刻意不用 uuid：第一张卡片的 id 就等于 preset id，与 `migrate_channel_map`
+/// 的"沿用原 preset id"完全一致；credentials.json 排障时也一眼能看懂是哪家。
+fn allocate_channel_id<V>(map: &HashMap<String, V>, provider_type: &str) -> String {
+    if !map.contains_key(provider_type) {
+        return provider_type.to_string();
+    }
+    for suffix in 2..u32::MAX {
+        let candidate = format!("{provider_type}-{suffix}");
+        if !map.contains_key(&candidate) {
+            return candidate;
+        }
+    }
+    unreachable!("channel id space exhausted")
+}
+
+/// 关闭渠道时把它排到末尾，重新打开时排到**启用组**末尾。
+///
+/// 重新打开不回原位是刻意的：回原位要额外持久化"关闭前的位置"，而用户重开一张卡片
+/// 通常就是想试试它，落到启用组末尾最不打扰当前生效的渠道。
+fn reposition_after_toggle<V: HasChannelMeta>(map: &mut HashMap<String, V>, id: &str) {
+    let Some(enabled) = map.get(id).map(|entry| entry.meta().enabled) else {
+        return;
+    };
+    let target = if enabled {
+        // 启用组末尾 = 最大的启用 order + 1（不含自己）。
+        map.iter()
+            .filter(|(key, entry)| key.as_str() != id && entry.meta().enabled)
+            .filter_map(|(_, entry)| entry.meta().order)
+            .max()
+            .map(|max| max.saturating_add(1))
+            .unwrap_or(0)
+    } else {
+        // 整个列表末尾。
+        map.iter()
+            .filter(|(key, _)| key.as_str() != id)
+            .filter_map(|(_, entry)| entry.meta().order)
+            .max()
+            .map(|max| max.saturating_add(1))
+            .unwrap_or(0)
+    };
+    if let Some(entry) = map.get_mut(id) {
+        entry.meta_mut().order = Some(target);
+    }
+    // 关掉的那张要沉到所有启用项之后：把启用项整体前移，重新压实 order。
+    compact_orders(map);
+}
+
+/// 重排 order 为 0..n 的连续整数，顺序为「启用项在前（按原 order），禁用项在后」。
+fn compact_orders<V: HasChannelMeta>(map: &mut HashMap<String, V>) {
+    let mut ids: Vec<String> = map.keys().cloned().collect();
+    ids.sort_by(|left, right| {
+        let left_meta = map.get(left).map(|e| e.meta());
+        let right_meta = map.get(right).map(|e| e.meta());
+        let key_of = |meta: Option<&ChannelMeta>| {
+            let meta = meta.expect("id came from this map");
+            // false < true：启用的排前面。
+            (!meta.enabled, meta.order.unwrap_or(u32::MAX))
+        };
+        key_of(left_meta)
+            .cmp(&key_of(right_meta))
+            .then_with(|| left.cmp(right))
+    });
+    for (index, id) in ids.iter().enumerate() {
+        if let Some(entry) = map.get_mut(id) {
+            entry.meta_mut().order = Some(index as u32);
+        }
+    }
+}
+
+/// 新建渠道的 order：排到启用组末尾（禁用项始终在其后，由 compact_orders 保证）。
+fn next_order<V: HasChannelMeta>(map: &HashMap<String, V>) -> u32 {
+    map.values()
+        .filter(|entry| entry.meta().enabled)
+        .filter_map(|entry| entry.meta().order)
+        .max()
+        .map(|max| max.saturating_add(1))
+        .unwrap_or(0)
+}
+
+/// 按前端给的 id 顺序重排；未提及的渠道保持在末尾（相对顺序不变）。
+fn apply_order<V: HasChannelMeta>(map: &mut HashMap<String, V>, ordered_ids: &[String]) {
+    for (index, id) in ordered_ids.iter().enumerate() {
+        if let Some(entry) = map.get_mut(id) {
+            entry.meta_mut().order = Some(index as u32);
+        }
+    }
+    // 没被提到的排到末尾，避免与显式序号撞车。
+    let tail_base = ordered_ids.len() as u32;
+    let unlisted: Vec<String> = map
+        .keys()
+        .filter(|id| !ordered_ids.contains(id))
+        .cloned()
+        .collect();
+    for (offset, id) in unlisted.iter().enumerate() {
+        if let Some(entry) = map.get_mut(id) {
+            entry.meta_mut().order = Some(tail_base.saturating_add(offset as u32));
+        }
+    }
+    // 拖拽后禁用项仍须沉底。
+    compact_orders(map);
+}
+
 /// 凭据存储——系统凭据库；旧 JSON 文件只作为迁移来源。
 pub struct CredentialsVault;
 
@@ -1558,9 +2042,22 @@ impl CredentialsVault {
         MARKETPLACE_TOKEN_REJECTED.store(false, Ordering::SeqCst);
     }
 
+    /// 当前 ASR 渠道的**厂商 id（providerType）**，不是渠道 id。
+    ///
+    /// 渠道化后 `active.asr` 存的是渠道 id（多把 key 时是 uuid），但全代码库几十处
+    /// `get_active_asr() == crate::asr::bailian::PROVIDER_ID` 式的比较、以及
+    /// `coordinator::resolve_effective_asr_provider` 的协议路由，要的都是厂商 id。
+    /// 因此这里做一次转换，让那些调用点保持零改动。
+    /// 需要渠道 id 本身时用 `get_active_asr_channel_id`。
     pub fn get_active_asr() -> String {
         let _guard = credentials_lock().lock();
-        load_credentials().active.asr
+        let root = load_credentials();
+        let id = root.active.asr.clone();
+        root.providers
+            .asr
+            .get(&id)
+            .map(|entry| channel_provider_type(&id, entry).to_string())
+            .unwrap_or(id)
     }
 
     pub fn set_active_asr_provider(id: &str) -> Result<()> {
@@ -1577,9 +2074,341 @@ impl CredentialsVault {
         save_credentials(&root)
     }
 
+    /// 当前 LLM 渠道的**厂商 id（providerType）**。理由同 `get_active_asr`。
     pub fn get_active_llm() -> String {
         let _guard = credentials_lock().lock();
-        load_credentials().active.llm
+        let root = load_credentials();
+        let id = root.active.llm.clone();
+        root.providers
+            .llm
+            .get(&id)
+            .map(|entry| channel_provider_type(&id, entry).to_string())
+            .unwrap_or(id)
+    }
+
+    // ---- 渠道卡片管理 ----
+
+    pub fn list_channels(kind: ChannelKind) -> Vec<ChannelSummary> {
+        let _guard = credentials_lock().lock();
+        let root = load_credentials();
+        match kind {
+            ChannelKind::Asr => channel_summaries(&root.providers.asr, |entry| {
+                entry.displayName.clone().unwrap_or_default()
+            }),
+            ChannelKind::Llm => channel_summaries(&root.providers.llm, |entry| {
+                entry.displayName.clone().unwrap_or_default()
+            }),
+        }
+    }
+
+    /// 新建一张渠道卡片，返回分配到的 id。新卡片排在**启用组末尾**。
+    pub fn create_channel(kind: ChannelKind, provider_type: &str, name: &str) -> Result<String> {
+        let provider_type = provider_type.trim();
+        if provider_type.is_empty() {
+            anyhow::bail!("provider type cannot be empty");
+        }
+        let _guard = credentials_lock().lock();
+        let mut root = load_credentials_for_update()?;
+        let name = name.trim();
+
+        let id = match kind {
+            ChannelKind::Asr => {
+                let id = allocate_channel_id(&root.providers.asr, provider_type);
+                root.providers.asr.insert(
+                    id.clone(),
+                    CredsAsrEntry {
+                        channel: ChannelMeta {
+                            providerType: Some(provider_type.to_string()),
+                            order: Some(next_order(&root.providers.asr)),
+                            enabled: true,
+                            lastTest: None,
+                        },
+                        displayName: (!name.is_empty()).then(|| name.to_string()),
+                        ..Default::default()
+                    },
+                );
+                // 存在禁用项时 `next_order`（启用项 max + 1）可能与其 order 同号，
+                // 列表排序会按 id 字母序把它们混排、破坏「禁用沉底」。压实成 0..n。
+                compact_orders(&mut root.providers.asr);
+                id
+            }
+            ChannelKind::Llm => {
+                let id = allocate_channel_id(&root.providers.llm, provider_type);
+                root.providers.llm.insert(
+                    id.clone(),
+                    CredsLlmEntry {
+                        channel: ChannelMeta {
+                            providerType: Some(provider_type.to_string()),
+                            order: Some(next_order(&root.providers.llm)),
+                            enabled: true,
+                            lastTest: None,
+                        },
+                        displayName: (!name.is_empty()).then(|| name.to_string()),
+                        ..Default::default()
+                    },
+                );
+                compact_orders(&mut root.providers.llm);
+                id
+            }
+        };
+
+        save_credentials(&root)?;
+        Ok(id)
+    }
+
+    /// 改一张卡片的厂商。
+    ///
+    /// 「添加渠道」被合并成单个弹窗后，用户是在**已经建好的草稿卡片上**换供应商的，
+    /// 所以这不是内部细节而是常规操作。旧厂商的凭据字段留着不动：不同厂商用不同的
+    /// 凭据槽（volcengine.* / xfyun.* / asr.*），互不覆盖，换回去时原样还在。
+    pub fn set_channel_provider_type(
+        kind: ChannelKind,
+        id: &str,
+        provider_type: &str,
+    ) -> Result<()> {
+        let provider_type = provider_type.trim();
+        if provider_type.is_empty() {
+            anyhow::bail!("provider type cannot be empty");
+        }
+        let _guard = credentials_lock().lock();
+        let mut root = load_credentials_for_update()?;
+        let meta = match kind {
+            ChannelKind::Asr => root
+                .providers
+                .asr
+                .get_mut(id)
+                .map(|entry| entry.meta_mut())
+                .with_context(|| format!("unknown ASR channel: {id}"))?,
+            ChannelKind::Llm => root
+                .providers
+                .llm
+                .get_mut(id)
+                .map(|entry| entry.meta_mut())
+                .with_context(|| format!("unknown LLM channel: {id}"))?,
+        };
+        meta.providerType = Some(provider_type.to_string());
+        // 换了厂商，之前那次测试结果就不再代表这张卡片了。
+        meta.lastTest = None;
+        save_credentials(&root)
+    }
+
+    /// 回收一张「什么都没填」的草稿渠道，返回是否真的删了。
+    ///
+    /// 单弹窗流程下，点开「添加渠道」就会先建一张草稿卡片（凭据必须按渠道 id 写入，
+    /// 没有 id 就没处可写）。用户什么都没填就关掉弹窗时用这个把草稿收走，
+    /// 免得列表里留下一张空卡片。填过任何一个字段就保留。
+    pub fn delete_channel_if_blank(kind: ChannelKind, id: &str) -> Result<bool> {
+        let _guard = credentials_lock().lock();
+        let mut root = load_credentials_for_update()?;
+        let blank = match kind {
+            ChannelKind::Asr => root
+                .providers
+                .asr
+                .get(id)
+                .map(|entry| entry.has_no_content())
+                .unwrap_or(false),
+            ChannelKind::Llm => root
+                .providers
+                .llm
+                .get(id)
+                .map(|entry| entry.has_no_content())
+                .unwrap_or(false),
+        };
+        if !blank {
+            return Ok(false);
+        }
+        match kind {
+            ChannelKind::Asr => {
+                root.providers.asr.remove(id);
+                compact_orders(&mut root.providers.asr);
+            }
+            ChannelKind::Llm => {
+                root.providers.llm.remove(id);
+                compact_orders(&mut root.providers.llm);
+            }
+        }
+        save_credentials(&root)?;
+        Ok(true)
+    }
+
+    pub fn rename_channel(kind: ChannelKind, id: &str, name: &str) -> Result<()> {
+        let _guard = credentials_lock().lock();
+        let mut root = load_credentials_for_update()?;
+        let name = name.trim();
+        let name = (!name.is_empty()).then(|| name.to_string());
+        match kind {
+            ChannelKind::Asr => {
+                let entry = root
+                    .providers
+                    .asr
+                    .get_mut(id)
+                    .with_context(|| format!("unknown ASR channel: {id}"))?;
+                entry.displayName = name;
+            }
+            ChannelKind::Llm => {
+                let entry = root
+                    .providers
+                    .llm
+                    .get_mut(id)
+                    .with_context(|| format!("unknown LLM channel: {id}"))?;
+                entry.displayName = name;
+            }
+        }
+        save_credentials(&root)
+    }
+
+    pub fn delete_channel(kind: ChannelKind, id: &str) -> Result<()> {
+        let _guard = credentials_lock().lock();
+        let mut root = load_credentials_for_update()?;
+        match kind {
+            ChannelKind::Asr => {
+                root.providers
+                    .asr
+                    .remove(id)
+                    .with_context(|| format!("unknown ASR channel: {id}"))?;
+                compact_orders(&mut root.providers.asr);
+            }
+            ChannelKind::Llm => {
+                root.providers
+                    .llm
+                    .remove(id)
+                    .with_context(|| format!("unknown LLM channel: {id}"))?;
+                compact_orders(&mut root.providers.llm);
+            }
+        }
+        // save_credentials 内部会 sync_active_channels，把 active 顺延到下一张。
+        save_credentials(&root)
+    }
+
+    pub fn set_channel_enabled(kind: ChannelKind, id: &str, enabled: bool) -> Result<()> {
+        let _guard = credentials_lock().lock();
+        let mut root = load_credentials_for_update()?;
+        match kind {
+            ChannelKind::Asr => {
+                let entry = root
+                    .providers
+                    .asr
+                    .get_mut(id)
+                    .with_context(|| format!("unknown ASR channel: {id}"))?;
+                entry.channel.enabled = enabled;
+                reposition_after_toggle(&mut root.providers.asr, id);
+            }
+            ChannelKind::Llm => {
+                let entry = root
+                    .providers
+                    .llm
+                    .get_mut(id)
+                    .with_context(|| format!("unknown LLM channel: {id}"))?;
+                entry.channel.enabled = enabled;
+                reposition_after_toggle(&mut root.providers.llm, id);
+            }
+        }
+        save_credentials(&root)
+    }
+
+    /// 按前端给的完整 id 顺序重排。列表里没提到的渠道保持在末尾。
+    pub fn reorder_channels(kind: ChannelKind, ordered_ids: &[String]) -> Result<()> {
+        let _guard = credentials_lock().lock();
+        let mut root = load_credentials_for_update()?;
+        match kind {
+            ChannelKind::Asr => apply_order(&mut root.providers.asr, ordered_ids),
+            ChannelKind::Llm => apply_order(&mut root.providers.llm, ordered_ids),
+        }
+        save_credentials(&root)
+    }
+
+    /// 记录一次「测试连通」的结果。
+    pub fn record_channel_test(
+        kind: ChannelKind,
+        id: &str,
+        ok: bool,
+        latency_ms: Option<u32>,
+        at: i64,
+        error: Option<String>,
+    ) -> Result<()> {
+        let test = ChannelTest {
+            ok,
+            latencyMs: latency_ms,
+            at,
+            error,
+        };
+        let _guard = credentials_lock().lock();
+        let mut root = load_credentials_for_update()?;
+        match kind {
+            ChannelKind::Asr => {
+                let entry = root
+                    .providers
+                    .asr
+                    .get_mut(id)
+                    .with_context(|| format!("unknown ASR channel: {id}"))?;
+                entry.channel.lastTest = Some(test);
+            }
+            ChannelKind::Llm => {
+                let entry = root
+                    .providers
+                    .llm
+                    .get_mut(id)
+                    .with_context(|| format!("unknown LLM channel: {id}"))?;
+                entry.channel.lastTest = Some(test);
+            }
+        }
+        save_credentials(&root)
+    }
+
+    /// 某张卡片的厂商 id。「测试连通」要按用户点的那张卡片决定协议，而不是当前生效的那张。
+    pub fn get_channel_provider_type(kind: ChannelKind, id: &str) -> Option<String> {
+        let _guard = credentials_lock().lock();
+        let root = load_credentials();
+        match kind {
+            ChannelKind::Asr => root
+                .providers
+                .asr
+                .get(id)
+                .map(|entry| channel_provider_type(id, entry).to_string()),
+            ChannelKind::Llm => root
+                .providers
+                .llm
+                .get(id)
+                .map(|entry| channel_provider_type(id, entry).to_string()),
+        }
+    }
+
+    /// 指定 LLM 渠道的自定义请求头（测试连通用；不传渠道时用 `get_active_llm_extra_headers`）。
+    pub fn get_llm_extra_headers_for_channel(id: &str) -> HashMap<String, String> {
+        let _guard = credentials_lock().lock();
+        let mut root = load_credentials();
+        root.active.llm = id.to_string();
+        active_llm_extra_headers(&root)
+    }
+
+    /// 指定 LLM 渠道的采样温度。
+    pub fn get_llm_temperature_for_channel(id: &str) -> Option<f32> {
+        let _guard = credentials_lock().lock();
+        let mut root = load_credentials();
+        root.active.llm = id.to_string();
+        active_llm_temperature(&root)
+    }
+
+    /// 按渠道 id 读 LLM 凭据（编辑非当前卡片时用）。
+    ///
+    /// ASR 早就有 `get_for_asr_provider`；LLM 侧原本只能读"当前 active"，
+    /// 渠道化后必须能读任意一张卡片。
+    pub fn get_for_llm_provider(id: &str, account: CredentialAccount) -> Result<Option<String>> {
+        let _guard = credentials_lock().lock();
+        let mut root = load_credentials();
+        root.active.llm = id.to_string();
+        Ok(lookup_account(&root, account))
+    }
+
+    pub fn set_for_llm_provider(id: &str, account: CredentialAccount, value: &str) -> Result<()> {
+        let _guard = credentials_lock().lock();
+        let mut root = load_credentials_for_update()?;
+        let active = root.active.llm.clone();
+        root.active.llm = id.to_string();
+        let value = (!value.is_empty()).then(|| value.to_string());
+        write_account(&mut root, account, value);
+        root.active.llm = active;
+        save_credentials(&root)
     }
 
     pub fn get_active_omni() -> String {
@@ -1730,10 +2559,11 @@ mod tests {
         lookup_account, lookup_marketplace_github_token, parse_extra_headers_json,
         parse_llm_temperature, reset_credentials_cache_for_tests, write_account,
         write_marketplace_github_token, CredentialAccount, CredsAsrEntry, CredsRoot,
-        MarketplaceGithubToken, KEYRING_CHUNK_MAX_UTF16_UNITS,
+        CredsLlmEntry, MarketplaceGithubToken, KEYRING_CHUNK_MAX_UTF16_UNITS,
     };
     use anyhow::anyhow;
     use parking_lot::Mutex;
+    use std::collections::HashMap;
 
     #[test]
     fn credential_payload_chunks_stay_under_windows_blob_limit() {
@@ -2157,6 +2987,474 @@ mod tests {
         assert_eq!(
             super::active_llm_temperature_string(&root).as_deref(),
             Some("0.7")
+        );
+    }
+
+    // ---- 渠道卡片（v1 → v2）----
+
+    fn v1_root_with_two_asr_providers() -> CredsRoot {
+        let mut root = CredsRoot::default();
+        root.active.asr = "volcengine".into();
+        root.providers.asr.insert(
+            "volcengine".into(),
+            CredsAsrEntry {
+                appKey: Some("vk".into()),
+                ..Default::default()
+            },
+        );
+        root.providers.asr.insert(
+            "groq".into(),
+            CredsAsrEntry {
+                apiKey: Some("gk".into()),
+                ..Default::default()
+            },
+        );
+        root
+    }
+
+    #[test]
+    fn migration_keeps_preset_ids_as_channel_ids_and_puts_active_first() {
+        let mut root = v1_root_with_two_asr_providers();
+        assert!(super::migrate_channels(&mut root));
+
+        // id 沿用原 preset id —— 老用户的 map key 一个字节都不变。
+        let volcengine = root
+            .providers
+            .asr
+            .get("volcengine")
+            .expect("volcengine kept");
+        let groq = root.providers.asr.get("groq").expect("groq kept");
+
+        assert_eq!(
+            volcengine.channel.providerType.as_deref(),
+            Some("volcengine")
+        );
+        assert_eq!(groq.channel.providerType.as_deref(), Some("groq"));
+        // 原 active 排第一。
+        assert_eq!(volcengine.channel.order, Some(0));
+        assert_eq!(groq.channel.order, Some(1));
+        // v1 老数据一律视为启用。
+        assert!(volcengine.channel.enabled);
+        assert!(groq.channel.enabled);
+    }
+
+    #[test]
+    fn migration_is_idempotent() {
+        let mut root = v1_root_with_two_asr_providers();
+        assert!(super::migrate_channels(&mut root));
+        let after_first = serde_json::to_string(&root).expect("encode");
+
+        // 第二次必须无改动（返回 false）且结果逐字节一致。
+        assert!(!super::migrate_channels(&mut root));
+        assert_eq!(serde_json::to_string(&root).expect("encode"), after_first);
+    }
+
+    #[test]
+    fn migrated_credentials_still_resolve_through_lookup_account() {
+        let mut root = v1_root_with_two_asr_providers();
+        super::migrate_channels(&mut root);
+        super::sync_active_channels(&mut root);
+
+        // 迁移后凭据读取行为不变 —— 这是老用户升级不炸的底线。
+        assert_eq!(
+            lookup_account(&root, CredentialAccount::VolcengineAppKey).as_deref(),
+            Some("vk")
+        );
+    }
+
+    #[test]
+    fn active_follows_order_and_enabled_not_user_choice() {
+        let mut root = v1_root_with_two_asr_providers();
+        super::migrate_channels(&mut root);
+
+        // 把 groq 拖到第一。
+        root.providers.asr.get_mut("groq").unwrap().channel.order = Some(0);
+        root.providers
+            .asr
+            .get_mut("volcengine")
+            .unwrap()
+            .channel
+            .order = Some(1);
+        super::sync_active_channels(&mut root);
+        assert_eq!(root.active.asr, "groq");
+
+        // 关掉 groq 后，当前渠道顺延到下一个启用的。
+        root.providers.asr.get_mut("groq").unwrap().channel.enabled = false;
+        super::sync_active_channels(&mut root);
+        assert_eq!(root.active.asr, "volcengine");
+    }
+
+    #[test]
+    fn every_channel_disabled_clears_active_so_lookup_reports_unconfigured() {
+        let mut root = v1_root_with_two_asr_providers();
+        super::migrate_channels(&mut root);
+        for entry in root.providers.asr.values_mut() {
+            entry.channel.enabled = false;
+        }
+        super::sync_active_channels(&mut root);
+        // 清空而不是保留旧 id：entry 还在，保留会让 lookup 继续命中已禁用渠道。
+        assert_eq!(root.active.asr, "");
+        assert_eq!(
+            lookup_account(&root, CredentialAccount::VolcengineAppKey),
+            None
+        );
+    }
+
+    #[test]
+    fn every_llm_channel_disabled_clears_active_so_lookup_reports_unconfigured() {
+        let mut root = CredsRoot::default();
+        root.active.llm = "ark".into();
+        root.providers.llm.insert(
+            "ark".into(),
+            CredsLlmEntry {
+                apiKey: Some("sk-ark".into()),
+                ..Default::default()
+            },
+        );
+        super::migrate_channels(&mut root);
+        for entry in root.providers.llm.values_mut() {
+            entry.channel.enabled = false;
+        }
+        super::sync_active_channels(&mut root);
+        assert_eq!(root.active.llm, "");
+        assert_eq!(lookup_account(&root, CredentialAccount::ArkApiKey), None);
+    }
+
+    /// `active` 指向一个**不存在的 entry** 是真实会发生的：前端 prefs 里的
+    /// `activeAsrProvider` 与凭据库里的 `active.asr` 是两份数据，历史上可能不同步。
+    /// 此时迁移只能退而求其次选一张，但**绝不允许动任何凭据** —— 用户的 key 必须原样
+    /// 留在各自的 entry 里，用户把想用的那张拖回第一位就能恢复。
+    #[test]
+    fn migration_never_touches_credentials_even_when_active_points_at_a_missing_entry() {
+        let mut root = CredsRoot::default();
+        root.active.asr = "stepfun".into(); // 凭据库里并没有这个 entry
+        root.providers.asr.insert(
+            "volcengine".into(),
+            CredsAsrEntry {
+                appKey: Some("vk".into()),
+                accessKey: Some("ak".into()),
+                ..Default::default()
+            },
+        );
+        root.providers.asr.insert(
+            "groq".into(),
+            CredsAsrEntry {
+                apiKey: Some("gk".into()),
+                ..Default::default()
+            },
+        );
+
+        super::migrate_channels(&mut root);
+        super::sync_active_channels(&mut root);
+
+        // 迁移只写 providerType / order，凭据一个字节都不动。
+        assert_eq!(
+            root.providers.asr.get("volcengine").unwrap().appKey.as_deref(),
+            Some("vk")
+        );
+        assert_eq!(
+            root.providers.asr.get("volcengine").unwrap().accessKey.as_deref(),
+            Some("ak")
+        );
+        assert_eq!(
+            root.providers.asr.get("groq").unwrap().apiKey.as_deref(),
+            Some("gk")
+        );
+        // 两张卡片都还在，用户可以自己拖回想要的那张。
+        assert_eq!(root.providers.asr.len(), 2);
+        // active 退到一个真实存在的渠道上，而不是继续指向空气。
+        assert!(root.providers.asr.contains_key(&root.active.asr));
+    }
+
+    #[test]
+    fn migration_prefers_a_configured_channel_over_alphabetical_order() {
+        // active 指向一个不存在的 entry；`aaa-empty` 字母序更靠前但一个字都没填，
+        // `volcengine` 才是用户真正配好的那张。纯字母序会让用户升级后看到"未配置"。
+        let mut root = CredsRoot::default();
+        root.active.asr = "stepfun".into();
+        root.providers.asr.insert(
+            "aaa-empty".into(),
+            CredsAsrEntry {
+                ..Default::default()
+            },
+        );
+        root.providers.asr.insert(
+            "volcengine".into(),
+            CredsAsrEntry {
+                appKey: Some("vk".into()),
+                accessKey: Some("ak".into()),
+                resourceId: Some("rid".into()),
+                ..Default::default()
+            },
+        );
+
+        super::migrate_channels(&mut root);
+        super::sync_active_channels(&mut root);
+
+        assert_eq!(root.active.asr, "volcengine");
+        // 凭据确实能通过正常读取路径拿到 —— 也就是 UI 上会显示"已配置"。
+        assert_eq!(
+            lookup_account(&root, CredentialAccount::VolcengineAppKey).as_deref(),
+            Some("vk")
+        );
+    }
+
+    #[test]
+    fn freshly_added_channel_survives_clean_credentials() {
+        let mut root = CredsRoot::default();
+        // 刚点「添加渠道」、名字取好了但还没填 key。
+        root.providers.asr.insert(
+            "chan-uuid".into(),
+            CredsAsrEntry {
+                channel: super::ChannelMeta {
+                    providerType: Some("groq".into()),
+                    order: Some(0),
+                    enabled: true,
+                    lastTest: None,
+                },
+                displayName: Some("Groq-备用".into()),
+                ..Default::default()
+            },
+        );
+
+        let cleaned = super::clean_credentials(&root);
+        assert!(
+            cleaned.providers.asr.contains_key("chan-uuid"),
+            "空 key 的新建渠道被 clean_credentials 静默删掉了"
+        );
+    }
+
+    #[test]
+    fn v1_payload_without_channel_fields_still_deserializes() {
+        // flatten 的 ChannelMeta 不能破坏老 payload 的反序列化。
+        let v1 = r#"{
+            "version": 1,
+            "active": { "asr": "volcengine", "llm": "ark" },
+            "providers": {
+                "asr": { "volcengine": { "appKey": "vk", "accessKey": "ak" } },
+                "llm": { "ark": { "apiKey": "sk", "model": "deepseek-v3-2" } }
+            }
+        }"#;
+        let root: CredsRoot = serde_json::from_str(v1).expect("v1 payload must still parse");
+        assert_eq!(
+            root.providers
+                .asr
+                .get("volcengine")
+                .unwrap()
+                .appKey
+                .as_deref(),
+            Some("vk")
+        );
+        // 缺省即启用，且尚未渠道化。
+        let entry = root.providers.asr.get("volcengine").unwrap();
+        assert!(entry.channel.enabled);
+        assert_eq!(entry.channel.providerType, None);
+        // 未迁移时 providerType 回落到 map key。
+        assert_eq!(
+            super::channel_provider_type("volcengine", entry),
+            "volcengine"
+        );
+    }
+
+    // ---- 排序 / 开关 ----
+
+    /// 造一组 ASR 渠道：`(id, order, enabled)`。
+    fn channels(spec: &[(&str, u32, bool)]) -> HashMap<String, CredsAsrEntry> {
+        spec.iter()
+            .map(|(id, order, enabled)| {
+                (
+                    (*id).to_string(),
+                    CredsAsrEntry {
+                        channel: super::ChannelMeta {
+                            providerType: Some((*id).to_string()),
+                            order: Some(*order),
+                            enabled: *enabled,
+                            lastTest: None,
+                        },
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// 按 order 升序取出 `(id, enabled)`，用来断言列表的可见顺序。
+    fn ordered(map: &HashMap<String, CredsAsrEntry>) -> Vec<(String, bool)> {
+        let mut list: Vec<_> = map
+            .iter()
+            .map(|(id, entry)| {
+                (
+                    id.clone(),
+                    entry.channel.enabled,
+                    entry.channel.order.unwrap_or(u32::MAX),
+                )
+            })
+            .collect();
+        list.sort_by(|left, right| left.2.cmp(&right.2).then_with(|| left.0.cmp(&right.0)));
+        list.into_iter()
+            .map(|(id, enabled, _)| (id, enabled))
+            .collect()
+    }
+
+    #[test]
+    fn disabling_a_channel_sinks_it_below_every_enabled_one() {
+        let mut map = channels(&[("a", 0, true), ("b", 1, true), ("c", 2, true)]);
+        map.get_mut("a").unwrap().channel.enabled = false;
+        super::reposition_after_toggle(&mut map, "a");
+
+        assert_eq!(
+            ordered(&map),
+            vec![("b".into(), true), ("c".into(), true), ("a".into(), false),]
+        );
+    }
+
+    #[test]
+    fn re_enabling_a_channel_lands_at_the_end_of_the_enabled_group() {
+        let mut map = channels(&[("a", 0, true), ("b", 1, true), ("c", 2, false)]);
+        map.get_mut("c").unwrap().channel.enabled = true;
+        super::reposition_after_toggle(&mut map, "c");
+
+        // 不回原位、也不抢第一 —— 落到启用组末尾，不打扰当前生效的 a。
+        assert_eq!(
+            ordered(&map),
+            vec![("a".into(), true), ("b".into(), true), ("c".into(), true)]
+        );
+    }
+
+    #[test]
+    fn compact_orders_keeps_disabled_channels_at_the_bottom() {
+        let mut map = channels(&[("a", 5, false), ("b", 9, true), ("c", 1, true)]);
+        super::compact_orders(&mut map);
+
+        assert_eq!(
+            ordered(&map),
+            vec![("c".into(), true), ("b".into(), true), ("a".into(), false),]
+        );
+        // order 压实成 0..n，避免反复拖拽后数值发散。
+        let mut orders: Vec<u32> = map
+            .values()
+            .map(|entry| entry.channel.order.unwrap())
+            .collect();
+        orders.sort_unstable();
+        assert_eq!(orders, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn reorder_puts_the_dragged_channel_first_and_drives_active() {
+        let mut root = CredsRoot::default();
+        root.providers.asr = channels(&[("a", 0, true), ("b", 1, true)]);
+        super::apply_order(&mut root.providers.asr, &["b".to_string(), "a".to_string()]);
+        super::sync_active_channels(&mut root);
+
+        assert_eq!(ordered(&root.providers.asr)[0].0, "b");
+        assert_eq!(root.active.asr, "b");
+    }
+
+    #[test]
+    fn reorder_tolerates_ids_the_frontend_did_not_mention() {
+        let mut map = channels(&[("a", 0, true), ("b", 1, true), ("c", 2, true)]);
+        // 前端只发了两个 id（比如 c 是刚被另一个窗口加进来的）。
+        super::apply_order(&mut map, &["c".to_string(), "a".to_string()]);
+
+        let order = ordered(&map);
+        assert_eq!(order[0].0, "c");
+        assert_eq!(order[1].0, "a");
+        // 没提到的 b 落到末尾而不是消失或撞车。
+        assert_eq!(order[2].0, "b");
+    }
+
+    #[test]
+    fn new_channel_id_falls_back_to_numbered_suffix_for_same_provider() {
+        let mut map = channels(&[("deepseek", 0, true)]);
+        let second = super::allocate_channel_id(&map, "deepseek");
+        assert_eq!(second, "deepseek-2");
+
+        map.insert(second, Default::default());
+        assert_eq!(super::allocate_channel_id(&map, "deepseek"), "deepseek-3");
+        // 不同厂商仍拿到干净的 id。
+        assert_eq!(super::allocate_channel_id(&map, "groq"), "groq");
+    }
+
+    #[test]
+    fn new_channel_lands_at_the_end_of_the_enabled_group() {
+        // 禁用项的 order 更大，但新卡片要排在启用组末尾，而不是整个列表末尾。
+        let map = channels(&[("a", 0, true), ("b", 1, true), ("c", 2, false)]);
+        assert_eq!(super::next_order(&map), 2);
+    }
+
+    #[test]
+    fn create_channel_with_disabled_present_keeps_disabled_at_the_bottom() {
+        // 与 `create_channel` 相同的路径：allocate → insert（order = next_order）
+        // → compact_orders。修复前新卡与禁用项 `c` 同 order，列表会按 id 字母序
+        // 混排；压实后新启用卡在启用组末尾、禁用项仍沉底。
+        let mut root = CredsRoot::default();
+        root.providers.asr = channels(&[("a", 0, true), ("b", 1, true), ("c", 2, false)]);
+        let id = super::allocate_channel_id(&root.providers.asr, "deepseek");
+        root.providers.asr.insert(
+            id.clone(),
+            CredsAsrEntry {
+                channel: super::ChannelMeta {
+                    providerType: Some("deepseek".into()),
+                    order: Some(super::next_order(&root.providers.asr)),
+                    enabled: true,
+                    lastTest: None,
+                },
+                ..Default::default()
+            },
+        );
+        super::compact_orders(&mut root.providers.asr);
+
+        assert_eq!(
+            ordered(&root.providers.asr),
+            vec![
+                ("a".into(), true),
+                ("b".into(), true),
+                ("deepseek".into(), true),
+                ("c".into(), false),
+            ]
+        );
+        // order 连续无重复，杜绝与禁用项同号。
+        let mut orders: Vec<u32> = root
+            .providers
+            .asr
+            .values()
+            .map(|entry| entry.channel.order.unwrap())
+            .collect();
+        orders.sort_unstable();
+        assert_eq!(orders, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn provider_type_is_independent_of_channel_id_for_multi_key_setups() {
+        // 同一家两把 key：map key 是 uuid，providerType 都指向 deepseek。
+        let mut root = CredsRoot::default();
+        for (id, order) in [("uuid-a", 0u32), ("uuid-b", 1)] {
+            root.providers.llm.insert(
+                id.into(),
+                super::CredsLlmEntry {
+                    channel: super::ChannelMeta {
+                        providerType: Some("deepseek".into()),
+                        order: Some(order),
+                        enabled: true,
+                        lastTest: None,
+                    },
+                    apiKey: Some(format!("sk-{id}")),
+                    ..Default::default()
+                },
+            );
+        }
+        super::sync_active_channels(&mut root);
+        assert_eq!(root.active.llm, "uuid-a");
+
+        let entry = root.providers.llm.get(&root.active.llm).unwrap();
+        // 协议路由拿到的必须是厂商 id，不是 uuid。
+        assert_eq!(
+            super::channel_provider_type(&root.active.llm, entry),
+            "deepseek"
+        );
+        assert_eq!(
+            lookup_account(&root, CredentialAccount::ArkApiKey).as_deref(),
+            Some("sk-uuid-a")
         );
     }
 }
