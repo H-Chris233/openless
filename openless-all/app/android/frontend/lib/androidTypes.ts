@@ -15,7 +15,52 @@ export interface AndroidOverlayStatus {
 export interface AndroidAccessibilityStatus {
   state: 'enabled' | 'notEnabled' | 'notAndroid';
   enabled: boolean;
-  message: string;
+  operational?: boolean;
+  message?: string;
+  messageKey: string;
+}
+
+export type AndroidShizukuState =
+  | 'notInstalled'
+  | 'notRunning'
+  | 'notAuthorized'
+  | 'authorized'
+  | 'binderDead'
+  | 'notAndroid';
+
+export interface AndroidAccessibilityDiagnosis {
+  registered: boolean;
+  operational: boolean;
+  message?: string;
+  messageKey: string;
+}
+
+export interface AndroidShizukuStatus {
+  state: AndroidShizukuState;
+  message?: string;
+  messageKey: string;
+  accessibility: AndroidAccessibilityDiagnosis;
+  lastPermissionMessageKey?: string | null;
+}
+
+export type AndroidAccessibilityRecoveryOutcome =
+  | 'success'
+  | 'writeRejected'
+  | 'serviceNotBound'
+  | 'shizukuUnavailable'
+  | 'userNotConfirmed'
+  | 'shellFailed';
+
+export interface AndroidAccessibilityRecoveryResult {
+  outcome: AndroidAccessibilityRecoveryOutcome;
+  message?: string;
+  messageKey: string;
+}
+
+export interface AndroidShizukuActionResult {
+  launched: boolean;
+  message?: string;
+  messageKey: string;
 }
 
 export type AndroidPreferenceKey =

@@ -697,13 +697,24 @@ pub mod android {
         env: &mut JNIEnv<'local>,
         context: &JObject<'local>,
     ) -> Result<bool, String> {
-        call_static_bool_with_context_class(
+        Ok(accessibility_paste_result(env, context, "")? == "SUCCESS")
+    }
+
+    pub fn accessibility_paste_result<'local>(
+        env: &mut JNIEnv<'local>,
+        context: &JObject<'local>,
+        text: &str,
+    ) -> Result<String, String> {
+        let text_obj = env
+            .new_string(text)
+            .map_err(|error| format!("create paste text jstring: {error}"))?;
+        call_static_string_with_context_class(
             env,
             context,
             "com.openless.app.OpenLessAccessibilityService",
-            "pasteToFocusedField",
-            "()Z",
-            &[],
+            "pasteToFocusedFieldResult",
+            "(Ljava/lang/String;)Ljava/lang/String;",
+            &[JValue::Object(&text_obj)],
         )
     }
 
@@ -738,9 +749,6 @@ pub mod android {
     }
 
     const ACCESSIBILITY_SERVICE_CLASS: &str = "com.openless.app.OpenLessAccessibilityService";
-    const ACCESSIBILITY_PREFS_NAME: &str = "openless_accessibility";
-    const ACCESSIBILITY_HEARTBEAT_KEY: &str = "last_heartbeat";
-    const ACCESSIBILITY_HEARTBEAT_STALE_MS: i64 = 15_000;
 
     fn content_resolver<'local>(
         env: &mut JNIEnv<'local>,
@@ -834,7 +842,10 @@ pub mod android {
         let services = settings_secure_get_string(env, context, "enabled_accessibility_services")?
             .unwrap_or_default();
         let component_id = accessibility_service_component_id(env, context)?;
-        Ok(services.contains(&component_id))
+        Ok(crate::android::accessibility::enabled_services_contain(
+            &services,
+            &component_id,
+        ))
     }
 
     pub fn accessibility_operational<'local>(
@@ -844,39 +855,14 @@ pub mod android {
         if !accessibility_enabled(env, context)? {
             return Ok(false);
         }
-        let prefs_name = jobject_str(env, ACCESSIBILITY_PREFS_NAME)?;
-        let prefs = env
-            .call_method(
-                context,
-                "getSharedPreferences",
-                "(Ljava/lang/String;I)Landroid/content/SharedPreferences;",
-                &[JValue::Object(&prefs_name), JValue::Int(0)],
-            )
-            .and_then(|value| value.l())
-            .map_err(|error| format!("Context.getSharedPreferences: {error}"))?;
-        let heartbeat_key = jobject_str(env, ACCESSIBILITY_HEARTBEAT_KEY)?;
-        let last_heartbeat = env
-            .call_method(
-                &prefs,
-                "getLong",
-                "(Ljava/lang/String;J)J",
-                &[JValue::Object(&heartbeat_key), JValue::Long(0)],
-            )
-            .and_then(|value| value.j())
-            .map_err(|error| format!("SharedPreferences.getLong: {error}"))?;
-        if last_heartbeat <= 0 {
-            return Ok(false);
-        }
-        let now = env
-            .call_static_method(
-                "java/lang/System",
-                "currentTimeMillis",
-                "()J",
-                &[],
-            )
-            .and_then(|value| value.j())
-            .map_err(|error| format!("System.currentTimeMillis: {error}"))?;
-        Ok(now.saturating_sub(last_heartbeat) <= ACCESSIBILITY_HEARTBEAT_STALE_MS)
+        call_static_bool_with_context_class(
+            env,
+            context,
+            "com.openless.app.OpenLessAccessibilityService",
+            "pingAccessibilityProcess",
+            "(Landroid/content/Context;)Z",
+            &[JValue::Object(context)],
+        )
     }
 
     pub fn launch_accessibility_settings(
@@ -885,6 +871,98 @@ pub mod android {
     ) -> Result<(), String> {
         let action_obj = jobject_str(env, "android.settings.ACCESSIBILITY_SETTINGS")?;
         start_settings_intent(env, context, &action_obj, None)
+    }
+
+    pub fn shizuku_get_status_json<'local>(
+        env: &mut JNIEnv<'local>,
+        context: &JObject<'local>,
+    ) -> Result<String, String> {
+        call_static_string_with_context_class(
+            env,
+            context,
+            "com.openless.app.OpenLessShizukuBridge",
+            "getStatusJson",
+            "(Landroid/content/Context;)Ljava/lang/String;",
+            &[JValue::Object(context)],
+        )
+    }
+
+    pub fn shizuku_request_permission<'local>(
+        env: &mut JNIEnv<'local>,
+        context: &JObject<'local>,
+    ) -> Result<bool, String> {
+        call_static_bool_with_context_class(
+            env,
+            context,
+            "com.openless.app.OpenLessShizukuBridge",
+            "requestPermission",
+            "(Landroid/content/Context;)Z",
+            &[JValue::Object(context)],
+        )
+    }
+
+    pub fn shizuku_open_app<'local>(
+        env: &mut JNIEnv<'local>,
+        context: &JObject<'local>,
+    ) -> Result<bool, String> {
+        call_static_bool_with_context_class(
+            env,
+            context,
+            "com.openless.app.OpenLessShizukuBridge",
+            "openShizukuApp",
+            "(Landroid/content/Context;)Z",
+            &[JValue::Object(context)],
+        )
+    }
+
+    pub fn shizuku_recover_accessibility_json<'local>(
+        env: &mut JNIEnv<'local>,
+        context: &JObject<'local>,
+        confirmed: bool,
+    ) -> Result<String, String> {
+        call_static_string_with_context_class(
+            env,
+            context,
+            "com.openless.app.OpenLessShizukuBridge",
+            "recoverAccessibilityJson",
+            "(Landroid/content/Context;Z)Ljava/lang/String;",
+            &[JValue::Object(context), JValue::Bool(confirmed as u8)],
+        )
+    }
+
+    pub fn shizuku_inject_paste_key<'local>(
+        env: &mut JNIEnv<'local>,
+        context: &JObject<'local>,
+    ) -> Result<bool, String> {
+        call_static_bool_with_context_class(
+            env,
+            context,
+            "com.openless.app.OpenLessShizukuBridge",
+            "injectPasteKey",
+            "(Landroid/content/Context;)Z",
+            &[JValue::Object(context)],
+        )
+    }
+
+    fn call_static_string_with_context_class<'local>(
+        env: &mut JNIEnv<'local>,
+        context: &JObject<'local>,
+        class_name: &str,
+        method: &str,
+        sig: &str,
+        args: &[JValue],
+    ) -> Result<String, String> {
+        let class = load_context_class(env, context, class_name)?;
+        let value = env
+            .call_static_method(class, method, sig, args)
+            .and_then(|value| value.l())
+            .map_err(|error| format!("call {class_name}.{method}: {error}"))?;
+        if value.is_null() {
+            return Err(format!("{class_name}.{method} returned null"));
+        }
+        env.get_string(&JString::from(value))
+            .map_err(|error| format!("read {class_name}.{method} result: {error}"))
+            .map(|text| text.to_string_lossy().into_owned())
     }
 
     fn start_settings_intent(

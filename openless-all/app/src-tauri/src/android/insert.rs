@@ -1,6 +1,12 @@
 //! Android cross-app text insertion strategies.
 
 #![cfg(target_os = "android")]
+use crate::android::accessibility::{is_accessibility_enabled, paste_via_accessibility_with_result};
+use crate::android::insert_tiers::{
+    resolve_tiered_insert_status, TieredInsertOutcome, PASTE_RESULT_SUCCESS,
+    PASTE_RESULT_SHIZUKU_UNAVAILABLE,
+};
+use crate::android::shizuku::paste_via_shizuku_with_result;
 use crate::android::types::AndroidInsertStrategy;
 use crate::insertion::TextInserter;
 use crate::types::InsertStatus;
@@ -18,18 +24,11 @@ pub fn android_insert_with_strategy(
         AndroidInsertStrategy::Clipboard => clipboard_fallback(inserter, text),
         AndroidInsertStrategy::Accessibility
         | AndroidInsertStrategy::Auto
-        | AndroidInsertStrategy::Ime => {
-            try_accessibility(inserter, text).unwrap_or_else(|| clipboard_fallback(inserter, text))
-        }
+        | AndroidInsertStrategy::Ime => insert_with_tiered_fallback(inserter, text),
     }
 }
 
-fn try_accessibility(inserter: &TextInserter, text: &str) -> Option<InsertStatus> {
-    if !crate::android::accessibility::get_android_accessibility_status().enabled {
-        log::info!("[android-insert] accessibility service not enabled");
-        return None;
-    }
-    // 保存粘贴前的剪贴板内容，粘贴完成后还原，避免静默覆盖用户剪贴板。
+fn insert_with_tiered_fallback(inserter: &TextInserter, text: &str) -> InsertStatus {
     let previous_clip: Option<String> =
         crate::android::jni::android::with_android_env(|env, context| {
             Ok(crate::android::jni::android::get_primary_clip_text(env, context))
@@ -38,29 +37,58 @@ fn try_accessibility(inserter: &TextInserter, text: &str) -> Option<InsertStatus
         .flatten();
 
     if !matches!(inserter.copy_fallback(text), InsertStatus::CopiedFallback) {
-        return None;
+        return InsertStatus::Failed;
     }
-    let result = if crate::android::accessibility::paste_via_accessibility() {
-        Some(InsertStatus::Inserted)
-    } else {
-        log::warn!("[android-insert] accessibility paste failed; text remains on clipboard");
-        Some(InsertStatus::CopiedFallback)
-    };
 
-    // 还原用户原有剪贴板内容（仅当粘贴成功时还原；失败时用户需要自己处理）。
-    if matches!(result, Some(InsertStatus::Inserted)) {
-        if let Some(prev) = previous_clip {
-            if let Err(e) =
-                crate::android::jni::android::with_android_env(|env, context| {
-                    crate::android::jni::android::set_primary_clip_text(env, context, &prev)
-                })
-            {
-                log::warn!("[android-insert] failed to restore clipboard: {e}");
-            }
+    let accessibility_result = if is_accessibility_enabled() {
+        Some(paste_via_accessibility_with_result(text))
+    } else {
+        log::info!("[android-insert] tier1 skipped: accessibility service not enabled");
+        None
+    };
+    if let Some(ref paste_result) = accessibility_result {
+        if paste_result != PASTE_RESULT_SUCCESS {
+            log::warn!("[android-insert] tier1 accessibility paste failed reason={paste_result}");
         }
     }
 
-    result
+    let shizuku_result = match accessibility_result.as_deref() {
+        Some(PASTE_RESULT_SUCCESS) => {
+            log::info!("[android-insert] tier2 skipped: tier1 succeeded");
+            None
+        }
+        _ => Some(paste_via_shizuku_with_result()),
+    };
+    if let Some(ref result) = shizuku_result {
+        if result != PASTE_RESULT_SUCCESS && result != PASTE_RESULT_SHIZUKU_UNAVAILABLE {
+            log::warn!("[android-insert] tier2 shizuku paste failed reason={result}");
+        } else if result == PASTE_RESULT_SHIZUKU_UNAVAILABLE {
+            log::info!("[android-insert] tier2 skipped: shizuku unavailable");
+        }
+    }
+
+    match resolve_tiered_insert_status(
+        accessibility_result.as_deref(),
+        shizuku_result.as_deref(),
+    ) {
+        TieredInsertOutcome::Inserted => {
+            restore_clipboard_after_success(previous_clip);
+            InsertStatus::Inserted
+        }
+        TieredInsertOutcome::ClipboardFallback => clipboard_fallback(inserter, text),
+    }
+}
+
+fn restore_clipboard_after_success(previous_clip: Option<String>) {
+    if let Some(prev) = previous_clip {
+        if let Err(e) =
+            crate::android::jni::android::with_android_env(|env, context| {
+                crate::android::jni::android::set_primary_clip_text(env, context, &prev)
+            })
+        {
+            log::warn!("[android-insert] failed to restore clipboard: {e}");
+        }
+    }
 }
 
 fn clipboard_fallback(inserter: &TextInserter, text: &str) -> InsertStatus {
