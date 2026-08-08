@@ -940,31 +940,106 @@ mod windows_paste {
 
 // ─────────────────────────── front-app label ───────────────────────────
 
+/// 前台 app 的 **结构化** 标识：`(localizedName, bundleIdentifier)`。
+///
+/// [`current_front_app`] 那个 `"Safari (com.apple.Safari)"` 显示串是给 LLM prompt 看的，
+/// 程序判定（比如 `host_document` 的 bundle 黑名单）没法用 —— 从显示串里再把 bundle
+/// 抠出来既脆又蠢。所以真正的取值放在这里，显示串由它拼装。
+///
+/// 这也是全仓唯一一处「读前台 app」的实现：`coordinator::capsule_focus` 曾有一份近乎
+/// 逐字重复的副本，现已改为调用本函数。
 #[cfg(target_os = "macos")]
-fn current_front_app() -> Option<String> {
+pub(crate) fn current_front_app_parts() -> (Option<String>, Option<String>) {
     use objc2::msg_send;
     use objc2::runtime::{AnyClass, AnyObject};
 
     unsafe {
-        let cls = AnyClass::get("NSWorkspace")?;
+        let Some(cls) = AnyClass::get("NSWorkspace") else {
+            return (None, None);
+        };
         let workspace: *mut AnyObject = msg_send![cls, sharedWorkspace];
         if workspace.is_null() {
-            return None;
+            return (None, None);
         }
         let app: *mut AnyObject = msg_send![workspace, frontmostApplication];
         if app.is_null() {
-            return None;
+            return (None, None);
         }
         let name_obj: *mut AnyObject = msg_send![app, localizedName];
-        let name = ns_string_to_rust(name_obj);
         let bundle_obj: *mut AnyObject = msg_send![app, bundleIdentifier];
-        let bundle = ns_string_to_rust(bundle_obj);
-        match (name, bundle) {
-            (Some(n), Some(b)) => Some(format!("{n} ({b})")),
-            (Some(n), None) => Some(n),
-            (None, Some(b)) => Some(b),
-            (None, None) => None,
+        (ns_string_to_rust(name_obj), ns_string_to_rust(bundle_obj))
+    }
+}
+
+/// **某个进程**的 bundle id —— 不是「谁在最前面」，是「这个 pid 是谁」。
+///
+/// `host_document` 的安全闸门要判的是**手里这个 AX 元素属于哪个 app**。用前台 app 顶替
+/// 有两个问题，后者是安全问题：
+///
+/// 1. 焦点元素的归属和「谁在最前面」本来就可能不一致；
+/// 2. 更要命的是时间差 —— bundle 在取元素**之前**采样，而每个 AX 调用都可能阻塞到
+///    `AX_MESSAGING_TIMEOUT_SECS`。用户在这中间切了 app，闸门就会拿旧 app 的身份，去
+///    放行一个属于新 app 的元素。终端、密码管理器正是靠 bundle 黑名单拦的。
+///
+/// 拿元素自己的 pid 来问，这个窗口就不存在了。
+#[cfg(target_os = "macos")]
+pub(crate) fn bundle_id_for_pid(pid: i32) -> Option<String> {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+
+    unsafe {
+        let cls = AnyClass::get("NSRunningApplication")?;
+        let app: *mut AnyObject = msg_send![cls, runningApplicationWithProcessIdentifier: pid];
+        if app.is_null() {
+            return None;
         }
+        let bundle_obj: *mut AnyObject = msg_send![app, bundleIdentifier];
+        ns_string_to_rust(bundle_obj)
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn current_front_app_parts() -> (Option<String>, Option<String>) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowTextLengthW, GetWindowTextW,
+    };
+    // Windows 上没有 bundle id 这个概念，窗口标题是我们唯一能免费拿到的标识。
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.0.is_null() {
+            return (None, None);
+        }
+        let len = GetWindowTextLengthW(hwnd);
+        if len <= 0 {
+            return (None, None);
+        }
+        let mut buf = vec![0u16; (len + 1) as usize];
+        let copied = GetWindowTextW(hwnd, &mut buf);
+        if copied <= 0 {
+            return (None, None);
+        }
+        let title = String::from_utf16_lossy(&buf[..copied as usize]);
+        if title.is_empty() {
+            (None, None)
+        } else {
+            (Some(title), None)
+        }
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+pub(crate) fn current_front_app_parts() -> (Option<String>, Option<String>) {
+    (None, None)
+}
+
+/// 前台 app 的显示串，形如 `"Safari (com.apple.Safari)"`（Windows 上是窗口标题）。
+/// 只作展示 / 进 prompt 用；要做判定请用 [`current_front_app_parts`]。
+pub(crate) fn current_front_app() -> Option<String> {
+    match current_front_app_parts() {
+        (Some(name), Some(bundle)) => Some(format!("{name} ({bundle})")),
+        (Some(name), None) => Some(name),
+        (None, Some(bundle)) => Some(bundle),
+        (None, None) => None,
     }
 }
 
@@ -1005,39 +1080,6 @@ fn current_front_app_pid() -> Option<i32> {
         let pid: i32 = msg_send![app, processIdentifier];
         (pid > 0).then_some(pid)
     }
-}
-
-#[cfg(target_os = "windows")]
-fn current_front_app() -> Option<String> {
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetWindowTextLengthW, GetWindowTextW,
-    };
-    unsafe {
-        let hwnd = GetForegroundWindow();
-        if hwnd.0.is_null() {
-            return None;
-        }
-        let len = GetWindowTextLengthW(hwnd);
-        if len <= 0 {
-            return None;
-        }
-        let mut buf = vec![0u16; (len + 1) as usize];
-        let copied = GetWindowTextW(hwnd, &mut buf);
-        if copied <= 0 {
-            return None;
-        }
-        let title = String::from_utf16_lossy(&buf[..copied as usize]);
-        if title.is_empty() {
-            None
-        } else {
-            Some(title)
-        }
-    }
-}
-
-#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-fn current_front_app() -> Option<String> {
-    None
 }
 
 #[cfg(test)]

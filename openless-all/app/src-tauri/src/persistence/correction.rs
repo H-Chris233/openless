@@ -9,7 +9,7 @@ use parking_lot::Mutex;
 use uuid::Uuid;
 
 use super::{atomic_write, data_dir, ensure_dir, read_or_default};
-use crate::types::CorrectionRule;
+use crate::types::{CorrectionRule, RuleSource};
 
 const CORRECTION_RULES_FILE: &str = "correction-rules.json";
 const CORRECTION_NUM_TOKEN: &str = "{num}";
@@ -29,6 +29,15 @@ impl CorrectionRuleStore {
         })
     }
 
+    /// 测试专用：指定落盘路径，让每个用例有自己独立的文件。
+    #[cfg(test)]
+    fn new_at(path: PathBuf) -> Self {
+        Self {
+            path,
+            lock: Mutex::new(()),
+        }
+    }
+
     /// 降级实例：data_dir 不可用时使用临时路径（桌面）或空 path（Android 内存态）。
     pub(crate) fn new_fallback() -> Self {
         Self {
@@ -43,18 +52,21 @@ impl CorrectionRuleStore {
     }
 
     pub fn add(&self, pattern: String, replacement: String) -> Result<CorrectionRule> {
+        self.add_with_source(pattern, replacement, RuleSource::Manual)
+    }
+
+    fn add_with_source(
+        &self,
+        pattern: String,
+        replacement: String,
+        source: RuleSource,
+    ) -> Result<CorrectionRule> {
         let pattern = pattern.trim().to_string();
         let replacement = replacement.trim().to_string();
         validate_correction_rule_syntax(&pattern, &replacement)?;
         let _guard = self.lock.lock();
         let mut rules = self.read_locked()?;
-        let rule = CorrectionRule {
-            id: Uuid::new_v4().to_string(),
-            pattern,
-            replacement,
-            enabled: true,
-            created_at: Utc::now().to_rfc3339(),
-        };
+        let rule = new_rule(pattern, replacement, source);
         rules.insert(0, rule.clone());
         self.write_locked(&rules)?;
         Ok(rule)
@@ -98,6 +110,17 @@ impl CorrectionRuleStore {
     }
 }
 
+fn new_rule(pattern: String, replacement: String, source: RuleSource) -> CorrectionRule {
+    CorrectionRule {
+        id: Uuid::new_v4().to_string(),
+        pattern,
+        replacement,
+        enabled: true,
+        created_at: Utc::now().to_rfc3339(),
+        source,
+    }
+}
+
 fn validate_correction_rule_syntax(pattern: &str, replacement: &str) -> Result<()> {
     if pattern.is_empty() {
         return Err(anyhow!("correction rule pattern is empty"));
@@ -123,6 +146,7 @@ fn validate_correction_rule_syntax(pattern: &str, replacement: &str) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::validate_correction_rule_syntax;
+    use crate::types::{CorrectionRule, RuleSource};
 
     #[test]
     fn correction_rule_syntax_rejects_silent_noops() {
@@ -132,5 +156,24 @@ mod tests {
         assert!(validate_correction_rule_syntax("{num}", "{num}例").is_err());
         assert!(validate_correction_rule_syntax("{num}到{num}粒", "{num}例").is_err());
         assert!(validate_correction_rule_syntax("几粒", "{num}例").is_err());
+    }
+
+    /// 老的 correction-rules.json 没有 `source` 字段，反序列化必须落到 Manual。
+    ///
+    /// 学习路径已经不再写纠正规则了（只写词汇表），但**早期版本写进去的 `learned`
+    /// 规则还躺在用户的文件里**，前端要能认出它们、让用户删掉。所以这个字段留着。
+    #[test]
+    fn a_rule_without_a_source_field_deserializes_as_manual() {
+        let json = r#"{"id":"1","pattern":"甲","replacement":"乙","enabled":true,"createdAt":""}"#;
+        let rule: CorrectionRule = serde_json::from_str(json).unwrap();
+        assert_eq!(rule.source, RuleSource::Manual);
+    }
+
+    #[test]
+    fn rule_source_round_trips_as_camel_case() {
+        let json = serde_json::to_string(&RuleSource::Learned).unwrap();
+        assert_eq!(json, "\"learned\"");
+        let back: RuleSource = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, RuleSource::Learned);
     }
 }

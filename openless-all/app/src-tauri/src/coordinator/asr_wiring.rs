@@ -762,7 +762,7 @@ pub(super) async fn build_qa_asr_start(
             ))
         }
         ActiveAsrProviderKind::StepfunRealtime => {
-            let prompt = crate::asr::whisper::build_prompt_from_phrases(&enabled_phrases(inner));
+            let prompt = crate::asr::whisper::build_prompt_from_phrases(&asr_vocab_phrases(inner));
             let creds = read_stepfun_realtime_credentials(prompt);
             let label = AsrCallLabel::new(effective_asr.clone(), Some(creds.model.clone()));
             Ok((
@@ -801,7 +801,7 @@ pub(super) async fn build_qa_asr_start(
             let (api_key, base_url, model) = read_whisper_credentials();
             let label = AsrCallLabel::new(effective_asr.clone(), Some(model.clone()));
             let (whisper_prompt, hotwords) =
-                whisper_vocab_for_provider(active_asr, enabled_phrases(inner));
+                whisper_vocab_for_provider(active_asr, asr_vocab_phrases(inner));
             let whisper = Arc::new(apply_zenmux_asr_options(
                 WhisperBatchASR::new(
                     api_key,

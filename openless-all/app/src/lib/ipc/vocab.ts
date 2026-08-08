@@ -1,4 +1,9 @@
-import type { CorrectionRule, DictionaryEntry, VocabPresetStore } from "../types"
+import type {
+    CorrectionRule,
+    DictionaryEntry,
+    PendingCorrection,
+    VocabPresetStore,
+} from "../types"
 import { invokeOrMock } from "./shared"
 import { mockVocab, mockCorrectionRules } from "./mock-data"
 
@@ -49,8 +54,24 @@ export function addCorrectionRule(
             replacement,
             enabled: true,
             createdAt: new Date().toISOString(),
+            source: "manual" as const,
         }),
     )
+}
+
+/** 卡片上点了勾：把这个词收进词汇表，并打「自动收集」标记。 */
+export function acceptPendingCorrection(id: string): Promise<void> {
+    return invokeOrMock("accept_pending_correction", { id }, () => undefined)
+}
+
+/** 卡片上点了叉：丢掉这一条，什么都不记 —— 没有拒绝名单。 */
+export function rejectPendingCorrection(id: string): Promise<void> {
+    return invokeOrMock("reject_pending_correction", { id }, () => undefined)
+}
+
+/** 卡片 10 秒到期，或新一轮听写开始。 */
+export function dismissVocabSuggestions(): Promise<void> {
+    return invokeOrMock("dismiss_vocab_suggestions", undefined, () => undefined)
 }
 
 export function removeCorrectionRule(id: string): Promise<void> {

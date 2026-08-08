@@ -48,6 +48,9 @@ export function Vocab() {
   const [presetNameDraft, setPresetNameDraft] = useState('');
   const [presetPhrasesDraft, setPresetPhrasesDraft] = useState('');
   const [correctionRules, setCorrectionRules] = useState<CorrectionRule[]>([]);
+  // 「只看自动收集的」筛选。自动收集能被信任的前提就是用户随时能把它们单独挑出来
+  // 一眼看完并批量删掉 —— 混在手动规则里等于看不见。
+  const [onlyLearnedRules, setOnlyLearnedRules] = useState(false);
   const [rulePatternDraft, setRulePatternDraft] = useState('');
   const [ruleReplacementDraft, setRuleReplacementDraft] = useState('');
 
@@ -143,6 +146,48 @@ export function Vocab() {
       setError(err instanceof Error ? err.message : String(err));
     }
   };
+
+  const onRemoveAllLearnedRules = async () => {
+    const learned = correctionRules.filter(r => r.source === 'learned');
+    if (learned.length === 0) return;
+    // 逐条删而不是加一个新的批量后端命令：规则数量是几十条量级，为此多开一条 IPC
+    // 不值得，而且逐条删失败一条也不影响其余。
+    const removed: string[] = [];
+    for (const rule of learned) {
+      try {
+        await removeCorrectionRule(rule.id);
+        removed.push(rule.id);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    }
+    setCorrectionRules(prev => prev.filter(r => !removed.includes(r.id)));
+  };
+
+  // 自动收集的词条靠 note 认。分成两区显示 —— 见下面渲染处的说明。
+  const LEARNED_NOTE = '从手改中自动收集';
+  const manualEntries = entries.filter(e => e.note !== LEARNED_NOTE);
+  const learnedEntries = entries.filter(e => e.note === LEARNED_NOTE);
+
+  const onRemoveAllLearnedEntries = async () => {
+    // 逐条删而不是加一条批量后端命令：词条是几十条量级，为此多开一条 IPC 不值得，
+    // 而且逐条删失败一条也不影响其余。
+    const removed: string[] = [];
+    for (const entry of learnedEntries) {
+      try {
+        await removeVocab(entry.id);
+        removed.push(entry.id);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    }
+    setEntries(prev => prev.filter(e => !removed.includes(e.id)));
+  };
+
+  const learnedRuleCount = correctionRules.filter(r => r.source === 'learned').length;
+  const visibleCorrectionRules = onlyLearnedRules
+    ? correctionRules.filter(r => r.source === 'learned')
+    : correctionRules;
 
   const onToggleCorrectionRule = async (rule: CorrectionRule) => {
     const next = !rule.enabled;
@@ -335,11 +380,26 @@ export function Vocab() {
               />
               <Btn size="sm" variant="primary" onClick={() => void onAddCorrectionRule()} style={mobile ? { justifySelf: 'start' } : undefined}>{t('common.add')}</Btn>
             </div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, minHeight: correctionRules.length ? undefined : 20 }}>
-              {correctionRules.length === 0 && (
+            {learnedRuleCount > 0 && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--ol-ink-3)' }}>
+                  <input
+                    type="checkbox"
+                    checked={onlyLearnedRules}
+                    onChange={e => setOnlyLearnedRules(e.target.checked)}
+                  />
+                  {t('vocab.corrections.onlyLearned', { count: learnedRuleCount })}
+                </label>
+                <Btn size="sm" onClick={() => void onRemoveAllLearnedRules()}>
+                  {t('vocab.corrections.removeAllLearned')}
+                </Btn>
+              </div>
+            )}
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, minHeight: visibleCorrectionRules.length ? undefined : 20 }}>
+              {visibleCorrectionRules.length === 0 && (
                 <span style={{ fontSize: 12, color: 'var(--ol-ink-4)' }}>{t('vocab.corrections.empty')}</span>
               )}
-              {correctionRules.map(rule => (
+              {visibleCorrectionRules.map(rule => (
                 <CorrectionRuleChip
                   key={rule.id}
                   rule={rule}
@@ -384,10 +444,39 @@ export function Vocab() {
                 {t('vocab.empty')}
               </div>
             )}
-            {!error && entries.map(e => (
+            {!error && manualEntries.map(e => (
               <VocabChip key={e.id} entry={e} onRemove={() => onRemove(e.id)} onToggle={() => onToggle(e)} />
             ))}
           </div>
+          {/* 自动收集的单独一区。不给每个词条挂 badge —— 混在一堆里要逐个看；
+              分区一眼就看得完，「全部删除」也自然地管着下面这一块。
+              用户随时能看清、能整块撤销，是自动收集能被信任的前提。 */}
+          {!error && learnedEntries.length > 0 && (
+            <>
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 10,
+                  marginTop: 16,
+                  paddingTop: 12,
+                  borderTop: '0.5px solid var(--ol-line-soft)',
+                }}
+              >
+                <span style={{ fontSize: 12, color: 'var(--ol-ink-3)' }}>
+                  {t('vocab.learnedSection', { count: learnedEntries.length })}
+                </span>
+                <Btn size="sm" onClick={() => void onRemoveAllLearnedEntries()}>
+                  {t('vocab.removeAllLearned')}
+                </Btn>
+              </div>
+              <div style={{ marginTop: 10, display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                {learnedEntries.map(e => (
+                  <VocabChip key={e.id} entry={e} onRemove={() => onRemove(e.id)} onToggle={() => onToggle(e)} />
+                ))}
+              </div>
+            </>
+          )}
         </Collapsible>
       </Card>
       <style>{`
@@ -429,6 +518,18 @@ function CorrectionRuleChip({ rule, onToggle, onRemove }: CorrectionRuleChipProp
       >
         {rule.pattern} → {rule.replacement}
       </button>
+      {rule.source === 'learned' && (
+        <span
+          title={t('vocab.corrections.learnedTip')}
+          style={{
+            padding: '1px 5px', borderRadius: 4, fontSize: 10,
+            background: 'var(--ol-blue-soft)', color: 'var(--ol-ink-3)',
+            fontFamily: 'inherit', letterSpacing: 0.2,
+          }}
+        >
+          {t('vocab.corrections.learnedBadge')}
+        </span>
+      )}
       <button
         onClick={onRemove}
         aria-label={t('vocab.corrections.removeAria')}

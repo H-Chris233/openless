@@ -422,6 +422,11 @@ export const ja: typeof zhCN = {
       clear: '結果を消去',
     },
   },
+  vocabCard: {
+    title: 'この語を覚えますか？',
+    accept: '覚える',
+    reject: '不要',
+  },
   vocab: {
     kicker: 'VOCABULARY',
     title: '語彙',
@@ -434,6 +439,8 @@ export const ja: typeof zhCN = {
     tipDisabled: 'クリックで無効化',
     tipEnabled: 'クリックで有効化',
     removeAria: '削除',
+    learnedSection: '自動収集（{{count}}）',
+    removeAllLearned: 'すべて削除',
     corrections: {
       title: '補正ルール',
       tip: 'ASR の誤認識を修正。{num} 数字ワイルドカード対応。',
@@ -444,6 +451,13 @@ export const ja: typeof zhCN = {
       tipDisabled: 'クリックしてこのルールを無効化',
       tipEnabled: 'クリックしてこのルールを有効化',
       removeAria: '補正ルールを削除',
+      learnedBadge: '自動',
+      learnedTip: 'あなたの手直しから自動で収集したものです。いつでも削除できます。',
+      onlyLearned: '自動収集のみ表示（{{count}}）',
+      removeAllLearned: '自動収集をすべて削除',
+      suggestTitle: 'この直しを覚えますか？',
+      suggestAccept: '覚える',
+      suggestDismiss: '不要',
     },
     presets: {
       title: 'シーンプリセット',
@@ -683,6 +697,9 @@ export const ja: typeof zhCN = {
     dataStorage: {
       title: 'データ保存',
       desc: 'この端末に保存される会話履歴とコンテキスト。',
+      cursorContextLabel: 'カーソル文脈（実験的）',
+      cursorContextDesc:
+        '推敲時に、いま書いている文書のカーソル周辺の原文を読み取り、同音語・固有名詞・代名詞の書き分けをモデルが判断できるようにします。オンにすると、そのテキストがリクエストとともに設定中の LLM プロバイダへ送信されます。オフのときは一文字も読み取りません。パスワード入力欄、Secure Input、パスワード管理アプリ、ターミナルは常に読み取りません。macOS のみ。',
     },
     codingConsole: {
       title: 'Claude コンソール',
@@ -754,6 +771,10 @@ export const ja: typeof zhCN = {
     debug: {
       title: 'デバッグツール',
       desc: '認識の問題を調査するときに使用。通常はオフのままで構いません。',
+      cursorProbeLabel: 'カーソル文脈プローブ',
+      cursorProbeDesc: 'クリックしたあと、カウントダウン中に対象アプリへ切り替えて入力欄をクリックしてください。そこのカーソル周辺の原文を読み取り、どのアプリが読めてどれが安全ゲートに阻まれるかを確認できます。読み取りは一度きりで、どのプロバイダにも送信しません。',
+      cursorProbeBtn: 'プローブ（5 秒後）',
+      cursorProbeCountdown: '{{n}} 秒後に読み取り…',
     },
     marketplace: {
       title: '拡張マーケット',

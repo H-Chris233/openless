@@ -244,6 +244,16 @@ pub struct DictationSession {
     #[serde(default)]
     pub source: HistorySource,
     pub raw_transcript: String,
+    /// **未经任何处理**的 ASR 原文。
+    ///
+    /// 和 `raw_transcript` 的区别容易被忽略但很关键：`raw_transcript` 存的是**已经跑过
+    /// 本地纠正规则**的文本（`dictation.rs` 在应用规则后原地改了 `raw.text`）。要判断
+    /// 一次手改到底是「ASR 听错了」还是「LLM 改坏了」，必须拿到规则之前的那一版。
+    ///
+    /// 没有沿用 `raw_transcript` 来存这一版，是为了不改变历史页现有的显示语义。
+    /// 旧历史没有此字段时为 None。
+    #[serde(default)]
+    pub asr_transcript: Option<String>,
     pub final_text: String,
     pub mode: PolishMode,
     /// 本次 dictation 使用的风格包。旧历史没有此字段时为 None；对话感知 polish
@@ -316,6 +326,20 @@ pub struct DictionaryEntry {
     pub created_at: String,
 }
 
+/// 一条纠正规则是怎么来的。
+///
+/// 用户必须随时能一眼看出「哪些是我自己加的、哪些是它替我学的」，并且能把后者一键
+/// 删掉。这是自动收集能被信任的前提 —— 一个看不清来源的词库，用户只会整个不敢用。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum RuleSource {
+    /// 用户在设置页手动录入。旧文件没有这个字段时也按这个算 —— 那些确实都是手动加的。
+    #[default]
+    Manual,
+    /// 从用户的手改中学来的。
+    Learned,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CorrectionRule {
@@ -326,7 +350,36 @@ pub struct CorrectionRule {
     pub enabled: bool,
     #[serde(default)]
     pub created_at: String,
+    /// 规则来源。`#[serde(default)]` 让 `correction-rules.json` 向后兼容：老文件缺
+    /// 这个字段就落到 `Manual`。
+    #[serde(default)]
+    pub source: RuleSource,
 }
+
+/// 一条等待用户确认的词条建议。
+///
+/// 只存在内存里，不落盘：建议是易逝的 —— 卡片消失就当没发生，用户下次改同一个词会再
+/// 产生一条。这也是不做「拒绝名单」的原因：一份用户看不见的名单，只会让他将来纳闷
+/// 「为什么这个词它不学了」。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingCorrection {
+    pub id: String,
+    /// 改之前那个（错的）写法。只用来在卡片上让用户看清改的是什么，不入库。
+    pub pattern: String,
+    /// 用户最后要的那个词 —— 点「好」之后进词汇表的就是它。
+    pub replacement: String,
+}
+
+/// 一张卡片上最多列几条。同一次听写里改好几个词会合并到一张卡；再多就该丢最老的了，
+/// 卡片撑得比屏幕还高没有意义。
+pub const MAX_PENDING_CORRECTIONS: usize = 5;
+
+/// 卡片自动消失的时间。
+///
+/// 到点就当没发生 —— 不记任何东西。用户下次改同一个词还会再问，这正是不要拒绝名单
+/// 换来的好处。
+pub const VOCAB_SUGGESTION_TTL_MS: u64 = 10_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1050,6 +1103,16 @@ pub struct UserPreferences {
     /// 默认 true（更接近用户习惯）。
     #[serde(default = "default_true")]
     pub streaming_insert_save_clipboard: bool,
+    /// 是否把「用户正在写的那篇文档」中光标附近的原文送进 LLM 润色当上下文。
+    ///
+    /// **默认 false，且必须保持 false。** 开启后每次听写都会读取前台 app 的正文并把
+    /// 其中一段发给 LLM 服务商——这是用户没有主动交给我们的数据，只能由用户显式选择。
+    /// 关闭时 `host_document` 一次 AX 都不发，prompt 与本功能存在之前逐字节相同。
+    ///
+    /// 目前仅 macOS 有实现；Windows / Linux 开了也读不到，优雅降级为无上下文。
+    /// 密码框 / Secure Input / 密码管理器 / 终端一律硬拦，与本开关无关。
+    #[serde(default)]
+    pub cursor_context_enabled: bool,
     /// 概览页是否显示「年度活动」热力图卡。默认 true；关闭只隐藏卡片，
     /// 活动计数照常记录（persistence/activity.rs），再打开时全年数据仍在。
     #[serde(default = "default_true")]
@@ -1304,6 +1367,8 @@ struct UserPreferencesWire {
     streaming_insert_default_migrated: bool,
     #[serde(default = "default_true")]
     streaming_insert_save_clipboard: bool,
+    #[serde(default)]
+    cursor_context_enabled: bool,
     #[serde(default = "default_true")]
     show_overview_activity_heatmap: bool,
     #[serde(default = "default_true")]
@@ -1423,6 +1488,7 @@ impl Default for UserPreferencesWire {
             streaming_insert: prefs.streaming_insert,
             streaming_insert_default_migrated: prefs.streaming_insert_default_migrated,
             streaming_insert_save_clipboard: prefs.streaming_insert_save_clipboard,
+            cursor_context_enabled: prefs.cursor_context_enabled,
             show_overview_activity_heatmap: prefs.show_overview_activity_heatmap,
             auto_update_check: prefs.auto_update_check,
             history_max_entries: prefs.history_max_entries,
@@ -1573,6 +1639,7 @@ impl<'de> Deserialize<'de> for UserPreferences {
             streaming_insert,
             streaming_insert_default_migrated: true,
             streaming_insert_save_clipboard: wire.streaming_insert_save_clipboard,
+            cursor_context_enabled: wire.cursor_context_enabled,
             show_overview_activity_heatmap: wire.show_overview_activity_heatmap,
             auto_update_check: wire.auto_update_check,
             history_max_entries: wire.history_max_entries,
@@ -2385,6 +2452,7 @@ impl Default for UserPreferences {
             streaming_insert: true,
             streaming_insert_default_migrated: true,
             streaming_insert_save_clipboard: true,
+            cursor_context_enabled: false,
             show_overview_activity_heatmap: true,
             auto_update_check: true,
             history_max_entries: None,
@@ -3926,6 +3994,7 @@ mod tests {
             created_at: "2026-07-01T00:00:00Z".into(),
             source: HistorySource::SelectionPolish,
             raw_transcript: "你好".into(),
+            asr_transcript: None,
             final_text: "你好。".into(),
             mode: PolishMode::Light,
             style_pack_id: None,

@@ -420,6 +420,11 @@ export const en: typeof zhCN = {
       clear: 'Clear results',
     },
   },
+  vocabCard: {
+    title: 'Remember this word?',
+    accept: 'Remember',
+    reject: 'Skip',
+  },
   vocab: {
     kicker: 'VOCABULARY',
     title: 'Vocabulary',
@@ -432,6 +437,8 @@ export const en: typeof zhCN = {
     tipDisabled: 'Click to disable this entry',
     tipEnabled: 'Click to enable this entry',
     removeAria: 'Remove',
+    learnedSection: 'Auto-collected ({{count}})',
+    removeAllLearned: 'Remove all',
     corrections: {
       title: 'Correction rules',
       tip: 'Fix common ASR mistakes. Supports {num} number wildcard.',
@@ -442,6 +449,13 @@ export const en: typeof zhCN = {
       tipDisabled: 'Click to disable this rule',
       tipEnabled: 'Click to enable this rule',
       removeAria: 'Remove correction rule',
+      learnedBadge: 'auto',
+      learnedTip: 'Collected automatically from your own edits. Delete it any time.',
+      onlyLearned: 'Only auto-collected ({{count}})',
+      removeAllLearned: 'Delete all auto-collected',
+      suggestTitle: 'Remember this correction?',
+      suggestAccept: 'Remember',
+      suggestDismiss: 'No thanks',
     },
     presets: {
       title: 'Scenario presets',
@@ -681,6 +695,9 @@ export const en: typeof zhCN = {
     dataStorage: {
       title: 'Data storage',
       desc: 'Conversation history and context kept on this device.',
+      cursorContextLabel: 'Cursor context (experimental)',
+      cursorContextDesc:
+        'While polishing, read the text around your cursor in the document you are writing, so the model can tell homophones, proper nouns and pronouns apart. When on, that text is sent to your configured LLM provider with the request; when off, nothing is read at all. Password fields, Secure Input, password managers and terminals are never read. macOS only.',
     },
     codingConsole: {
       title: 'Claude Console',
@@ -752,6 +769,10 @@ export const en: typeof zhCN = {
     debug: {
       title: 'Debug tools',
       desc: 'For troubleshooting recognition issues; off by default.',
+      cursorProbeLabel: 'Cursor context probe',
+      cursorProbeDesc: 'Click, then switch to the target app and click into a text field before the countdown ends. The probe reads the text around your cursor there, so you can see which apps are readable and which the safety gate blocks. One read, sent to no provider.',
+      cursorProbeBtn: 'Probe (in 5s)',
+      cursorProbeCountdown: 'Reading in {{n}}s…',
     },
     marketplace: {
       title: 'Marketplace',

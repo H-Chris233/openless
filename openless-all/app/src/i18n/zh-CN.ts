@@ -418,6 +418,11 @@ export const zhCN = {
       clear: '清除结果',
     },
   },
+  vocabCard: {
+    title: '要记住这个词吗？',
+    accept: '记住',
+    reject: '不用',
+  },
   vocab: {
     kicker: 'VOCABULARY',
     title: '词汇表',
@@ -430,6 +435,8 @@ export const zhCN = {
     tipDisabled: '点击禁用此词条',
     tipEnabled: '点击启用此词条',
     removeAria: '删除',
+    learnedSection: '自动收集（{{count}}）',
+    removeAllLearned: '全部删除',
     corrections: {
       title: '纠正规则',
       tip: '修正常见 ASR 误识别，支持 {num} 数字通配。',
@@ -440,6 +447,13 @@ export const zhCN = {
       tipDisabled: '点击禁用此规则',
       tipEnabled: '点击启用此规则',
       removeAria: '删除纠正规则',
+      learnedBadge: '自动',
+      learnedTip: '从你的手改中自动收集。可以随时删掉。',
+      onlyLearned: '只看自动收集的（{{count}}）',
+      removeAllLearned: '删除全部自动收集的',
+      suggestTitle: '要记住这个改法吗？',
+      suggestAccept: '记住',
+      suggestDismiss: '不用',
     },
     presets: {
       title: '场景预设',
@@ -679,6 +693,9 @@ export const zhCN = {
     dataStorage: {
       title: '数据存储',
       desc: '本机保留的历史会话与对话上下文。',
+      cursorContextLabel: '光标上下文（实验）',
+      cursorContextDesc:
+        '润色时读取你正在写的那篇文档中光标附近的原文，帮模型判断同音词、专名和代词该怎么写。开启后这段文字会随请求发送给你配置的 LLM 服务商；关闭时一个字都不读。密码输入框、Secure Input、密码管理器与终端始终不读。仅 macOS。',
     },
     codingConsole: {
       title: 'Claude 控制台',
@@ -750,6 +767,10 @@ export const zhCN = {
     debug: {
       title: '调试工具',
       desc: '排查识别问题时使用，平时无需开启。',
+      cursorProbeLabel: '光标上下文探针',
+      cursorProbeDesc: '点一下，然后在倒计时内切到目标 app 并点进输入框——探针会读那里的光标附近原文，用来确认哪些 app 读得到、哪些被安全闸门拦住。只读一次，不发给任何服务商。',
+      cursorProbeBtn: '探测（5 秒后）',
+      cursorProbeCountdown: '{{n}} 秒后读取…',
     },
     marketplace: {
       title: '扩展市场',

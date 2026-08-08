@@ -105,6 +105,7 @@ export let mockSettings: UserPreferences = {
     streamingInsert: true,
     streamingInsertDefaultMigrated: true,
     streamingInsertSaveClipboard: true,
+    cursorContextEnabled: false,
     showOverviewActivityHeatmap: true,
     autoUpdateCheck: true,
     historyMaxEntries: null,
@@ -568,6 +569,7 @@ export const mockHistory: DictationSession[] = OL_DATA.history.map((h, i) => ({
     id: `mock-${i}`,
     createdAt: new Date().toISOString(),
     rawTranscript: h.preview,
+    asrTranscript: null,
     finalText: h.preview,
     mode: "structured",
     stylePackId: "builtin.structured",
@@ -616,6 +618,15 @@ export const mockCorrectionRules: CorrectionRule[] = [
         replacement: "{num}例",
         enabled: true,
         createdAt: new Date().toISOString(),
+        source: "manual",
+    },
+    {
+        id: "rule-learned-codex",
+        pattern: "扣德克斯",
+        replacement: "Codex",
+        enabled: true,
+        createdAt: new Date().toISOString(),
+        source: "learned",
     },
 ]
 

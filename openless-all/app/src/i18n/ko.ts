@@ -422,6 +422,11 @@ export const ko: typeof zhCN = {
       clear: '결과 지우기',
     },
   },
+  vocabCard: {
+    title: '이 단어를 기억할까요?',
+    accept: '기억하기',
+    reject: '건너뛰기',
+  },
   vocab: {
     kicker: 'VOCABULARY',
     title: '어휘',
@@ -434,6 +439,8 @@ export const ko: typeof zhCN = {
     tipDisabled: '클릭하여 비활성화',
     tipEnabled: '클릭하여 활성화',
     removeAria: '삭제',
+    learnedSection: '자동 수집 ({{count}})',
+    removeAllLearned: '모두 삭제',
     corrections: {
       title: '교정 규칙',
       tip: 'ASR 오인식 수정. {num} 숫자 와일드카드 지원.',
@@ -444,6 +451,13 @@ export const ko: typeof zhCN = {
       tipDisabled: '이 규칙 비활성화',
       tipEnabled: '이 규칙 활성화',
       removeAria: '교정 규칙 삭제',
+      learnedBadge: '자동',
+      learnedTip: '직접 고친 내용에서 자동으로 수집했습니다. 언제든 삭제할 수 있습니다.',
+      onlyLearned: '자동 수집만 보기 ({{count}})',
+      removeAllLearned: '자동 수집 전체 삭제',
+      suggestTitle: '이 수정을 기억할까요?',
+      suggestAccept: '기억하기',
+      suggestDismiss: '괜찮아요',
     },
     presets: {
       title: '시나리오 프리셋',
@@ -683,6 +697,9 @@ export const ko: typeof zhCN = {
     dataStorage: {
       title: '데이터 저장',
       desc: '이 기기에 보관되는 대화 기록과 컨텍스트.',
+      cursorContextLabel: '커서 문맥 (실험적)',
+      cursorContextDesc:
+        '다듬을 때 작성 중인 문서에서 커서 주변 원문을 읽어, 동음이의어·고유명사·대명사를 모델이 구분할 수 있게 합니다. 켜면 해당 텍스트가 요청과 함께 설정된 LLM 제공자로 전송됩니다. 끄면 한 글자도 읽지 않습니다. 비밀번호 입력란, Secure Input, 비밀번호 관리자, 터미널은 항상 읽지 않습니다. macOS 전용.',
     },
     codingConsole: {
       title: 'Claude 콘솔',
@@ -754,6 +771,10 @@ export const ko: typeof zhCN = {
     debug: {
       title: '디버그 도구',
       desc: '인식 문제를 진단할 때 사용합니다. 평소에는 꺼두어도 됩니다.',
+      cursorProbeLabel: '커서 문맥 프로브',
+      cursorProbeDesc: '누른 뒤 카운트다운 안에 대상 앱으로 전환해 입력란을 클릭하세요. 그곳의 커서 주변 원문을 읽어, 어떤 앱이 읽히고 어떤 앱이 안전 게이트에 막히는지 확인할 수 있습니다. 한 번만 읽으며 어떤 제공자에게도 보내지 않습니다.',
+      cursorProbeBtn: '프로브 (5초 후)',
+      cursorProbeCountdown: '{{n}}초 후 읽기…',
     },
     marketplace: {
       title: '확장 마켓',

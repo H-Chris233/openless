@@ -45,6 +45,10 @@ export interface DictationSession {
   id: string;
   createdAt: string; // ISO-8601
   rawTranscript: string;
+  /** 纠正规则**之前**的 ASR 原文。`rawTranscript` 存的是规则跑完之后的版本，
+   *  两者相同时后端不写这个字段（null）。用于归因：一次误识别到底是 ASR 听错还是
+   *  LLM 改坏。旧历史没有此字段。 */
+  asrTranscript: string | null;
   finalText: string;
   mode: PolishMode;
   stylePackId: string | null;
@@ -84,12 +88,37 @@ export interface DictionaryEntry {
   createdAt: string;
 }
 
+/** 一条纠正规则是怎么来的。老的 correction-rules.json 没有这个字段，后端反序列化时
+ *  落到 'manual'——那些确实都是手动加的。 */
+export type RuleSource = 'manual' | 'learned';
+
 export interface CorrectionRule {
   id: string;
   pattern: string;
   replacement: string;
   enabled: boolean;
   createdAt: string;
+  source: RuleSource;
+}
+
+/** `debug_read_cursor_context` 的返回：一次光标上下文探测的完整结果。
+ *  status 之外的每一种都要能说清「为什么没读到」——装机验证时全靠它判断某个 app
+ *  是被安全闸门拦住了，还是 AX 根本不支持。 */
+export interface HostDocumentReadResult {
+  status: 'ok' | 'blocked' | 'unsupported' | 'unavailable' | 'timeout';
+  reason: string | null;
+  window: { text: string; cursor: number } | null;
+  appName: string | null;
+  bundleId: string | null;
+  elapsedMs: number;
+}
+
+/** 一条等待用户确认的纠正建议（Tier2）。后端只存在内存里，重启即空——建议本身是
+ *  易逝的，用户下次犯同样的错会再产生一条。 */
+export interface PendingCorrection {
+  id: string;
+  pattern: string;
+  replacement: string;
 }
 
 export interface VocabPreset {
@@ -421,6 +450,10 @@ export interface UserPreferences {
   /** 流式输入成功后是否把最终润色文本写回剪贴板。开启后 Cmd+V 还能重复粘贴该次输出，
    *  与一次性路径行为对齐。默认 true。 */
   streamingInsertSaveClipboard: boolean;
+  /** 是否把「用户正在写的那篇文档」中光标附近的原文送进 LLM 润色当上下文。
+   *  默认 false —— 开启后每次听写都会读取前台 app 的正文并把其中一段发给 LLM 服务商。
+   *  仅 macOS 有实现；密码框 / Secure Input / 密码管理器 / 终端一律硬拦。 */
+  cursorContextEnabled: boolean;
   /** 概览页是否显示「年度活动」热力图卡。默认 true；关闭只隐藏卡片，活动计数照常记录。 */
   showOverviewActivityHeatmap: boolean;
   /** 主窗口启动 + 后台每 60 分钟自动检查更新。默认 true。

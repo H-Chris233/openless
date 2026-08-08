@@ -420,6 +420,11 @@ export const zhTW: typeof zhCN = {
       clear: '清除結果',
     },
   },
+  vocabCard: {
+    title: '要記住這個詞嗎？',
+    accept: '記住',
+    reject: '不用',
+  },
   vocab: {
     kicker: 'VOCABULARY',
     title: '詞彙表',
@@ -432,6 +437,8 @@ export const zhTW: typeof zhCN = {
     tipDisabled: '點擊禁用此詞條',
     tipEnabled: '點擊啓用此詞條',
     removeAria: '刪除',
+    learnedSection: '自動收集（{{count}}）',
+    removeAllLearned: '全部刪除',
     corrections: {
       title: '糾正規則',
       tip: '修正常見 ASR 誤識別，支援 {num} 數字通配。',
@@ -442,6 +449,13 @@ export const zhTW: typeof zhCN = {
       tipDisabled: '點擊停用此規則',
       tipEnabled: '點擊啟用此規則',
       removeAria: '刪除糾正規則',
+      learnedBadge: '自動',
+      learnedTip: '從你的手動修改中自動收集。可以隨時刪掉。',
+      onlyLearned: '只看自動收集的（{{count}}）',
+      removeAllLearned: '刪除全部自動收集的',
+      suggestTitle: '要記住這個改法嗎？',
+      suggestAccept: '記住',
+      suggestDismiss: '不用',
     },
     presets: {
       title: '場景預設',
@@ -681,6 +695,9 @@ export const zhTW: typeof zhCN = {
     dataStorage: {
       title: '資料儲存',
       desc: '本機保留的歷史會話與對話上下文。',
+      cursorContextLabel: '游標上下文（實驗）',
+      cursorContextDesc:
+        '潤稿時讀取你正在寫的那篇文件中游標附近的原文，幫模型判斷同音詞、專有名詞與代詞該怎麼寫。開啟後這段文字會隨請求送給你設定的 LLM 服務商；關閉時一個字都不讀。密碼輸入框、Secure Input、密碼管理器與終端機始終不讀。僅 macOS。',
     },
     codingConsole: {
       title: 'Claude 主控台',
@@ -752,6 +769,10 @@ export const zhTW: typeof zhCN = {
     debug: {
       title: '除錯工具',
       desc: '排查辨識問題時使用，平時無需開啟。',
+      cursorProbeLabel: '游標上下文探針',
+      cursorProbeDesc: '點一下，然後在倒數內切到目標 app 並點進輸入框——探針會讀那裡的游標附近原文，用來確認哪些 app 讀得到、哪些被安全閘門擋住。只讀一次，不送給任何服務商。',
+      cursorProbeBtn: '探測（5 秒後）',
+      cursorProbeCountdown: '{{n}} 秒後讀取…',
     },
     marketplace: {
       title: '擴充市集',

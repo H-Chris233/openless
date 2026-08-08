@@ -179,6 +179,165 @@ fn show_capsule_window_for_recording<R: tauri::Runtime>(
     }
 }
 
+/// 词条建议卡片的窗口尺寸（逻辑点）。
+///
+/// 显示卡片时必须把胶囊窗口缩到这个大小 —— 见 [`show_vocab_suggestion_card`] 里关于
+/// 鼠标穿透的说明。
+const VOCAB_CARD_WIDTH: f64 = 320.0;
+/// 一行建议的高度：勾叉按钮 28pt + 行间距 8pt，与 `VocabSuggestionCard.tsx` 对齐。
+const VOCAB_CARD_ROW_HEIGHT: f64 = 36.0;
+/// 标题行 + 卡片内边距 + 留给投影的外边距。
+const VOCAB_CARD_CHROME_HEIGHT: f64 = 72.0;
+/// 卡片离屏幕右边缘留多少。
+const VOCAB_CARD_EDGE_MARGIN: f64 = 24.0;
+
+/// 把「要不要记住这个词」的卡片弹到胶囊那个位置。
+///
+/// 复用胶囊窗口而不是新开一个：多显示器定位、Space 贴附（macOS 26 上那个把窗口钉死在
+/// 单个桌面的坑）、nonactivating panel 都是踩过坑才对的，重开一个窗口等于重踩一遍。
+///
+/// 但有一处必须动：**胶囊平时是鼠标完全穿透的**（`set_ignore_cursor_events(true)`），
+/// 因为它浮在别的 app 上面，不能挡住用户点下面的东西。卡片要能点，就得临时关掉穿透；
+/// 而透明窗口一旦不穿透，**连透明的部分也会拦鼠标**。所以显示卡片时把窗口缩到卡片实际
+/// 大小，挡住的范围就只有卡片本身；收起时再恢复。
+pub(crate) fn show_vocab_suggestion_card(inner: &Arc<Inner>) {
+    let pending = inner.pending_corrections.lock().clone();
+    if pending.is_empty() {
+        return;
+    }
+    let Some(app) = inner.app.lock().clone() else {
+        return;
+    };
+    let height = VOCAB_CARD_CHROME_HEIGHT + VOCAB_CARD_ROW_HEIGHT * pending.len() as f64;
+    let app_for_main = app.clone();
+    let inner_for_main = Arc::clone(inner);
+    let _ = app.run_on_main_thread(move || {
+        let app = app_for_main;
+        let inner = inner_for_main;
+        // **最后一道闸：听写不在 Idle 就绝不弹卡片。**
+        //
+        // 上游那些判据（观察器代次、`pending_corrections` 是否为空）全都是「读一次再去
+        // 干活」，读完到这里还隔着一次跨线程调度 —— 排队的这段时间里 `begin_session_as`
+        // 完全可能已经跑完：解除观察器、收起卡片、开启新一轮听写。那种 check-then-act
+        // 无论怎么加都堵不住这一段。
+        //
+        // 判据放在这里才有意义：这是碰窗口之前的最后一个时点，而且问的是**真正的不变量**
+        // —— 卡片和录音胶囊共用一个窗口，显示卡片要把窗口缩到卡片大小，在听写进行中弹
+        // 出来就是把那次听写的胶囊弄没了（真机踩过，表现是「热键像是坏了」）。
+        //
+        // `begin_session_as` 是先置 phase 再收卡片的，所以只要它开了头，这里必然看得见。
+        if inner.state.lock().phase != crate::coordinator_state::SessionPhase::Idle {
+            log::debug!("[vocab-card] suppressed: a dictation session is in flight");
+            inner.pending_corrections.lock().clear();
+            return;
+        }
+        inner.vocab_card_visible.store(true, Ordering::SeqCst);
+        let Some(window) = app.get_webview_window("capsule") else {
+            return;
+        };
+        // 卡片是要点的，穿透必须关掉。
+        // Android 没有胶囊窗口，tauri 的 set_ignore_cursor_events 在其上不存在
+        //（与 capsule_focus.rs 里同一处理）。
+        #[cfg(not(mobile))]
+        if let Err(e) = window.set_ignore_cursor_events(false) {
+            log::warn!("[vocab-card] set_ignore_cursor_events(false) failed: {e}");
+        }
+        if let Err(e) = window.set_size(tauri::LogicalSize::new(VOCAB_CARD_WIDTH, height)) {
+            log::warn!("[vocab-card] resize failed: {e}");
+        }
+        if let Err(e) = position_vocab_card(&window, VOCAB_CARD_WIDTH, height) {
+            log::warn!("[vocab-card] position failed: {e}");
+        }
+        let _ = app.emit_to("capsule", "vocab:suggested", &pending);
+        show_capsule_window_for_recording(&app, &window, true);
+        #[cfg(target_os = "macos")]
+        crate::restore_main_window_key_if_active(&app);
+    });
+}
+
+/// 收起卡片：把窗口完整还给胶囊。
+///
+/// 四条路径都会走到这里 —— 用户点了「好」/「都不用」、10 秒到时、新一轮听写开始。
+///
+/// **没有卡片时必须原样返回。** `begin_session_as` 每次听写都会调它，如果无条件去
+/// `hide()` 那个窗口，就会和 `emit_capsule` 的 show 抢同一个窗口 —— 胶囊时隐时不显，
+/// 用户会以为热键坏了。
+pub(crate) fn hide_vocab_suggestion_card(inner: &Arc<Inner>) {
+    inner.pending_corrections.lock().clear();
+    if !inner.vocab_card_visible.swap(false, Ordering::SeqCst) {
+        return;
+    }
+    let Some(app) = inner.app.lock().clone() else {
+        return;
+    };
+    let app_for_main = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let app = app_for_main;
+        let Some(window) = app.get_webview_window("capsule") else {
+            return;
+        };
+        let _ = app.emit_to("capsule", "vocab:suggested", Vec::<crate::types::PendingCorrection>::new());
+        // 穿透必须还回去，否则胶囊会一直挡着屏幕底部那一块。
+        #[cfg(not(mobile))]
+        if let Err(e) = window.set_ignore_cursor_events(true) {
+            log::warn!("[vocab-card] restoring cursor passthrough failed: {e}");
+        }
+        // 尺寸也必须还回去 —— 卡片把窗口缩到过自己的大小，不复原的话下一次胶囊
+        // 就挤在一个 300×108 的窗口里，等于看不见。
+        let bounds = crate::capsule_window_bounds(false);
+        if let Err(e) = window.set_size(tauri::LogicalSize::new(bounds.width, bounds.height)) {
+            log::warn!("[vocab-card] restoring capsule size failed: {e}");
+        }
+        let _ = window.hide();
+    });
+}
+
+/// 解除手改观察器 —— **唯一的解除入口，三条路径都必须走它。**
+///
+/// 两步缺一不可，而这正是它必须收口成一个函数的原因：
+///
+/// 1. `*slot = None` 丢掉 `EditWatcher`，其 `Drop` 置位停止 flag；
+/// 2. 推进代次，让还在路上的上报当场失效。
+///
+/// 只做第 1 步是不够的：解除是**异步**的，观察线程要到下一次 runloop 轮转（≤1s）才看得见
+/// flag，而 AX 通知回调正跑在那次轮转里面。漏掉第 2 步，一条属于上一轮的建议就会在新会话
+/// 进行中弹出卡片 —— 而卡片会把胶囊窗口缩到卡片大小，等于把正在进行的那次听写的胶囊
+/// 弄没了（真机踩过，表现是「热键像是坏了」）。
+///
+/// 这个函数是补出来的：代次守卫刚加进来时，`arm_edit_watch` 和 `disarm_edit_watch` 各自
+/// 推了代次，唯独 `begin_session_as` 还是裸的 `*slot = None` —— 而它恰好是「新会话开始」
+/// 这条主路径，也就是上面那个 bug 的实际触发路径。三处各写各的，漏一处就等于没修。
+pub(crate) fn disarm_edit_watch(inner: &Arc<Inner>) {
+    *inner.edit_watcher.lock() = None;
+    inner
+        .edit_watch_generation
+        .fetch_add(1, Ordering::SeqCst);
+}
+
+/// 把卡片放到屏幕**右下角**。
+///
+/// 不跟胶囊一样居中：卡片是要停留几秒等你读的，而屏幕正下方居中正是你在写字的地方 ——
+/// 真机上它就直接盖住了正在编辑的那一行。右下角是通知类界面的常规位置，也是唯一一块
+/// 「停留几秒不打扰任何人」的地方。
+fn position_vocab_card<R: tauri::Runtime>(
+    window: &tauri::WebviewWindow<R>,
+    width: f64,
+    height: f64,
+) -> tauri::Result<()> {
+    let Some(monitor) = window.current_monitor()? else {
+        return Ok(());
+    };
+    let scale = monitor.scale_factor();
+    let size = monitor.size();
+    let pos = monitor.position();
+    let (mon_w, mon_h) = (size.width as f64 / scale, size.height as f64 / scale);
+    let (mon_x, mon_y) = (pos.x as f64 / scale, pos.y as f64 / scale);
+    let x = mon_x + mon_w - width - VOCAB_CARD_EDGE_MARGIN;
+    // 80pt 给 Dock，与胶囊同源。
+    let y = mon_y + mon_h - height - 80.0;
+    window.set_position(tauri::LogicalPosition::new(x, y))
+}
+
 #[derive(Clone)]
 enum ActiveAsr {
     Volcengine(Arc<VolcengineStreamingASR>),
@@ -576,6 +735,31 @@ struct Inner {
     /// 决定 DictationSession.has_audio_recording 字段。比单纯读 prefs.record_audio_for_debug
     /// 更准确：用户开了开关但路径无法创建（权限 / 磁盘满）也算 false。
     audio_archive_active: AtomicBool,
+    /// 上一次落字之后武装的手改监听（macOS）。
+    ///
+    /// 存在 `Inner` 上只为了「下一次听写开始时解除上一次的」这一条生命周期规则 ——
+    /// 覆盖这个 Option 会 drop 掉旧的 watcher，drop 即解除。另外三条（60 秒超时、
+    /// 前台 app 切换、焦点元素消失）由观察线程自己负责。
+    edit_watcher: Mutex<Option<crate::host_document::EditWatcher>>,
+    /// 观察器代次。每武装一次 +1；上报时对不上号的一律丢弃。
+    ///
+    /// 解除是**异步**的：drop `EditWatcher` 只是置一个 flag，观察线程要到下一次 runloop
+    /// 轮转（≤1s）才看得见，而 AX 通知回调正跑在那次轮转**里面**。也就是说「已解除」和
+    /// 「还能再上报一次」有一段重叠 —— 光靠 flag 只能缩小这个窗口，关不死它。
+    ///
+    /// 迟到的上报不是小事：卡片会把胶囊窗口缩到卡片大小，一条属于上一轮的建议在**新
+    /// 会话进行中**弹出来，等于把正在进行的那次听写的胶囊弄没了。真机上踩过一次，
+    /// 表现是「热键像是坏了」。
+    ///
+    /// 所以判据不放在线程那边，放在这里：只有代次对得上的上报才算数。
+    edit_watch_generation: std::sync::atomic::AtomicU64,
+    /// 等待用户确认的词条建议。只在内存里 —— 见 `PendingCorrection` 的说明。
+    pending_corrections: Mutex<Vec<crate::types::PendingCorrection>>,
+    /// 建议卡片是不是正占着胶囊窗口。
+    ///
+    /// 门控 `hide_vocab_suggestion_card`：没有卡片时它必须什么都不做，否则每次听写
+    /// 开始都会去 hide 胶囊窗口，和 `emit_capsule` 的 show 抢同一个窗口。
+    vocab_card_visible: AtomicBool,
     recording_mute: Mutex<SharedRecordingMuteState>,
     hotkey: Mutex<Option<HotkeyMonitor>>,
     hotkey_status: Mutex<HotkeyStatus>,
@@ -830,6 +1014,10 @@ impl Coordinator {
                     omni_pcm: Mutex::new(None),
                     recorder: Mutex::new(None),
                     audio_archive_active: AtomicBool::new(false),
+                    edit_watcher: Mutex::new(None),
+                    edit_watch_generation: std::sync::atomic::AtomicU64::new(0),
+                    pending_corrections: Mutex::new(Vec::new()),
+                    vocab_card_visible: AtomicBool::new(false),
                     recording_mute: Mutex::new(SharedRecordingMuteState::new()),
                     hotkey: Mutex::new(None),
                     hotkey_status: Mutex::new(HotkeyStatus::default()),
@@ -950,6 +1138,10 @@ impl Coordinator {
                 omni_pcm: Mutex::new(None),
                 recorder: Mutex::new(None),
                 audio_archive_active: AtomicBool::new(false),
+                edit_watcher: Mutex::new(None),
+                    edit_watch_generation: std::sync::atomic::AtomicU64::new(0),
+                pending_corrections: Mutex::new(Vec::new()),
+                vocab_card_visible: AtomicBool::new(false),
                 recording_mute: Mutex::new(SharedRecordingMuteState::new()),
                 hotkey: Mutex::new(None),
                 hotkey_status: Mutex::new(HotkeyStatus::default()),
@@ -1650,6 +1842,68 @@ impl Coordinator {
         &self.inner.correction_rules
     }
 
+    /// 用户在卡片上点了勾 —— 这一条进词汇表。
+    pub fn accept_pending_correction(&self, id: &str) {
+        let Some(taken) = self.take_pending_correction(id) else {
+            return;
+        };
+        dictation::commit_learned_rule(
+            &self.inner,
+            &crate::host_document::LearnedRule {
+                pattern: taken.pattern,
+                replacement: taken.replacement,
+            },
+        );
+        self.refresh_vocab_card();
+    }
+
+    /// 用户在卡片上点了叉 —— 这一条丢掉，什么都不记。
+    ///
+    /// **不做「拒绝名单」。** 下次你再改同一个词它还会问；一份你看不见的名单只会让你
+    /// 将来纳闷「为什么这个词它不学了」。
+    pub fn reject_pending_correction(&self, id: &str) {
+        if self.take_pending_correction(id).is_none() {
+            return;
+        }
+        self.refresh_vocab_card();
+    }
+
+    fn take_pending_correction(&self, id: &str) -> Option<crate::types::PendingCorrection> {
+        let mut pending = self.inner.pending_corrections.lock();
+        pending
+            .iter()
+            .position(|p| p.id == id)
+            .map(|idx| pending.remove(idx))
+    }
+
+    /// 逐条点完之后重排卡片：还有剩的就按新行数重算高度，空了就收起来。
+    ///
+    /// 不重算高度的话，窗口会停在「原来那么多行」的尺寸上，而窗口在显示卡片期间是**不
+    /// 穿透鼠标**的 —— 那块已经空掉的透明区域会继续拦住底下的点击。
+    fn refresh_vocab_card(&self) {
+        if self.inner.pending_corrections.lock().is_empty() {
+            hide_vocab_suggestion_card(&self.inner);
+        } else {
+            show_vocab_suggestion_card(&self.inner);
+        }
+    }
+
+    /// 卡片 10 秒到期，或新一轮听写开始。
+    pub fn dismiss_vocab_suggestions(&self) {
+        hide_vocab_suggestion_card(&self.inner);
+    }
+
+    /// 用户关掉了「光标上下文」开关 —— 立刻停掉一切还在跑的观察，别等它自己超时。
+    ///
+    /// 置空即解除：`EditWatcher` 的 `Drop` 会把停止 flag 置位，观察线程在下一次
+    /// runloop 轮转（≤1s）时退出并反注册 AXObserver。同时把还挂着的建议卡片收掉 ——
+    /// 那些建议是这条链路的产物，开关关了就不该再让用户看见。
+    pub fn disarm_edit_watch(&self) {
+        disarm_edit_watch(&self.inner);
+        hide_vocab_suggestion_card(&self.inner);
+        log::info!("[cursor-context] edit watch disarmed: feature switched off");
+    }
+
     pub fn update_hotkey_binding(&self) {
         let prefs = self.inner.prefs.get();
         let dictation_trigger =
@@ -2093,6 +2347,9 @@ impl Coordinator {
             output_language_preference,
             llm_thinking_enabled,
             front_app.as_deref(),
+            // repolish 发生在历史页里，此刻焦点在 OpenLess 自己的窗口上，读到的
+            // 只会是我们自己的 UI —— 没有可用的光标上下文。
+            None,
             &[],
             // repolish 不回写历史的模型/耗时字段，调用快照就地丢弃。
             &mut None,
@@ -2262,6 +2519,9 @@ impl Coordinator {
             prefs.chinese_script_preference,
             prefs.output_language_preference,
             None,
+            // front_app 一样传 None：这是脱离运行时的静态预览，前台 app 和光标上下文
+            // 都要等真正听写时才有值。
+            None,
             false,
         );
         let multi_turn = crate::polish::assemble_polish_system_prompt(
@@ -2270,6 +2530,7 @@ impl Coordinator {
             &prefs.working_languages,
             prefs.chinese_script_preference,
             prefs.output_language_preference,
+            None,
             None,
             true,
         );
@@ -3030,6 +3291,138 @@ fn resolve_ark_endpoint_with_policy(
 
 #[cfg(test)]
 mod tests {
+    /// 造一条词典条目。传给 `prioritize_vocab_for_asr` 时必须是词典的原始顺序
+    /// （最近添加在前）。
+    fn vocab_entry(phrase: &str, hits: u64) -> crate::types::DictionaryEntry {
+        crate::types::DictionaryEntry {
+            id: phrase.to_string(),
+            phrase: phrase.to_string(),
+            note: None,
+            enabled: true,
+            hits,
+            created_at: String::new(),
+        }
+    }
+
+    fn learned_vocab_entry(phrase: &str, hits: u64) -> crate::types::DictionaryEntry {
+        let mut entry = vocab_entry(phrase, hits);
+        entry.note = Some(super::dictation::LEARNED_VOCAB_NOTE.to_string());
+        entry
+    }
+
+    /// 真机复现：刚添加的碎片排在词典最前，把命中 18 次的 `hermes`、7 次的
+    /// `win-shukong` 挤出了 240 字符的 ASR 预算。保底席位之后必须按命中排。
+    #[test]
+    fn asr_vocab_orders_by_hits_once_past_the_fresh_seats() {
+        let mut entries: Vec<_> = (0..super::FRESH_VOCAB_SEATS)
+            .map(|i| vocab_entry(&format!("fresh{i}"), 0))
+            .collect();
+        entries.push(vocab_entry("scrap", 1));
+        entries.push(vocab_entry("hermes", 18));
+        entries.push(vocab_entry("win-shukong", 7));
+
+        let ordered = super::prioritize_vocab_for_asr(entries);
+
+        let pos = |p: &str| ordered.iter().position(|x| x == p).expect("phrase kept");
+        assert!(pos("hermes") < pos("scrap"), "命中多的必须排在刚收进来的碎片前面");
+        assert!(pos("win-shukong") < pos("scrap"));
+        assert!(pos("hermes") < pos("win-shukong"), "命中多的在前");
+    }
+
+    /// 纯按命中排会让刚添加的词永远进不去预算——而用户刚加它，多半就是因为刚
+    /// 被它坑过。最近添加的若干条要有保底席位。
+    #[test]
+    fn asr_vocab_reserves_seats_for_freshly_added_phrases() {
+        let mut entries = vec![vocab_entry("Pathwyze", 0)];
+        entries.extend((0..30).map(|i| vocab_entry(&format!("old{i}"), 100 + i)));
+
+        let ordered = super::prioritize_vocab_for_asr(entries);
+
+        assert_eq!(
+            ordered.first().map(String::as_str),
+            Some("Pathwyze"),
+            "命中为 0 的新词也要占住最前的保底席位"
+        );
+    }
+
+    /// 同词异形一起进词表既浪费预算，又让模型无所适从。留命中多的那个写法——
+    /// 位置取最靠前那次，但内容不能被刚收进来、命中为 0 的变体顶掉。
+    #[test]
+    fn asr_vocab_dedupes_case_insensitively_keeping_the_most_hit_spelling() {
+        let entries = vec![
+            vocab_entry("claude", 0),
+            vocab_entry("mac-mini", 27),
+            vocab_entry("Claude", 33),
+        ];
+
+        let ordered = super::prioritize_vocab_for_asr(entries);
+
+        assert_eq!(
+            ordered,
+            vec!["Claude".to_string(), "mac-mini".to_string()],
+            "保留 Claude 的写法，但沿用 claude 那次更靠前的位置"
+        );
+    }
+
+    #[test]
+    fn learned_vocab_does_not_consume_fresh_manual_seats() {
+        let mut entries = Vec::new();
+        for i in 0..super::FRESH_VOCAB_SEATS {
+            entries.push(learned_vocab_entry(&format!("learned{i}"), 1_000 - i as u64));
+            entries.push(vocab_entry(&format!("manual{i}"), 0));
+        }
+
+        let ordered = super::prioritize_vocab_for_asr(entries);
+        let expected_manual: Vec<String> = (0..super::FRESH_VOCAB_SEATS)
+            .map(|i| format!("manual{i}"))
+            .collect();
+
+        assert_eq!(
+            &ordered[..super::FRESH_VOCAB_SEATS],
+            expected_manual.as_slice(),
+            "学习词条即使排在词典前面，也不能占用手动新增的保底席位"
+        );
+    }
+
+    #[test]
+    fn learned_vocab_does_not_backfill_unused_manual_seats() {
+        let entries = vec![
+            learned_vocab_entry("learned-low", 1),
+            vocab_entry("only-manual", 0),
+            learned_vocab_entry("learned-high", 20),
+        ];
+
+        let ordered = super::prioritize_vocab_for_asr(entries);
+
+        assert_eq!(ordered, vec!["only-manual", "learned-high", "learned-low"]);
+    }
+
+    #[test]
+    fn all_learned_vocab_is_ranked_by_hits() {
+        let entries = vec![
+            learned_vocab_entry("cold", 0),
+            learned_vocab_entry("hot", 12),
+            learned_vocab_entry("warm", 5),
+        ];
+
+        let ordered = super::prioritize_vocab_for_asr(entries);
+
+        assert_eq!(ordered, vec!["hot", "warm", "cold"]);
+    }
+
+    #[test]
+    fn asr_vocab_dedupes_across_manual_and_learned_sources() {
+        let entries = vec![
+            vocab_entry("claude", 0),
+            learned_vocab_entry("Claude", 33),
+            learned_vocab_entry("other", 10),
+        ];
+
+        let ordered = super::prioritize_vocab_for_asr(entries);
+
+        assert_eq!(ordered, vec!["Claude", "other"]);
+    }
+
     #[test]
     fn volc_resource_history_label_allows_volc_namespace_ids() {
         // issue #373 场景的两个真实 resource id 必须放行。
@@ -4751,6 +5144,91 @@ fn enabled_phrases(inner: &Arc<Inner>) -> Vec<String> {
         .filter(|e| e.enabled)
         .map(|e| e.phrase)
         .collect()
+}
+
+/// 词典启用词条，**按送进 ASR 词汇偏置的优先级排好序**。
+///
+/// LLM 侧的热词块没有名额限制（[`enabled_phrases`] 直接用词典顺序就行），ASR 侧
+/// 有：`whisper::PROMPT_CHAR_BUDGET` 只给 240 个字符，装不下的词条被直接丢弃。
+/// 于是「送进去的顺序」就等于「谁能被听见」。
+///
+/// 而词典本身的顺序是**最近添加的在最前**（[`DictionaryStore::add`] 用
+/// `insert(0)`，为的是词汇表页面把刚加的词排在上面）。两个各自都合理的决定撞在
+/// 一起，结果是预算永远优先喂给最新的词，最老的先掉出去——而最老的那批恰恰是
+/// 攒了最多命中的常用词。真机上的表现：一份 40 条的词典里，命中 18 次、7 次、
+/// 10 次的三个专有名词全部排在预算外，从来没送到过 ASR；用户在词汇表里看得见
+/// 它们、以为在生效，实际上一次都没生效过。
+///
+/// 排序规则：
+/// 1. 最近手动添加的前 [`FRESH_VOCAB_SEATS`] 条保底——刚加的词还没机会攒命中，纯按
+///    命中排会让它永远进不去，而用户刚加它多半就是因为刚被它坑过。手改学习词条不占
+///    这些席位；它们本来就可能是半截词，必须靠真实命中自己爬进预算。
+/// 2. 其余按命中次数降序。
+/// 3. 同词异形（`claude` / `Claude`）只留命中多的那个写法。
+fn asr_vocab_phrases(inner: &Arc<Inner>) -> Vec<String> {
+    let entries: Vec<crate::types::DictionaryEntry> = inner
+        .vocab
+        .list()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|e| e.enabled)
+        .collect();
+    prioritize_vocab_for_asr(entries)
+}
+
+/// 最近添加的词条无条件占住的名额，见 [`asr_vocab_phrases`]。
+const FRESH_VOCAB_SEATS: usize = 5;
+
+/// [`asr_vocab_phrases`] 的纯函数部分，方便直接测排序规则。
+///
+/// `entries` 必须是词典的原始顺序（最近添加在前）——保底席位靠它取「最近」，
+/// 不去解析 `created_at` 字符串（历史文件由 Swift 版写入，格式不保证一致）。
+fn prioritize_vocab_for_asr(entries: Vec<crate::types::DictionaryEntry>) -> Vec<String> {
+    let mut fresh_manual = Vec::with_capacity(FRESH_VOCAB_SEATS.min(entries.len()));
+    let mut ranked = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let learned = entry.note.as_deref() == Some(dictation::LEARNED_VOCAB_NOTE);
+        if !learned && fresh_manual.len() < FRESH_VOCAB_SEATS {
+            fresh_manual.push(entry);
+        } else {
+            ranked.push(entry);
+        }
+    }
+    // 保底席位之外的全部词条按命中降序；`sort_by_key` 是稳定排序，同命中次数的保持
+    // 词典原顺序（最近添加在前）。学习词条也在这里，不会被拿来填空缺的手动保底席位。
+    ranked.sort_by_key(|e| std::cmp::Reverse(e.hits));
+    fresh_manual.extend(ranked);
+    let ordered = fresh_manual;
+
+    // 同一个词的不同写法（`claude` / `Claude`）只留一个：既省预算，也免得两种
+    // 写法一起进词表让模型无所适从。留**命中多**的那个写法，但位置取最靠前那次
+    // ——否则一个刚被收进来、命中为 0 的小写变体会把攒了几十次命中的正确写法顶掉。
+    let mut best: std::collections::HashMap<String, (usize, crate::types::DictionaryEntry)> =
+        std::collections::HashMap::new();
+    for (index, entry) in ordered.into_iter().enumerate() {
+        let key = entry.phrase.trim().to_lowercase();
+        if key.is_empty() {
+            continue;
+        }
+        match best.entry(key) {
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert((index, entry));
+            }
+            std::collections::hash_map::Entry::Occupied(mut slot) => {
+                if entry.hits > slot.get().1.hits {
+                    let position = slot.get().0;
+                    slot.insert((position, entry));
+                }
+            }
+        }
+    }
+
+    let mut picked: Vec<(usize, String)> = best
+        .into_values()
+        .map(|(index, entry)| (index, entry.phrase))
+        .collect();
+    picked.sort_by_key(|(index, _)| *index);
+    picked.into_iter().map(|(_, phrase)| phrase).collect()
 }
 
 /// 终止态（Done / Error）后延迟 N ms 把胶囊改回 Idle，让浮窗自动消失。
