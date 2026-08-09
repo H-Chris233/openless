@@ -271,11 +271,10 @@ fn read_openai_provider_config(scope: &ProviderScope) -> Result<ProviderConfig, 
     if base_url.trim().is_empty() {
         return Err("Endpoint 为空".to_string());
     }
-    // issue #609 F-01 孪生 gap（@claude 复审 #617 指出）：ASR / provider 自定义 endpoint
-    // 同样是 attacker-controlled，且 ASR 请求也带 API Key。复用 LLM 路径已有的 SSRF 配置
-    // 校验，拒绝指向内网/回环/link-local/CGNAT/IPv6 ULA/元数据服务的地址；localhost/
-    // 127.0.0.1/::1 仍放行 http（本地 Whisper 服务）。覆盖 validate_provider_credentials
-    // (asr/llm) 连通性测试与 list_provider_models 模型列表两条 HTTP 路径。
+    // endpoint 校验：仅保证是合法 http(s) URL，地址不设任何限制（公网/局域网/内网
+    // DNS/hosts 别名/本地均可）——端点由用户显式配置，选择权在用户；前端对 http://
+    // 输入展示明文风险提示。覆盖 validate_provider_credentials 连通性测试与
+    // list_provider_models 模型列表两条 HTTP 路径。
     crate::endpoint_security::validate_http_endpoint(&base_url)
         .map_err(|_| "endpointInvalid".to_string())?;
     Ok(ProviderConfig {
@@ -1452,26 +1451,33 @@ mod tests {
     }
 
     #[test]
-    fn asr_endpoint_rejects_metadata_cgnat_and_non_https_public() {
-        // 元数据 / CGNAT / 非 https 外网：拒绝，避免带 API Key 的 ASR 请求被指向高价值目标 / 明文外泄。
-        assert!(validate_http_endpoint("http://169.254.169.254/v1/audio/transcriptions").is_err());
-        assert!(validate_http_endpoint("http://100.64.0.1/v1/audio/transcriptions").is_err());
-        assert!(validate_http_endpoint("http://api.example.com/v1/audio/transcriptions").is_err());
-    }
-
-    #[test]
-    fn asr_endpoint_accepts_public_https_localhost_and_lan() {
+    fn asr_endpoint_accepts_any_http_or_https_url() {
+        // 地址选择权完全交给用户：公网 / 局域网 / 元数据地址一律放行，
+        // 前端对 http:// 输入展示明文风险提示。
+        validate_http_endpoint("http://169.254.169.254/v1/audio/transcriptions")
+            .expect("用户显式配置的 endpoint 必须放行");
+        validate_http_endpoint("http://100.64.0.1/v1/audio/transcriptions")
+            .expect("用户显式配置的 endpoint 必须放行");
+        validate_http_endpoint("http://api.example.com/v1/audio/transcriptions")
+            .expect("公网 http ASR endpoint 必须放行");
         // 公网 https（如自建 Whisper 网关）放行。
         validate_http_endpoint("https://api.example.com/v1/audio/transcriptions")
             .expect("公网 https ASR endpoint 必须通过");
         // 本地 Whisper 服务：localhost / 127.0.0.1 http 放行。
         validate_http_endpoint("http://localhost:9000/v1").expect("本地 Whisper http 必须通过");
         validate_http_endpoint("http://127.0.0.1:9000/v1").expect("本地 Whisper http 必须通过");
-        // F-01 放宽：局域网（RFC1918）http ASR 网关放行（用户局域网自托管 Whisper）。
+        // 局域网（RFC1918）http ASR 网关放行（用户局域网自托管 Whisper）。
         validate_http_endpoint("http://192.168.1.50:9000/v1/audio/transcriptions")
             .expect("局域网 http ASR endpoint 必须通过");
         // Mimo 官方默认 endpoint（https）放行。
         validate_http_endpoint(crate::asr::mimo::DEFAULT_ENDPOINT)
             .expect("Mimo 官方默认 endpoint 必须通过");
+    }
+
+    #[test]
+    fn asr_endpoint_rejects_malformed_or_non_http_urls() {
+        assert!(validate_http_endpoint("not a url").is_err());
+        assert!(validate_http_endpoint("ftp://example.com/").is_err());
+        assert!(validate_http_endpoint("wss://example.com/").is_err());
     }
 }
