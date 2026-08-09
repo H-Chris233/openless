@@ -1047,6 +1047,7 @@ export const ja: typeof zhCN = {
       validateFailed: '接続チェックに失敗しました。',
       providerHttpStatus: 'サプライヤーが {{status}} を返しました。API Key 権限またはエンドポイントを確認してください。',
       endpointMustUseHttps: 'HTTP Endpoint も使用できますが、API Key と音声内容が通信中に漏えいする可能性があります。',
+      endpointHttpWarning: 'HTTP Endpoint も使用できますが、API Key とリクエスト内容が通信中に漏えいする可能性があります。',
       endpointInvalid: 'Endpoint の形式が無効です。',
       bailianEndpointSchemeInvalid: 'Bailian リアルタイム ASR は DashScope の WebSocket ゲートウェイを使用します。エンドポイントは wss:// で始まる必要があります（既定: wss://dashscope.aliyuncs.com/api-ws/v1/inference/）。https:// の互換モード URL はここでは使用できません。',
       qwen3EndpointSchemeInvalid: 'Qwen3 リアルタイム ASR は DashScope Realtime WebSocket ゲートウェイを使用します。エンドポイントは wss:// で始まる必要があります（既定: wss://dashscope.aliyuncs.com/api-ws/v1/realtime）。https:// の URL はここでは使用できません。',

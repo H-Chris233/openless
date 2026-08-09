@@ -1027,7 +1027,7 @@ function CredentialField({ label, account, provider, placeholder, mono, mask, de
 
   const inputType = mask && !revealed ? 'password' : 'text';
   const disabled = !loaded;
-  const showInsecureAsrEndpointWarning = account === 'asr.endpoint'
+  const showInsecureEndpointWarning = (account === 'ark.endpoint' || account === 'asr.endpoint' || account === 'omni.endpoint')
     && value.trim().toLowerCase().startsWith('http://');
 
   return (
@@ -1120,9 +1120,9 @@ function CredentialField({ label, account, provider, placeholder, mono, mask, de
             </span>
           )}
         </div>
-        {showInsecureAsrEndpointWarning && (
+        {showInsecureEndpointWarning && (
           <span style={{ fontSize: 11, color: 'var(--ol-warn)', lineHeight: 1.45 }}>
-            {t('settings.providers.endpointMustUseHttps')}
+            {t('settings.providers.endpointHttpWarning')}
           </span>
         )}
       </div>

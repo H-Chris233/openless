@@ -1047,6 +1047,7 @@ export const ko: typeof zhCN = {
       validateFailed: '연결 확인에 실패했습니다.',
       providerHttpStatus: '공급자가 {{status}} 를 반환했습니다. API Key 권한 또는 Endpoint 를 확인해 주세요.',
       endpointMustUseHttps: 'HTTP Endpoint 를 사용할 수 있지만, API Key 와 음성 내용이 전송 중 유출될 수 있습니다.',
+      endpointHttpWarning: 'HTTP Endpoint 를 사용할 수 있지만, API Key 와 요청 내용이 전송 중 유출될 수 있습니다.',
       endpointInvalid: 'Endpoint 형식이 올바르지 않습니다.',
       bailianEndpointSchemeInvalid: 'Bailian 실시간 ASR은 DashScope WebSocket 게이트웨이를 사용합니다. 엔드포인트는 wss://로 시작해야 합니다(기본값: wss://dashscope.aliyuncs.com/api-ws/v1/inference/). https:// 호환 모드 주소는 여기서 사용할 수 없습니다.',
       qwen3EndpointSchemeInvalid: 'Qwen3 실시간 ASR은 DashScope Realtime WebSocket 게이트웨이를 사용합니다. 엔드포인트는 wss://로 시작해야 합니다(기본값: wss://dashscope.aliyuncs.com/api-ws/v1/realtime). https:// 주소는 여기서 사용할 수 없습니다.',
