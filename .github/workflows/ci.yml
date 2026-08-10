@@ -180,6 +180,9 @@ jobs:
           cache: npm
           cache-dependency-path: openless-all/app/package-lock.json
 
+      # 现有测试继续用 stable；额外安装声明的 MSRV，供下方兼容性门禁显式调用。
+      - uses: dtolnay/rust-toolchain@1.88.0
+
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Install Linux check dependencies
@@ -241,6 +244,12 @@ jobs:
         # 这样 Windows CI 能实际执行 coordinator/hotkey/recorder/insertion 逻辑单测。
         if: runner.os == 'Windows'
         run: cargo test --manifest-path src-tauri/backend-tests/Cargo.toml
+
+      - name: Check Tauri backend with Rust 1.88 MSRV
+        run: cargo +1.88.0 check --locked --manifest-path src-tauri/Cargo.toml
+
+      - name: Compile backend tests with Rust 1.88 MSRV
+        run: cargo +1.88.0 test --locked --manifest-path src-tauri/backend-tests/Cargo.toml --no-run
 
       - name: Verify version sync across all 5 files
         # 两个平台都跑这个校验：Windows runner 自带 git-bash，跨 shell 表现一致。
