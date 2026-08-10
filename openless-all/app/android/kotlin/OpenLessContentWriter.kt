@@ -24,13 +24,13 @@ object OpenLessContentWriter {
                 output.write(bytes)
                 output.flush()
             } ?: run {
-                Log.w(TAG, "openOutputStream returned null for $uriString")
+                Log.w(TAG, "openOutputStream returned null for selected document")
                 return false
             }
-            Log.i(TAG, "wrote ${bytes.size} bytes to $uriString")
+            Log.i(TAG, "wrote ${bytes.size} bytes to selected document")
             true
         } catch (error: Throwable) {
-            Log.e(TAG, "failed to write $uriString", error)
+            Log.e(TAG, "failed to write selected document", error)
             false
         }
     }

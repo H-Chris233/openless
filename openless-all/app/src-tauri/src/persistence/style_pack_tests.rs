@@ -498,6 +498,24 @@ fn style_pack_archive_round_trip_preserves_valid_pack_and_png_icon() {
 }
 
 #[test]
+fn style_pack_archive_bytes_can_be_imported_from_a_document_provider() {
+    let root = TestDir::new("bytes-import");
+    let zip_path = root.path().join("document-provider.zip");
+    valid_archive(&zip_path, None);
+    let bytes = fs::read(&zip_path).expect("read archive bytes");
+    let destination = test_store(&root.path().join("destination"), Vec::new());
+
+    let imported = destination
+        .import_from_zip_bytes(&bytes, "document provider")
+        .expect("import valid archive bytes");
+
+    assert_eq!(imported.id, "test-pack");
+    assert_eq!(imported.name, "Test Pack");
+    assert_eq!(imported.prompt, "Write clearly and concisely.");
+    assert_eq!(imported.examples.len(), 1);
+}
+
+#[test]
 fn migration_fills_empty_selection_prompts_with_style_defaults() {
     let mut packs = builtin_style_packs();
     for pack in &mut packs {

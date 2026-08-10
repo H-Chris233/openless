@@ -20,8 +20,10 @@ import { ThinkingDots } from '../components/ThinkingDots';
 import { GithubLoginModal } from '../components/GithubLoginModal';
 import { Modal } from '../components/ui/Modal';
 import {
+  downloadMarketplacePack,
   fetchMarketplaceDetail,
   installMarketplacePack,
+  isTauri,
   likeMarketplacePack,
   listMarketplace,
   listStylePacks,
@@ -45,6 +47,7 @@ import {
   shouldCloseMarketplaceDetail,
   type MarketplaceInstallError,
 } from '../lib/marketplaceInstall';
+import { pickStylePackZipTargetPath, stylePackZipFileName } from '../lib/stylePackZip';
 import { Btn, Card, PageHeader, Pill } from './_atoms';
 
 type SortMode = 'popular' | 'new' | 'liked';
@@ -65,6 +68,7 @@ export function Marketplace() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [actionMsg, setActionMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
   const [installingPackId, setInstallingPackId] = useState<string | null>(null);
+  const [downloadingPackId, setDownloadingPackId] = useState<string | null>(null);
   const [installError, setInstallError] = useState<MarketplaceInstallError | null>(null);
 
   const [showUpload, setShowUpload] = useState(false);
@@ -289,6 +293,22 @@ export function Marketplace() {
     } finally {
       setInstallingPackId(current => current === packId ? null : current);
       if (clientFailureLog) void logClientError(clientFailureLog);
+    }
+  };
+
+  const onDownload = async (pack: MarketplaceListItem) => {
+    if (downloadingPackId !== null) return;
+    setDownloadingPackId(pack.id);
+    try {
+      const defaultName = stylePackZipFileName(pack.name, pack.version);
+      const targetPath = await pickStylePackZipTargetPath(defaultName, isTauri);
+      if (!targetPath) return;
+      await downloadMarketplacePack(pack.id, targetPath);
+      setActionMsg({ kind: 'ok', text: t('marketplace.downloaded', { name: pack.name }) });
+    } catch (error) {
+      setActionMsg({ kind: 'err', text: t('marketplace.errors.download', { err: errorMessage(error) }) });
+    } finally {
+      setDownloadingPackId(current => current === pack.id ? null : current);
     }
   };
 
@@ -624,56 +644,99 @@ export function Marketplace() {
         ) : (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 12 }}>
             <AnimatePresence mode="sync">
-            {visibleItems.map(p => (
-              <motion.button
-                layout
-                initial={{ opacity: 0, scale: 0.85 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.85 }}
-                transition={{
-                  layout: { type: 'spring', damping: 25, stiffness: 220 },
-                  opacity: { duration: 0.2 },
-                  scale: { duration: 0.2 }
-                }}
-                key={p.id}
-                onClick={() => void openDetail(p.id)}
-                style={{
-                  textAlign: 'left',
-                  padding: 14,
-                  borderRadius: 12,
-                  border: '0.5px solid var(--ol-line-strong)',
-                  background: 'var(--ol-surface)',
-                  cursor: 'pointer',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: 6,
-                }}
-              >
-                <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 6 }}>
-                  <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--ol-ink-1)' }}>{p.name}</span>
-                  <span style={{ fontSize: 10, color: 'var(--ol-ink-4)', fontFamily: 'var(--ol-font-mono)' }}>v{p.version}</span>
-                </div>
-                <div style={{ fontSize: 12, color: 'var(--ol-ink-3)', lineHeight: 1.5, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden', minHeight: 36 }}>
-                  {p.description || t('marketplace.noDescription')}
-                </div>
-                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 2 }}>
-                  <Pill size="sm" tone="outline">{p.baseMode}</Pill>
-                  {isDerivative(p.originAuthorLogin) && (
-                    <span title={t('marketplace.derivativeBadge', { login: p.originAuthorLogin })}>
-                      <Pill size="sm" tone="ok">{t('marketplace.derivativeBadge', { login: p.originAuthorLogin })}</Pill>
-                    </span>
-                  )}
-                  {p.tags.slice(0, 2).map(tag => <Pill key={tag} size="sm" tone="default">{tag}</Pill>)}
-                </div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: 'var(--ol-ink-4)', marginTop: 4 }}>
-                  <span style={{ fontWeight: 500, color: 'var(--ol-ink-3)' }}>@{p.authorLogin}</span>
-                  <span>
-                    <span style={{ color: likedIds.has(p.id) ? '#ef4444' : 'var(--ol-ink-4)' }}>{likedIds.has(p.id) ? '★' : '☆'}</span>
-                    {' '}{p.likeCount} · ↓ {p.downloadCount}
-                  </span>
-                </div>
-              </motion.button>
-            ))}
+              {visibleItems.map(p => {
+                const isDownloading = downloadingPackId === p.id;
+                return (
+                  <motion.article
+                    layout
+                    initial={{ opacity: 0, scale: 0.85 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    exit={{ opacity: 0, scale: 0.85 }}
+                    transition={{
+                      layout: { type: 'spring', damping: 25, stiffness: 220 },
+                      opacity: { duration: 0.2 },
+                      scale: { duration: 0.2 }
+                    }}
+                    key={p.id}
+                    style={{
+                      borderRadius: 12,
+                      border: '0.5px solid var(--ol-line-strong)',
+                      background: 'var(--ol-surface)',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      overflow: 'hidden',
+                    }}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => void openDetail(p.id)}
+                      style={{
+                        width: '100%',
+                        flex: 1,
+                        textAlign: 'left',
+                        padding: 14,
+                        border: 'none',
+                        background: 'transparent',
+                        cursor: 'pointer',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 6,
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 6 }}>
+                        <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--ol-ink-1)' }}>{p.name}</span>
+                        <span style={{ fontSize: 10, color: 'var(--ol-ink-4)', fontFamily: 'var(--ol-font-mono)' }}>v{p.version}</span>
+                      </div>
+                      <div style={{ fontSize: 12, color: 'var(--ol-ink-3)', lineHeight: 1.5, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden', minHeight: 36 }}>
+                        {p.description || t('marketplace.noDescription')}
+                      </div>
+                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 2 }}>
+                        <Pill size="sm" tone="outline">{p.baseMode}</Pill>
+                        {isDerivative(p.originAuthorLogin) && (
+                          <span title={t('marketplace.derivativeBadge', { login: p.originAuthorLogin })}>
+                            <Pill size="sm" tone="ok">{t('marketplace.derivativeBadge', { login: p.originAuthorLogin })}</Pill>
+                          </span>
+                        )}
+                        {p.tags.slice(0, 2).map(tag => <Pill key={tag} size="sm" tone="default">{tag}</Pill>)}
+                      </div>
+                    </button>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8, padding: '0 14px 12px', fontSize: 11, color: 'var(--ol-ink-4)' }}>
+                      <span style={{ fontWeight: 500, color: 'var(--ol-ink-3)' }}>@{p.authorLogin}</span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <span>
+                          <span style={{ color: likedIds.has(p.id) ? '#ef4444' : 'var(--ol-ink-4)' }}>{likedIds.has(p.id) ? '★' : '☆'}</span>
+                          {' '}{p.likeCount} · ↓ {p.downloadCount}
+                        </span>
+                        <button
+                          type="button"
+                          disabled={downloadingPackId !== null}
+                          aria-label={t('marketplace.downloadAria', { name: p.name })}
+                          title={t('marketplace.downloadAria', { name: p.name })}
+                          onClick={() => void onDownload(p)}
+                          style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: 4,
+                            padding: '4px 7px',
+                            borderRadius: 7,
+                            border: '0.5px solid var(--ol-line-strong)',
+                            background: 'var(--ol-surface-2)',
+                            color: 'var(--ol-ink-2)',
+                            cursor: downloadingPackId === null ? 'pointer' : 'not-allowed',
+                            opacity: downloadingPackId !== null && !isDownloading ? 0.5 : 1,
+                            fontSize: 10,
+                            fontWeight: 600,
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          <Icon name="download" size={12} />
+                          {isDownloading ? t('marketplace.downloadingZipBtn') : t('marketplace.downloadZipBtn')}
+                        </button>
+                      </div>
+                    </div>
+                  </motion.article>
+                );
+              })}
             </AnimatePresence>
           </div>
         )}

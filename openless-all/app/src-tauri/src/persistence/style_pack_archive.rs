@@ -78,9 +78,20 @@ pub(super) struct StreamBudget {
 
 pub(super) fn read_style_pack_archive(zip_path: &Path) -> Result<ParsedStylePackArchive> {
     let compressed = read_compressed_archive_bounded(zip_path)?;
-    let mut archive = zip::ZipArchive::new(Cursor::new(compressed.as_slice()))
-        .context("open style pack zip archive")?;
-    preflight_physical_central_directory(&compressed, &archive)?;
+    read_style_pack_archive_bytes(&compressed)
+}
+
+pub(super) fn read_style_pack_archive_bytes(compressed: &[u8]) -> Result<ParsedStylePackArchive> {
+    if compressed.len() > STYLE_PACK_ARCHIVE_MAX_COMPRESSED_BYTES {
+        bail!(
+            "style pack archive compressed size {} exceeds {} bytes",
+            compressed.len(),
+            STYLE_PACK_ARCHIVE_MAX_COMPRESSED_BYTES
+        );
+    }
+    let mut archive =
+        zip::ZipArchive::new(Cursor::new(compressed)).context("open style pack zip archive")?;
+    preflight_physical_central_directory(compressed, &archive)?;
     let entry_names = preflight_archive_metadata(&mut archive)?;
     let mut stream_budget = StreamBudget::default();
 
@@ -152,6 +163,10 @@ pub(super) fn read_style_pack_archive(zip_path: &Path) -> Result<ParsedStylePack
         examples,
         icon,
     })
+}
+
+pub(crate) fn validate_style_pack_archive_bytes(compressed: &[u8]) -> Result<()> {
+    read_style_pack_archive_bytes(compressed).map(|_| ())
 }
 
 const CENTRAL_DIRECTORY_HEADER_SIGNATURE: &[u8; 4] = b"PK\x01\x02";
