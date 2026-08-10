@@ -67,15 +67,31 @@ pub(super) fn ensure_microphone_permission(_inner: &Arc<Inner>) -> Result<(), St
 pub(super) fn ensure_asr_credentials() -> Result<(), String> {
     let active_asr = CredentialsVault::get_active_asr();
 
-    // 本地 Qwen3-ASR 没有"凭据"概念，但需要：(a) macOS 平台 (b) 模型已下载。
+    // 本地 Qwen3-ASR 没有"凭据"概念，但需要：(a) 当前渠道的后端可用 (b) 模型已下载。
     if crate::asr::local::is_local_qwen3(&active_asr) {
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            if crate::asr::local::qwen_backend_for_provider(&active_asr).is_none() {
+                return Err(format!("本地 Qwen3-ASR 渠道 {active_asr} 不支持当前系统"));
+            }
+            return ensure_local_qwen3_model_ready();
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            return Err(
+                "本地 Qwen3-ASR C 后端目前支持 macOS/Linux；MLX 后端仅支持 macOS".to_string(),
+            );
+        }
+    }
+
+    if crate::asr::local::is_local_whisper(&active_asr) {
         #[cfg(not(target_os = "macos"))]
         {
-            return Err("本地 ASR 当前仅支持 macOS（Windows 见 issue #256）".to_string());
+            return Err("本地 Whisper 当前仅支持 macOS".to_string());
         }
         #[cfg(target_os = "macos")]
         {
-            return ensure_local_qwen3_model_ready();
+            return ensure_local_whisper_model_ready();
         }
     }
 
@@ -185,7 +201,7 @@ pub(super) fn require_openai_compatible_fields(endpoint: &str, model: &str) -> R
 #[cfg(test)]
 pub(super) fn is_keyless_local_asr_provider(id: &str) -> bool {
     if crate::asr::local::is_local_qwen3(id) {
-        return true;
+        return crate::asr::local::qwen_backend_for_provider(id).is_some();
     }
     #[cfg(target_os = "macos")]
     if crate::asr::local::is_apple_speech(id) {
@@ -203,7 +219,7 @@ pub(super) fn is_keyless_local_asr_provider(id: &str) -> bool {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub(super) fn ensure_local_qwen3_model_ready() -> Result<(), String> {
     let prefs = || -> Result<crate::types::UserPreferences, String> {
         // 这里没法拿到 inner，直接读 preferences.json 即可（Coordinator 写盘后总是同步的）。
@@ -213,6 +229,12 @@ pub(super) fn ensure_local_qwen3_model_ready() -> Result<(), String> {
     }()?;
     let model_id = crate::asr::local::ModelId::from_str(&prefs.local_asr_active_model)
         .ok_or_else(|| format!("未知的本地模型 id: {}", prefs.local_asr_active_model))?;
+    if !model_id.is_qwen() {
+        return Err(format!(
+            "当前模型 {} 不属于本地 Qwen3-ASR",
+            model_id.as_str()
+        ));
+    }
     if !crate::asr::local::models::is_downloaded(model_id) {
         return Err(format!(
             "本地模型 {} 未下载完整，请到 设置 → 模型设置 中下载",
@@ -220,6 +242,29 @@ pub(super) fn ensure_local_qwen3_model_ready() -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn ensure_local_whisper_model_ready() -> Result<(), String> {
+    let model_id = crate::persistence::PreferencesStore::new()
+        .map(|store| store.get().local_asr_active_model)
+        .ok()
+        .filter(|id| {
+            crate::asr::local::ModelId::from_str(id)
+                .map(|model| model.is_whisper())
+                .unwrap_or(false)
+        })
+        .unwrap_or_else(|| crate::asr::local::WHISPER_MODEL_ID.to_string());
+    if crate::asr::local::whisper_model_ready_for_model(&model_id) {
+        return Ok(());
+    }
+    let path =
+        crate::asr::local::whisper_model_path_for_model(&model_id).map_err(|e| e.to_string())?;
+    Err(format!(
+        "本地 Whisper 模型 {} 不存在，请到 设置 → 本地模型 下载，或将模型文件放到 {}",
+        model_id,
+        path.display()
+    ))
 }
 
 /// 引擎加载/释放/keepLoadedSecs 变化时主动推给前端，前端 listen
@@ -266,6 +311,21 @@ pub(super) fn schedule_local_asr_release(inner: &Arc<Inner>) {
     });
 }
 
+#[cfg(target_os = "macos")]
+pub(super) fn schedule_local_whisper_release(inner: &Arc<Inner>) {
+    let keep_secs = inner.prefs.get().local_asr_keep_loaded_secs;
+    let cache = Arc::clone(&inner.local_whisper_cache);
+    if keep_secs == 0 {
+        cache.release_now();
+        return;
+    }
+    let threshold = std::time::Duration::from_secs(keep_secs as u64);
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(threshold).await;
+        cache.release_if_idle(threshold);
+    });
+}
+
 #[cfg(target_os = "windows")]
 pub(super) fn foundry_local_asr_release_keep_secs(inner: &Arc<Inner>) -> u32 {
     inner.prefs.get().foundry_local_asr_keep_loaded_secs
@@ -279,7 +339,10 @@ pub(super) enum AsrReleaseSession {
 }
 
 #[cfg(target_os = "windows")]
-pub(super) fn asr_release_session_is_current(inner: &Arc<Inner>, session: AsrReleaseSession) -> bool {
+pub(super) fn asr_release_session_is_current(
+    inner: &Arc<Inner>,
+    session: AsrReleaseSession,
+) -> bool {
     match session {
         AsrReleaseSession::Dictation(session_id) => inner.state.lock().session_id == session_id,
         AsrReleaseSession::Qa(session_id) => inner.qa_state.lock().session_id == session_id,
@@ -329,34 +392,63 @@ pub(super) fn schedule_sherpa_onnx_release(inner: &Arc<Inner>, session: AsrRelea
     });
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 /// 返回 (provider, 实际加载的模型 id)。模型 id 是 ModelId 校验归一后的值，调用方
 /// 直接用它做历史归因（构建时快照，PR #826 review）。
 pub(super) async fn build_local_qwen3(
     inner: &Arc<Inner>,
+    provider_id: &str,
 ) -> anyhow::Result<(Arc<crate::asr::local::LocalQwenAsr>, String)> {
+    let backend = crate::asr::local::qwen_backend_for_provider(provider_id)
+        .ok_or_else(|| anyhow::anyhow!("本地 Qwen3-ASR 渠道 {provider_id} 不支持当前系统"))?;
     let prefs = inner.prefs.get();
     let model_id = crate::asr::local::ModelId::from_str(&prefs.local_asr_active_model)
+        .filter(|id| id.is_qwen())
         .ok_or_else(|| anyhow::anyhow!("未知本地模型 id: {}", prefs.local_asr_active_model))?;
     let dir = crate::asr::local::models::model_dir(model_id)?;
-    let app = inner
-        .app
-        .lock()
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("AppHandle 未绑定"))?;
     // 走缓存：如果已有同 id 的引擎在内存里就直接复用，避免每次会话都重加载
     // 1.2GB+ 模型。第一次加载阻塞数秒，spawn_blocking 不卡 tokio runtime。
     let cache = Arc::clone(&inner.local_asr_cache);
     let mid = model_id.as_str().to_string();
-    let engine = tauri::async_runtime::spawn_blocking(move || cache.get_or_load(&mid, &dir))
-        .await
-        .map_err(|e| anyhow::anyhow!("spawn_blocking join failed: {e:#}"))??;
+    let engine =
+        tauri::async_runtime::spawn_blocking(move || cache.get_or_load(backend, &mid, &dir))
+            .await
+            .map_err(|e| anyhow::anyhow!("spawn_blocking join failed: {e:#}"))??;
     // 加载完成（含缓存命中刷新 last_used）后推一次状态，前端零轮询更新「已加载」。
     emit_local_asr_engine_status(inner);
     let model_label = model_id.as_str().to_string();
     Ok((
-        Arc::new(crate::asr::local::LocalQwenAsr::new(app, engine)),
+        Arc::new(crate::asr::local::LocalQwenAsr::new(engine)),
         model_label,
+    ))
+}
+
+#[cfg(target_os = "macos")]
+pub(super) async fn build_local_whisper(
+    inner: &Arc<Inner>,
+) -> anyhow::Result<(Arc<crate::asr::local::LocalWhisperAsr>, String)> {
+    let model_id = crate::asr::local::ModelId::from_str(&inner.prefs.get().local_asr_active_model)
+        .filter(|id| id.is_whisper())
+        .map(|id| id.as_str().to_string())
+        .unwrap_or_else(|| crate::asr::local::WHISPER_MODEL_ID.to_string());
+    let path = crate::asr::local::whisper_model_path_for_model(&model_id)?;
+    let cache = Arc::clone(&inner.local_whisper_cache);
+    let cache_model_id = model_id.clone();
+    let engine =
+        tauri::async_runtime::spawn_blocking(move || cache.get_or_load(&cache_model_id, &path))
+            .await
+            .map_err(|e| anyhow::anyhow!("spawn_blocking join failed: {e:#}"))??;
+    let language = inner
+        .prefs
+        .get()
+        .working_languages
+        .first()
+        .and_then(|name| crate::asr::local::native_name_to_apple_locale(name))
+        .map(|locale| locale.split('-').next().unwrap_or("auto").to_string())
+        .unwrap_or_else(|| "auto".to_string());
+    Ok((
+        Arc::new(crate::asr::local::LocalWhisperAsr::new(engine, language)),
+        model_id,
     ))
 }
 
@@ -712,13 +804,24 @@ pub(super) async fn build_qa_asr_start(
     }
 
     #[cfg(target_os = "macos")]
+    if crate::asr::local::is_local_whisper(active_asr) {
+        let (local, model) = build_local_whisper(inner)
+            .await
+            .map_err(|e| format!("local Whisper init failed: {e}"))?;
+        let active = ActiveAsr::LocalWhisper(Arc::clone(&local));
+        let consumer: Arc<dyn crate::recorder::AudioConsumer> = local;
+        let label = AsrCallLabel::new(crate::asr::local::LOCAL_WHISPER_PROVIDER_ID, Some(model));
+        return Ok((QaAsrStart::Ready { active, consumer }, label));
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     if crate::asr::local::is_local_qwen3(active_asr) {
-        let (local, model) = build_local_qwen3(inner)
+        let (local, model) = build_local_qwen3(inner, active_asr)
             .await
             .map_err(|e| format!("local ASR init failed: {e}"))?;
         let active = ActiveAsr::Local(Arc::clone(&local));
         let consumer: Arc<dyn crate::recorder::AudioConsumer> = local;
-        let label = AsrCallLabel::new(crate::asr::local::PROVIDER_ID, Some(model));
+        let label = AsrCallLabel::new(active_asr, Some(model));
         return Ok((QaAsrStart::Ready { active, consumer }, label));
     }
 

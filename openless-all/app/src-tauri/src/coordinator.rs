@@ -358,9 +358,12 @@ enum ActiveAsr {
     /// Windows sherpa-onnx 本地 ASR（offline batch + 实验 online streaming）。
     #[cfg(target_os = "windows")]
     SherpaOnnxLocal(Arc<SherpaOnnxAsr>),
-    /// 本地 Qwen3-ASR；只在 macOS + 模型已下载时可达。
-    #[cfg(target_os = "macos")]
+    /// 本地 Qwen3-ASR；macOS 可选 MLX/C，Linux 使用 C。
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     Local(Arc<crate::asr::local::LocalQwenAsr>),
+    /// 本地 Whisper Large-v3 Turbo；只在 macOS + 模型已迁移时可达。
+    #[cfg(target_os = "macos")]
+    LocalWhisper(Arc<crate::asr::local::LocalWhisperAsr>),
     /// Apple Speech（SFSpeechRecognizer）系统本地 ASR；只在 macOS 可达。
     #[cfg(target_os = "macos")]
     AppleSpeech(Arc<crate::asr::local::AppleSpeechAsr>),
@@ -374,6 +377,8 @@ fn asr_transcribe_uses_global_timeout(asr: &ActiveAsr) -> bool {
         // COORDINATOR_GLOBAL_TIMEOUT；各 provider 自己里面控制細粒度超时。
         #[cfg(target_os = "windows")]
         ActiveAsr::SherpaOnnxLocal(_) => false,
+        #[cfg(target_os = "macos")]
+        ActiveAsr::LocalWhisper(_) => false,
         _ => true,
     }
 }
@@ -724,9 +729,11 @@ struct Inner {
     /// `multimodal_pipeline_enabled && pipeline_mode == multimodal` 时使用，
     /// 与 asr 槽互斥——同一会话二者有且仅有一个。
     omni_pcm: Mutex<Option<SessionResource<Arc<resources::PcmBufferConsumer>>>>,
-    /// 本地 Qwen3-ASR 引擎缓存。跨会话复用，避免每次重加载 1.2GB+ 模型。
+    /// 本地 Qwen3-ASR MLX 引擎缓存。跨会话复用，避免每次重加载 1.2GB+ 模型。
     /// 释放时机由 prefs.local_asr_keep_loaded_secs 决定。
     local_asr_cache: Arc<crate::asr::local::LocalAsrCache>,
+    #[cfg(target_os = "macos")]
+    local_whisper_cache: Arc<crate::asr::local::LocalWhisperCache>,
     #[cfg(target_os = "windows")]
     foundry_local_runtime: Arc<FoundryLocalRuntime>,
     /// Windows sherpa-onnx 本地 ASR runtime。与 Foundry 同处一个
@@ -1068,6 +1075,8 @@ impl Coordinator {
                     qa_recorder: Mutex::new(None),
                     qa_stream_cancelled: Arc::new(AtomicBool::new(false)),
                     local_asr_cache: Arc::new(crate::asr::local::LocalAsrCache::new()),
+                    #[cfg(target_os = "macos")]
+                    local_whisper_cache: Arc::new(crate::asr::local::LocalWhisperCache::new()),
                     shutdown: AtomicBool::new(false),
                     #[cfg(not(mobile))]
                     remote_audio_sink: Mutex::new(None),
@@ -1193,6 +1202,8 @@ impl Coordinator {
                 qa_recorder: Mutex::new(None),
                 qa_stream_cancelled: Arc::new(AtomicBool::new(false)),
                 local_asr_cache: Arc::new(crate::asr::local::LocalAsrCache::new()),
+                #[cfg(target_os = "macos")]
+                local_whisper_cache: Arc::new(crate::asr::local::LocalWhisperCache::new()),
                 foundry_local_runtime,
                 sherpa_onnx_runtime,
                 shutdown: AtomicBool::new(false),
@@ -1215,11 +1226,11 @@ impl Coordinator {
         }
     }
 
-    /// 后台预加载本地 ASR 引擎；当用户在 UI 切到 local-qwen3 provider 时调一次。
+    /// 后台预加载当前本地 Qwen3-ASR 后端；当用户在 UI 切到对应 provider 时调一次。
     /// 加载是阻塞且数秒，所以放 spawn_blocking 里，不影响 UI 响应。
-    /// 模型未下载或不在 macOS 上时静默跳过。
+    /// 模型未下载或当前平台不支持该后端时静默跳过。
     pub fn preload_local_asr_in_background(self: &Arc<Self>) {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
             let inner = Arc::clone(&self.inner);
             tauri::async_runtime::spawn(async move {
@@ -1229,6 +1240,16 @@ impl Coordinator {
                         Some(m) => m,
                         None => return,
                     };
+                if !model_id.is_qwen()
+                    || !crate::asr::local::is_local_qwen3(&prefs.active_asr_provider)
+                {
+                    return;
+                }
+                let Some(backend) =
+                    crate::asr::local::qwen_backend_for_provider(&prefs.active_asr_provider)
+                else {
+                    return;
+                };
                 if !crate::asr::local::models::is_downloaded(model_id) {
                     log::info!(
                         "[coord] local ASR preload skipped: model {} not downloaded",
@@ -1243,7 +1264,7 @@ impl Coordinator {
                 let cache = Arc::clone(&inner.local_asr_cache);
                 let mid = model_id.as_str().to_string();
                 let _ = tauri::async_runtime::spawn_blocking(move || {
-                    if let Err(e) = cache.get_or_load(&mid, &dir) {
+                    if let Err(e) = cache.get_or_load(backend, &mid, &dir) {
                         log::warn!("[coord] local ASR preload failed: {e:#}");
                     }
                 })
@@ -1261,6 +1282,8 @@ impl Coordinator {
     /// 释放当前缓存的本地 ASR 引擎（用户主动点 / 或 删除模型时调）。
     pub fn release_local_asr_engine(&self) {
         self.inner.local_asr_cache.release_now();
+        #[cfg(target_os = "macos")]
+        self.inner.local_whisper_cache.release_now();
         emit_local_asr_engine_status(&self.inner);
     }
 
@@ -2518,7 +2541,7 @@ impl Coordinator {
                     .await
                     .map_err(|e| e.to_string())?
             }
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             ActiveAsr::Local(local) => {
                 let dur =
                     local_qwen_transcribe_timeout((local.buffer_duration_ms() as f64) / 1000.0);
@@ -2528,6 +2551,18 @@ impl Coordinator {
                     .map_err(|_| "重新转录超时".to_string())?
                     .map_err(|e| e.to_string())?;
                 schedule_local_asr_release(inner);
+                out
+            }
+            #[cfg(target_os = "macos")]
+            ActiveAsr::LocalWhisper(local) => {
+                let dur =
+                    local_whisper_transcribe_timeout((local.buffer_duration_ms() as f64) / 1000.0);
+                inner.local_whisper_cache.touch();
+                let out = tokio::time::timeout(dur, local.transcribe())
+                    .await
+                    .map_err(|_| "重新转录超时".to_string())?
+                    .map_err(|e| e.to_string())?;
+                schedule_local_whisper_release(inner);
                 out
             }
             #[cfg(target_os = "macos")]
@@ -5303,6 +5338,13 @@ fn local_qwen_transcribe_timeout(audio_secs: f64) -> std::time::Duration {
     let secs = ((audio_secs * 0.6).ceil() as u64)
         .saturating_add(10)
         .max(COORDINATOR_GLOBAL_TIMEOUT_SECS);
+    std::time::Duration::from_secs(secs)
+}
+
+fn local_whisper_transcribe_timeout(audio_secs: f64) -> std::time::Duration {
+    let secs = ((audio_secs * 0.5).ceil() as u64)
+        .saturating_add(10)
+        .max(15);
     std::time::Duration::from_secs(secs)
 }
 

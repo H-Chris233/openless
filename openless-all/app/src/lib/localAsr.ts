@@ -16,7 +16,7 @@ export interface LocalAsrSettings {
     mirror: string
     modelsBaseDir: string | null
     modelsRootDir: string
-    /** macOS 才编入 vendored Open-Less/qwen-asr 引擎；Win 端 UI 据此把"开始"按钮灰掉。 */
+    /** macOS/Linux 编入 C 引擎；MLX 仅在 macOS 可用。 */
     engineAvailable: boolean
 }
 
@@ -177,7 +177,7 @@ const MOCK_FOUNDRY_CATALOG: FoundryLocalAsrCatalogModel[] = [
 ]
 
 const MOCK_SETTINGS: LocalAsrSettings = {
-    providerId: "local-qwen3",
+    providerId: "local-qwen3-mlx",
     activeModel: "qwen3-asr-0.6b",
     mirror: "huggingface",
     modelsBaseDir: null,

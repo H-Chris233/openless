@@ -347,8 +347,25 @@ mod tests {
             &whisper_keyless_ready
         ));
 
-        assert!(asr_configured_for_provider(
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            assert!(asr_configured_for_provider(
+                crate::asr::local::PROVIDER_ID,
+                &snapshot()
+            ));
+            assert!(asr_configured_for_provider(
+                crate::asr::local::LOCAL_QWEN3_C_PROVIDER_ID,
+                &snapshot()
+            ));
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        assert!(!asr_configured_for_provider(
             crate::asr::local::PROVIDER_ID,
+            &snapshot()
+        ));
+        #[cfg(target_os = "macos")]
+        assert!(asr_configured_for_provider(
+            crate::asr::local::LOCAL_QWEN3_MLX_PROVIDER_ID,
             &snapshot()
         ));
         #[cfg(target_os = "windows")]
@@ -396,6 +413,14 @@ mod tests {
         assert!(active_asr_is_keyless_for_validation(
             crate::asr::local::PROVIDER_ID
         ));
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        assert!(active_asr_is_keyless_for_validation(
+            crate::asr::local::LOCAL_QWEN3_C_PROVIDER_ID
+        ));
+        #[cfg(target_os = "macos")]
+        assert!(active_asr_is_keyless_for_validation(
+            crate::asr::local::LOCAL_QWEN3_MLX_PROVIDER_ID
+        ));
         #[cfg(target_os = "windows")]
         assert!(active_asr_is_keyless_for_validation(
             crate::asr::local::foundry::PROVIDER_ID
@@ -422,6 +447,13 @@ mod tests {
         assert!(!qwen.qwen);
         assert!(qwen.foundry);
         assert!(qwen.sherpa);
+
+        let qwen_c =
+            local_asr_release_plan_for_provider(crate::asr::local::LOCAL_QWEN3_C_PROVIDER_ID);
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        assert!(!qwen_c.qwen);
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        assert!(qwen_c.qwen);
 
         let foundry = local_asr_release_plan_for_provider(crate::asr::local::foundry::PROVIDER_ID);
         assert!(foundry.qwen);

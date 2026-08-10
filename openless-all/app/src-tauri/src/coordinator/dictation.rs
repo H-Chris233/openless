@@ -32,22 +32,30 @@ pub(super) const COMBO_ARBITRATION_GRACE: std::time::Duration =
     std::time::Duration::from_millis(150);
 const STREAMING_INSERT_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(12);
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MacosKeylessDictationProvider {
+enum DesktopKeylessDictationProvider {
     LocalQwen3,
+    #[cfg(target_os = "macos")]
+    LocalWhisper,
+    #[cfg(target_os = "macos")]
     AppleSpeech,
 }
 
-#[cfg(target_os = "macos")]
-fn macos_keyless_dictation_provider(active_asr: &str) -> Option<MacosKeylessDictationProvider> {
-    if crate::asr::local::is_local_qwen3(active_asr) {
-        Some(MacosKeylessDictationProvider::LocalQwen3)
-    } else if crate::asr::local::is_apple_speech(active_asr) {
-        Some(MacosKeylessDictationProvider::AppleSpeech)
-    } else {
-        None
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn desktop_keyless_dictation_provider(active_asr: &str) -> Option<DesktopKeylessDictationProvider> {
+    if crate::asr::local::qwen_backend_for_provider(active_asr).is_some() {
+        return Some(DesktopKeylessDictationProvider::LocalQwen3);
     }
+    #[cfg(target_os = "macos")]
+    if crate::asr::local::is_local_whisper(active_asr) {
+        return Some(DesktopKeylessDictationProvider::LocalWhisper);
+    }
+    #[cfg(target_os = "macos")]
+    if crate::asr::local::is_apple_speech(active_asr) {
+        return Some(DesktopKeylessDictationProvider::AppleSpeech);
+    }
+    None
 }
 
 /// Less Computer 浮窗的 Tauri 事件名（前端 LessComputerPanel 订阅）。
@@ -2045,11 +2053,11 @@ pub(super) async fn begin_session_as(inner: &Arc<Inner>, voice_agent: bool) -> R
         return Ok(());
     }
 
-    #[cfg(target_os = "macos")]
-    if let Some(provider) = macos_keyless_dictation_provider(&active_asr) {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    if let Some(provider) = desktop_keyless_dictation_provider(&active_asr) {
         match provider {
-            MacosKeylessDictationProvider::LocalQwen3 => {
-                let (local, local_model) = match build_local_qwen3(inner).await {
+            DesktopKeylessDictationProvider::LocalQwen3 => {
+                let (local, local_model) = match build_local_qwen3(inner, &active_asr).await {
                     Ok(l) => l,
                     Err(e) => {
                         log::error!("[coord] 本地 Qwen3-ASR 初始化失败: {e:#}");
@@ -2071,7 +2079,7 @@ pub(super) async fn begin_session_as(inner: &Arc<Inner>, voice_agent: bool) -> R
                     inner,
                     current_session_id,
                     ActiveAsr::Local(Arc::clone(&local)),
-                    AsrCallLabel::new(crate::asr::local::PROVIDER_ID, Some(local_model)),
+                    AsrCallLabel::new(active_asr.clone(), Some(local_model)),
                 );
                 let consumer: Arc<dyn crate::recorder::AudioConsumer> = local;
                 start_recorder_and_enter_listening(
@@ -2082,7 +2090,8 @@ pub(super) async fn begin_session_as(inner: &Arc<Inner>, voice_agent: bool) -> R
                 )
                 .await?;
             }
-            MacosKeylessDictationProvider::AppleSpeech => {
+            #[cfg(target_os = "macos")]
+            DesktopKeylessDictationProvider::AppleSpeech => {
                 let local = build_apple_speech(&inner.prefs.get());
                 store_asr_for_session(
                     inner,
@@ -2090,6 +2099,41 @@ pub(super) async fn begin_session_as(inner: &Arc<Inner>, voice_agent: bool) -> R
                     ActiveAsr::AppleSpeech(Arc::clone(&local)),
                     // 系统语音识别没有用户可见的模型 id。
                     AsrCallLabel::new(crate::asr::local::APPLE_SPEECH_PROVIDER_ID, None),
+                );
+                let consumer: Arc<dyn crate::recorder::AudioConsumer> = local;
+                start_recorder_and_enter_listening(
+                    inner,
+                    current_session_id,
+                    &active_asr,
+                    consumer,
+                )
+                .await?;
+            }
+            #[cfg(target_os = "macos")]
+            DesktopKeylessDictationProvider::LocalWhisper => {
+                let (local, model) = match build_local_whisper(inner).await {
+                    Ok(value) => value,
+                    Err(error) => {
+                        log::error!("[coord] 本地 Whisper 初始化失败: {error:#}");
+                        emit_capsule(
+                            inner,
+                            CapsuleState::Error,
+                            0.0,
+                            0,
+                            Some(format!("本地模型初始化失败: {error}")),
+                            None,
+                        );
+                        restore_prepared_windows_ime_session(inner, current_session_id);
+                        inner.state.lock().phase = SessionPhase::Idle;
+                        schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
+                        return Err(format!("local Whisper init failed: {error}"));
+                    }
+                };
+                store_asr_for_session(
+                    inner,
+                    current_session_id,
+                    ActiveAsr::LocalWhisper(Arc::clone(&local)),
+                    AsrCallLabel::new(crate::asr::local::LOCAL_WHISPER_PROVIDER_ID, Some(model)),
                 );
                 let consumer: Arc<dyn crate::recorder::AudioConsumer> = local;
                 start_recorder_and_enter_listening(
@@ -3157,10 +3201,15 @@ pub(super) fn schedule_cancelled_asr_release(
         ActiveAsr::SherpaOnnxLocal(_) => {
             schedule_sherpa_onnx_release(inner, AsrReleaseSession::Dictation(session_id));
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         ActiveAsr::Local(_) => {
             inner.local_asr_cache.touch();
             schedule_local_asr_release(inner);
+        }
+        #[cfg(target_os = "macos")]
+        ActiveAsr::LocalWhisper(_) => {
+            inner.local_whisper_cache.touch();
+            schedule_local_whisper_release(inner);
         }
         _ => {}
     }
@@ -3643,7 +3692,7 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                         }
                     }
                 }
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", target_os = "linux"))]
                 ActiveAsr::Local(local) => {
                     debug_assert!(uses_global_timeout);
                     // 缓存命中时 transcribe 不含 load 时间；冷启动 load 已在 build_local_qwen3
@@ -3716,6 +3765,31 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                                 "apple-speech global timeout".to_string(),
                             ))
                         }
+                    }
+                }
+                #[cfg(target_os = "macos")]
+                ActiveAsr::LocalWhisper(local) => {
+                    debug_assert!(!uses_global_timeout);
+                    let audio_secs = (local.buffer_duration_ms() as f64) / 1000.0;
+                    let timeout_duration = local_whisper_transcribe_timeout(audio_secs);
+                    log::info!(
+                        "[coord] local Whisper transcribe: audio={:.2}s timeout={}s",
+                        audio_secs,
+                        timeout_duration.as_secs()
+                    );
+                    let result = tokio::time::timeout(timeout_duration, local.transcribe()).await;
+                    inner.local_whisper_cache.touch();
+                    schedule_local_whisper_release(inner);
+                    match result {
+                        Ok(Ok(raw)) => Ok(raw),
+                        Ok(Err(error)) => Err(TranscribeFail::new(
+                            format!("本地识别失败: {error}"),
+                            error.to_string(),
+                        )),
+                        Err(_) => Err(TranscribeFail::new(
+                            "识别超时".to_string(),
+                            "local whisper timeout".to_string(),
+                        )),
                     }
                 }
             };
@@ -4813,8 +4887,8 @@ mod tests {
         append_cursor_context_to_multimodal_prompt, pcm_duration_ms, pcm_from_wav_bytes,
         should_arm_edit_watch, should_read_cursor_context, streaming_insert_eligible,
     };
-    #[cfg(target_os = "macos")]
-    use super::{macos_keyless_dictation_provider, MacosKeylessDictationProvider};
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    use super::{desktop_keyless_dictation_provider, DesktopKeylessDictationProvider};
     use crate::types::{
         ChineseScriptPreference, CorrectionRule, DictationSession, InsertStatus, PolishMode,
     };
@@ -5134,16 +5208,24 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn macos_keyless_dictation_provider_routes_apple_speech_locally() {
+    fn desktop_keyless_dictation_provider_routes_apple_speech_locally() {
         assert_eq!(
-            macos_keyless_dictation_provider(crate::asr::local::APPLE_SPEECH_PROVIDER_ID),
-            Some(MacosKeylessDictationProvider::AppleSpeech)
+            desktop_keyless_dictation_provider(crate::asr::local::APPLE_SPEECH_PROVIDER_ID),
+            Some(DesktopKeylessDictationProvider::AppleSpeech)
         );
         assert_eq!(
-            macos_keyless_dictation_provider(crate::asr::local::PROVIDER_ID),
-            Some(MacosKeylessDictationProvider::LocalQwen3)
+            desktop_keyless_dictation_provider(crate::asr::local::PROVIDER_ID),
+            Some(DesktopKeylessDictationProvider::LocalQwen3)
         );
-        assert_eq!(macos_keyless_dictation_provider("volcengine"), None);
+        assert_eq!(
+            desktop_keyless_dictation_provider(crate::asr::local::LOCAL_QWEN3_MLX_PROVIDER_ID),
+            Some(DesktopKeylessDictationProvider::LocalQwen3)
+        );
+        assert_eq!(
+            desktop_keyless_dictation_provider(crate::asr::local::LOCAL_QWEN3_C_PROVIDER_ID),
+            Some(DesktopKeylessDictationProvider::LocalQwen3)
+        );
+        assert_eq!(desktop_keyless_dictation_provider("volcengine"), None);
     }
 
     #[test]

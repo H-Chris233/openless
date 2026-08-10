@@ -18,6 +18,12 @@ pub(super) const READY_SENTINEL: &str = ".openless-asr-ready";
 pub enum ModelId {
     Small06b,
     Large17b,
+    WhisperBase,
+    WhisperSmall,
+    WhisperMedium,
+    WhisperLargeV3,
+    WhisperLargeV3Turbo,
+    WhisperLargeV3TurboQ5,
 }
 
 impl ModelId {
@@ -25,6 +31,12 @@ impl ModelId {
         match self {
             ModelId::Small06b => "qwen3-asr-0.6b",
             ModelId::Large17b => "qwen3-asr-1.7b",
+            ModelId::WhisperBase => "whisper-base",
+            ModelId::WhisperSmall => "whisper-small",
+            ModelId::WhisperMedium => "whisper-medium",
+            ModelId::WhisperLargeV3 => "whisper-large-v3",
+            ModelId::WhisperLargeV3Turbo => "whisper-large-v3-turbo",
+            ModelId::WhisperLargeV3TurboQ5 => "whisper-large-v3-turbo-q5",
         }
     }
 
@@ -32,12 +44,27 @@ impl ModelId {
         match s {
             "qwen3-asr-0.6b" => Some(ModelId::Small06b),
             "qwen3-asr-1.7b" => Some(ModelId::Large17b),
+            "whisper-base" => Some(ModelId::WhisperBase),
+            "whisper-small" => Some(ModelId::WhisperSmall),
+            "whisper-medium" => Some(ModelId::WhisperMedium),
+            "whisper-large-v3" => Some(ModelId::WhisperLargeV3),
+            "whisper-large-v3-turbo" => Some(ModelId::WhisperLargeV3Turbo),
+            "whisper-large-v3-turbo-q5" => Some(ModelId::WhisperLargeV3TurboQ5),
             _ => None,
         }
     }
 
     pub fn all() -> &'static [ModelId] {
-        &[ModelId::Small06b, ModelId::Large17b]
+        &[
+            ModelId::Small06b,
+            ModelId::Large17b,
+            ModelId::WhisperBase,
+            ModelId::WhisperSmall,
+            ModelId::WhisperMedium,
+            ModelId::WhisperLargeV3,
+            ModelId::WhisperLargeV3Turbo,
+            ModelId::WhisperLargeV3TurboQ5,
+        ]
     }
 
     /// HuggingFace repo id（用于拼 API + 下载 URL）。
@@ -45,22 +72,70 @@ impl ModelId {
         match self {
             ModelId::Small06b => "Qwen/Qwen3-ASR-0.6B",
             ModelId::Large17b => "Qwen/Qwen3-ASR-1.7B",
+            ModelId::WhisperBase
+            | ModelId::WhisperSmall
+            | ModelId::WhisperMedium
+            | ModelId::WhisperLargeV3
+            | ModelId::WhisperLargeV3Turbo
+            | ModelId::WhisperLargeV3TurboQ5 => "ggerganov/whisper.cpp",
+        }
+    }
+
+    pub fn is_whisper(self) -> bool {
+        matches!(
+            self,
+            ModelId::WhisperBase
+                | ModelId::WhisperSmall
+                | ModelId::WhisperMedium
+                | ModelId::WhisperLargeV3
+                | ModelId::WhisperLargeV3Turbo
+                | ModelId::WhisperLargeV3TurboQ5
+        )
+    }
+
+    pub fn is_qwen(self) -> bool {
+        matches!(self, ModelId::Small06b | ModelId::Large17b)
+    }
+
+    pub fn file_name(self) -> Option<&'static str> {
+        match self {
+            ModelId::WhisperBase => Some("ggml-base.bin"),
+            ModelId::WhisperSmall => Some("ggml-small.bin"),
+            ModelId::WhisperMedium => Some("ggml-medium.bin"),
+            ModelId::WhisperLargeV3 => Some("ggml-large-v3.bin"),
+            ModelId::WhisperLargeV3Turbo => Some("ggml-large-v3-turbo.bin"),
+            ModelId::WhisperLargeV3TurboQ5 => Some("ggml-large-v3-turbo-q5_0.bin"),
+            _ => None,
         }
     }
 }
 
 /// 模型在本地的根目录（可能不存在）。
 pub fn model_dir(id: ModelId) -> Result<PathBuf> {
-    Ok(persistence::local_models_root()?.join(id.as_str()))
+    if id.is_whisper() {
+        // Whisper 与 Qwen 共用模型根目录，但各自独立子目录；Turbo 的全精度与
+        // Q5 量化文件放同一目录，兼容之前手动迁移的 q5_0 文件。
+        let dir_name = if matches!(id, ModelId::WhisperLargeV3TurboQ5) {
+            ModelId::WhisperLargeV3Turbo.as_str()
+        } else {
+            id.as_str()
+        };
+        Ok(persistence::models_root()?.join(dir_name))
+    } else {
+        Ok(persistence::local_models_root()?.join(id.as_str()))
+    }
 }
 
-/// 完整且可加载？= 哨兵存在。
+/// 判断模型是否完整且可加载：Whisper 看目标文件，Qwen 看完成哨兵。
 /// 比"枚举所有应有文件"稳：HF 仓库改文件名 / 加新文件时不会误报缺失。
 pub fn is_downloaded(id: ModelId) -> bool {
     let dir = match model_dir(id) {
         Ok(d) => d,
         Err(_) => return false,
     };
+    if let Some(file_name) = id.file_name() {
+        return dir.join(file_name).is_file();
+    }
     dir.join(READY_SENTINEL).exists()
 }
 
@@ -70,6 +145,13 @@ pub fn downloaded_bytes(id: ModelId) -> u64 {
         Ok(d) => d,
         Err(_) => return 0,
     };
+    if let Some(file_name) = id.file_name() {
+        let dest = dir.join(file_name);
+        if let Ok(meta) = std::fs::metadata(&dest) {
+            return meta.len();
+        }
+        return super::download::partial_actual_size(&dest.with_extension("partial"));
+    }
     let mut total: u64 = 0;
     walk_files(&dir, &mut |size| total += size);
     total
@@ -130,6 +212,16 @@ pub fn list_status() -> Vec<ModelStatus> {
 /// 删除本地模型目录（用户在 UI 主动删）。
 pub fn delete_model(id: ModelId) -> Result<()> {
     let dir = model_dir(id)?;
+    if let Some(file_name) = id.file_name() {
+        let dest = dir.join(file_name);
+        let _ = std::fs::remove_file(&dest);
+        let _ = std::fs::remove_file(dest.with_extension("partial"));
+        let _ = std::fs::remove_file(dest.with_extension("partial.idx"));
+        if dir.exists() && dir.read_dir()?.next().is_none() {
+            let _ = std::fs::remove_dir(&dir);
+        }
+        return Ok(());
+    }
     if dir.exists() {
         std::fs::remove_dir_all(&dir)?;
     }

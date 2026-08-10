@@ -590,7 +590,7 @@ pub(super) async fn transcribe_overlay_dictation_asr(
                 }
             }
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         ActiveAsr::Local(local) => {
             debug_assert!(uses_global_timeout);
             let audio_secs = (local.buffer_duration_ms() as f64) / 1000.0;
@@ -602,6 +602,21 @@ pub(super) async fn transcribe_overlay_dictation_asr(
                 Ok(Ok(raw)) => Ok(raw),
                 Ok(Err(error)) => Err(error.to_string()),
                 Err(_) => Err("local qwen transcribe timeout".to_string()),
+            }
+        }
+        #[cfg(target_os = "macos")]
+        ActiveAsr::LocalWhisper(local) => {
+            debug_assert!(!uses_global_timeout);
+            let timeout_duration = local_whisper_transcribe_timeout(
+                (local.buffer_duration_ms() as f64) / 1000.0,
+            );
+            let result = tokio::time::timeout(timeout_duration, local.transcribe()).await;
+            _inner.local_whisper_cache.touch();
+            schedule_local_whisper_release(_inner);
+            match result {
+                Ok(Ok(raw)) => Ok(raw),
+                Ok(Err(error)) => Err(error.to_string()),
+                Err(_) => Err("local whisper transcribe timeout".to_string()),
             }
         }
         #[cfg(target_os = "macos")]
@@ -1397,7 +1412,7 @@ pub(super) async fn end_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
                 }
             }
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         ActiveAsr::Local(local) => {
             debug_assert!(uses_global_timeout);
             let audio_secs = (local.buffer_duration_ms() as f64) / 1000.0;
@@ -1428,6 +1443,32 @@ pub(super) async fn end_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
                     );
                     finish_qa_with_error_if_current(inner, session_id, "本地识别超时".to_string());
                     return Err("local qwen transcribe timeout".to_string());
+                }
+            }
+        }
+        #[cfg(target_os = "macos")]
+        ActiveAsr::LocalWhisper(local) => {
+            debug_assert!(!uses_global_timeout);
+            let timeout_duration = local_whisper_transcribe_timeout(
+                (local.buffer_duration_ms() as f64) / 1000.0,
+            );
+            let result = tokio::time::timeout(timeout_duration, local.transcribe()).await;
+            inner.local_whisper_cache.touch();
+            schedule_local_whisper_release(inner);
+            match result {
+                Ok(Ok(raw)) => raw,
+                Ok(Err(error)) => {
+                    log::error!("[coord] QA local Whisper transcribe failed: {error:#}");
+                    finish_qa_with_error_if_current(
+                        inner,
+                        session_id,
+                        format!("本地识别失败: {error}"),
+                    );
+                    return Err(error.to_string());
+                }
+                Err(_) => {
+                    finish_qa_with_error_if_current(inner, session_id, "本地识别超时".to_string());
+                    return Err("local whisper transcribe timeout".to_string());
                 }
             }
         }

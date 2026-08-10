@@ -228,11 +228,7 @@ mod imp {
                 })?;
             }
             return Err(replace_error).with_context(|| {
-                format!(
-                    "move {} to {}",
-                    staging_dir.display(),
-                    target_dir.display()
-                )
+                format!("move {} to {}", staging_dir.display(), target_dir.display())
             });
         }
 

@@ -104,6 +104,7 @@ import {
 import {
     DownloadProgressBlock,
     FoundryPrepareProgressBlock,
+    MetalToolchainGuide,
     ModelDetailPanel,
     ModelSidebar,
     type SidebarModelEntry,
@@ -1497,21 +1498,28 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
         }
     }
 
-    // 「加载并测试」（qwen3）：先设为当前模型（含把 active provider 切到本地
-    // —— 与 ProvidersSection 的本地模型下拉一致），再跑内置音频测试。不再单独
-    // 提供「设为默认」按钮：激活 = 在 ASR 语音转写里选择本地模型供应商。
-    const handleTest = async (modelId: string) => {
+    // 先设为当前模型（含把 active provider 切到对应的本地引擎），再跑内置音频
+    // 测试。这样 Qwen3 与 Whisper 可以在同一页切换并比较加载/转写耗时。
+    const handleTest = async (
+        modelId: string,
+        provider: "local-qwen3-mlx" | "local-qwen3-c" | "local-whisper" =
+            prefs?.activeAsrProvider === "local-qwen3-c"
+                ? "local-qwen3-c"
+                : IS_MAC
+                  ? "local-qwen3-mlx"
+                  : "local-qwen3-c",
+    ) => {
         try {
             await setLocalAsrActiveModel(modelId)
-            await ensureLocalAsrChannel("local-qwen3")
-            await setActiveAsrProvider("local-qwen3")
+            await ensureLocalAsrChannel(provider)
+            await setActiveAsrProvider(provider)
             await updatePrefs((current) =>
-                current.activeAsrProvider === "local-qwen3" &&
+                current.activeAsrProvider === provider &&
                 current.localAsrActiveModel === modelId
                     ? current
                     : {
                           ...current,
-                          activeAsrProvider: "local-qwen3",
+                          activeAsrProvider: provider,
                           localAsrActiveModel: modelId,
                       },
             )
@@ -1774,8 +1782,10 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
     // 「＋ 下载新模型」弹窗获取）。
     const allSidebarEntries = useMemo<SidebarModelEntry[]>(() => {
         const entries: SidebarModelEntry[] = []
-        // macOS：Qwen3 引擎
+        // macOS：Qwen3 / Whisper 引擎
         for (const m of models) {
+            const isWhisper = m.id.startsWith("whisper-")
+            if (isWhisper && !IS_MAC) continue
             const isDownloading =
                 Boolean(progress[m.id]) &&
                 (progress[m.id]?.phase === "started" ||
@@ -1797,8 +1807,14 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                     : null,
                 isActive:
                     settings?.activeModel === m.id &&
-                    prefs?.activeAsrProvider === "local-qwen3",
-                engine: "qwen3",
+                    (isWhisper
+                        ? prefs?.activeAsrProvider === "local-whisper"
+                        : [
+                              "local-qwen3",
+                              "local-qwen3-mlx",
+                              "local-qwen3-c",
+                          ].includes(prefs?.activeAsrProvider ?? "")),
+                engine: isWhisper ? "whisper" : "qwen3",
             })
         }
         // Windows：sherpa-onnx + foundry
@@ -1916,6 +1932,10 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
             if (action === "download") void handleDownload(entry.id)
             else if (action === "delete") void handleDelete(entry.id)
             else if (action === "reveal") void handleRevealModelDir(entry.id)
+        } else if (entry.engine === "whisper") {
+            if (action === "download") void handleDownload(entry.id)
+            else if (action === "delete") void handleDelete(entry.id)
+            else if (action === "reveal") void handleRevealModelDir(entry.id)
         } else if (entry.engine === "sherpa") {
             const alias = entry.id as SherpaOnnxModelAlias
             if (action === "download") {
@@ -1955,12 +1975,14 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
     const selectedEntryRemote = selectedEntry
         ? selectedEntry.engine === "qwen3"
             ? remoteSizes[selectedEntry.id]
-            : selectedEntry.engine === "sherpa"
-              ? sherpaRemoteSizes[selectedEntry.id]
+            : selectedEntry.engine === "whisper" || selectedEntry.engine === "sherpa"
+              ? selectedEntry.engine === "whisper"
+                  ? remoteSizes[selectedEntry.id]
+                  : sherpaRemoteSizes[selectedEntry.id]
               : null
         : null
     const selectedEntryProgress =
-        selectedEntry?.engine === "qwen3"
+        selectedEntry?.engine === "qwen3" || selectedEntry?.engine === "whisper"
             ? progress[selectedEntry.id]
             : selectedEntry?.engine === "sherpa"
               ? sherpaDownloadProgress[selectedEntry.id]
@@ -2005,6 +2027,8 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                     </div>
                 </Card>
             )}
+
+            {IS_MAC && <MetalToolchainGuide />}
 
             {/* ─── 模型管理看板：左侧模型选择（竖排，已下载打绿勾），右侧详情
                  （HF 实时抓取的尺寸/文件数）+ 操作。全平台归一化（Qwen3 /
@@ -2053,7 +2077,8 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                             entry={selectedEntry}
                             fileCount={selectedEntryRemote?.fileCount ?? null}
                             mirrorLabel={
-                                selectedEntry?.engine === "qwen3"
+                                selectedEntry?.engine === "qwen3" ||
+                                selectedEntry?.engine === "whisper"
                                     ? settings?.mirror === "hf-mirror"
                                         ? "hf-mirror"
                                         : "huggingface"
@@ -2069,7 +2094,10 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                             }
                             onCancel={() => {
                                 if (!selectedEntry) return
-                                if (selectedEntry.engine === "qwen3")
+                                if (
+                                    selectedEntry.engine === "qwen3" ||
+                                    selectedEntry.engine === "whisper"
+                                )
                                     void handleCancel(selectedEntry.id)
                                 else if (selectedEntry.engine === "sherpa")
                                     void handleCancelSherpaDownload()
@@ -2080,18 +2108,33 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                             onReveal={() =>
                                 selectedEntry && dispatchEntryAction(selectedEntry, "reveal")
                             }
-                            onTest={() =>
-                                selectedEntry?.engine === "qwen3" &&
-                                void handleTest(selectedEntry.id)
+                            onTest={() => {
+                                if (
+                                    selectedEntry?.engine === "qwen3" ||
+                                    selectedEntry?.engine === "whisper"
+                                ) {
+                                    void handleTest(
+                                        selectedEntry.id,
+                                        selectedEntry.engine === "whisper"
+                                            ? "local-whisper"
+                                            : IS_MAC
+                                              ? "local-qwen3-mlx"
+                                              : "local-qwen3-c",
+                                    )
+                                }
+                            }}
+                            showTest={
+                                selectedEntry?.engine === "qwen3" ||
+                                selectedEntry?.engine === "whisper"
                             }
-                            showTest={selectedEntry?.engine === "qwen3"}
                             testResult={
                                 selectedEntry
                                     ? (testResults[selectedEntry.id] ?? null)
                                     : null
                             }
                             testing={
-                                selectedEntry?.engine === "qwen3" &&
+                                (selectedEntry?.engine === "qwen3" ||
+                                    selectedEntry?.engine === "whisper") &&
                                 testingModelId === selectedEntry.id
                             }
                         />
@@ -2420,7 +2463,7 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                         const entry = allSidebarEntries.find((e) => e.id === id)
                         if (!entry) return null
                         const remote =
-                            entry.engine === "qwen3"
+                            entry.engine === "qwen3" || entry.engine === "whisper"
                                 ? remoteSizes[id]
                                 : entry.engine === "sherpa"
                                   ? sherpaRemoteSizes[id]

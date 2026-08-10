@@ -12,8 +12,8 @@ use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter};
 
 use super::download::{
-    build_client, download_one, now_millis, partial_actual_size, DownloadPhase,
-    DownloadProgress, Mirror, PROGRESS_EMIT_MIN_INTERVAL_MS,
+    build_client, download_one, now_millis, partial_actual_size, DownloadPhase, DownloadProgress,
+    Mirror, PROGRESS_EMIT_MIN_INTERVAL_MS,
 };
 use super::sherpa;
 
@@ -424,9 +424,7 @@ async fn run_download(
                 // 节流（同 download.rs）：每 HTTP chunk 回调一次，全量转发会
                 // 高频刷前端进度条；in_flight 照常累计，只按 ≥150ms 转发最新值。
                 let now = now_millis();
-                if now - last_emit.load(Ordering::Relaxed)
-                    < PROGRESS_EMIT_MIN_INTERVAL_MS
-                {
+                if now - last_emit.load(Ordering::Relaxed) < PROGRESS_EMIT_MIN_INTERVAL_MS {
                     return;
                 }
                 last_emit.store(now, Ordering::Relaxed);

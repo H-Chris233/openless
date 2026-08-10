@@ -55,7 +55,8 @@ export function presetsFor(kind: ChannelKind, os: OS): PresetOption[] {
   }
   return ASR_PRESETS.filter(p => {
     // 本地引擎严格按其实际支持的平台暴露；Linux / Android 不展示桌面专有实现。
-    if (p.id === 'local-qwen3' || p.id === 'apple-speech') return os === 'mac';
+    if (p.id === 'local-qwen3-mlx' || p.id === 'local-whisper' || p.id === 'apple-speech') return os === 'mac';
+    if (p.id === 'local-qwen3-c') return os === 'mac' || os === 'linux';
     if (p.id === 'foundry-local-whisper' || p.id === 'sherpa-onnx-local') {
       return os === 'win';
     }

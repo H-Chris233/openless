@@ -431,7 +431,12 @@ export function History() {
         )}
 
         {(!mobile || mobileDetailOpen) && (
-        <Card padding={20} className="ol-thinscroll" style={{ overflow: 'auto' }}>
+        <Card
+          key={item?.id ?? 'history-empty'}
+          padding={20}
+          className="ol-thinscroll"
+          style={{ overflow: 'auto' }}
+        >
           {item ? (
             <>
               {mobile && (

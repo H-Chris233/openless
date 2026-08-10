@@ -13,7 +13,7 @@ pub struct LocalAsrSettings {
     pub mirror: String,
     pub models_base_dir: Option<String>,
     pub models_root_dir: String,
-    /// macOS 才编入引擎；Windows 端 UI 需要据此把"开始下载"按钮灰掉。
+    /// macOS/Linux 编入本地 Qwen3-ASR C 引擎；MLX 仅在 macOS 可用。
     pub engine_available: bool,
 }
 
@@ -30,7 +30,7 @@ pub fn local_asr_get_settings(coord: CoordinatorState<'_>) -> LocalAsrSettings {
         mirror: prefs.local_asr_mirror,
         models_base_dir,
         models_root_dir,
-        engine_available: cfg!(target_os = "macos"),
+        engine_available: cfg!(any(target_os = "macos", target_os = "linux")),
     }
 }
 
@@ -239,7 +239,7 @@ pub fn local_asr_delete_model(coord: CoordinatorState<'_>, model_id: String) -> 
     let id = ModelId::from_str(&model_id).ok_or_else(|| format!("unknown model id: {model_id}"))?;
     // 如果内存里加载的就是要删的这个模型，先释放：否则 mmap 残留指向已 unlink 的文件，
     // 且 RAM 直到下次切模型 / 用户手动按"释放"才回收。
-    if coord.local_asr_loaded_model().as_deref() == Some(id.as_str()) {
+    if id.is_whisper() || coord.local_asr_loaded_model().as_deref() == Some(id.as_str()) {
         coord.release_local_asr_engine();
     }
     crate::asr::local::models::delete_model(id).map_err(|e| e.to_string())
@@ -272,10 +272,13 @@ pub fn local_asr_reveal_models_root(coord: CoordinatorState<'_>) -> Result<(), S
 
 #[tauri::command]
 pub async fn local_asr_test_model(
+    coord: CoordinatorState<'_>,
     model_id: String,
 ) -> Result<crate::asr::local::test_run::TestResult, String> {
     let id = ModelId::from_str(&model_id).ok_or_else(|| format!("unknown model id: {model_id}"))?;
-    crate::asr::local::test_run::run_test(id)
+    let backend =
+        crate::asr::local::qwen_backend_for_provider(&coord.prefs().get().active_asr_provider);
+    crate::asr::local::test_run::run_test(id, backend)
         .await
         .map_err(|e| format!("{e:#}"))
 }

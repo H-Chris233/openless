@@ -2,16 +2,18 @@ import type { OS } from '../../components/WindowChrome';
 import { presetsFor, shouldRecycleDraft } from './ChannelList';
 
 const localProviders = [
-  'local-qwen3',
+  'local-qwen3-mlx',
+  'local-qwen3-c',
+  'local-whisper',
   'apple-speech',
   'foundry-local-whisper',
   'sherpa-onnx-local',
 ] as const;
 
 const expectedByPlatform: Record<OS, readonly string[]> = {
-  mac: ['local-qwen3', 'apple-speech'],
+  mac: ['local-qwen3-mlx', 'local-qwen3-c', 'local-whisper', 'apple-speech'],
   win: ['foundry-local-whisper', 'sherpa-onnx-local'],
-  linux: [],
+  linux: ['local-qwen3-c'],
   android: [],
 };
 

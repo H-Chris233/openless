@@ -101,7 +101,7 @@ struct HfTreeEntry {
 
 pub async fn fetch_remote_info(model_id: ModelId, mirror: Mirror) -> Result<RemoteInfo> {
     let client = build_client()?;
-    let files = fetch_file_list(&client, model_id.hf_repo(), mirror).await?;
+    let files = fetch_file_list(&client, model_id, mirror).await?;
     let total_bytes = files.iter().map(|f| f.size).sum();
     Ok(RemoteInfo {
         model_id: model_id.as_str().into(),
@@ -113,9 +113,10 @@ pub async fn fetch_remote_info(model_id: ModelId, mirror: Mirror) -> Result<Remo
 
 async fn fetch_file_list(
     client: &reqwest::Client,
-    repo: &str,
+    model_id: ModelId,
     mirror: Mirror,
 ) -> Result<Vec<RemoteFile>> {
+    let repo = model_id.hf_repo();
     let url = format!("{}/api/models/{}/tree/main", mirror.base_url(), repo);
     let resp = client
         .get(&url)
@@ -131,7 +132,7 @@ async fn fetch_file_list(
         .with_context(|| format!("HF tree JSON 解码失败: {url}"))?;
     let files: Vec<RemoteFile> = entries
         .into_iter()
-        .filter(|e| e.entry_type == "file" && keep_file(&e.path))
+        .filter(|e| e.entry_type == "file" && keep_file(&e.path, model_id))
         .map(|e| RemoteFile {
             path: e.path,
             size: e.size.unwrap_or(0),
@@ -143,7 +144,10 @@ async fn fetch_file_list(
     Ok(files)
 }
 
-fn keep_file(path: &str) -> bool {
+fn keep_file(path: &str, model_id: ModelId) -> bool {
+    if let Some(file_name) = model_id.file_name() {
+        return path == file_name;
+    }
     if path.starts_with('.') {
         return false;
     }
