@@ -233,7 +233,25 @@ pub fn import_style_pack_from_zip(
     coord: CoordinatorState<'_>,
     zip_path: String,
 ) -> Result<StylePack, String> {
-    log::info!("[style-pack] command import requested zip_path={zip_path}");
+    log::info!(
+        "[style-pack] command import requested source_kind={}",
+        if zip_path.starts_with("content://") {
+            "content-uri"
+        } else {
+            "file-path"
+        }
+    );
+    #[cfg(target_os = "android")]
+    if zip_path.starts_with("content://") {
+        let bytes = crate::android::jni::android::read_content_uri(
+            &zip_path,
+            crate::persistence::STYLE_PACK_ARCHIVE_MAX_COMPRESSED_BYTES,
+        )?;
+        return coord
+            .style_packs()
+            .import_from_zip_bytes(&bytes, "Android document provider")
+            .map_err(|error| error.to_string());
+    }
     coord
         .style_packs()
         .import_from_zip(std::path::Path::new(&zip_path))

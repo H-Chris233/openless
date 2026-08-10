@@ -47,7 +47,9 @@ pub use history::*;
 pub use paths::*;
 pub use preferences::*;
 pub use style_pack::*;
-pub(crate) use style_pack_archive::STYLE_PACK_ARCHIVE_MAX_COMPRESSED_BYTES;
+pub(crate) use style_pack_archive::{
+    validate_style_pack_archive_bytes, STYLE_PACK_ARCHIVE_MAX_COMPRESSED_BYTES,
+};
 
 #[cfg(target_os = "android")]
 pub use android_storage::init_android_storage_roots;
