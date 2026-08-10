@@ -242,6 +242,8 @@ OpenLess 只做一件事:**把语音变成可用的书面文字(尤其是 AI 提
 
 活跃的代码库位于 `openless-all/app/`(Tauri 2 + Rust + React/TS)。macOS 构建会链接一个 vendored 的 C 语言 ASR 引擎([`Open-Less/qwen-asr`](https://github.com/Open-Less/qwen-asr),fork 自 `antirez/qwen-asr`),它作为 git 子模块位于 `src-tauri/vendor/qwen-asr/`,因此首次克隆时需初始化子模块。
 
+Rust 1.88 是从源码构建所支持的最低工具链版本；建议使用最新 stable Rust。CI 会在 macOS、Windows 和 Linux 上同时验证 Rust 1.88 与 stable。
+
 ```bash
 # 仅首次克隆——拉取 vendored 子模块
 git submodule update --init --recursive
