@@ -661,8 +661,6 @@ async fn download_marketplace_archive_bytes(base: &str, pack_id: &str) -> Result
 fn marketplace_target_kind(target_path: &str) -> &'static str {
     if target_path.starts_with("content://") {
         "content-uri"
-    } else if target_path.starts_with("file://") {
-        "file-uri"
     } else {
         "file-path"
     }
@@ -678,11 +676,15 @@ fn write_marketplace_archive_target(target_path: &str, bytes: &[u8]) -> Result<(
     if target_path.starts_with("content://") {
         return Err("content URI targets are only supported on Android".to_string());
     }
-    let path = target_path.strip_prefix("file://").unwrap_or(target_path);
-    if path.trim().is_empty() {
+    if target_path.starts_with("file://") {
+        return Err(
+            "file URI targets are not supported; provide a filesystem path instead".to_string(),
+        );
+    }
+    if target_path.trim().is_empty() {
         return Err("marketplace download target is empty".to_string());
     }
-    let path = std::path::Path::new(path);
+    let path = std::path::Path::new(target_path);
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -923,6 +925,17 @@ mod archive_download_tests {
             b"exact archive bytes"
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn marketplace_download_target_rejects_file_uri() {
+        let error = write_marketplace_archive_target(
+            "file:///tmp/openless-marketplace-download.zip",
+            b"archive bytes",
+        )
+        .expect_err("file URI must not be interpreted as a filesystem path");
+
+        assert!(error.contains("file URI targets are not supported"));
     }
 
     #[test]
