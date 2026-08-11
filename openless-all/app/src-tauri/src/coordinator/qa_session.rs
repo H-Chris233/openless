@@ -551,7 +551,11 @@ pub(super) async fn transcribe_overlay_dictation_asr(
             debug_assert!(!uses_global_timeout);
             let audio_secs = (local.buffer_duration_ms() as f64) / 1000.0;
             let timeout_duration = windows_local_asr_transcribe_timeout(audio_secs);
-            match local.transcribe(timeout_duration).await {
+            let notices = foundry_dictation_fallback_notice_callback(_inner, _current_session_id);
+            match local
+                .transcribe_with_fallback_notice(timeout_duration, notices)
+                .await
+            {
                 Ok(raw) => {
                     schedule_foundry_local_asr_release(
                         _inner,
@@ -1335,7 +1339,11 @@ pub(super) async fn end_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
                 audio_secs,
                 timeout_duration.as_secs()
             );
-            match local.transcribe(timeout_duration).await {
+            let notices = foundry_qa_fallback_notice_callback(inner, session_id);
+            match local
+                .transcribe_with_fallback_notice(timeout_duration, notices)
+                .await
+            {
                 Ok(r) => {
                     schedule_foundry_local_asr_release(inner, AsrReleaseSession::Qa(qa_session_id));
                     r
