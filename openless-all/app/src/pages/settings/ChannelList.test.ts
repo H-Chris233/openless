@@ -2,6 +2,7 @@ import type { OS } from '../../components/WindowChrome';
 import { presetsFor, shouldRecycleDraft } from './ChannelList';
 
 const localProviders = [
+  'local-qwen3',
   'local-qwen3-mlx',
   'local-qwen3-c',
   'local-whisper',
@@ -33,6 +34,14 @@ for (const os of Object.keys(expectedByPlatform) as OS[]) {
   if (ids.has('bailian-qwen3-realtime') || ids.has('bailian-fun-asr-flash')) {
     throw new Error(`legacy Bailian aliases must remain hidden on ${os}`);
   }
+  if (ids.has('local-qwen3')) {
+    throw new Error('legacy local-qwen3 must remain hidden from new channels');
+  }
+}
+
+const intelMacIds = new Set(presetsFor('asr', 'mac', false).map(preset => preset.id));
+if (intelMacIds.has('local-qwen3-mlx') || !intelMacIds.has('local-qwen3-c')) {
+  throw new Error('Intel macOS must expose C/CPU Qwen3 but not MLX');
 }
 
 if (!shouldRecycleDraft('draft-1', false)) {

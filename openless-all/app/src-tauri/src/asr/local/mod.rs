@@ -36,7 +36,7 @@ pub use sherpa_runtime::SherpaOnnxRuntime;
 
 #[cfg(target_os = "macos")]
 mod apple_speech_provider;
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 mod mlx_qwen_engine;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod qwen_engine;
@@ -48,7 +48,7 @@ mod qwen_ffi;
 pub use apple_speech_provider::{native_name_to_apple_locale, AppleSpeechAsr};
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub use local_provider::LocalQwenAsr;
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub use mlx_qwen_engine::MlxQwenAsrEngine;
 #[cfg(target_os = "macos")]
 pub use whisper_provider::MODEL_ID as WHISPER_MODEL_ID;
@@ -85,7 +85,7 @@ pub fn is_local_qwen3(id: &str) -> bool {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QwenBackend {
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     Mlx,
     C,
 }
@@ -93,7 +93,7 @@ pub enum QwenBackend {
 impl QwenBackend {
     pub fn cache_key(self) -> &'static str {
         match self {
-            #[cfg(target_os = "macos")]
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
             Self::Mlx => "mlx",
             Self::C => "c",
         }
@@ -102,19 +102,21 @@ impl QwenBackend {
 
 pub fn qwen_backend_for_provider(id: &str) -> Option<QwenBackend> {
     match id {
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         PROVIDER_ID | LOCAL_QWEN3_MLX_PROVIDER_ID => Some(QwenBackend::Mlx),
         #[cfg(target_os = "linux")]
         PROVIDER_ID | LOCAL_QWEN3_C_PROVIDER_ID => Some(QwenBackend::C),
         #[cfg(target_os = "macos")]
         LOCAL_QWEN3_C_PROVIDER_ID => Some(QwenBackend::C),
+        #[cfg(all(target_os = "macos", not(target_arch = "aarch64")))]
+        PROVIDER_ID => Some(QwenBackend::C),
         _ => None,
     }
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub enum LocalQwenEngine {
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     Mlx(MlxQwenAsrEngine),
     C(qwen_engine::QwenAsrEngine),
 }
@@ -123,7 +125,7 @@ pub enum LocalQwenEngine {
 impl LocalQwenEngine {
     pub fn load(backend: QwenBackend, model_dir: &std::path::Path) -> anyhow::Result<Self> {
         match backend {
-            #[cfg(target_os = "macos")]
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
             QwenBackend::Mlx => Ok(Self::Mlx(MlxQwenAsrEngine::load(model_dir)?)),
             QwenBackend::C => Ok(Self::C(qwen_engine::QwenAsrEngine::load(model_dir)?)),
         }
@@ -131,7 +133,7 @@ impl LocalQwenEngine {
 
     pub fn transcribe_pcm(&self, samples: &[f32]) -> anyhow::Result<String> {
         match self {
-            #[cfg(target_os = "macos")]
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
             Self::Mlx(engine) => engine.transcribe_pcm(samples),
             Self::C(engine) => engine.transcribe_audio(samples),
         }

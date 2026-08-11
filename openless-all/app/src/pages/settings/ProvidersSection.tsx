@@ -235,6 +235,7 @@ const ASR_DEFAULT_RESOURCE_ID = 'volc.seedasr.sauc.duration';
 
 /// 无 key / 无地址的本地引擎：卡片编辑里没有凭据字段，模型下载仍在「高级 → 本地模型」。
 export const LOCAL_ASR_PROVIDER_IDS: string[] = [
+  'local-qwen3',
   'local-qwen3-mlx',
   'local-qwen3-c',
   'local-whisper',

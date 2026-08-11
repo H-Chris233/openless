@@ -89,6 +89,7 @@ import {
 } from "../../lib/localAsr"
 import { useHotkeySettings } from "../../state/HotkeySettingsContext"
 import { detectOS } from "../../components/WindowChrome"
+import { getPlatformCapabilities } from "../../lib/platform"
 import { SelectLite } from "../../components/ui/SelectLite"
 import { Btn, Card, Collapsible, PageHeader, Pill } from "../_atoms"
 import {
@@ -138,12 +139,11 @@ async function ensureLocalAsrChannel(providerType: string): Promise<void> {
 // 非 Windows 平台 runtime 是 stub 永远 unavailable。前端这一页对应的卡片、状态拉取、
 // 事件订阅都必须按 OS 隔离，避免 macOS / Linux 用户看到 Windows 专属的 UI。
 //
-// 同理 Qwen3-ASR 后端只在 macOS 编译实体（qwen_engine / cache / local_provider 全是
-// `#[cfg(target_os = "macos")]`），Qwen3 模型管理 UI 也按 IS_MAC 守严——之前用
-// `!IS_WINDOWS` 会让假设的 Linux 渲染路径暴露死 UI（pr_agent #403 'Linux regression'
-// 修法）。
+// Qwen3-ASR 的 MLX 实体只在 Apple Silicon 编译，C/CPU 实体覆盖 macOS / Linux；
+// Qwen3 模型管理 UI 仍按桌面端守严，具体后端由平台能力与渠道选择决定。
 const IS_WINDOWS = detectOS() === "win"
 const IS_MAC = detectOS() === "mac"
+const IS_QWEN_PLATFORM = IS_MAC || detectOS() === "linux"
 
 interface LocalAsrProps {
     /// `embedded=true` 表示作为子组件嵌入「高级」设置页（Settings → Advanced）；
@@ -158,6 +158,7 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
     const { t } = useTranslation()
     const { prefs, updatePrefs } = useHotkeySettings()
     const [settings, setSettings] = useState<LocalAsrSettings | null>(null)
+    const [supportsQwen3Mlx, setSupportsQwen3Mlx] = useState(IS_MAC)
     const [models, setModels] = useState<LocalAsrModelStatus[]>([])
     // 两栏看板：右侧当前选中的模型（默认选第一个已下载的）。
     const [selectedModelId, setSelectedModelId] = useState<string | null>(null)
@@ -243,6 +244,12 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
     )
     const scrollGuardTimer = useRef<number | null>(null)
     const scrollGuardCleanup = useRef<(() => void) | null>(null)
+
+    useEffect(() => {
+        void getPlatformCapabilities().then(caps =>
+            setSupportsQwen3Mlx(caps.supportsLocalQwen3Mlx),
+        )
+    }, [])
 
     const restoreScrollGuard = () => {
         const guard = scrollGuard.current
@@ -1505,7 +1512,7 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
         provider: "local-qwen3-mlx" | "local-qwen3-c" | "local-whisper" =
             prefs?.activeAsrProvider === "local-qwen3-c"
                 ? "local-qwen3-c"
-                : IS_MAC
+                : supportsQwen3Mlx
                   ? "local-qwen3-mlx"
                   : "local-qwen3-c",
     ) => {
@@ -2028,7 +2035,7 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                 </Card>
             )}
 
-            {IS_MAC && <MetalToolchainGuide />}
+            {supportsQwen3Mlx && <MetalToolchainGuide />}
 
             {/* ─── 模型管理看板：左侧模型选择（竖排，已下载打绿勾），右侧详情
                  （HF 实时抓取的尺寸/文件数）+ 操作。全平台归一化（Qwen3 /
@@ -2117,7 +2124,7 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                                         selectedEntry.id,
                                         selectedEntry.engine === "whisper"
                                             ? "local-whisper"
-                                            : IS_MAC
+                                            : supportsQwen3Mlx
                                               ? "local-qwen3-mlx"
                                               : "local-qwen3-c",
                                     )
@@ -2149,7 +2156,7 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                     title={t("localAsr.downloadSettingsTitle")}
                     desc={t("localAsr.downloadSettingsDesc")}
                 >
-                    {IS_MAC && (
+                    {IS_QWEN_PLATFORM && (
                         <>
                         <Card style={{ marginBottom: 16 }}>
                             <div
@@ -3310,7 +3317,7 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
           Windows / Linux 看见镜像源 / 下载 / 模型列表都是 dead UI。Foundry 块自身已经
           被上方 IS_WINDOWS 守卫，错误 Card（共享 setError，被 Foundry handler 也写）
           保持无条件露出。 */}
-            {IS_MAC && !engineAvailable && (
+            {IS_QWEN_PLATFORM && !engineAvailable && (
                 <Card
                     style={{
                         marginBottom: 16,

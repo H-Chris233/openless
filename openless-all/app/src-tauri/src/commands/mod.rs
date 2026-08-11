@@ -363,7 +363,7 @@ mod tests {
             crate::asr::local::PROVIDER_ID,
             &snapshot()
         ));
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         assert!(asr_configured_for_provider(
             crate::asr::local::LOCAL_QWEN3_MLX_PROVIDER_ID,
             &snapshot()
@@ -417,7 +417,7 @@ mod tests {
         assert!(active_asr_is_keyless_for_validation(
             crate::asr::local::LOCAL_QWEN3_C_PROVIDER_ID
         ));
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         assert!(active_asr_is_keyless_for_validation(
             crate::asr::local::LOCAL_QWEN3_MLX_PROVIDER_ID
         ));

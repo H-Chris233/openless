@@ -1,6 +1,8 @@
 import { spawnSync } from "node:child_process"
 
-if (process.platform !== "darwin") process.exit(0)
+// MLX is only compiled into Apple Silicon builds. Intel macOS uses the C/CPU
+// Qwen backend and Whisper, so it must not be blocked by a Metal toolchain check.
+if (process.platform !== "darwin" || process.arch !== "arm64") process.exit(0)
 
 const result = spawnSync("xcrun", ["--find", "metal"], {
     encoding: "utf8",

@@ -699,6 +699,7 @@ export interface PlatformCapabilities {
   supportsOverlay: boolean;
   supportsImeInput: boolean;
   supportsLocalAsr: boolean;
+  supportsLocalQwen3Mlx: boolean;
   supportsInAppDictation: boolean;
   supportsAutoUpdate: boolean;
 }

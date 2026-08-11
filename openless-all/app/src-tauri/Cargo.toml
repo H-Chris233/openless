@@ -117,7 +117,6 @@ minisign-verify = "0.2"
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.5"
 core-foundation = "0.10"
-qwen3-asr-rs = { path = "vendor/qwen3-asr-rs", default-features = false, features = ["mlx"] }
 tokenizers = "0.21"
 whisper-rs = { version = "0.14", features = ["metal"] }
 core-graphics = "0.24"
@@ -128,6 +127,9 @@ coreaudio-sys = "0.2"
 objc2 = { version = "0.5", features = ["exception"] }
 objc2-foundation = "0.2"
 objc2-app-kit = "0.2"
+
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+qwen3-asr-rs = { path = "vendor/qwen3-asr-rs", default-features = false, features = ["mlx"] }
 # 把胶囊窗口转成「非激活 NSPanel」，使其能叠在别的 app 的全屏 Space 之上。
 # 普通 NSWindow 即便设了 collectionBehavior 也做不到（tauri#9556 / #11488）—— 必须是
 # NSPanel。该插件做窗口 NSWindow→NSPanel subclass 转换；仅 macOS。
@@ -174,7 +176,9 @@ custom-protocol = ["tauri/custom-protocol"]
 opt-level = 3
 lto = "thin"
 codegen-units = 1
-strip = "symbols"
+# `symbols` corrupts macOS proc-macro dylibs with the Homebrew Rust toolchain
+# (rustc reports "mis-aligned LINKEDIT string pool" when loading them).
+strip = "debuginfo"
 
 # issue #801: wayland-scanner 0.31.10 still pins vulnerable quick-xml 0.39.
 # This local copy backports upstream security commit d07c4f91f28b without

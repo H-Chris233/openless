@@ -258,6 +258,8 @@ export const ASR_PRESETS = [
   { id: 'sherpa-onnx-local',     nameKey: 'asrSherpaOnnxLocal',     baseUrl: '',                              model: ''                              },
   { id: 'local-qwen3-mlx', nameKey: 'asrLocalQwen3Mlx', baseUrl: '',                                          model: ''                              },
   { id: 'local-qwen3-c',   nameKey: 'asrLocalQwen3C', baseUrl: '',                                            model: ''                              },
+  // 历史配置兼容：不在新建下拉显示，但编辑旧渠道时仍按本地引擎处理。
+  { id: 'local-qwen3', nameKey: 'asrLocalQwen3', baseUrl: '',                                                 model: ''                              },
   // Apple 系统语音识别（macOS）：无 baseUrl/model、无下载、无凭据。
   { id: 'apple-speech', nameKey: 'asrAppleSpeech',  baseUrl: '',                                              model: ''                              },
 ] as const;

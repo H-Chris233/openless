@@ -3,4 +3,4 @@
 	url = https://github.com/Open-Less/qwen-asr.git
 [submodule "openless-all/app/src-tauri/vendor/qwen3-asr-rs"]
 	path = openless-all/app/src-tauri/vendor/qwen3-asr-rs
-	url = git@github.com:jimersylee/qwen3_asr_rs.git
+	url = https://github.com/jimersylee/qwen3_asr_rs.git

@@ -3013,6 +3013,7 @@ pub struct PlatformCapabilities {
     pub supports_desktop_hotkey: bool,
     pub supports_tray: bool,
     pub supports_local_asr: bool,
+    pub supports_local_qwen3_mlx: bool,
     pub supports_in_app_dictation: bool,
     pub supports_auto_update: bool,
 }
@@ -3028,6 +3029,7 @@ impl PlatformCapabilities {
                 supports_desktop_hotkey: false,
                 supports_tray: false,
                 supports_local_asr: false,
+                supports_local_qwen3_mlx: false,
                 supports_in_app_dictation: true,
                 supports_auto_update: true,
             }
@@ -3045,6 +3047,7 @@ impl PlatformCapabilities {
                 supports_desktop_hotkey: false,
                 supports_tray: false,
                 supports_local_asr: false,
+                supports_local_qwen3_mlx: false,
                 supports_in_app_dictation: false,
                 supports_auto_update: false,
             }
@@ -3058,7 +3061,12 @@ impl PlatformCapabilities {
                 supports_overlay: true,
                 supports_desktop_hotkey: true,
                 supports_tray: true,
-                supports_local_asr: cfg!(any(target_os = "macos", target_os = "windows")),
+                supports_local_asr: cfg!(any(
+                    target_os = "macos",
+                    target_os = "linux",
+                    target_os = "windows"
+                )),
+                supports_local_qwen3_mlx: cfg!(all(target_os = "macos", target_arch = "aarch64")),
                 supports_in_app_dictation: false,
                 supports_auto_update: true,
             }
