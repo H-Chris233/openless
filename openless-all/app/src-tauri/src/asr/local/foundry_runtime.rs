@@ -28,6 +28,23 @@ pub(crate) struct FoundryTranscriptionOutcome {
     pub used_cpu_fallback: bool,
     pub gpu_model_id: Option<String>,
     pub cpu_model_id: Option<String>,
+    pub primary_recovery: Option<FoundryPrimaryRecoveryToken>,
+}
+
+/// 一次成功 CPU 回退后恢复原始 primary variant 所需的进程内令牌。
+///
+/// 令牌绑定 route epoch；旧会话的异步恢复不能覆盖后续录音或显式模型操作。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FoundryPrimaryRecoveryToken {
+    alias: String,
+    primary_model_id: String,
+    route_epoch: u64,
+}
+
+impl FoundryPrimaryRecoveryToken {
+    pub(crate) const fn route_epoch(&self) -> u64 {
+        self.route_epoch
+    }
 }
 
 /// 单次录音回退临时 CPU 模型的运行时 lease。
@@ -57,6 +74,8 @@ pub(crate) fn is_terminal_foundry_fallback_error(error: &anyhow::Error) -> bool 
 #[cfg(target_os = "windows")]
 #[allow(dead_code)]
 mod imp {
+    use super::FoundryPrimaryRecoveryToken;
+    use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -141,6 +160,17 @@ mod imp {
             || error.contains("cudnn_engines_precompiled64_9.dll")
     }
 
+    fn is_cuda_fallback_candidate(
+        device: FoundryExecutionDevice,
+        execution_provider: Option<&str>,
+        error: &str,
+    ) -> bool {
+        device == FoundryExecutionDevice::Gpu
+            && execution_provider
+                .is_some_and(|provider| provider.eq_ignore_ascii_case("CUDAExecutionProvider"))
+            && is_cuda_cudnn_failure(error)
+    }
+
     fn may_reuse_loaded_model(
         loaded_alias: &str,
         requested_alias: &str,
@@ -162,6 +192,7 @@ mod imp {
         model_id: String,
         model: Arc<Model>,
         device: FoundryExecutionDevice,
+        execution_provider: Option<String>,
         temporary_cpu_fallback_lease: Option<FoundryTemporaryCpuFallbackLease>,
     }
 
@@ -171,10 +202,16 @@ mod imp {
             model: Arc<Model>,
             temporary_cpu_fallback_lease: Option<FoundryTemporaryCpuFallbackLease>,
         ) -> Self {
+            let execution_provider = model
+                .info()
+                .runtime
+                .as_ref()
+                .map(|runtime| runtime.execution_provider.clone());
             Self {
                 alias: alias.into(),
                 model_id: model.id().to_string(),
                 device: FoundryExecutionDevice::from_model(&model),
+                execution_provider,
                 model,
                 temporary_cpu_fallback_lease,
             }
@@ -185,10 +222,32 @@ mod imp {
         }
     }
 
+    #[derive(Clone)]
+    struct PrimaryModel {
+        alias: String,
+        model_id: String,
+        model: Arc<Model>,
+        device: FoundryExecutionDevice,
+        execution_provider: Option<String>,
+    }
+
+    impl PrimaryModel {
+        fn from_loaded(loaded: &LoadedModel) -> Self {
+            Self {
+                alias: loaded.alias.clone(),
+                model_id: loaded.model_id.clone(),
+                model: Arc::clone(&loaded.model),
+                device: loaded.device,
+                execution_provider: loaded.execution_provider.clone(),
+            }
+        }
+    }
+
     #[derive(Default)]
     struct RuntimeState {
         manager: Option<&'static FoundryLocalManager>,
         loaded: Option<LoadedModel>,
+        primary_by_alias: HashMap<String, PrimaryModel>,
     }
 
     #[derive(Debug, Clone)]
@@ -203,6 +262,7 @@ mod imp {
     trait FoundryExecutionAdapter {
         fn alias(&self) -> &str;
         fn execution_device(&self) -> FoundryExecutionDevice;
+        fn execution_provider(&self) -> Option<&str>;
         fn model_id(&self) -> &str;
         async fn transcribe(&mut self, audio_path: &Path, timeout: Duration) -> Result<String>;
         async fn switch_to_cpu(
@@ -225,6 +285,7 @@ mod imp {
                 gpu_model_id: (adapter.execution_device() == FoundryExecutionDevice::Gpu)
                     .then(|| adapter.model_id().to_string()),
                 cpu_model_id: None,
+                primary_recovery: None,
             };
             let mut fallback_gpu_error = None;
             let mut fallback_started_at = None;
@@ -245,8 +306,11 @@ mod imp {
                     Ok(text) => outcome.texts.push(text),
                     Err(error)
                         if !outcome.used_cpu_fallback
-                            && adapter.execution_device() == FoundryExecutionDevice::Gpu
-                            && is_cuda_cudnn_failure(&format!("{error:#}")) =>
+                            && is_cuda_fallback_candidate(
+                                adapter.execution_device(),
+                                adapter.execution_provider(),
+                                &format!("{error:#}"),
+                            ) =>
                     {
                         let gpu_error = format!("{error:#}");
                         let fallback_started = Instant::now();
@@ -369,6 +433,7 @@ mod imp {
         manager: &'static FoundryLocalManager,
         alias: &'a str,
         language_hint: Option<String>,
+        primary: PrimaryModel,
         loaded: LoadedModel,
         using_temporary_cpu_fallback: bool,
     }
@@ -400,6 +465,10 @@ mod imp {
 
         fn execution_device(&self) -> FoundryExecutionDevice {
             self.loaded.device
+        }
+
+        fn execution_provider(&self) -> Option<&str> {
+            self.loaded.execution_provider.as_deref()
         }
 
         fn model_id(&self) -> &str {
@@ -482,10 +551,11 @@ mod imp {
             // 先把带 lease 的临时模型记入 runtime state，再等待 load。若外层因取消 drop
             // 当前 future，取消清理任务将在 lifecycle 锁释放后看到这份 state 并卸载它。
             let loaded = LoadedModel::new(self.alias, Arc::clone(&cpu_model), Some(lease));
-            *self.runtime.state.lock() = RuntimeState {
-                manager: Some(self.manager),
-                loaded: Some(loaded.clone()),
-            };
+            {
+                let mut state = self.runtime.state.lock();
+                state.manager = Some(self.manager);
+                state.loaded = Some(loaded.clone());
+            }
 
             log::info!(
                 "[foundry-asr] event=cpu_load_started alias={} cpu_model={}",
@@ -497,26 +567,22 @@ mod imp {
                 .await
                 .with_context(|| format!("load Foundry CPU model {cpu_model_id}"))
             {
-                self.runtime.clear_loaded_if_model_id(&loaded.model_id);
-                if let Err(cleanup_error) = cpu_model.unload().await {
-                    log::warn!(
-                        "[foundry-asr] event=cpu_load_failure_cleanup_failed alias={} cpu_model={}: {cleanup_error:#}",
-                        self.alias,
-                        cpu_model_id
-                    );
+                if let Err(cleanup_error) = FoundryLocalRuntime::unload_model(&loaded).await {
+                    return Err(error.context(format!(
+                        "temporary CPU model {cpu_model_id} also failed to unload; preserving temporary runtime state: {cleanup_error:#}"
+                    )));
                 }
+                self.runtime.clear_loaded_if_model_id(&loaded.model_id);
                 return self.restore_after_failed_cpu_switch(&previous, error).await;
             }
             if let Err(error) = self.runtime.check_prepare_cancelled() {
-                if let Err(cleanup_error) = cpu_model.unload().await {
-                    log::warn!(
-                        "[foundry-asr] event=cpu_cancel_cleanup_failed alias={} cpu_model={}: {cleanup_error:#}",
-                        self.alias,
-                        cpu_model_id
-                    );
+                if let Err(cleanup_error) = FoundryLocalRuntime::unload_model(&loaded).await {
+                    return Err(error.context(format!(
+                        "cancelled temporary CPU model {cpu_model_id} also failed to unload; preserving temporary runtime state: {cleanup_error:#}"
+                    )));
                 }
                 self.runtime.clear_loaded_if_model_id(&loaded.model_id);
-                return Err(error);
+                return self.restore_after_failed_cpu_switch(&previous, error).await;
             }
 
             self.loaded = loaded;
@@ -548,6 +614,7 @@ mod imp {
         lifecycle: AsyncMutex<()>,
         cancel_prepare: Arc<AtomicBool>,
         temporary_cpu_fallback_sequence: AtomicU64,
+        route_epoch: AtomicU64,
         state: Mutex<RuntimeState>,
     }
 
@@ -563,6 +630,7 @@ mod imp {
                 lifecycle: AsyncMutex::new(()),
                 cancel_prepare: Arc::new(AtomicBool::new(false)),
                 temporary_cpu_fallback_sequence: AtomicU64::new(0),
+                route_epoch: AtomicU64::new(0),
                 state: Mutex::new(RuntimeState::default()),
             }
         }
@@ -605,6 +673,7 @@ mod imp {
         where
             F: Fn(FoundryPrepareProgressPayload) + Send + Sync + 'static,
         {
+            self.advance_route_epoch();
             let _lifecycle = self.lifecycle.lock().await;
             self.cancel_prepare.store(false, Ordering::SeqCst);
             let progress: FoundryPrepareProgressCallback = Arc::new(progress);
@@ -634,6 +703,7 @@ mod imp {
         }
 
         pub fn request_cancel_prepare(&self) {
+            self.advance_route_epoch();
             self.cancel_prepare.store(true, Ordering::SeqCst);
         }
 
@@ -700,6 +770,7 @@ mod imp {
             audio_timeout: Duration,
             notices: FoundryFallbackNoticeCallback,
         ) -> Result<FoundryTranscriptionOutcome> {
+            let route_epoch = self.advance_route_epoch();
             let _lifecycle = self.lifecycle.lock().await;
             self.cancel_prepare.store(false, Ordering::SeqCst);
             let runtime_source = foundry_native::normalize_runtime_source(runtime_source);
@@ -707,21 +778,56 @@ mod imp {
                 .ensure_loaded_locked(alias, runtime_source, Arc::new(|_| {}))
                 .await?;
             let manager = self.manager()?;
+            let primary = PrimaryModel::from_loaded(&loaded);
             let mut execution = FoundrySdkExecution {
                 runtime: self,
                 manager,
                 alias,
                 language_hint: normalized_language_hint(language_hint),
+                primary,
                 loaded,
                 using_temporary_cpu_fallback: false,
             };
-            transcribe_recording_with_adapter(&mut execution, audio_paths, audio_timeout, &notices)
-                .await
+            let mut outcome = transcribe_recording_with_adapter(
+                &mut execution,
+                audio_paths,
+                audio_timeout,
+                &notices,
+            )
+            .await?;
+            if outcome.used_cpu_fallback {
+                outcome.primary_recovery = Some(FoundryPrimaryRecoveryToken {
+                    alias: alias.to_string(),
+                    primary_model_id: execution.primary.model_id.clone(),
+                    route_epoch,
+                });
+            }
+            Ok(outcome)
         }
 
         pub async fn release_now(&self) -> Result<()> {
+            self.advance_route_epoch();
             let _lifecycle = self.lifecycle.lock().await;
             self.release_now_locked().await
+        }
+
+        pub fn route_epoch_snapshot(&self) -> u64 {
+            self.route_epoch.load(Ordering::SeqCst)
+        }
+
+        /// 使已调度的恢复/释放任务失效；用于 alias 或 runtime source 切换。
+        pub fn invalidate_route(&self) {
+            self.advance_route_epoch();
+        }
+
+        pub async fn release_if_route_epoch(&self, expected_epoch: u64) -> Result<bool> {
+            let _lifecycle = self.lifecycle.lock().await;
+            if self.route_epoch_snapshot() != expected_epoch {
+                return Ok(false);
+            }
+            self.release_now_locked().await?;
+            self.advance_route_epoch();
+            Ok(true)
         }
 
         /// 返回当前取消可清理到的 CPU 回退 lease 上界。
@@ -780,6 +886,7 @@ mod imp {
         }
 
         pub async fn delete_model(&self, alias: &str) -> Result<()> {
+            self.advance_route_epoch();
             let _lifecycle = self.lifecycle.lock().await;
             let manager = self.manager()?;
             let model = manager
@@ -787,7 +894,9 @@ mod imp {
                 .get_model(alias)
                 .await
                 .with_context(|| format!("get Foundry model {alias}"))?;
-            let loaded = self.cached_loaded_model(alias);
+            let loaded = self
+                .loaded_model_snapshot()
+                .filter(|loaded| loaded.alias == alias);
             if let Some(loaded) = loaded.as_ref() {
                 Self::unload_model(loaded).await?;
                 self.clear_loaded_if_model_id(&loaded.model_id);
@@ -796,6 +905,7 @@ mod imp {
                 .remove_from_cache()
                 .await
                 .with_context(|| format!("remove Foundry model cache {alias}"))?;
+            self.state.lock().primary_by_alias.remove(alias);
             Ok(())
         }
 
@@ -863,11 +973,18 @@ mod imp {
             ));
             self.check_prepare_cancelled()?;
 
-            let model = manager
-                .catalog()
-                .get_model(alias)
-                .await
-                .with_context(|| format!("get Foundry model {alias}"))?;
+            let preferred_primary = self.preferred_primary_model(manager, alias).await;
+            let mut model = match preferred_primary {
+                Some(model) => model,
+                None => manager
+                    .catalog()
+                    .get_model(alias)
+                    .await
+                    .with_context(|| format!("get Foundry model {alias}"))?,
+            };
+            let using_recorded_primary = self
+                .primary_model_snapshot(alias)
+                .is_some_and(|primary| primary.model_id == model.id());
 
             let model_label = model_display_label(alias);
             if !model
@@ -923,10 +1040,7 @@ mod imp {
                     100.0,
                 ));
                 let loaded = LoadedModel::new(alias, model, None);
-                *self.state.lock() = RuntimeState {
-                    manager: Some(manager),
-                    loaded: Some(loaded.clone()),
-                };
+                self.set_primary_loaded(manager, loaded.clone());
                 progress.as_ref()(FoundryPrepareProgressPayload::finished(
                     alias,
                     format!("{model_label} ready"),
@@ -950,8 +1064,56 @@ mod imp {
                 .await
                 .with_context(|| format!("load Foundry model {alias}"))
             {
-                self.rollback_prepare_error(manager, unloaded_previous.as_ref(), alias, error)
-                    .await?;
+                if using_recorded_primary {
+                    let failed_primary_id = model.id().to_string();
+                    self.clear_primary_if_model_id(alias, &failed_primary_id);
+                    let alias_model = manager
+                        .catalog()
+                        .get_model(alias)
+                        .await
+                        .with_context(|| format!("reselect Foundry model {alias}"))?;
+                    if alias_model.id() == failed_primary_id {
+                        self.rollback_prepare_error(
+                            manager,
+                            unloaded_previous.as_ref(),
+                            alias,
+                            error,
+                        )
+                        .await?;
+                    }
+                    log::warn!(
+                        "[foundry-asr] recorded primary {} failed to load; reselected {} for alias {}",
+                        failed_primary_id,
+                        alias_model.id(),
+                        alias
+                    );
+                    model = alias_model;
+                    if !model
+                        .is_cached()
+                        .await
+                        .context("check reselected Foundry model cache")?
+                    {
+                        model.download(None::<fn(f64)>).await.with_context(|| {
+                            format!("download reselected Foundry model {alias}")
+                        })?;
+                    }
+                    if let Err(reselect_error) = model
+                        .load()
+                        .await
+                        .with_context(|| format!("load reselected Foundry model {alias}"))
+                    {
+                        self.rollback_prepare_error(
+                            manager,
+                            unloaded_previous.as_ref(),
+                            alias,
+                            reselect_error,
+                        )
+                        .await?;
+                    }
+                } else {
+                    self.rollback_prepare_error(manager, unloaded_previous.as_ref(), alias, error)
+                        .await?;
+                }
             }
             if self.cancel_prepare.load(Ordering::SeqCst) {
                 if let Err(error) = model
@@ -977,10 +1139,7 @@ mod imp {
             ));
 
             let loaded = LoadedModel::new(alias, model, None);
-            *self.state.lock() = RuntimeState {
-                manager: Some(manager),
-                loaded: Some(loaded.clone()),
-            };
+            self.set_primary_loaded(manager, loaded.clone());
             progress.as_ref()(FoundryPrepareProgressPayload::finished(
                 alias,
                 format!("{model_label} ready"),
@@ -996,6 +1155,101 @@ mod imp {
             Ok(())
         }
 
+        /// 成功 CPU 回退后按原 route 恢复精确 primary variant。
+        ///
+        /// 新准备/转写会在等待 lifecycle 锁之前推进 epoch，因此旧恢复任务不会覆盖新会话。
+        pub async fn restore_primary_for_keep_alive(
+            &self,
+            token: &FoundryPrimaryRecoveryToken,
+        ) -> Result<bool> {
+            let _lifecycle = self.lifecycle.lock().await;
+            if !self.route_is_current(token) {
+                return Ok(false);
+            }
+
+            if let Some(loaded) = self.loaded_model_snapshot() {
+                if loaded.model_id == token.primary_model_id && !loaded.is_temporary_cpu_fallback()
+                {
+                    return Ok(true);
+                }
+                if loaded.is_temporary_cpu_fallback() {
+                    Self::unload_model(&loaded).await?;
+                    self.clear_loaded_if_model_id(&loaded.model_id);
+                } else {
+                    return Ok(false);
+                }
+            }
+
+            let Some(primary) = self
+                .primary_model_snapshot(&token.alias)
+                .filter(|primary| primary.model_id == token.primary_model_id)
+            else {
+                return Ok(false);
+            };
+            let manager = self.manager()?;
+            if primary.device != FoundryExecutionDevice::Gpu
+                || primary
+                    .execution_provider
+                    .as_deref()
+                    .is_none_or(|provider| !provider.eq_ignore_ascii_case("CUDAExecutionProvider"))
+            {
+                self.clear_primary_if_model_id(&token.alias, &token.primary_model_id);
+                return Ok(false);
+            }
+            if let Err(error) = manager
+                .catalog()
+                .get_model_variant(&token.primary_model_id)
+                .await
+            {
+                self.clear_primary_if_model_id(&token.alias, &token.primary_model_id);
+                log::warn!(
+                    "[foundry-asr] primary recovery variant disappeared alias={} model={}: {error:#}",
+                    token.alias,
+                    token.primary_model_id
+                );
+                return Ok(false);
+            }
+            let model = Arc::clone(&primary.model);
+            if let Err(error) = model.load().await.with_context(|| {
+                format!("restore Foundry primary model {}", token.primary_model_id)
+            }) {
+                self.clear_primary_if_model_id(&token.alias, &token.primary_model_id);
+                return Err(error);
+            }
+            let loaded = LoadedModel::new(&primary.alias, model, None);
+            if !self.route_is_current(token) {
+                if let Err(error) = Self::unload_model(&loaded).await {
+                    let mut state = self.state.lock();
+                    state.manager = Some(manager);
+                    state.loaded = Some(loaded);
+                    return Err(error.context("unload stale restored Foundry primary model"));
+                }
+                return Ok(false);
+            }
+            self.set_primary_loaded(manager, loaded);
+            Ok(true)
+        }
+
+        /// 仅当恢复令牌仍代表当前 route 时释放 primary；用于保活截止任务。
+        pub async fn release_primary_if_current(
+            &self,
+            token: &FoundryPrimaryRecoveryToken,
+        ) -> Result<bool> {
+            let _lifecycle = self.lifecycle.lock().await;
+            if !self.route_is_current(token) {
+                return Ok(false);
+            }
+            let Some(loaded) = self.loaded_model_snapshot().filter(|loaded| {
+                loaded.model_id == token.primary_model_id && !loaded.is_temporary_cpu_fallback()
+            }) else {
+                return Ok(false);
+            };
+            Self::unload_model(&loaded).await?;
+            self.clear_loaded_if_model_id(&loaded.model_id);
+            self.advance_route_epoch();
+            Ok(true)
+        }
+
         async fn restore_loaded_model(
             &self,
             manager: &'static FoundryLocalManager,
@@ -1006,10 +1260,13 @@ mod imp {
                 .load()
                 .await
                 .with_context(|| format!("restore Foundry model {}", loaded.model_id))?;
-            *self.state.lock() = RuntimeState {
-                manager: Some(manager),
-                loaded: Some(loaded.clone()),
-            };
+            if loaded.is_temporary_cpu_fallback() {
+                let mut state = self.state.lock();
+                state.manager = Some(manager);
+                state.loaded = Some(loaded.clone());
+            } else {
+                self.set_primary_loaded(manager, loaded.clone());
+            }
             Ok(())
         }
 
@@ -1063,6 +1320,26 @@ mod imp {
                 .with_context(|| format!("get Foundry CPU model variant {cpu_variant_id}"))
         }
 
+        async fn preferred_primary_model(
+            &self,
+            manager: &'static FoundryLocalManager,
+            alias: &str,
+        ) -> Option<Arc<Model>> {
+            let primary = self.primary_model_snapshot(alias)?;
+            match manager.catalog().get_model_variant(&primary.model_id).await {
+                Ok(model) => Some(model),
+                Err(error) => {
+                    log::warn!(
+                        "[foundry-asr] recorded primary variant unavailable alias={} model={}: {error:#}",
+                        alias,
+                        primary.model_id
+                    );
+                    self.clear_primary_if_model_id(alias, &primary.model_id);
+                    None
+                }
+            }
+        }
+
         fn cached_loaded_model(&self, alias: &str) -> Option<LoadedModel> {
             self.state
                 .lock()
@@ -1108,6 +1385,32 @@ mod imp {
 
         fn loaded_model_snapshot(&self) -> Option<LoadedModel> {
             self.state.lock().loaded.clone()
+        }
+
+        fn primary_model_snapshot(&self, alias: &str) -> Option<PrimaryModel> {
+            self.state.lock().primary_by_alias.get(alias).cloned()
+        }
+
+        fn set_primary_loaded(&self, manager: &'static FoundryLocalManager, loaded: LoadedModel) {
+            debug_assert!(!loaded.is_temporary_cpu_fallback());
+            let primary = PrimaryModel::from_loaded(&loaded);
+            let mut state = self.state.lock();
+            state.manager = Some(manager);
+            state
+                .primary_by_alias
+                .insert(primary.alias.clone(), primary);
+            state.loaded = Some(loaded);
+        }
+
+        fn clear_primary_if_model_id(&self, alias: &str, model_id: &str) {
+            let mut state = self.state.lock();
+            if state
+                .primary_by_alias
+                .get(alias)
+                .is_some_and(|primary| primary.model_id == model_id)
+            {
+                state.primary_by_alias.remove(alias);
+            }
         }
 
         fn loaded_for_replacement(&self, alias: &str) -> Option<LoadedModel> {
@@ -1159,6 +1462,16 @@ mod imp {
                     .wrapping_add(1),
             )
         }
+
+        fn advance_route_epoch(&self) -> u64 {
+            self.route_epoch
+                .fetch_add(1, Ordering::SeqCst)
+                .wrapping_add(1)
+        }
+
+        fn route_is_current(&self, token: &FoundryPrimaryRecoveryToken) -> bool {
+            self.route_epoch.load(Ordering::SeqCst) == token.route_epoch
+        }
     }
 
     fn model_display_label(alias: &str) -> String {
@@ -1195,12 +1508,12 @@ mod imp {
     #[cfg(test)]
     mod lifecycle_tests {
         use super::{
-            foundry_native_dir_candidates, is_cuda_cudnn_failure, may_reuse_loaded_model,
-            normalized_language_hint, select_cpu_variant_id, select_foundry_native_dir,
-            should_release_temporary_cpu_fallback, transcribe_recording_with_adapter,
-            FoundryCpuSwitch, FoundryExecutionAdapter, FoundryExecutionDevice,
-            FoundryFallbackNotice, FoundryFallbackNoticeCallback, FoundryLocalRuntime,
-            FoundryVariantDescriptor,
+            foundry_native_dir_candidates, is_cuda_cudnn_failure, is_cuda_fallback_candidate,
+            may_reuse_loaded_model, normalized_language_hint, select_cpu_variant_id,
+            select_foundry_native_dir, should_release_temporary_cpu_fallback,
+            transcribe_recording_with_adapter, FoundryCpuSwitch, FoundryExecutionAdapter,
+            FoundryExecutionDevice, FoundryFallbackNotice, FoundryFallbackNoticeCallback,
+            FoundryLocalRuntime, FoundryVariantDescriptor,
         };
         use anyhow::Result;
         use std::{
@@ -1226,6 +1539,7 @@ mod imp {
 
         struct ScriptedExecution {
             device: FoundryExecutionDevice,
+            execution_provider: Option<&'static str>,
             model_id: String,
             transcriptions: VecDeque<ScriptedTranscription>,
             cpu_switch: Option<ScriptedCpuSwitch>,
@@ -1244,6 +1558,7 @@ mod imp {
             ) -> Self {
                 Self {
                     device: FoundryExecutionDevice::Gpu,
+                    execution_provider: Some("CUDAExecutionProvider"),
                     model_id: "whisper-medium-gpu:4".to_string(),
                     transcriptions: transcriptions.into_iter().collect(),
                     cpu_switch: Some(cpu_switch),
@@ -1269,6 +1584,10 @@ mod imp {
 
             fn execution_device(&self) -> FoundryExecutionDevice {
                 self.device
+            }
+
+            fn execution_provider(&self) -> Option<&str> {
+                self.execution_provider
             }
 
             fn model_id(&self) -> &str {
@@ -1313,6 +1632,7 @@ mod imp {
                             notices(FoundryFallbackNotice::DownloadingCpu);
                         }
                         self.device = FoundryExecutionDevice::Cpu;
+                        self.execution_provider = Some("CPUExecutionProvider");
                         self.model_id = model_id.to_string();
                         Ok(FoundryCpuSwitch {
                             model_id: model_id.to_string(),
@@ -1495,6 +1815,34 @@ mod imp {
         }
 
         #[tokio::test]
+        async fn cudnn_signature_on_a_non_cuda_gpu_does_not_trigger_cpu_fallback() {
+            let mut execution = ScriptedExecution::gpu(
+                [ScriptedTranscription::Error(
+                    "CUDNN_FE failure 11: CUDNN_BACKEND_API_FAILED",
+                )],
+                ScriptedCpuSwitch::Success {
+                    model_id: "whisper-medium-cpu:4",
+                    download_required: false,
+                },
+            );
+            execution.execution_provider = Some("WebGpuExecutionProvider");
+            let (callback, _) = notices();
+
+            let error = transcribe_recording_with_adapter(
+                &mut execution,
+                &audio_paths(1),
+                Duration::from_secs(30),
+                &callback,
+            )
+            .await
+            .unwrap_err();
+
+            assert!(error.to_string().contains("CUDNN_FE failure"));
+            assert_eq!(execution.switch_count, 0);
+            assert_eq!(execution.finish_count, 1);
+        }
+
+        #[tokio::test]
         async fn unavailable_cpu_variant_is_a_terminal_fallback_error_without_a_second_gpu_attempt()
         {
             let mut execution = ScriptedExecution::gpu(
@@ -1662,6 +2010,37 @@ mod imp {
         }
 
         #[test]
+        fn cuda_fallback_requires_the_cuda_execution_provider() {
+            let cudnn_error = "CUDNN_FE failure 11: CUDNN_BACKEND_API_FAILED";
+
+            assert!(is_cuda_fallback_candidate(
+                FoundryExecutionDevice::Gpu,
+                Some("CUDAExecutionProvider"),
+                cudnn_error,
+            ));
+            assert!(!is_cuda_fallback_candidate(
+                FoundryExecutionDevice::Gpu,
+                Some("WebGpuExecutionProvider"),
+                cudnn_error,
+            ));
+            assert!(!is_cuda_fallback_candidate(
+                FoundryExecutionDevice::Gpu,
+                Some("OpenVINOExecutionProvider"),
+                cudnn_error,
+            ));
+            assert!(!is_cuda_fallback_candidate(
+                FoundryExecutionDevice::Cpu,
+                Some("CPUExecutionProvider"),
+                cudnn_error,
+            ));
+            assert!(!is_cuda_fallback_candidate(
+                FoundryExecutionDevice::Other,
+                None,
+                cudnn_error,
+            ));
+        }
+
+        #[test]
         fn cpu_variant_selection_uses_device_type_and_highest_version() {
             let variants = [
                 FoundryVariantDescriptor::new(
@@ -1721,6 +2100,21 @@ mod imp {
                 Some(newer_lease),
                 cancelled_lease
             ));
+        }
+
+        #[test]
+        fn a_new_route_invalidates_an_old_primary_recovery_token() {
+            let runtime = FoundryLocalRuntime::new();
+            let epoch = runtime.advance_route_epoch();
+            let token = super::super::FoundryPrimaryRecoveryToken {
+                alias: "whisper-medium".to_string(),
+                primary_model_id: "whisper-medium-cuda-gpu:4".to_string(),
+                route_epoch: epoch,
+            };
+
+            assert!(runtime.route_is_current(&token));
+            runtime.advance_route_epoch();
+            assert!(!runtime.route_is_current(&token));
         }
 
         #[test]
@@ -1816,6 +2210,8 @@ impl FoundryLocalRuntime {
     }
 
     pub fn request_cancel_prepare(&self) {}
+
+    pub fn invalidate_route(&self) {}
 
     pub async fn catalog_snapshot(
         &self,

@@ -58,6 +58,7 @@ pub async fn foundry_local_asr_catalog(
 #[tauri::command]
 pub fn foundry_local_asr_set_model(
     coord: CoordinatorState<'_>,
+    runtime: State<'_, Arc<FoundryLocalRuntime>>,
     model_alias: String,
 ) -> Result<(), String> {
     validate_foundry_model_alias(&model_alias)?;
@@ -66,7 +67,9 @@ pub fn foundry_local_asr_set_model(
         return Ok(());
     }
     prefs.foundry_local_asr_model = model_alias;
-    coord.prefs().set(prefs).map_err(|e| e.to_string())
+    coord.prefs().set(prefs).map_err(|e| e.to_string())?;
+    runtime.invalidate_route();
+    Ok(())
 }
 
 #[tauri::command]
@@ -86,6 +89,7 @@ pub fn foundry_local_asr_set_language_hint(
 #[tauri::command]
 pub fn foundry_local_asr_set_runtime_source(
     coord: CoordinatorState<'_>,
+    runtime: State<'_, Arc<FoundryLocalRuntime>>,
     source: String,
 ) -> Result<(), String> {
     let mut prefs = coord.prefs().get();
@@ -94,7 +98,9 @@ pub fn foundry_local_asr_set_runtime_source(
         return Ok(());
     }
     prefs.foundry_local_runtime_source = normalized;
-    coord.prefs().set(prefs).map_err(|e| e.to_string())
+    coord.prefs().set(prefs).map_err(|e| e.to_string())?;
+    runtime.invalidate_route();
+    Ok(())
 }
 
 #[tauri::command]

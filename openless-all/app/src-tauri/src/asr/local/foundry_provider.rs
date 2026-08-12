@@ -19,13 +19,19 @@ use uuid::Uuid;
 use crate::asr::wav::encode_wav_16k_mono;
 use crate::asr::RawTranscript;
 
-use super::foundry_runtime::FoundryFallbackNoticeCallback;
 #[cfg(target_os = "windows")]
 use super::foundry_runtime::FoundryLocalRuntime;
+use super::foundry_runtime::{FoundryFallbackNoticeCallback, FoundryPrimaryRecoveryToken};
 
 /// Foundry Local Whisper 属于 Whisper 系模型，原生解码窗口约 30s。每次 SDK
 /// 请求保持在窗口内，再由 OpenLess 合并分片文本，避免长听写只返回第一段。
 const FOUNDRY_WHISPER_CHUNK_LIMIT_MS: u64 = 30_000;
+
+pub(crate) struct FoundryProviderTranscription {
+    pub raw: RawTranscript,
+    pub used_cpu_fallback: bool,
+    pub primary_recovery: Option<FoundryPrimaryRecoveryToken>,
+}
 
 pub struct FoundryLocalWhisperAsr {
     #[cfg(target_os = "windows")]
@@ -81,8 +87,10 @@ impl FoundryLocalWhisperAsr {
     }
 
     pub async fn transcribe(&self, audio_timeout: std::time::Duration) -> Result<RawTranscript> {
-        self.transcribe_with_fallback_notice(audio_timeout, Arc::new(|_| {}))
-            .await
+        Ok(self
+            .transcribe_with_fallback_notice(audio_timeout, Arc::new(|_| {}))
+            .await?
+            .raw)
     }
 
     /// 转写当前录音，并在 Foundry 的一次性 GPU→CPU 回退期间同步最小 UI 提示。
@@ -92,13 +100,17 @@ impl FoundryLocalWhisperAsr {
         &self,
         audio_timeout: std::time::Duration,
         notices: FoundryFallbackNoticeCallback,
-    ) -> Result<RawTranscript> {
+    ) -> Result<FoundryProviderTranscription> {
         let cancel_generation = self.cancel_generation.load(Ordering::SeqCst);
         let pcm = self.buffer.lock().clone();
         if pcm.is_empty() {
-            return Ok(RawTranscript {
-                text: String::new(),
-                duration_ms: 0,
+            return Ok(FoundryProviderTranscription {
+                raw: RawTranscript {
+                    text: String::new(),
+                    duration_ms: 0,
+                },
+                used_cpu_fallback: false,
+                primary_recovery: None,
             });
         }
 
@@ -117,7 +129,7 @@ impl FoundryLocalWhisperAsr {
         pcm: &[u8],
         audio_timeout: std::time::Duration,
         notices: FoundryFallbackNoticeCallback,
-    ) -> Result<RawTranscript> {
+    ) -> Result<FoundryProviderTranscription> {
         let duration_ms = pcm_duration_ms(pcm);
 
         #[cfg(not(target_os = "windows"))]
@@ -179,9 +191,13 @@ impl FoundryLocalWhisperAsr {
                 .map(|text| trim_transcript_text(text))
                 .collect::<Vec<_>>();
 
-            Ok(RawTranscript {
-                text: crate::asr::whisper::join_transcript_chunks(&texts),
-                duration_ms,
+            Ok(FoundryProviderTranscription {
+                raw: RawTranscript {
+                    text: crate::asr::whisper::join_transcript_chunks(&texts),
+                    duration_ms,
+                },
+                used_cpu_fallback: outcome.used_cpu_fallback,
+                primary_recovery: outcome.primary_recovery,
             })
         }
     }

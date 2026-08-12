@@ -3161,7 +3161,11 @@ pub(super) fn schedule_cancelled_asr_release(
     match asr {
         #[cfg(target_os = "windows")]
         ActiveAsr::FoundryLocalWhisper(_) => {
-            schedule_foundry_local_asr_release(inner, AsrReleaseSession::Dictation(session_id));
+            schedule_foundry_local_asr_release(
+                inner,
+                AsrReleaseSession::Dictation(session_id),
+                None,
+            );
         }
         #[cfg(target_os = "windows")]
         ActiveAsr::SherpaOnnxLocal(_) => {
@@ -3327,6 +3331,12 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
     // `asr` move 进去，命中取消时那个 future 会被 drop（连同它持有的 Arc），我们再用这份
     // clone 显式 cancel，促使流式 WebSocket 立刻关闭、不残留后台 worker。
     let asr_for_cancel = asr.clone();
+    #[cfg(target_os = "windows")]
+    let is_foundry_local = matches!(&asr, ActiveAsr::FoundryLocalWhisper(_));
+    #[cfg(target_os = "windows")]
+    let foundry_primary_recovery = Arc::new(Mutex::new(None));
+    #[cfg(target_os = "windows")]
+    let foundry_primary_recovery_for_transcribe = Arc::clone(&foundry_primary_recovery);
     // 「等待转写结果」实测起点：流式 ASR 量的是收尾延迟，批式量完整转写。写进
     // history.asr_ms 供历史详情页展示（含下方的自动静默重试时间——那也是用户等的时间）。
     let transcribe_started = std::time::Instant::now();
@@ -3602,12 +3612,14 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                         .transcribe_with_fallback_notice(timeout_duration, notices)
                         .await
                     {
-                        Ok(r) => {
-                            schedule_foundry_local_asr_release(
-                                inner,
-                                AsrReleaseSession::Dictation(current_session_id),
+                        Ok(outcome) => {
+                            debug_assert_eq!(
+                                outcome.used_cpu_fallback,
+                                outcome.primary_recovery.is_some()
                             );
-                            Ok(r)
+                            *foundry_primary_recovery_for_transcribe.lock() =
+                                outcome.primary_recovery;
+                            Ok(outcome.raw)
                         }
                         Err(e) => {
                             // 用户取消现在由外层 select! 统一处理（drop 掉本 future 中断在途转写），
@@ -3616,6 +3628,7 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                             schedule_foundry_local_asr_release(
                                 inner,
                                 AsrReleaseSession::Dictation(current_session_id),
+                                None,
                             );
                             let retryable = !crate::asr::local::foundry_runtime::is_terminal_foundry_fallback_error(&e);
                             if !retryable {
@@ -3778,6 +3791,15 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
     // 优先级高于 empty 检查 — 用户取消 → 静默丢弃，不写失败历史也不弹错误胶囊。
     if inner.state.lock().cancelled {
         log::info!("[coord] cancel detected after ASR — discarding transcript");
+        cancel_active_asr(asr_for_cancel);
+        #[cfg(target_os = "windows")]
+        if is_foundry_local {
+            schedule_foundry_local_asr_release(
+                inner,
+                AsrReleaseSession::Dictation(current_session_id),
+                None,
+            );
+        }
         restore_prepared_windows_ime_session(inner, current_session_id);
         // PR #387 的「cancel 后清 focus_target」契约要在 Processing 路径上也成立。
         // cancel_session 在 Processing 阶段故意跳过 finish_cancel_session_state（让
@@ -3785,6 +3807,15 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         // 2026-05-10 P3 (🚩) 把这条补完。
         finish_cancelled_processing(inner, current_session_id);
         return Ok(());
+    }
+
+    #[cfg(target_os = "windows")]
+    if is_foundry_local && transcribe_outcome.is_ok() {
+        schedule_foundry_local_asr_release(
+            inner,
+            AsrReleaseSession::Dictation(current_session_id),
+            foundry_primary_recovery.lock().take(),
+        );
     }
 
     // ASR 失败/超时：先自动静默重试（从刚归档的音频重转，应对网络/服务端瞬时抖动）。上面的
