@@ -30,7 +30,7 @@ use super::{AudioConsumer, DictionaryHotword, RawTranscript};
 const ENDPOINT_APP_ID_TOKEN: &str = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async";
 const ENDPOINT_API_KEY: &str = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async";
 /// 200 ms of 16 kHz / 16-bit / mono PCM.
-const TARGET_AUDIO_CHUNK_BYTES: usize = 6_400;
+pub(crate) const TARGET_AUDIO_CHUNK_BYTES: usize = 6_400;
 /// 16 kHz · 16-bit · mono = 32 000 bytes/sec → 32 bytes/ms.
 const BYTES_PER_MS: f64 = 32.0;
 const HOTWORD_CAP: usize = 80;
@@ -101,6 +101,13 @@ pub struct VolcengineCredentials {
 impl VolcengineCredentials {
     pub fn default_resource_id() -> &'static str {
         "volc.seedasr.sauc.duration"
+    }
+
+    /// 未配置或仅含空白字符时使用默认 Resource ID；保留非空配置的原始值。
+    pub(crate) fn resolve_resource_id(configured: Option<String>) -> String {
+        configured
+            .filter(|resource_id| !resource_id.trim().is_empty())
+            .unwrap_or_else(|| Self::default_resource_id().to_string())
     }
 
     /// 凭据是否满足当前鉴权模式的要求（统一 trim 语义，见 [`VolcengineAuthMode::auth_ok`]）。
@@ -943,6 +950,29 @@ mod tests {
             VolcengineCredentials::default_resource_id(),
             "volc.seedasr.sauc.duration"
         );
+    }
+
+    #[test]
+    fn resource_id_resolution_defaults_only_missing_or_blank_values() {
+        let default_resource_id = "volc.seedasr.sauc.duration";
+        let cases = [
+            (None, default_resource_id),
+            (Some(""), default_resource_id),
+            (Some("   "), default_resource_id),
+            (Some("\t\r\n"), default_resource_id),
+            (
+                Some("volc.bigasr.sauc.duration"),
+                "volc.bigasr.sauc.duration",
+            ),
+            (Some(" custom.resource.id "), " custom.resource.id "),
+        ];
+
+        for (configured, expected) in cases {
+            assert_eq!(
+                VolcengineCredentials::resolve_resource_id(configured.map(str::to_string)),
+                expected
+            );
+        }
     }
 
     #[test]
