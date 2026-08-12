@@ -4452,7 +4452,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stop_dictation_from_listening_without_asr_returns_idle() {
+    async fn stop_dictation_from_listening_without_asr_returns_idle_and_hides_capsule() {
         let coordinator = Coordinator::new();
         {
             let mut state = coordinator.inner.state.lock();
@@ -4463,6 +4463,20 @@ mod tests {
         coordinator.stop_dictation().await.unwrap();
 
         assert_eq!(coordinator.inner.state.lock().phase, SessionPhase::Idle);
+        tokio::time::sleep(std::time::Duration::from_millis(
+            CAPSULE_AUTO_HIDE_DELAY_MS + 100,
+        ))
+        .await;
+        assert_eq!(
+            coordinator
+                .inner
+                .last_capsule_state
+                .lock()
+                .as_ref()
+                .copied(),
+            Some(CapsuleState::Idle),
+            "无 ASR 句柄的停止路径也必须调度胶囊隐藏"
+        );
     }
 
     #[tokio::test]
@@ -4598,6 +4612,20 @@ mod tests {
     #[tokio::test]
     async fn toggle_press_within_cooldown_is_dropped() {
         let coordinator = Coordinator::new();
+        // Coordinator::new() 读取真实持久化偏好；测试必须固定自己的模式，不能让本机
+        // 当前设置（例如 Hold/Auto）改变该用例验证的 Toggle 冷却语义。
+        coordinator
+            .inner
+            .prefs
+            .set(crate::types::UserPreferences {
+                hotkey: crate::types::HotkeyBinding {
+                    trigger: HotkeyTrigger::RightControl,
+                    mode: HotkeyMode::Toggle,
+                    keys: None,
+                },
+                ..Default::default()
+            })
+            .unwrap();
         // Idle + 冷却未过期：模拟「识别中按下 → 会话收尾 → bridge 取出该 Pressed」的时刻。
         *coordinator.inner.session_cooldown_until.lock() = Some(
             std::time::Instant::now() + std::time::Duration::from_millis(POST_SESSION_COOLDOWN_MS),

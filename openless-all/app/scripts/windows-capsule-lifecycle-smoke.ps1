@@ -15,20 +15,58 @@ if (-not (Test-Path $ExePath)) {
 }
 
 $logPath = Join-Path $env:LOCALAPPDATA "OpenLess\Logs\openless.log"
+$existingOpenLess = @(Get-Process openless -ErrorAction SilentlyContinue)
+foreach ($existingProcess in $existingOpenLess) {
+  Stop-Process -Id $existingProcess.Id -Force -ErrorAction SilentlyContinue
+}
+if ($existingOpenLess.Count -gt 0) {
+  Start-Sleep -Milliseconds 300
+}
 Remove-Item -LiteralPath $logPath -Force -ErrorAction SilentlyContinue
-Get-Process openless -ErrorAction SilentlyContinue | Stop-Process -Force
 
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
+using System.Text;
 
 public static class OpenLessCapsuleProbe {
-  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-  public static extern IntPtr FindWindowW(string lpClassName, string lpWindowName);
-
   [DllImport("user32.dll")]
   [return: MarshalAs(UnmanagedType.Bool)]
   public static extern bool IsWindowVisible(IntPtr hWnd);
+
+  [DllImport("user32.dll")]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+
+  [DllImport("user32.dll")]
+  private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+  private static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int maxCount);
+
+  private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+  public static IntPtr FindVisibleCapsuleWindowForProcess(int processId) {
+    var result = IntPtr.Zero;
+    EnumWindows((hWnd, _) => {
+      if (!IsWindowVisible(hWnd)) {
+        return true;
+      }
+      uint ownerPid;
+      GetWindowThreadProcessId(hWnd, out ownerPid);
+      if (ownerPid != (uint)processId) {
+        return true;
+      }
+      var title = new StringBuilder(256);
+      GetWindowText(hWnd, title, title.Capacity);
+      if (title.ToString() == "OpenLess Capsule") {
+        result = hWnd;
+        return false;
+      }
+      return true;
+    }, IntPtr.Zero);
+    return result;
+  }
 
   [DllImport("user32.dll")]
   public static extern void keybd_event(byte bVk, byte bScan, int dwFlags, UIntPtr dwExtraInfo);
@@ -49,16 +87,57 @@ function Wait-LogPattern($Pattern, $TimeoutSeconds) {
   return $false
 }
 
+function Get-LogCount($Pattern) {
+  if (-not (Test-Path $logPath)) {
+    return 0
+  }
+  return ([regex]::Matches((Get-Content -Raw $logPath), $Pattern)).Count
+}
+
+function Get-KeyScanCode($Vk) {
+  switch ([int]$Vk) {
+    0xA0 { return 0x2A }
+    0xA1 { return 0x36 }
+    0xA2 { return 0x1D }
+    0xA3 { return 0x1D }
+    0xA4 { return 0x38 }
+    0xA5 { return 0x38 }
+    0x5B { return 0x5B }
+    0x5C { return 0x5C }
+    default { return 0 }
+  }
+}
+
+function Test-KeyExtended($Vk) {
+  return @(
+    0xA3, 0xA5, 0x5B, 0x5C
+  ) -contains [int]$Vk
+}
+
 function Send-KeyEdge([byte]$Vk, [bool]$KeyUp) {
-  $flags = [OpenLessCapsuleProbe]::KEYEVENTF_EXTENDEDKEY
+  $flags = 0
+  if (Test-KeyExtended $Vk) {
+    $flags = $flags -bor [OpenLessCapsuleProbe]::KEYEVENTF_EXTENDEDKEY
+  }
   if ($KeyUp) {
     $flags = $flags -bor [OpenLessCapsuleProbe]::KEYEVENTF_KEYUP
   }
-  [OpenLessCapsuleProbe]::keybd_event($Vk, 0x1D, $flags, [UIntPtr]::Zero)
+  [OpenLessCapsuleProbe]::keybd_event(
+    $Vk,
+    [byte](Get-KeyScanCode $Vk),
+    $flags,
+    [UIntPtr]::Zero
+  )
 }
 
-function Get-CapsuleWindowState() {
-  $hwnd = [OpenLessCapsuleProbe]::FindWindowW($null, "OpenLess Capsule")
+function Release-AllModifiers() {
+  foreach ($vk in @(0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0x5B, 0x5C)) {
+    Send-KeyEdge $vk $true
+  }
+}
+
+function Get-CapsuleWindowState($ProcessId) {
+  $hwnd = [OpenLessCapsuleProbe]::FindVisibleCapsuleWindowForProcess($ProcessId)
   if ($hwnd -eq [IntPtr]::Zero) {
     return [pscustomobject]@{
       Exists = $false
@@ -75,7 +154,6 @@ function Get-CapsuleWindowState() {
 }
 
 Write-Host "== Windows capsule lifecycle smoke =="
-$env:OPENLESS_ACCEPT_SYNTHETIC_HOTKEY_EVENTS = "1"
 $env:OPENLESS_HOTKEY_INJECTION_DRY_RUN = "1"
 $process = Start-Process -FilePath $ExePath -WorkingDirectory (Split-Path $ExePath -Parent) -PassThru
 try {
@@ -84,21 +162,34 @@ try {
   }
 
   Start-Sleep -Milliseconds 500
-  $before = Get-CapsuleWindowState
+  $before = Get-CapsuleWindowState $process.Id
 
   Send-KeyEdge 0xA3 $false
   Start-Sleep -Milliseconds 120
   Send-KeyEdge 0xA3 $true
 
-  $startedDryRun = Wait-LogPattern "session started \(hotkey-injection dry-run\)" 5
+  $startedDryRun = Wait-LogPattern "session started \(hotkey-injection dry-run\)" $TimeoutSeconds
   Start-Sleep -Milliseconds 400
-  $afterStart = Get-CapsuleWindowState
+  $afterStart = Get-CapsuleWindowState $process.Id
 
   Send-KeyEdge 0xA3 $false
   Start-Sleep -Milliseconds 120
   Send-KeyEdge 0xA3 $true
   Start-Sleep -Seconds 3
-  $afterStop = Get-CapsuleWindowState
+  $afterStop = Get-CapsuleWindowState $process.Id
+
+  # Auto/hold semantics depend on the user's persisted mode. If the first short
+  # cycle was interpreted as a long hold, it already stopped the first session;
+  # the second cycle may therefore have started a new one. Close only that
+  # observed extra dry-run session, while still failing on a single-session hide
+  # regression instead of masking it with another key press.
+  if ($afterStop.Visible -and (Get-LogCount "session started \(hotkey-injection dry-run\)") -gt 1) {
+    Send-KeyEdge 0xA3 $false
+    Start-Sleep -Milliseconds 120
+    Send-KeyEdge 0xA3 $true
+    Start-Sleep -Seconds 3
+    $afterStop = Get-CapsuleWindowState $process.Id
+  }
 
   [pscustomobject]@{
     StartedDryRun = $startedDryRun
@@ -122,7 +213,9 @@ try {
   Write-Host "[ok] Capsule window is not visible after synthetic stop."
 }
 finally {
-  Remove-Item Env:OPENLESS_ACCEPT_SYNTHETIC_HOTKEY_EVENTS -ErrorAction SilentlyContinue
+  Release-AllModifiers
   Remove-Item Env:OPENLESS_HOTKEY_INJECTION_DRY_RUN -ErrorAction SilentlyContinue
-  Get-Process openless -ErrorAction SilentlyContinue | Stop-Process -Force
+  if ($null -ne $process) {
+    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+  }
 }
