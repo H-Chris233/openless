@@ -192,15 +192,13 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: git submodule update --init src-tauri/vendor/qwen-asr
-
       - name: Disable macOS-only Qwen3 MLX dependency
         if: runner.os != 'macOS'
         run: node scripts/ci-disable-macos-qwen3.mjs
-          # vendor/qwen-asr 仅 macOS 上 build.rs 会编译（build.rs:49 build_qwen_asr_macos）。
-          # Windows/Linux 的 cargo check 不需要子模块；用矩阵条件避免非 macOS job
-          # 多拉一次 git submodule（省网络 fetch + 去掉一个失败点）。
+        # vendor/qwen-asr 仅 macOS 上 build.rs 会编译（build.rs:49 build_qwen_asr_macos）。
+        # Windows/Linux 的 cargo check 不需要子模块；用矩阵条件避免非 macOS job
+        with:
           submodules: ${{ matrix.os == 'macos-latest' && 'recursive' || 'false' }}
-
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
