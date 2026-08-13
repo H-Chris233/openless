@@ -23,7 +23,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
+          # Android 不使用任何桌面本地 ASR 子模块；macOS MLX 依赖不进入此任务。
+          submodules: false
 
       - name: Setup Android SDK + NDK
         uses: android-actions/setup-android@v3
@@ -87,6 +88,9 @@ jobs:
 
       - name: Check Android updater pubkey matches tauri.conf.json
         run: npm run check:android-updater-pubkey
+
+      - name: Disable macOS-only Qwen3 MLX dependency
+        run: node scripts/ci-disable-macos-qwen3.mjs
 
       - name: Check Tauri backend (Android target)
         run: cargo check --manifest-path src-tauri/Cargo.toml --target aarch64-linux-android
@@ -170,9 +174,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # vendor/qwen-asr 是 macOS 上 build.rs 必须的 git submodule。Windows
-          # checkout 也拉一份保持与 release-tauri.yml 一致，开销几秒可以忽略。
-          submodules: recursive
+          # 只在 macOS 初始化 MLX 子模块；Linux 的 C 后端单独初始化 qwen-asr。
+          submodules: ${{ matrix.os == 'macos-latest' && 'recursive' || 'false' }}
+
+      - name: Initialize Linux C ASR submodule
+        if: runner.os == 'Linux'
+        shell: bash
+        run: git submodule update --init openless-all/app/src-tauri/vendor/qwen-asr
+
+      - name: Disable macOS-only Qwen3 MLX dependency
+        if: runner.os != 'macOS'
+        run: node scripts/ci-disable-macos-qwen3.mjs
 
       - uses: actions/setup-node@v4
         with:

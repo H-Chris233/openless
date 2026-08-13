@@ -26,7 +26,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
+          # Android 不使用本地 Qwen3/Whisper C 子模块。
+          submodules: false
+
+      - name: Disable macOS-only Qwen3 MLX dependency
+        run: node openless-all/app/scripts/ci-disable-macos-qwen3.mjs
 
       - name: Detect build mode
         id: mode
