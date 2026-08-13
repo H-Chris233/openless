@@ -13,6 +13,11 @@ on:
     branches: [main, beta]
   workflow_dispatch:
 
+# 同一 PR 快速重复推送时取消旧运行；workflow_dispatch 用 run_id 隔离。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   android-check:
     name: Android cargo check
@@ -26,6 +31,8 @@ jobs:
           # Android 不使用任何桌面本地 ASR 子模块；macOS MLX 依赖不进入此任务。
           submodules: false
 
+        # vendor/qwen-asr 仅 macOS 上 build.rs 会编译（build.rs:49 build_qwen_asr_macos）；
+        # Android/Linux 的 cargo check 不需要，去掉递归拉取省一次网络 fetch + 失败点。
       - name: Setup Android SDK + NDK
         uses: android-actions/setup-android@v3
         with:
@@ -71,6 +78,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android,x86_64-linux-android
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: 'openless-all/app/src-tauri -> target'
 
       - uses: gradle/actions/setup-gradle@v4
 
@@ -185,6 +196,10 @@ jobs:
       - name: Disable macOS-only Qwen3 MLX dependency
         if: runner.os != 'macOS'
         run: node scripts/ci-disable-macos-qwen3.mjs
+          # vendor/qwen-asr 仅 macOS 上 build.rs 会编译（build.rs:49 build_qwen_asr_macos）。
+          # Windows/Linux 的 cargo check 不需要子模块；用矩阵条件避免非 macOS job
+          # 多拉一次 git submodule（省网络 fetch + 去掉一个失败点）。
+          submodules: ${{ matrix.os == 'macos-latest' && 'recursive' || 'false' }}
 
       - uses: actions/setup-node@v4
         with:
@@ -192,7 +207,14 @@ jobs:
           cache: npm
           cache-dependency-path: openless-all/app/package-lock.json
 
+      # 现有测试继续用 stable；额外安装声明的 MSRV，供下方兼容性门禁显式调用。
+      - uses: dtolnay/rust-toolchain@1.88.0
+
       - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: 'openless-all/app/src-tauri -> target'
 
       - name: Install Linux check dependencies
         if: runner.os == 'Linux'
@@ -253,6 +275,12 @@ jobs:
         # 这样 Windows CI 能实际执行 coordinator/hotkey/recorder/insertion 逻辑单测。
         if: runner.os == 'Windows'
         run: cargo test --manifest-path src-tauri/backend-tests/Cargo.toml
+
+      - name: Check Tauri backend with Rust 1.88 MSRV
+        run: cargo +1.88.0 check --locked --manifest-path src-tauri/Cargo.toml
+
+      - name: Compile backend tests with Rust 1.88 MSRV
+        run: cargo +1.88.0 test --locked --manifest-path src-tauri/backend-tests/Cargo.toml --no-run
 
       - name: Verify version sync across all 5 files
         # 两个平台都跑这个校验：Windows runner 自带 git-bash，跨 shell 表现一致。

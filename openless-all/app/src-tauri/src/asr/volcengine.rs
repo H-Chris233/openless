@@ -24,10 +24,13 @@ use uuid::Uuid;
 use super::frame::{self, Flags, MessageType, Serialization};
 use super::{AudioConsumer, DictionaryHotword, RawTranscript};
 
+/// 官方「大模型流式语音识别 API」（双向流式·优化版）端点：
+/// https://www.volcengine.com/docs/6561/1354869
+/// 新旧两种鉴权模式共享同一端点，仅握手鉴权头不同。
 const ENDPOINT_APP_ID_TOKEN: &str = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async";
-const ENDPOINT_API_KEY: &str = "wss://openspeech.bytedance.com/api/v3/plan/sauc/bigmodel_async";
+const ENDPOINT_API_KEY: &str = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async";
 /// 200 ms of 16 kHz / 16-bit / mono PCM.
-const TARGET_AUDIO_CHUNK_BYTES: usize = 6_400;
+pub(crate) const TARGET_AUDIO_CHUNK_BYTES: usize = 6_400;
 /// 16 kHz · 16-bit · mono = 32 000 bytes/sec → 32 bytes/ms.
 const BYTES_PER_MS: f64 = 32.0;
 const HOTWORD_CAP: usize = 80;
@@ -98,6 +101,13 @@ pub struct VolcengineCredentials {
 impl VolcengineCredentials {
     pub fn default_resource_id() -> &'static str {
         "volc.seedasr.sauc.duration"
+    }
+
+    /// 未配置或仅含空白字符时使用默认 Resource ID；保留非空配置的原始值。
+    pub(crate) fn resolve_resource_id(configured: Option<String>) -> String {
+        configured
+            .filter(|resource_id| !resource_id.trim().is_empty())
+            .unwrap_or_else(|| Self::default_resource_id().to_string())
     }
 
     /// 凭据是否满足当前鉴权模式的要求（统一 trim 语义，见 [`VolcengineAuthMode::auth_ok`]）。
@@ -306,6 +316,7 @@ impl VolcengineStreamingASR {
     fn build_connect_request(
         &self,
         connect_id: &str,
+        request_id: &str,
     ) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request, VolcengineASRError>
     {
         let endpoint = match &self.credentials.auth_mode {
@@ -352,6 +363,15 @@ impl VolcengineStreamingASR {
             HeaderValue::from_str(connect_id)
                 .map_err(|e| VolcengineASRError::ConnectionFailed(e.to_string()))?,
         );
+        // 官方鉴权表（docs/6561/1354869）要求其余两个头：
+        // X-Api-Request-Id（任务 ID，官方推荐随机 UUID；每次握手尝试独立生成）与
+        // X-Api-Sequence（发包序号，固定值 -1）。
+        headers.insert(
+            "X-Api-Request-Id",
+            HeaderValue::from_str(request_id)
+                .map_err(|e| VolcengineASRError::ConnectionFailed(e.to_string()))?,
+        );
+        headers.insert("X-Api-Sequence", HeaderValue::from_static("-1"));
         Ok(request)
     }
 
@@ -363,7 +383,8 @@ impl VolcengineStreamingASR {
         let mut attempt = 0usize;
         loop {
             attempt += 1;
-            let request = self.build_connect_request(connect_id)?;
+            let request_id = Uuid::new_v4().to_string();
+            let request = self.build_connect_request(connect_id, &request_id)?;
             match tokio::time::timeout(CONNECT_TIMEOUT, connect_async(request)).await {
                 Ok(Ok((ws, _resp))) => return Ok(ws),
                 Ok(Err(e)) => {
@@ -932,6 +953,29 @@ mod tests {
     }
 
     #[test]
+    fn resource_id_resolution_defaults_only_missing_or_blank_values() {
+        let default_resource_id = "volc.seedasr.sauc.duration";
+        let cases = [
+            (None, default_resource_id),
+            (Some(""), default_resource_id),
+            (Some("   "), default_resource_id),
+            (Some("\t\r\n"), default_resource_id),
+            (
+                Some("volc.bigasr.sauc.duration"),
+                "volc.bigasr.sauc.duration",
+            ),
+            (Some(" custom.resource.id "), " custom.resource.id "),
+        ];
+
+        for (configured, expected) in cases {
+            assert_eq!(
+                VolcengineCredentials::resolve_resource_id(configured.map(str::to_string)),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn auth_mode_from_str_roundtrips() {
         assert_eq!(VolcengineAuthMode::from_str("api_key"), VolcengineAuthMode::ApiKey);
         assert_eq!(VolcengineAuthMode::from_str("app_id_token"), VolcengineAuthMode::AppIdToken);
@@ -983,7 +1027,9 @@ mod tests {
                 },
                 vec![],
             );
-            let req = asr.build_connect_request("connect-id").unwrap();
+            let req = asr
+                .build_connect_request("connect-id", "request-id")
+                .unwrap();
             assert_eq!(
                 req.uri().to_string(),
                 endpoint,
@@ -1007,8 +1053,20 @@ mod tests {
             );
             // 两种模式都必须携带资源与连接标识头。
             assert!(headers.contains_key("X-Api-Resource-Id"));
-            assert!(headers.contains_key("X-Api-Connect-Id"));
+            assert_eq!(headers.get("X-Api-Connect-Id").unwrap(), "connect-id");
+            // 官方鉴权表要求的其余头（docs/6561/1354869）。
+            assert_eq!(headers.get("X-Api-Request-Id").unwrap(), "request-id");
+            assert_ne!(
+                headers.get("X-Api-Request-Id"),
+                headers.get("X-Api-Connect-Id"),
+                "任务 ID 不应复用会话连接 ID"
+            );
+            assert_eq!(headers.get("X-Api-Sequence").unwrap(), "-1");
         }
+        // 回归：新旧两种鉴权模式共享同一官方端点（docs/6561/1354869），
+        // 曾因 ApiKey 模式误用 /api/v3/plan/... 路径导致 45000010 AuthenticationError。
+        assert_eq!(ENDPOINT_API_KEY, ENDPOINT_APP_ID_TOKEN);
+        assert_eq!(ENDPOINT_API_KEY, "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async");
     }
 
     /// 构造一个握手阶段返回给定 HTTP 状态码的 tungstenite 错误，用于分类测试。

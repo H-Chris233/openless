@@ -13,6 +13,11 @@ on:
       - 'v*-tauri'
   workflow_dispatch:
 
+# 同一 tag 重复推送只跑最新一次；workflow_dispatch 用 run_id 隔离避免互相取消。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
+
 jobs:
   build-android-apk:
     permissions:
@@ -31,6 +36,7 @@ jobs:
 
       - name: Disable macOS-only Qwen3 MLX dependency
         run: node openless-all/app/scripts/ci-disable-macos-qwen3.mjs
+
 
       - name: Detect build mode
         id: mode
@@ -140,7 +146,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: "22"
           cache: npm
           cache-dependency-path: openless-all/app/package-lock.json
 

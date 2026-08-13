@@ -134,7 +134,8 @@ use tauri::{
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use tauri::{WebviewUrl, WebviewWindowBuilder};
 
-use crate::types::PolishMode;
+#[cfg(not(mobile))]
+use crate::types::StylePack;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -193,6 +194,7 @@ macro_rules! app_invoke_handler_desktop {
             commands::marketplace_list,
             commands::marketplace_detail,
             commands::marketplace_install,
+            commands::marketplace_download,
             commands::marketplace_upload,
             commands::marketplace_like,
             commands::marketplace_my_likes,
@@ -407,6 +409,7 @@ macro_rules! app_invoke_handler_mobile {
             $crate::commands::marketplace_list,
             $crate::commands::marketplace_detail,
             $crate::commands::marketplace_install,
+            $crate::commands::marketplace_download,
             $crate::commands::marketplace_upload,
             $crate::commands::marketplace_like,
             $crate::commands::marketplace_my_likes,
@@ -854,12 +857,15 @@ struct TrayMenu {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg(not(mobile))]
-struct TrayPolishModeMenuEntry {
+struct TrayStylePackMenuEntry {
     id: String,
-    label: &'static str,
-    mode: PolishMode,
+    pack_id: String,
+    label: String,
     checked: bool,
 }
+
+#[cfg(not(mobile))]
+const TRAY_STYLE_PACK_MENU_ID_PREFIX: &str = "style-pack-id-";
 
 fn tray_style_menu_enabled() -> bool {
     #[cfg(all(not(mobile), target_os = "windows"))]
@@ -869,32 +875,44 @@ fn tray_style_menu_enabled() -> bool {
 }
 
 #[cfg(not(mobile))]
-fn tray_polish_mode_menu_entries(selected: PolishMode) -> Vec<TrayPolishModeMenuEntry> {
-    [
-        (PolishMode::Raw, "style-raw"),
-        (PolishMode::Light, "style-light"),
-        (PolishMode::Structured, "style-structured"),
-        (PolishMode::Formal, "style-formal"),
-    ]
-    .into_iter()
-    .map(|(mode, id)| TrayPolishModeMenuEntry {
-        id: id.to_string(),
-        label: mode.display_name(),
-        mode,
-        checked: mode == selected,
-    })
-    .collect()
+fn tray_style_pack_menu_id(pack_id: &str) -> String {
+    format!("{TRAY_STYLE_PACK_MENU_ID_PREFIX}{pack_id}")
 }
 
 #[cfg(not(mobile))]
-fn parse_tray_polish_mode_id(id: &str) -> Option<PolishMode> {
-    match id {
-        "style-raw" => Some(PolishMode::Raw),
-        "style-light" => Some(PolishMode::Light),
-        "style-structured" => Some(PolishMode::Structured),
-        "style-formal" => Some(PolishMode::Formal),
-        _ => None,
-    }
+fn parse_tray_style_pack_menu_id(id: &str) -> Option<&str> {
+    let pack_id = id.strip_prefix(TRAY_STYLE_PACK_MENU_ID_PREFIX)?;
+    (!pack_id.is_empty()).then_some(pack_id)
+}
+
+#[cfg(not(mobile))]
+fn tray_style_pack_menu_entries(
+    packs: &[StylePack],
+    active_style_pack_id: &str,
+) -> Vec<TrayStylePackMenuEntry> {
+    packs
+        .iter()
+        .filter(|pack| pack.enabled)
+        .map(|pack| TrayStylePackMenuEntry {
+            id: tray_style_pack_menu_id(&pack.id),
+            pack_id: pack.id.clone(),
+            label: if pack.name.trim().is_empty() {
+                pack.id.clone()
+            } else {
+                pack.name.clone()
+            },
+            checked: pack.id == active_style_pack_id,
+        })
+        .collect()
+}
+
+#[cfg(not(mobile))]
+fn resolve_tray_style_pack_id<'a>(id: &'a str, packs: &[StylePack]) -> Option<&'a str> {
+    let pack_id = parse_tray_style_pack_menu_id(id)?;
+    packs
+        .iter()
+        .any(|pack| pack.enabled && pack.id == pack_id)
+        .then_some(pack_id)
 }
 
 #[cfg(not(mobile))]
@@ -929,13 +947,12 @@ fn build_style_tray_menu<M: Manager<tauri::Wry>>(
     coordinator: &Arc<coordinator::Coordinator>,
 ) -> tauri::Result<StyleTrayMenu> {
     let prefs = coordinator.prefs().get();
-    let selected = coordinator
-        .style_packs()
-        .get_or_default_active(&prefs.active_style_pack_id)
-        .map(|pack| pack.base_mode)
-        .unwrap_or(prefs.default_mode);
+    let packs = coordinator.style_packs().list().unwrap_or_else(|err| {
+        log::warn!("[tray] list style packs for tray menu failed: {err}");
+        Vec::new()
+    });
     let mut submenu = SubmenuBuilder::with_id(app, "style", "输出风格");
-    for entry in tray_polish_mode_menu_entries(selected) {
+    for entry in tray_style_pack_menu_entries(&packs, &prefs.active_style_pack_id) {
         let item = CheckMenuItemBuilder::with_id(&entry.id, entry.label)
             .checked(entry.checked)
             .build(app)?;
@@ -1166,12 +1183,23 @@ fn handle_microphone_tray_menu_event(app: &AppHandle, id: &str) {
 
 #[cfg(not(mobile))]
 fn handle_style_tray_menu_event(app: &AppHandle, id: &str) -> bool {
-    let Some(mode) = parse_tray_polish_mode_id(id) else {
+    let Some(pack_id) = parse_tray_style_pack_menu_id(id) else {
         return false;
     };
     let coord = app.state::<Arc<coordinator::Coordinator>>();
-    if let Err(err) = commands::activate_builtin_style_mode(&coord, app, mode) {
-        log::warn!("[tray] activate builtin style mode failed: {err}");
+    let packs = match coord.style_packs().list() {
+        Ok(packs) => packs,
+        Err(err) => {
+            log::warn!("[tray] validate style pack tray item failed: {err}");
+            return true;
+        }
+    };
+    if resolve_tray_style_pack_id(id, &packs).is_none() {
+        log::warn!("[tray] ignore stale or disabled style pack tray item id={pack_id}");
+        return true;
+    }
+    if let Err(err) = commands::activate_style_pack_by_id(&coord, app, pack_id) {
+        log::warn!("[tray] activate style pack from tray failed: {err}");
         return true;
     }
     if let Err(err) = refresh_tray_microphone_menu(app) {
@@ -2920,11 +2948,12 @@ mod tests {
     use super::{
         bottom_center_position, bottom_visual_position, capsule_height_for_qa,
         capsule_visual_height, capsule_window_bounds, clamp_to_monitor, frame_contains_point,
-        frame_distance_to_point_squared, logical_monitor_frame, parse_tray_polish_mode_id,
-        rotate_log_if_too_large, tray_polish_mode_menu_entries, tray_style_menu_enabled,
-        LogicalMonitorFrame, LOG_ROTATE_LIMIT_BYTES,
+        frame_distance_to_point_squared, logical_monitor_frame, parse_tray_style_pack_menu_id,
+        resolve_tray_style_pack_id, rotate_log_if_too_large, tray_style_menu_enabled,
+        tray_style_pack_menu_entries, tray_style_pack_menu_id, LogicalMonitorFrame,
+        LOG_ROTATE_LIMIT_BYTES,
     };
-    use crate::types::PolishMode;
+    use crate::types::{builtin_style_pack_for_mode, PolishMode, StylePack, StylePackKind};
     use std::io::Write;
 
     #[test]
@@ -2937,43 +2966,109 @@ mod tests {
     }
 
     #[test]
-    fn tray_style_menu_lists_builtin_modes_in_expected_order() {
-        let entries = tray_polish_mode_menu_entries(PolishMode::Structured);
+    fn tray_style_menu_lists_enabled_packs_and_marks_active_id() {
+        let imported = StylePack {
+            id: "imported.meeting".into(),
+            name: "会议纪要".into(),
+            kind: StylePackKind::Imported,
+            base_mode: PolishMode::Structured,
+            ..StylePack::default()
+        };
+        let duplicate_base_mode = StylePack {
+            id: "imported.structured".into(),
+            name: "自定义结构化".into(),
+            kind: StylePackKind::Imported,
+            base_mode: PolishMode::Structured,
+            ..StylePack::default()
+        };
+        let disabled = StylePack {
+            id: "imported.disabled".into(),
+            name: "已禁用".into(),
+            kind: StylePackKind::Imported,
+            base_mode: PolishMode::Structured,
+            enabled: false,
+            ..StylePack::default()
+        };
+
+        let packs = vec![
+            builtin_style_pack_for_mode(PolishMode::Raw),
+            builtin_style_pack_for_mode(PolishMode::Light),
+            builtin_style_pack_for_mode(PolishMode::Structured),
+            builtin_style_pack_for_mode(PolishMode::Formal),
+            imported,
+            duplicate_base_mode,
+            disabled,
+        ];
+        let entries = tray_style_pack_menu_entries(&packs, "imported.meeting");
 
         assert_eq!(
             entries
                 .iter()
-                .map(|entry| (entry.id.as_str(), entry.label, entry.mode, entry.checked))
+                .map(|entry| (entry.pack_id.as_str(), entry.label.as_str(), entry.checked))
                 .collect::<Vec<_>>(),
             vec![
-                ("style-raw", "原文", PolishMode::Raw, false),
-                ("style-light", "轻度润色", PolishMode::Light, false),
-                ("style-structured", "清晰结构", PolishMode::Structured, true),
-                ("style-formal", "正式表达", PolishMode::Formal, false),
+                ("builtin.raw", "原文", false),
+                ("builtin.light", "轻度润色", false),
+                ("builtin.structured", "清晰结构", false),
+                ("builtin.formal", "正式表达", false),
+                ("imported.meeting", "会议纪要", true),
+                ("imported.structured", "自定义结构化", false),
             ]
         );
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| entry.checked)
+                .map(|entry| entry.pack_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["imported.meeting"]
+        );
+        assert_eq!(entries[0].id, tray_style_pack_menu_id("builtin.raw"));
     }
 
     #[test]
-    fn tray_style_menu_id_parsing_accepts_only_style_items() {
+    fn tray_style_menu_ids_are_stable_and_collision_safe() {
+        let first = tray_style_pack_menu_id("imported.meeting");
+        assert_eq!(first, "style-pack-id-imported.meeting");
+        assert_eq!(first, tray_style_pack_menu_id("imported.meeting"));
+        assert_ne!(first, tray_style_pack_menu_id("imported.structured"));
+        assert_ne!(first, "style-structured");
+    }
+
+    #[test]
+    fn tray_style_menu_id_parsing_rejects_malformed_and_stale_items() {
+        let packs = vec![
+            builtin_style_pack_for_mode(PolishMode::Raw),
+            StylePack {
+                id: "imported.disabled".into(),
+                name: "已禁用".into(),
+                kind: StylePackKind::Imported,
+                base_mode: PolishMode::Raw,
+                enabled: false,
+                ..StylePack::default()
+            },
+        ];
+
         assert_eq!(
-            parse_tray_polish_mode_id("style-raw"),
-            Some(PolishMode::Raw)
+            parse_tray_style_pack_menu_id(&tray_style_pack_menu_id("builtin.raw")),
+            Some("builtin.raw")
         );
         assert_eq!(
-            parse_tray_polish_mode_id("style-light"),
-            Some(PolishMode::Light)
+            resolve_tray_style_pack_id(&tray_style_pack_menu_id("builtin.raw"), &packs),
+            Some("builtin.raw")
         );
         assert_eq!(
-            parse_tray_polish_mode_id("style-structured"),
-            Some(PolishMode::Structured)
+            resolve_tray_style_pack_id(&tray_style_pack_menu_id("imported.disabled"), &packs),
+            None
         );
         assert_eq!(
-            parse_tray_polish_mode_id("style-formal"),
-            Some(PolishMode::Formal)
+            resolve_tray_style_pack_id(&tray_style_pack_menu_id("imported.deleted"), &packs),
+            None
         );
-        assert_eq!(parse_tray_polish_mode_id("toggle"), None);
-        assert_eq!(parse_tray_polish_mode_id("mic-default"), None);
+        assert_eq!(parse_tray_style_pack_menu_id("style-pack-id-"), None);
+        assert_eq!(parse_tray_style_pack_menu_id("style-raw"), None);
+        assert_eq!(parse_tray_style_pack_menu_id("toggle"), None);
+        assert_eq!(parse_tray_style_pack_menu_id("mic-default"), None);
     }
 
     #[test]

@@ -242,6 +242,8 @@ For the full end-user walkthrough, see [USAGE.md](USAGE.md).
 
 The active codebase lives in `openless-all/app/` (Tauri 2 + Rust + React/TS). The macOS build links a vendored C ASR engine ([`Open-Less/qwen-asr`](https://github.com/Open-Less/qwen-asr), forked from `antirez/qwen-asr`) pulled in as a git submodule under `src-tauri/vendor/qwen-asr/`, so initialize submodules on first clone.
 
+Rust 1.88 is the minimum supported toolchain for source builds; the latest stable Rust is recommended. CI verifies both Rust 1.88 and stable on macOS, Windows, and Linux.
+
 ```bash
 # First clone only — pull in vendored submodules
 git submodule update --init --recursive

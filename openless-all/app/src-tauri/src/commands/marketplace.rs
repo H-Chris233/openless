@@ -8,10 +8,11 @@ use std::io::Write;
 // 写操作认证：Rust 从 CredentialsVault 读取 GitHub OAuth token 并附加
 // `Authorization: Bearer`。`marketplace_dev_login` 只是前端展示缓存，不是权限来源。
 //
-// 5 个 IPC：
+// 6 个 IPC：
 // - marketplace_list      列表 + 搜索 + 排序
 // - marketplace_detail    详情（含完整 prompt）
 // - marketplace_install   下载 ZIP + 直接调 import_from_zip 装到本地
+// - marketplace_download  校验 ZIP + 保存到用户选择的位置
 // - marketplace_upload    把本地某个 style pack export ZIP → multipart 上传
 // - marketplace_like      点赞
 
@@ -270,6 +271,15 @@ fn log_marketplace_install_failure(phase: &str, pack_id: &str, error: &str) {
     );
 }
 
+fn log_marketplace_download_failure(phase: &str, pack_id: &str, error: &str) {
+    log::error!(
+        "[marketplace-download] stage=failed phase={} pack_id={} error={}",
+        marketplace_log_value(phase),
+        marketplace_log_value(pack_id),
+        marketplace_log_value(error),
+    );
+}
+
 const MARKETPLACE_INSTALL_IN_PROGRESS: &str =
     "marketplace_install_in_progress: another style pack installation is already running";
 
@@ -482,21 +492,7 @@ pub async fn marketplace_install(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let response = match execute_public_marketplace_with(
-        &base,
-        MarketplacePublicEndpoint::Download {
-            pack_id: pack_id.clone(),
-        },
-    )
-    .await
-    {
-        Ok(response) => response,
-        Err(error) => {
-            log_marketplace_install_failure("download", &pack_id, &error);
-            return Err(error);
-        }
-    };
-    let bytes = match read_marketplace_archive_response(response).await {
+    let bytes = match download_marketplace_archive_bytes(&base, &pack_id).await {
         Ok(bytes) => bytes,
         Err(error) => {
             log_marketplace_install_failure("download", &pack_id, &error);
@@ -564,6 +560,50 @@ pub async fn marketplace_install(
     }
 }
 
+#[tauri::command]
+pub async fn marketplace_download(
+    coord: CoordinatorState<'_>,
+    pack_id: String,
+    target_path: String,
+) -> Result<(), String> {
+    log::info!(
+        "[marketplace-download] stage=start pack_id={} target_kind={}",
+        marketplace_log_value(&pack_id),
+        marketplace_target_kind(&target_path)
+    );
+    if !is_valid_session_id(&pack_id) {
+        return Err("invalid pack id".into());
+    }
+    if target_path.trim().is_empty() {
+        return Err("marketplace download target is empty".into());
+    }
+
+    let prefs = coord.prefs().get();
+    let base = marketplace_url_from_prefs(&prefs);
+    let bytes = download_marketplace_archive_bytes(&base, &pack_id)
+        .await
+        .map_err(|error| {
+            log_marketplace_download_failure("download", &pack_id, &error);
+            error
+        })?;
+    crate::persistence::validate_style_pack_archive_bytes(&bytes).map_err(|error| {
+        let error = format!("invalid marketplace style pack archive: {error}");
+        log_marketplace_download_failure("validate-archive", &pack_id, &error);
+        error
+    })?;
+    write_marketplace_archive_target(&target_path, &bytes).map_err(|error| {
+        log_marketplace_download_failure("write-target", &pack_id, &error);
+        error
+    })?;
+    log::info!(
+        "[marketplace-download] stage=done pack_id={} bytes={} target_kind={}",
+        marketplace_log_value(&pack_id),
+        bytes.len(),
+        marketplace_target_kind(&target_path)
+    );
+    Ok(())
+}
+
 fn validate_marketplace_archive_content_length(content_length: Option<u64>) -> Result<(), String> {
     if content_length.is_some_and(|length| {
         length > crate::persistence::STYLE_PACK_ARCHIVE_MAX_COMPRESSED_BYTES as u64
@@ -605,6 +645,63 @@ async fn read_marketplace_archive_response(response: reqwest::Response) -> Resul
         append_marketplace_archive_chunk(&mut body, &chunk)?;
     }
     Ok(body)
+}
+
+async fn download_marketplace_archive_bytes(base: &str, pack_id: &str) -> Result<Vec<u8>, String> {
+    let response = execute_public_marketplace_with(
+        base,
+        MarketplacePublicEndpoint::Download {
+            pack_id: pack_id.to_string(),
+        },
+    )
+    .await?;
+    read_marketplace_archive_response(response).await
+}
+
+fn marketplace_target_kind(target_path: &str) -> &'static str {
+    if target_path.starts_with("content://") {
+        "content-uri"
+    } else {
+        "file-path"
+    }
+}
+
+fn write_marketplace_archive_target(target_path: &str, bytes: &[u8]) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    if target_path.starts_with("content://") {
+        return crate::android::jni::android::write_content_uri(target_path, bytes)
+            .map_err(|_| "write marketplace archive target failed".to_string());
+    }
+
+    if target_path.starts_with("content://") {
+        return Err("content URI targets are only supported on Android".to_string());
+    }
+    if target_path.starts_with("file://") {
+        return Err(
+            "file URI targets are not supported; provide a filesystem path instead".to_string(),
+        );
+    }
+    if target_path.trim().is_empty() {
+        return Err("marketplace download target is empty".to_string());
+    }
+    let path = std::path::Path::new(target_path);
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            format!("create marketplace archive target directory failed: {error}")
+        })?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .map_err(|error| format!("create marketplace archive target failed: {error}"))?;
+    file.write_all(bytes)
+        .and_then(|_| file.sync_all())
+        .map_err(|error| format!("write marketplace archive target failed: {error}"))
 }
 
 struct MarketplaceTempArchive {
@@ -772,8 +869,8 @@ mod archive_download_tests {
     use super::{
         append_marketplace_archive_chunk, marketplace_log_value,
         marketplace_temp_root_from_cache_dir, try_acquire_marketplace_install_lock,
-        validate_marketplace_archive_content_length, MarketplaceTempArchive,
-        MARKETPLACE_INSTALL_IN_PROGRESS,
+        validate_marketplace_archive_content_length, write_marketplace_archive_target,
+        MarketplaceTempArchive, MARKETPLACE_INSTALL_IN_PROGRESS,
     };
     use crate::persistence::STYLE_PACK_ARCHIVE_MAX_COMPRESSED_BYTES;
     use std::io::Write;
@@ -812,6 +909,33 @@ mod archive_download_tests {
         append_marketplace_archive_chunk(&mut body, b"x").expect("exact limit is valid");
 
         assert_eq!(body.len(), STYLE_PACK_ARCHIVE_MAX_COMPRESSED_BYTES);
+    }
+
+    #[test]
+    fn marketplace_download_target_preserves_archive_bytes() {
+        let root = test_root("download-target");
+        std::fs::create_dir_all(&root).expect("create download target root");
+        let target = root.join("downloaded.zip");
+
+        write_marketplace_archive_target(&target.to_string_lossy(), b"exact archive bytes")
+            .expect("write marketplace archive target");
+
+        assert_eq!(
+            std::fs::read(&target).expect("read marketplace archive target"),
+            b"exact archive bytes"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn marketplace_download_target_rejects_file_uri() {
+        let error = write_marketplace_archive_target(
+            "file:///tmp/openless-marketplace-download.zip",
+            b"archive bytes",
+        )
+        .expect_err("file URI must not be interpreted as a filesystem path");
+
+        assert!(error.contains("file URI targets are not supported"));
     }
 
     #[test]

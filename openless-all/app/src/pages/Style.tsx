@@ -20,6 +20,7 @@ import type { PolishMode, StylePack, StylePackExample, StylePackRuntimeDiagnosti
 import { Btn, Card, PageHeader, Pill } from './_atoms';
 import { Icon } from '../components/Icon';
 import { SavedToast, type SaveToastState } from '../components/SavedToast';
+import { pickStylePackZipTargetPath, stylePackZipFileName } from '../lib/stylePackZip';
 
 type BusyAction =
   | 'loading'
@@ -125,11 +126,6 @@ function modeTone(mode: PolishMode): 'default' | 'blue' | 'ok' | 'outline' | 'da
   if (mode === 'light') return 'blue';
   if (mode === 'structured') return 'ok';
   return 'dark';
-}
-
-function sanitizeZipFileName(name: string) {
-  const trimmed = name.trim() || 'style-pack';
-  return trimmed.replace(/[<>:"/\\|?*]+/g, '-').replace(/\s+/g, '-').toLowerCase();
 }
 
 export function Style() {
@@ -542,17 +538,8 @@ export function Style() {
     }
     setBusy('exporting');
     try {
-      const defaultName = `${sanitizeZipFileName(pack.name)}.zip`;
-      let targetPath: string | null = null;
-      if (isTauri) {
-        const { save } = await import('@tauri-apps/plugin-dialog');
-        targetPath = await save({
-          defaultPath: defaultName,
-          filters: [{ name: 'Style Pack ZIP', extensions: ['zip'] }],
-        });
-      } else {
-        targetPath = `~/Downloads/${defaultName}`;
-      }
+      const defaultName = stylePackZipFileName(pack.name);
+      const targetPath = await pickStylePackZipTargetPath(defaultName, isTauri);
       if (!targetPath) {
         setBusy(null);
         return;

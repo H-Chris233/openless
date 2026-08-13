@@ -157,17 +157,6 @@ pub fn speech_to_text_url(base_url: &str) -> Result<String> {
         .map_err(anyhow::Error::msg)
         .context("validate ElevenLabs endpoint")?;
     let parsed = reqwest::Url::parse(base_url.trim()).context("parse ElevenLabs base URL")?;
-    let loopback_http = parsed.scheme() == "http"
-        && parsed.host_str().is_some_and(|host| {
-            let host = host.trim_start_matches('[').trim_end_matches(']');
-            host.eq_ignore_ascii_case("localhost")
-                || host
-                    .parse::<std::net::IpAddr>()
-                    .is_ok_and(|ip| ip.is_loopback())
-        });
-    if parsed.scheme() != "https" && !loopback_http {
-        anyhow::bail!("ElevenLabs endpoint must use HTTPS (HTTP is allowed only for loopback)");
-    }
     let mut url = parsed.clone();
     let path = parsed.path().trim_end_matches('/');
     let next_path = if path.ends_with("/speech-to-text") {
@@ -277,20 +266,22 @@ mod tests {
     }
 
     #[test]
-    fn url_rejects_insecure_non_loopback_endpoint() {
-        let error = speech_to_text_url("http://api.example.com/v1").unwrap_err();
-        assert!(format!("{error:#}").to_ascii_lowercase().contains("https"));
-
-        assert!(speech_to_text_url("http://127.0.0.1:8080/v1").is_ok());
-        assert!(speech_to_text_url("http://localhost:8080/v1").is_ok());
-        assert!(speech_to_text_url("http://[::1]:8080/v1").is_ok());
-    }
-
-    #[test]
-    fn url_rejects_sensitive_network_targets() {
-        assert!(speech_to_text_url("https://169.254.169.254/v1").is_err());
-        assert!(speech_to_text_url("https://100.64.0.1/v1").is_err());
-        assert!(speech_to_text_url("https://metadata.google.internal/v1").is_err());
+    fn url_accepts_explicitly_configured_http_endpoints() {
+        for base_url in [
+            "http://api.example.com/v1",
+            "http://192.168.1.50:8080/v1",
+            "http://127.0.0.1:8080/v1",
+            "http://localhost:8080/v1",
+            "http://[::1]:8080/v1",
+            "http://169.254.169.254/v1",
+            "http://100.64.0.1/v1",
+            "http://metadata.google.internal/v1",
+        ] {
+            assert!(
+                speech_to_text_url(base_url).is_ok(),
+                "explicitly configured endpoint should be accepted: {base_url}"
+            );
+        }
     }
 
     #[test]

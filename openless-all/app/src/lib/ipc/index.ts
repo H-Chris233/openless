@@ -208,6 +208,7 @@ export {
     listMarketplace,
     fetchMarketplaceDetail,
     installMarketplacePack,
+    downloadMarketplacePack,
     uploadMarketplacePack,
     likeMarketplacePack,
     marketplaceMyLikes,

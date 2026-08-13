@@ -1,8 +1,15 @@
 //! Shared validation for user-configurable HTTP endpoints.
 //!
-//! Provider validation and the real request path must call the same policy;
+//! Provider validation and the real request path must call the same function;
 //! otherwise a saved endpoint can bypass the checks performed by the
 //! "validate connection" button.
+//!
+//! Only URL well-formedness is enforced: the value must be a valid URL with a
+//! host and an `http`/`https` scheme. Address reachability is deliberately not
+//! restricted — endpoints are explicitly configured by the user (LAN gateways,
+//! internal DNS names, hosts-file aliases, public hosts, etc.), and the
+//! settings UI shows an in-app warning when an `http://` endpoint is entered.
+//! The user decides.
 
 use std::net::IpAddr;
 
@@ -11,74 +18,21 @@ pub(crate) struct ResolvedEndpoint {
     pub(crate) addrs: Vec<std::net::SocketAddr>,
 }
 
+/// Validate a user-configured endpoint. Format-only: must be a valid `http(s)`
+/// URL with a host. No SSRF-style address restrictions are applied.
 pub(crate) fn validate_http_endpoint(raw: &str) -> anyhow::Result<()> {
     let url = url::Url::parse(raw).map_err(|e| anyhow::anyhow!("endpoint 不是合法 URL：{e}"))?;
-    let host = url
-        .host_str()
-        .ok_or_else(|| anyhow::anyhow!("endpoint 缺少主机名"))?
-        .to_ascii_lowercase();
-
-    const METADATA_HOSTS: [&str; 2] = ["metadata.google.internal", "169.254.169.254"];
-    if METADATA_HOSTS
-        .iter()
-        .any(|metadata| host.contains(metadata))
-    {
-        anyhow::bail!("endpoint 指向云元数据服务，已拒绝：{host}");
+    url.host_str()
+        .ok_or_else(|| anyhow::anyhow!("endpoint 缺少主机名"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        anyhow::bail!("endpoint 必须使用 http 或 https：{raw}");
     }
-
-    let scheme = url.scheme();
-    let bare_host = host
-        .strip_prefix('[')
-        .and_then(|value| value.strip_suffix(']'))
-        .unwrap_or(host.as_str());
-
-    let Ok(ip) = bare_host.parse::<IpAddr>() else {
-        if bare_host == "localhost" {
-            return Ok(());
-        }
-        if scheme != "https" {
-            anyhow::bail!("endpoint 必须使用 https（仅 localhost / 局域网允许 http）：{raw}");
-        }
-        return Ok(());
-    };
-
-    let canonical = match ip {
-        IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(ip),
-        v4 => v4,
-    };
-
-    let is_lan = match canonical {
-        IpAddr::V4(v4) => v4.is_loopback() || v4.is_private(),
-        IpAddr::V6(v6) => v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00,
-    };
-    if is_lan {
-        return Ok(());
-    }
-
-    let is_blocked = match canonical {
-        IpAddr::V4(v4) => {
-            let octets = v4.octets();
-            let is_cgnat = octets[0] == 100 && (64..=127).contains(&octets[1]);
-            v4.is_link_local() || v4.is_unspecified() || v4.is_broadcast() || is_cgnat
-        }
-        IpAddr::V6(v6) => {
-            let is_link_local = (v6.segments()[0] & 0xffc0) == 0xfe80;
-            v6.is_unspecified() || is_link_local
-        }
-    };
-    if is_blocked {
-        anyhow::bail!("endpoint 指向保留/危险地址，已拒绝（防 SSRF）：{ip}");
-    }
-
-    if scheme != "https" {
-        anyhow::bail!("endpoint 必须使用 https（仅 localhost / 局域网允许 http）：{raw}");
-    }
-
     Ok(())
 }
 
-/// Resolve a hostname once, validate every result, and return the addresses so
-/// the HTTP client can pin this exact resolution and avoid DNS rebinding.
+/// Resolve a hostname once, and return the addresses so the HTTP client can pin
+/// this exact resolution and avoid DNS rebinding. No address restrictions are
+/// applied to the resolved results.
 pub(crate) async fn resolve_http_endpoint(raw: &str) -> anyhow::Result<Option<ResolvedEndpoint>> {
     validate_http_endpoint(raw)?;
     let url = url::Url::parse(raw)?;
@@ -95,15 +49,43 @@ pub(crate) async fn resolve_http_endpoint(raw: &str) -> anyhow::Result<Option<Re
     if addrs.is_empty() {
         anyhow::bail!("endpoint 主机名无法解析：{host}");
     }
-    for addr in &addrs {
-        let host = match addr.ip() {
-            IpAddr::V4(ip) => ip.to_string(),
-            IpAddr::V6(ip) => format!("[{ip}]"),
-        };
-        validate_http_endpoint(&format!("{}://{host}", url.scheme()))?;
-    }
     Ok(Some(ResolvedEndpoint {
         host: host.to_string(),
         addrs,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_http_endpoint;
+
+    #[test]
+    fn accepts_http_anywhere_user_chooses() {
+        // 地址选择权完全交给用户：公网域名、局域网、公网 IP、本地、元数据地址一律
+        // 放行，前端对 http:// 输入展示明文风险提示（user decides）。
+        validate_http_endpoint("http://example.com:12345/")
+            .expect("public HTTP hostname must be allowed");
+        validate_http_endpoint("http://api.example.com/v1/audio/transcriptions")
+            .expect("public HTTP hostname must be allowed");
+        validate_http_endpoint("http://1.2.3.4/v1").expect("public literal IP HTTP must be allowed");
+        validate_http_endpoint("http://192.168.1.50:9000/v1")
+            .expect("LAN HTTP endpoint must be allowed");
+        validate_http_endpoint("http://localhost:9000/v1")
+            .expect("localhost HTTP endpoint must be allowed");
+        validate_http_endpoint("http://169.254.169.254/v1")
+            .expect("metadata address must be allowed (user decides)");
+        validate_http_endpoint("http://100.64.0.1/v1")
+            .expect("CGNAT address must be allowed (user decides)");
+        validate_http_endpoint("http://metadata.google.internal/v1")
+            .expect("metadata hostname must be allowed (user decides)");
+        validate_http_endpoint("https://example.com:12345/")
+            .expect("HTTPS hostname must be allowed");
+    }
+
+    #[test]
+    fn rejects_malformed_or_non_http_urls() {
+        assert!(validate_http_endpoint("not a url").is_err());
+        assert!(validate_http_endpoint("ftp://example.com/").is_err());
+        assert!(validate_http_endpoint("wss://example.com/").is_err());
+    }
 }

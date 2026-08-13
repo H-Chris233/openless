@@ -44,10 +44,12 @@ const KOTLIN_FILES = [
   'OpenLessAccessibilityCommandReceiver.kt',
   'OverlayPermissionActivity.kt',
   'OpenLessUpdateInstaller.kt',
+  'OpenLessContentReader.kt',
   'OpenLessContentWriter.kt',
 ];
 
 const KOTLIN_TEST_FILES = [
+  'OpenLessContentReaderTest.kt',
   'OpenLessCredentialCipherTest.kt',
   'OpenLessShizukuBridgeTest.kt',
   'OpenLessAccessibilityResultTest.kt',

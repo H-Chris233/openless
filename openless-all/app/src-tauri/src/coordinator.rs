@@ -3138,11 +3138,11 @@ fn read_volc_credentials() -> VolcengineCredentials {
             .flatten()
             .unwrap_or_default(),
     };
-    let resource_id = CredentialsVault::get(CredentialAccount::VolcengineResourceId)
-        .ok()
-        .flatten()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| VolcengineCredentials::default_resource_id().to_string());
+    let resource_id = VolcengineCredentials::resolve_resource_id(
+        CredentialsVault::get(CredentialAccount::VolcengineResourceId)
+            .ok()
+            .flatten(),
+    );
     VolcengineCredentials {
         auth_mode,
         app_id,
@@ -3356,8 +3356,12 @@ fn resolve_ark_endpoint_with_policy(
     if api_key.trim().is_empty() && endpoint.is_none() {
         anyhow::bail!("API Key 为空");
     }
-    Ok(endpoint
-        .unwrap_or_else(|| "https://ark.cn-beijing.volces.com/api/v3/chat/completions".to_string()))
+    let resolved = endpoint
+        .unwrap_or_else(|| "https://ark.cn-beijing.volces.com/api/v3/chat/completions".to_string());
+    // 与 validate_provider_credentials / list_provider_models 同一校验函数：仅保证是
+    // 合法 http(s) URL，地址不设限制（用户显式配置，前端有 http 风险提示）。
+    crate::endpoint_security::validate_http_endpoint(&resolved)?;
+    Ok(resolved)
 }
 
 #[cfg(test)]
@@ -4405,6 +4409,40 @@ mod tests {
         )
         .unwrap();
         assert_eq!(endpoint, "https://example.com/v1/chat/completions");
+    }
+
+    #[test]
+    fn resolve_ark_endpoint_allows_any_custom_endpoint() {
+        // 地址选择权完全交给用户：http 域名、局域网 IP、元数据地址均放行，
+        // 前端对 http:// 输入展示明文风险提示。
+        let endpoint = resolve_ark_endpoint_with_policy(
+            "",
+            Some("http://example.com:12345/v1/chat/completions".to_string()),
+        )
+        .expect("custom LLM HTTP hostname with a custom port must remain usable");
+        assert_eq!(endpoint, "http://example.com:12345/v1/chat/completions");
+
+        resolve_ark_endpoint_with_policy(
+            "",
+            Some("http://192.168.1.50:12345/v1/chat/completions".to_string()),
+        )
+        .expect("custom LLM LAN HTTP endpoint must remain usable");
+
+        resolve_ark_endpoint_with_policy(
+            "",
+            Some("http://169.254.169.254/latest/meta-data/".to_string()),
+        )
+        .expect("user-explicitly-configured endpoint must be allowed (user decides)");
+    }
+
+    #[test]
+    fn resolve_ark_endpoint_rejects_malformed_endpoint() {
+        let error = resolve_ark_endpoint_with_policy(
+            "",
+            Some("ftp://example.com/v1/chat/completions".to_string()),
+        )
+        .expect_err("non-http(s) scheme must be rejected");
+        assert!(error.to_string().contains("http 或 https"));
     }
 
     #[test]

@@ -271,11 +271,10 @@ fn read_openai_provider_config(scope: &ProviderScope) -> Result<ProviderConfig, 
     if base_url.trim().is_empty() {
         return Err("Endpoint 为空".to_string());
     }
-    // issue #609 F-01 孪生 gap（@claude 复审 #617 指出）：ASR / provider 自定义 endpoint
-    // 同样是 attacker-controlled，且 ASR 请求也带 API Key。复用 LLM 路径已有的 SSRF 配置
-    // 校验，拒绝指向内网/回环/link-local/CGNAT/IPv6 ULA/元数据服务的地址；localhost/
-    // 127.0.0.1/::1 仍放行 http（本地 Whisper 服务）。覆盖 validate_provider_credentials
-    // (asr/llm) 连通性测试与 list_provider_models 模型列表两条 HTTP 路径。
+    // endpoint 校验：仅保证是合法 http(s) URL，地址不设任何限制（公网/局域网/内网
+    // DNS/hosts 别名/本地均可）——端点由用户显式配置，选择权在用户；前端对 http://
+    // 输入展示明文风险提示。覆盖 validate_provider_credentials 连通性测试与
+    // list_provider_models 模型列表两条 HTTP 路径。
     crate::endpoint_security::validate_http_endpoint(&base_url)
         .map_err(|_| "endpointInvalid".to_string())?;
     Ok(ProviderConfig {
@@ -446,6 +445,12 @@ async fn validate_asr_provider(scope: &ProviderScope) -> Result<(), String> {
     if active_asr == crate::asr::xfyun::PROVIDER_ID {
         return validate_xfyun_asr_provider(scope).await;
     }
+    // 火山走专属 WS 协议与 volcengine.* 凭据槽位，不能落进下面的 OpenAI 兼容
+    // HTTP 兜底（那条路只认 asr.api_key —— 火山从不写入的槽位，填对也必报
+    // 「API Key 为空」）。
+    if active_asr == "volcengine" {
+        return validate_volcengine_asr_provider(scope).await;
+    }
     // StepFun 一入口双协议：`*-stream` 模型走实时 WS 验证，其余走批式
     // /audio/transcriptions（与 build 侧 resolve_effective_asr_provider 同判据）。
     if active_asr == "stepfun" || active_asr == crate::asr::stepfun_realtime::PROVIDER_ID {
@@ -502,6 +507,82 @@ async fn validate_xfyun_asr_provider(scope: &ProviderScope) -> Result<(), String
     match asr.await_final_result().await {
         Ok(_) => Ok(()),
         Err(crate::asr::xfyun::XfyunASRError::NoFinalResult) => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// 按鉴权模式检查火山凭据完整性，返回给前端映射多语言文案的哨兵串
+/// （providerErrorMessage 识别）。与 [`VolcengineAuthMode::auth_ok`] 同一
+/// trim 语义，但区分缺哪一项，让用户直接知道该补哪个输入框。
+///
+/// [`VolcengineAuthMode::auth_ok`]: crate::asr::volcengine::VolcengineAuthMode::auth_ok
+fn volcengine_missing_credential_error(
+    auth_mode: &crate::asr::volcengine::VolcengineAuthMode,
+    app_id: &str,
+    secret: &str,
+) -> Option<&'static str> {
+    use crate::asr::volcengine::VolcengineAuthMode;
+    match auth_mode {
+        VolcengineAuthMode::AppIdToken => {
+            if app_id.trim().is_empty() {
+                return Some("volcengineAppIdMissing");
+            }
+            if secret.trim().is_empty() {
+                return Some("volcengineAccessTokenMissing");
+            }
+        }
+        VolcengineAuthMode::ApiKey => {
+            if secret.trim().is_empty() {
+                return Some("volcengineApiKeyMissing");
+            }
+        }
+    }
+    None
+}
+
+/// 火山 bigmodel 验证：真连 + 1s 静音 + 收尾。密钥槽位随鉴权模式（与
+/// `read_volc_credentials` 同规则）：旧版读 volcengine.access_key，新版控制台
+/// 读 volcengine.api_key，互不污染。鉴权错误（401/403 → AuthRejected）在
+/// WebSocket 握手阶段即返回；纯静音会话服务端可能不回 final（等价「没说话」），
+/// 这类 `NoFinalResult` 不算验证失败 —— 握手成功已经证明凭据有效。
+async fn validate_volcengine_asr_provider(scope: &ProviderScope) -> Result<(), String> {
+    use crate::asr::volcengine::{VolcengineAuthMode, VolcengineCredentials};
+    let auth_mode = scope
+        .get(CredentialAccount::VolcengineAuthMode)?
+        .map(|s| VolcengineAuthMode::from_str(&s))
+        .unwrap_or(VolcengineAuthMode::AppIdToken);
+    let app_id = scope
+        .get(CredentialAccount::VolcengineAppKey)?
+        .unwrap_or_default();
+    let secret = match auth_mode {
+        VolcengineAuthMode::AppIdToken => scope.get(CredentialAccount::VolcengineAccessKey)?,
+        VolcengineAuthMode::ApiKey => scope.get(CredentialAccount::VolcengineApiKey)?,
+    }
+    .unwrap_or_default();
+    if let Some(message) = volcengine_missing_credential_error(&auth_mode, &app_id, &secret) {
+        return Err(message.to_string());
+    }
+    let resource_id = VolcengineCredentials::resolve_resource_id(
+        scope.get(CredentialAccount::VolcengineResourceId)?,
+    );
+    let asr = std::sync::Arc::new(crate::asr::VolcengineStreamingASR::new(
+        VolcengineCredentials {
+            auth_mode,
+            app_id,
+            access_token: secret,
+            resource_id,
+        },
+        Vec::new(),
+    ));
+    asr.open_session().await.map_err(|e| e.to_string())?;
+    crate::asr::AudioConsumer::consume_pcm_chunk(
+        &*asr,
+        &vec![0u8; crate::asr::volcengine::TARGET_AUDIO_CHUNK_BYTES * 5],
+    );
+    asr.send_last_frame().await.map_err(|e| e.to_string())?;
+    match asr.await_final_result().await {
+        Ok(_) => Ok(()),
+        Err(crate::asr::volcengine::VolcengineASRError::NoFinalResult) => Ok(()),
         Err(e) => Err(e.to_string()),
     }
 }
@@ -1208,8 +1289,8 @@ mod tests {
     use super::{
         asr_error_is_no_speech_rejection, fetch_provider_models, models_url,
         provider_llm_error_message, provider_log_context, provider_request_error_message,
-        sanitized_provider_destination, send_dashscope_multimodal_validation, ProviderConfig,
-        ProviderScope,
+        sanitized_provider_destination, send_dashscope_multimodal_validation,
+        volcengine_missing_credential_error, ProviderConfig, ProviderScope,
     };
     use crate::endpoint_security::validate_http_endpoint;
 
@@ -1241,6 +1322,34 @@ mod tests {
                 .expect("channel provider kind must remain supported");
             assert_eq!(scope.channel.as_deref(), Some("channel-1"));
         }
+    }
+
+    #[test]
+    fn volcengine_missing_credential_error_follows_auth_mode() {
+        use crate::asr::volcengine::VolcengineAuthMode;
+        // 旧版：先查 APP ID 再查 Access Token；全空格视为未填（trim 语义，
+        // 与 VolcengineAuthMode::auth_ok 一致）。
+        assert_eq!(
+            volcengine_missing_credential_error(&VolcengineAuthMode::AppIdToken, "  ", "tok"),
+            Some("volcengineAppIdMissing")
+        );
+        assert_eq!(
+            volcengine_missing_credential_error(&VolcengineAuthMode::AppIdToken, "app", "  "),
+            Some("volcengineAccessTokenMissing")
+        );
+        assert_eq!(
+            volcengine_missing_credential_error(&VolcengineAuthMode::AppIdToken, "app", "tok"),
+            None
+        );
+        // 新版控制台：只查 API Key，不要求 APP ID。
+        assert_eq!(
+            volcengine_missing_credential_error(&VolcengineAuthMode::ApiKey, "", "  "),
+            Some("volcengineApiKeyMissing")
+        );
+        assert_eq!(
+            volcengine_missing_credential_error(&VolcengineAuthMode::ApiKey, "", "key"),
+            None
+        );
     }
 
     #[test]
@@ -1478,26 +1587,33 @@ mod tests {
     }
 
     #[test]
-    fn asr_endpoint_rejects_metadata_cgnat_and_non_https_public() {
-        // 元数据 / CGNAT / 非 https 外网：拒绝，避免带 API Key 的 ASR 请求被指向高价值目标 / 明文外泄。
-        assert!(validate_http_endpoint("http://169.254.169.254/v1/audio/transcriptions").is_err());
-        assert!(validate_http_endpoint("http://100.64.0.1/v1/audio/transcriptions").is_err());
-        assert!(validate_http_endpoint("http://api.example.com/v1/audio/transcriptions").is_err());
-    }
-
-    #[test]
-    fn asr_endpoint_accepts_public_https_localhost_and_lan() {
+    fn asr_endpoint_accepts_any_http_or_https_url() {
+        // 地址选择权完全交给用户：公网 / 局域网 / 元数据地址一律放行，
+        // 前端对 http:// 输入展示明文风险提示。
+        validate_http_endpoint("http://169.254.169.254/v1/audio/transcriptions")
+            .expect("用户显式配置的 endpoint 必须放行");
+        validate_http_endpoint("http://100.64.0.1/v1/audio/transcriptions")
+            .expect("用户显式配置的 endpoint 必须放行");
+        validate_http_endpoint("http://api.example.com/v1/audio/transcriptions")
+            .expect("公网 http ASR endpoint 必须放行");
         // 公网 https（如自建 Whisper 网关）放行。
         validate_http_endpoint("https://api.example.com/v1/audio/transcriptions")
             .expect("公网 https ASR endpoint 必须通过");
         // 本地 Whisper 服务：localhost / 127.0.0.1 http 放行。
         validate_http_endpoint("http://localhost:9000/v1").expect("本地 Whisper http 必须通过");
         validate_http_endpoint("http://127.0.0.1:9000/v1").expect("本地 Whisper http 必须通过");
-        // F-01 放宽：局域网（RFC1918）http ASR 网关放行（用户局域网自托管 Whisper）。
+        // 局域网（RFC1918）http ASR 网关放行（用户局域网自托管 Whisper）。
         validate_http_endpoint("http://192.168.1.50:9000/v1/audio/transcriptions")
             .expect("局域网 http ASR endpoint 必须通过");
         // Mimo 官方默认 endpoint（https）放行。
         validate_http_endpoint(crate::asr::mimo::DEFAULT_ENDPOINT)
             .expect("Mimo 官方默认 endpoint 必须通过");
+    }
+
+    #[test]
+    fn asr_endpoint_rejects_malformed_or_non_http_urls() {
+        assert!(validate_http_endpoint("not a url").is_err());
+        assert!(validate_http_endpoint("ftp://example.com/").is_err());
+        assert!(validate_http_endpoint("wss://example.com/").is_err());
     }
 }

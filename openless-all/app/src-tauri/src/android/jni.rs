@@ -1033,6 +1033,36 @@ pub mod android {
         )
     }
 
+    /// Read at most `max_bytes` from a SAF `content://` URI via Kotlin ContentResolver.
+    pub fn read_content_uri(uri: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
+        let max_bytes = i32::try_from(max_bytes)
+            .map_err(|_| "content URI byte limit exceeds Android integer range".to_string())?;
+        with_android_env(|env, context| {
+            let class =
+                load_context_class(env, context, "com.openless.app.OpenLessContentReader")?;
+            let uri_obj = jobject_str(env, uri)?;
+            let value = env
+                .call_static_method(
+                    class,
+                    "readBytes",
+                    "(Landroid/content/Context;Ljava/lang/String;I)[B",
+                    &[
+                        JValue::Object(context),
+                        JValue::Object(&uri_obj),
+                        JValue::Int(max_bytes),
+                    ],
+                )
+                .and_then(|value| value.l())
+                .map_err(|error| format!("call OpenLessContentReader.readBytes: {error}"))?;
+            if value.is_null() {
+                return Err("read selected Android document failed".to_string());
+            }
+            let bytes = JByteArray::from(value);
+            env.convert_byte_array(&bytes)
+                .map_err(|error| format!("copy selected Android document bytes: {error}"))
+        })
+    }
+
     /// Write `bytes` to a SAF `content://` URI via Kotlin ContentResolver.
     pub fn write_content_uri(uri: &str, bytes: &[u8]) -> Result<(), String> {
         with_android_env(|env, context| {

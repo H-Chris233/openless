@@ -16,6 +16,19 @@ pub struct AppHandle<R: Runtime>(std::marker::PhantomData<R>);
 #[cfg(target_os = "windows")]
 pub trait Runtime {}
 
+#[cfg(target_os = "linux")]
+mod linux_fcitx {
+    pub fn commit_text(_text: &str) -> Result<(), String> {
+        Err("fcitx is unavailable in the Rust-only test harness".to_string())
+    }
+
+    pub fn sync_qa_binding(_trigger: Option<crate::types::HotkeyTrigger>) {}
+
+    pub fn sync_selection_polish_binding(_trigger: Option<crate::types::HotkeyTrigger>) {}
+
+    pub fn sync_translation_binding(_trigger: Option<crate::types::HotkeyTrigger>) {}
+}
+
 mod asr {
     pub mod local {
         pub mod foundry {
