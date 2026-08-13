@@ -180,7 +180,7 @@ jobs:
       - name: Initialize Linux C ASR submodule
         if: runner.os == 'Linux'
         shell: bash
-        run: git submodule update --init openless-all/app/src-tauri/vendor/qwen-asr
+        run: git submodule update --init src-tauri/vendor/qwen-asr
 
       - name: Disable macOS-only Qwen3 MLX dependency
         if: runner.os != 'macOS'
