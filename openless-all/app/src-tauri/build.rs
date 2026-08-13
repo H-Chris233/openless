@@ -2,8 +2,13 @@ fn main() {
     #[cfg(target_os = "windows")]
     link_windows_common_controls_v6_manifest_dependency();
 
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    build_qwen_asr();
+    // build.rs 的 `#[cfg(target_os)]` 判断的是构建脚本主机，不是 Cargo 的目标平台。
+    // Android CI 在 Linux 主机上交叉编译时必须显式读取 CARGO_CFG_TARGET_OS，
+    // 否则会误把 Linux 的 qwen-asr C 后端编进 Android。
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if matches!(target_os.as_str(), "macos" | "linux") {
+        build_qwen_asr(&target_os);
+    }
 
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("android") {
         link_android_cpp_runtime();
@@ -46,8 +51,7 @@ int openless_common_controls_v6_manifest_dependency_anchor = 0;
 /// `USE_BLAS` + `ACCELERATE_NEW_LAPACK` 是必要宏。
 /// `-march=native` 这里**不**用——分发二进制要可移植，cc crate 在 release 下
 /// 默认带 `-O2`，加上 `-O3` 提一档；NEON/AVX 在源码里有 `#ifdef` 自动分派。
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-fn build_qwen_asr() {
+fn build_qwen_asr(target_os: &str) {
     const VENDOR: &str = "vendor/qwen-asr";
     const SOURCES: &[&str] = &[
         "qwen_asr.c",
@@ -75,10 +79,11 @@ fn build_qwen_asr() {
         .flag("-Wno-sign-compare")
         .warnings(false);
 
-    #[cfg(target_os = "macos")]
-    build
-        .define("USE_BLAS", None)
-        .define("ACCELERATE_NEW_LAPACK", None);
+    if target_os == "macos" {
+        build
+            .define("USE_BLAS", None)
+            .define("ACCELERATE_NEW_LAPACK", None);
+    }
 
     for src in SOURCES {
         let path = format!("{}/{}", VENDOR, src);
@@ -90,18 +95,19 @@ fn build_qwen_asr() {
     build.compile("qwen_asr");
 
     // BLAS = Accelerate
-    #[cfg(target_os = "macos")]
-    println!("cargo:rustc-link-lib=framework=Accelerate");
+    if target_os == "macos" {
+        println!("cargo:rustc-link-lib=framework=Accelerate");
+    }
 
     // Linux 不依赖发行版的 OpenBLAS 开发包，先走 C 引擎自带的通用 CPU kernels。
-    #[cfg(target_os = "linux")]
-    {
+    if target_os == "linux" {
         println!("cargo:rustc-link-lib=m");
         println!("cargo:rustc-link-lib=pthread");
     }
 
     // Apple Speech 本地 ASR（issue #574）：apple_speech_provider 用
     // SFSpeechRecognizer / SFSpeechURLRecognitionRequest，符号在 Speech.framework。
-    #[cfg(target_os = "macos")]
-    println!("cargo:rustc-link-lib=framework=Speech");
+    if target_os == "macos" {
+        println!("cargo:rustc-link-lib=framework=Speech");
+    }
 }
