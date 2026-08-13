@@ -3,14 +3,24 @@ fn main() {
     link_windows_common_controls_v6_manifest_dependency();
 
     // build.rs 的 `#[cfg(target_os)]` 判断的是构建脚本主机，不是 Cargo 的目标平台。
-    // Android CI 在 Linux 主机上交叉编译时必须显式读取 CARGO_CFG_TARGET_OS，
-    // 否则会误把 Linux 的 qwen-asr C 后端编进 Android。
-    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    if matches!(target_os.as_str(), "macos" | "linux") {
-        build_qwen_asr(&target_os);
+    // 直接解析 TARGET，明确排除所有 Android triple，避免 Linux 主机交叉编译时
+    // 把 qwen-asr C 后端误编进 Android。
+    let target = std::env::var("TARGET").unwrap_or_default();
+    let target_os = if target.ends_with("-android") {
+        "android"
+    } else if target.ends_with("-apple-darwin") {
+        "macos"
+    } else if target.contains("-linux-") {
+        "linux"
+    } else {
+        ""
+    };
+    println!("cargo:warning=OpenLess build target={target}, target_os={target_os}");
+    if matches!(target_os, "macos" | "linux") {
+        build_qwen_asr(target_os);
     }
 
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("android") {
+    if target_os == "android" {
         link_android_cpp_runtime();
     }
 
