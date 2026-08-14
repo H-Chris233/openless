@@ -49,8 +49,8 @@ mod tests {
         Shared {
             binding: RwLock::new(HotkeyBinding::default()),
             trigger_held: AtomicBool::new(true),
-            trigger_press_id: AtomicU64::new(0),
-            trigger_companion_seen: AtomicU64::new(0),
+            trigger_press_id: AtomicU64::new(42),
+            trigger_companion_seen: AtomicU64::new(42),
             qa_trigger: RwLock::new(None),
             qa_trigger_held: AtomicBool::new(true),
             selection_polish_trigger: RwLock::new(None),
@@ -67,6 +67,8 @@ mod tests {
         reset_shared_held_state(&shared);
 
         assert!(!shared.trigger_held.load(Ordering::SeqCst));
+        assert_eq!(shared.trigger_press_id.load(Ordering::SeqCst), 0);
+        assert_eq!(shared.trigger_companion_seen.load(Ordering::SeqCst), 0);
         assert!(!shared.qa_trigger_held.load(Ordering::SeqCst));
         assert!(!shared.selection_polish_trigger_held.load(Ordering::SeqCst));
         assert!(!shared.translation_trigger_held.load(Ordering::SeqCst));
@@ -86,6 +88,8 @@ mod tests {
 
         assert_eq!(*shared.binding.read(), next);
         assert!(!shared.trigger_held.load(Ordering::SeqCst));
+        assert_eq!(shared.trigger_press_id.load(Ordering::SeqCst), 0);
+        assert_eq!(shared.trigger_companion_seen.load(Ordering::SeqCst), 0);
         assert!(shared.qa_trigger_held.load(Ordering::SeqCst));
         assert!(shared.selection_polish_trigger_held.load(Ordering::SeqCst));
         assert!(shared.translation_trigger_held.load(Ordering::SeqCst));
@@ -339,6 +343,12 @@ fn update_shared_binding(shared: &Shared, binding: HotkeyBinding) {
     shared
         .trigger_held
         .store(false, std::sync::atomic::Ordering::SeqCst);
+    shared
+        .trigger_press_id
+        .store(0, std::sync::atomic::Ordering::SeqCst);
+    shared
+        .trigger_companion_seen
+        .store(0, std::sync::atomic::Ordering::SeqCst);
 }
 
 fn update_shared_modifier_shortcuts(
@@ -367,6 +377,9 @@ fn reset_shared_held_state(shared: &Shared) {
         .store(false, std::sync::atomic::Ordering::SeqCst);
     shared
         .trigger_companion_seen
+        .store(0, std::sync::atomic::Ordering::SeqCst);
+    shared
+        .trigger_press_id
         .store(0, std::sync::atomic::Ordering::SeqCst);
     shared
         .qa_trigger_held
@@ -1059,9 +1072,6 @@ mod platform {
     const VK_RWIN: u32 = 0x5C;
     const VK_LWIN: u32 = 0x5B;
     const VK_MEDIA_PLAY_PAUSE: u32 = 0xB3;
-    const LLKHF_INJECTED: u32 = 0x0000_0010;
-    const ACCEPT_INJECTED_ENV: &str = "OPENLESS_ACCEPT_SYNTHETIC_HOTKEY_EVENTS";
-
     static HOOK_CONTEXT: AtomicPtr<CallbackContext> = AtomicPtr::new(std::ptr::null_mut());
 
     pub fn start_adapter(
@@ -1201,6 +1211,10 @@ mod platform {
             if let Some(hook) = (*context).hook.lock().unwrap().take() {
                 let _ = UnhookWindowsHookEx(hook);
             }
+            // 监听线程可能在触发键仍处于按下状态时退出（配置重载、应用关闭或
+            // hook 消息循环异常结束）。先清理内部锁存，避免下一次监听器复用
+            // 共享状态时把旧的按下状态带过去。
+            super::reset_shared_held_state(&(*context).shared);
             HOOK_CONTEXT.store(std::ptr::null_mut(), AtomicOrdering::SeqCst);
             let _ = Box::from_raw(context);
         }
@@ -1214,10 +1228,11 @@ mod platform {
         if code == HC_ACTION as i32 && lparam.0 != 0 {
             if let Some(ctx) = callback_context() {
                 let keyboard = *(lparam.0 as *const KBDLLHOOKSTRUCT);
-                if keyboard.flags.0 & LLKHF_INJECTED == 0 || accept_injected_events() {
-                    if dispatch_keyboard_event(ctx, keyboard.vkCode, wparam.0) {
-                        return LRESULT(1);
-                    }
+                // 合成输入（SendInput/keybd_event）与真实键盘统一走同一条分发路径。
+                // 只要事件的虚拟键值匹配当前配置，现有的边沿去重和组合键撤销逻辑
+                // 仍然负责决定是否触发 OpenLess；这里不再按合成输入来源过滤。
+                if dispatch_keyboard_event(ctx, keyboard.vkCode, wparam.0) {
+                    return LRESULT(1);
                 }
             }
         }
@@ -1426,10 +1441,6 @@ mod platform {
         }
     }
 
-    fn accept_injected_events() -> bool {
-        std::env::var(ACCEPT_INJECTED_ENV).ok().as_deref() == Some("1")
-    }
-
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -1519,6 +1530,16 @@ mod platform {
                 edge_names(drain(&rx)),
                 vec!["pressed", "released"]
             );
+        }
+
+        #[test]
+        fn windows_unrelated_key_does_not_trigger_configured_modifier() {
+            let shared = shared(HotkeyTrigger::RightControl);
+            let (ctx, rx) = callback_context(shared);
+
+            assert!(!dispatch_keyboard_event(&ctx, 0x41, WM_KEYDOWN));
+            assert!(!dispatch_keyboard_event(&ctx, 0x41, WM_KEYUP));
+            assert!(drain(&rx).is_empty());
         }
 
         #[test]

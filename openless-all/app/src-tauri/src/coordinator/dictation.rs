@@ -3307,6 +3307,10 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
             restore_prepared_windows_ime_session(inner, current_session_id);
             if !finish_cancelled_processing(inner, current_session_id) {
                 set_phase_idle_if_session_matches(inner, current_session_id);
+                // Dry-run、启动竞态或 ASR 初始化失败都可能让收尾时没有可用的
+                // ASR 句柄。phase 已经回到 Idle 后仍必须安排胶囊收起，否则
+                // 无 ASR 的测试/异常路径会把 Transcribing 胶囊永久留在屏幕上。
+                schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
             }
             return Ok(());
         }
