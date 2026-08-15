@@ -74,6 +74,33 @@ export function dismissVocabSuggestions(): Promise<void> {
     return invokeOrMock("dismiss_vocab_suggestions", undefined, () => undefined)
 }
 
+/**
+ * 把文字放进剪贴板。
+ *
+ * 走后端而不是 `navigator.clipboard`：兜底卡片浮在别的 app 上面、按钮刻意不抢焦点，
+ * 而未聚焦的文档调那个 API 会抛 `Document is not focused`。
+ */
+export function copyTextToClipboard(text: string): Promise<void> {
+    return invokeOrMock("copy_text_to_clipboard", { text }, () => undefined)
+}
+
+/** 落字失败兜底卡片关掉了（用户点关闭 / TTL 到时）。 */
+export function dismissInsertFallbackCard(): Promise<void> {
+    return invokeOrMock("dismiss_insert_fallback_card", undefined, () => undefined)
+}
+
+/** 把浏览器真实折行后的卡片高度同步给原生共享窗口。 */
+export function reportInsertFallbackCardHeight(
+    presentationId: number,
+    height: number,
+): Promise<void> {
+    return invokeOrMock(
+        "report_insert_fallback_card_height",
+        { presentationId, height },
+        () => undefined,
+    )
+}
+
 export function removeCorrectionRule(id: string): Promise<void> {
     return invokeOrMock("remove_correction_rule", { id }, () => undefined)
 }
