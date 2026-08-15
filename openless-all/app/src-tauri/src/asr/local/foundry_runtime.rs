@@ -21,6 +21,13 @@ impl FoundryFallbackNotice {
 pub(crate) type FoundryFallbackNoticeCallback =
     Arc<dyn Fn(FoundryFallbackNotice) + Send + Sync + 'static>;
 
+/// 一条 Foundry ASR route 的进程内代数。
+///
+/// route 在录音/重转录会话创建时分配；后续设置变更或新会话只能使旧 route 失效，
+/// 不能在真正开始转写时把旧会话重新绑定到最新代数。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FoundryRouteEpoch(u64);
+
 /// 一段录音的 Foundry 转写结果。仅供本地 ASR provider 消费，不扩展 IPC 协议。
 #[derive(Debug, Clone, Default)]
 pub(crate) struct FoundryTranscriptionOutcome {
@@ -38,11 +45,23 @@ pub(crate) struct FoundryTranscriptionOutcome {
 pub(crate) struct FoundryPrimaryRecoveryToken {
     alias: String,
     primary_model_id: String,
-    route_epoch: u64,
+    route_epoch: FoundryRouteEpoch,
 }
 
 impl FoundryPrimaryRecoveryToken {
-    pub(crate) const fn route_epoch(&self) -> u64 {
+    pub(crate) fn new(
+        alias: impl Into<String>,
+        primary_model_id: impl Into<String>,
+        route_epoch: FoundryRouteEpoch,
+    ) -> Self {
+        Self {
+            alias: alias.into(),
+            primary_model_id: primary_model_id.into(),
+            route_epoch,
+        }
+    }
+
+    pub(crate) const fn route_epoch(&self) -> FoundryRouteEpoch {
         self.route_epoch
     }
 }
@@ -74,7 +93,7 @@ pub(crate) fn is_terminal_foundry_fallback_error(error: &anyhow::Error) -> bool 
 #[cfg(target_os = "windows")]
 #[allow(dead_code)]
 mod imp {
-    use super::FoundryPrimaryRecoveryToken;
+    use super::{FoundryPrimaryRecoveryToken, FoundryRouteEpoch};
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::sync::{
@@ -184,6 +203,26 @@ mod imp {
         cancelled_through: FoundryTemporaryCpuFallbackLease,
     ) -> bool {
         loaded_lease.is_some_and(|lease| lease <= cancelled_through)
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum FoundryCpuLoadCompletion {
+        UseCpu,
+        RestorePrimary,
+        Cancelled,
+    }
+
+    fn cpu_load_completion(
+        load_succeeded: bool,
+        cancel_requested: bool,
+    ) -> FoundryCpuLoadCompletion {
+        if cancel_requested {
+            FoundryCpuLoadCompletion::Cancelled
+        } else if load_succeeded {
+            FoundryCpuLoadCompletion::UseCpu
+        } else {
+            FoundryCpuLoadCompletion::RestorePrimary
+        }
     }
 
     #[derive(Clone)]
@@ -562,27 +601,34 @@ mod imp {
                 self.alias,
                 cpu_model_id
             );
-            if let Err(error) = cpu_model
+            let load_result = cpu_model
                 .load()
                 .await
-                .with_context(|| format!("load Foundry CPU model {cpu_model_id}"))
-            {
-                if let Err(cleanup_error) = FoundryLocalRuntime::unload_model(&loaded).await {
-                    return Err(error.context(format!(
-                        "temporary CPU model {cpu_model_id} also failed to unload; preserving temporary runtime state: {cleanup_error:#}"
-                    )));
+                .with_context(|| format!("load Foundry CPU model {cpu_model_id}"));
+            let cancellation_error = self.runtime.check_prepare_cancelled().err();
+            match cpu_load_completion(load_result.is_ok(), cancellation_error.is_some()) {
+                FoundryCpuLoadCompletion::UseCpu => {}
+                FoundryCpuLoadCompletion::RestorePrimary => {
+                    let error = load_result.expect_err("failed CPU load must carry an error");
+                    if let Err(cleanup_error) = FoundryLocalRuntime::unload_model(&loaded).await {
+                        return Err(error.context(format!(
+                            "temporary CPU model {cpu_model_id} also failed to unload; preserving temporary runtime state: {cleanup_error:#}"
+                        )));
+                    }
+                    self.runtime.clear_loaded_if_model_id(&loaded.model_id);
+                    return self.restore_after_failed_cpu_switch(&previous, error).await;
                 }
-                self.runtime.clear_loaded_if_model_id(&loaded.model_id);
-                return self.restore_after_failed_cpu_switch(&previous, error).await;
-            }
-            if let Err(error) = self.runtime.check_prepare_cancelled() {
-                if let Err(cleanup_error) = FoundryLocalRuntime::unload_model(&loaded).await {
-                    return Err(error.context(format!(
-                        "cancelled temporary CPU model {cpu_model_id} also failed to unload; preserving temporary runtime state: {cleanup_error:#}"
-                    )));
+                FoundryCpuLoadCompletion::Cancelled => {
+                    let error = cancellation_error
+                        .expect("cancelled CPU load completion must carry a cancellation error");
+                    if let Err(cleanup_error) = FoundryLocalRuntime::unload_model(&loaded).await {
+                        return Err(error.context(format!(
+                            "cancelled temporary CPU model {cpu_model_id} also failed to unload; preserving temporary runtime state: {cleanup_error:#}"
+                        )));
+                    }
+                    self.runtime.clear_loaded_if_model_id(&loaded.model_id);
+                    return Err(error);
                 }
-                self.runtime.clear_loaded_if_model_id(&loaded.model_id);
-                return self.restore_after_failed_cpu_switch(&previous, error).await;
             }
 
             self.loaded = loaded;
@@ -748,8 +794,10 @@ mod imp {
             audio_path: &Path,
             audio_timeout: std::time::Duration,
         ) -> Result<String> {
+            let route_epoch = self.begin_route();
             let outcome = self
                 .transcribe_audio_files(
+                    route_epoch,
                     alias,
                     runtime_source,
                     language_hint,
@@ -761,8 +809,9 @@ mod imp {
             Ok(outcome.texts.into_iter().next().unwrap_or_default())
         }
 
-        pub async fn transcribe_audio_files(
+        pub(crate) async fn transcribe_audio_files(
             &self,
+            route_epoch: FoundryRouteEpoch,
             alias: &str,
             runtime_source: &str,
             language_hint: Option<&str>,
@@ -770,7 +819,6 @@ mod imp {
             audio_timeout: Duration,
             notices: FoundryFallbackNoticeCallback,
         ) -> Result<FoundryTranscriptionOutcome> {
-            let route_epoch = self.advance_route_epoch();
             let _lifecycle = self.lifecycle.lock().await;
             self.cancel_prepare.store(false, Ordering::SeqCst);
             let runtime_source = foundry_native::normalize_runtime_source(runtime_source);
@@ -796,11 +844,11 @@ mod imp {
             )
             .await?;
             if outcome.used_cpu_fallback {
-                outcome.primary_recovery = Some(FoundryPrimaryRecoveryToken {
-                    alias: alias.to_string(),
-                    primary_model_id: execution.primary.model_id.clone(),
+                outcome.primary_recovery = Some(FoundryPrimaryRecoveryToken::new(
+                    alias,
+                    execution.primary.model_id.clone(),
                     route_epoch,
-                });
+                ));
             }
             Ok(outcome)
         }
@@ -811,8 +859,13 @@ mod imp {
             self.release_now_locked().await
         }
 
-        pub fn route_epoch_snapshot(&self) -> u64 {
-            self.route_epoch.load(Ordering::SeqCst)
+        /// 为新录音或重转录会话分配 route，并立即使旧恢复/释放任务失效。
+        pub(crate) fn begin_route(&self) -> FoundryRouteEpoch {
+            self.advance_route_epoch()
+        }
+
+        pub(crate) fn route_epoch_snapshot(&self) -> FoundryRouteEpoch {
+            FoundryRouteEpoch(self.route_epoch.load(Ordering::SeqCst))
         }
 
         /// 使已调度的恢复/释放任务失效；用于 alias 或 runtime source 切换。
@@ -820,7 +873,10 @@ mod imp {
             self.advance_route_epoch();
         }
 
-        pub async fn release_if_route_epoch(&self, expected_epoch: u64) -> Result<bool> {
+        pub(crate) async fn release_if_route_epoch(
+            &self,
+            expected_epoch: FoundryRouteEpoch,
+        ) -> Result<bool> {
             let _lifecycle = self.lifecycle.lock().await;
             if self.route_epoch_snapshot() != expected_epoch {
                 return Ok(false);
@@ -1463,14 +1519,16 @@ mod imp {
             )
         }
 
-        fn advance_route_epoch(&self) -> u64 {
-            self.route_epoch
-                .fetch_add(1, Ordering::SeqCst)
-                .wrapping_add(1)
+        fn advance_route_epoch(&self) -> FoundryRouteEpoch {
+            FoundryRouteEpoch(
+                self.route_epoch
+                    .fetch_add(1, Ordering::SeqCst)
+                    .wrapping_add(1),
+            )
         }
 
         fn route_is_current(&self, token: &FoundryPrimaryRecoveryToken) -> bool {
-            self.route_epoch.load(Ordering::SeqCst) == token.route_epoch
+            self.route_epoch_snapshot() == token.route_epoch
         }
     }
 
@@ -1508,10 +1566,11 @@ mod imp {
     #[cfg(test)]
     mod lifecycle_tests {
         use super::{
-            foundry_native_dir_candidates, is_cuda_cudnn_failure, is_cuda_fallback_candidate,
-            may_reuse_loaded_model, normalized_language_hint, select_cpu_variant_id,
-            select_foundry_native_dir, should_release_temporary_cpu_fallback,
-            transcribe_recording_with_adapter, FoundryCpuSwitch, FoundryExecutionAdapter,
+            cpu_load_completion, foundry_native_dir_candidates, is_cuda_cudnn_failure,
+            is_cuda_fallback_candidate, may_reuse_loaded_model, normalized_language_hint,
+            select_cpu_variant_id, select_foundry_native_dir,
+            should_release_temporary_cpu_fallback, transcribe_recording_with_adapter,
+            FoundryCpuLoadCompletion, FoundryCpuSwitch, FoundryExecutionAdapter,
             FoundryExecutionDevice, FoundryFallbackNotice, FoundryFallbackNoticeCallback,
             FoundryLocalRuntime, FoundryVariantDescriptor,
         };
@@ -1967,6 +2026,26 @@ mod imp {
             }
         }
 
+        #[test]
+        fn cpu_load_completion_never_restores_primary_after_cancellation() {
+            assert_eq!(
+                cpu_load_completion(true, true),
+                FoundryCpuLoadCompletion::Cancelled
+            );
+            assert_eq!(
+                cpu_load_completion(false, true),
+                FoundryCpuLoadCompletion::Cancelled
+            );
+            assert_eq!(
+                cpu_load_completion(false, false),
+                FoundryCpuLoadCompletion::RestorePrimary
+            );
+            assert_eq!(
+                cpu_load_completion(true, false),
+                FoundryCpuLoadCompletion::UseCpu
+            );
+        }
+
         #[tokio::test]
         async fn cpu_inference_cancellation_releases_the_temporary_cpu_route_without_text() {
             let mut execution = ScriptedExecution::gpu(
@@ -2211,6 +2290,10 @@ impl FoundryLocalRuntime {
 
     pub fn request_cancel_prepare(&self) {}
 
+    pub(crate) fn begin_route(&self) -> FoundryRouteEpoch {
+        FoundryRouteEpoch(0)
+    }
+
     pub fn invalidate_route(&self) {}
 
     pub async fn catalog_snapshot(
@@ -2230,8 +2313,9 @@ impl FoundryLocalRuntime {
         anyhow::bail!("Foundry Local Whisper is only available on Windows: {alias}");
     }
 
-    pub async fn transcribe_audio_files(
+    pub(crate) async fn transcribe_audio_files(
         &self,
+        _route_epoch: FoundryRouteEpoch,
         alias: &str,
         _runtime_source: &str,
         _language_hint: Option<&str>,

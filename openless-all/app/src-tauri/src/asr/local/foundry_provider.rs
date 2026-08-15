@@ -21,12 +21,15 @@ use crate::asr::RawTranscript;
 
 #[cfg(target_os = "windows")]
 use super::foundry_runtime::FoundryLocalRuntime;
+#[cfg(target_os = "windows")]
+use super::foundry_runtime::FoundryRouteEpoch;
 use super::foundry_runtime::{FoundryFallbackNoticeCallback, FoundryPrimaryRecoveryToken};
 
 /// Foundry Local Whisper 属于 Whisper 系模型，原生解码窗口约 30s。每次 SDK
 /// 请求保持在窗口内，再由 OpenLess 合并分片文本，避免长听写只返回第一段。
 const FOUNDRY_WHISPER_CHUNK_LIMIT_MS: u64 = 30_000;
 
+#[must_use = "primary_recovery must be passed to Foundry release scheduling"]
 pub(crate) struct FoundryProviderTranscription {
     pub raw: RawTranscript,
     pub used_cpu_fallback: bool,
@@ -36,6 +39,8 @@ pub(crate) struct FoundryProviderTranscription {
 pub struct FoundryLocalWhisperAsr {
     #[cfg(target_os = "windows")]
     runtime: Arc<FoundryLocalRuntime>,
+    #[cfg(target_os = "windows")]
+    route_epoch: FoundryRouteEpoch,
     model_alias: String,
     runtime_source: String,
     language_hint: Option<String>,
@@ -51,8 +56,10 @@ impl FoundryLocalWhisperAsr {
         runtime_source: String,
         language_hint: Option<String>,
     ) -> Self {
+        let route_epoch = runtime.begin_route();
         Self {
             runtime,
+            route_epoch,
             model_alias,
             runtime_source,
             language_hint: normalize_language_hint(language_hint),
@@ -80,22 +87,16 @@ impl FoundryLocalWhisperAsr {
         self.language_hint.as_deref()
     }
 
-    /// 当前缓冲音频时长（毫秒）。Coordinator 在 transcribe() 调用前读取，
+    /// 当前缓冲音频时长（毫秒）。Coordinator 在发起转写前读取，
     /// 用来给 Foundry Local Whisper 计算动态超时。不消费缓冲。
     pub fn buffer_duration_ms(&self) -> u64 {
         pcm_duration_ms(&self.buffer.lock())
     }
 
-    pub async fn transcribe(&self, audio_timeout: std::time::Duration) -> Result<RawTranscript> {
-        Ok(self
-            .transcribe_with_fallback_notice(audio_timeout, Arc::new(|_| {}))
-            .await?
-            .raw)
-    }
-
     /// 转写当前录音，并在 Foundry 的一次性 GPU→CPU 回退期间同步最小 UI 提示。
     ///
-    /// 普通转写与历史重新转录继续调用 `transcribe`，因此不会创建新的 UI 协议或提示。
+    /// 返回值包含 primary recovery token；所有调用方都必须把它交给 Coordinator 的释放调度，
+    /// 避免成功重转录只保留文本、却丢失模型生命周期信息。
     pub(crate) async fn transcribe_with_fallback_notice(
         &self,
         audio_timeout: std::time::Duration,
@@ -170,6 +171,7 @@ impl FoundryLocalWhisperAsr {
             let outcome = self
                 .runtime
                 .transcribe_audio_files(
+                    self.route_epoch,
                     &self.model_alias,
                     &self.runtime_source,
                     self.language_hint(),
@@ -404,6 +406,45 @@ mod tests {
 
         assert_eq!(provider.buffer_duration_ms(), 1000);
         assert_eq!(provider.buffer.lock().len(), 32_000);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn foundry_provider_binds_a_new_route_when_the_recording_is_created() {
+        let runtime = std::sync::Arc::new(super::FoundryLocalRuntime::new());
+        let first = super::FoundryLocalWhisperAsr::new(
+            std::sync::Arc::clone(&runtime),
+            "whisper-small".into(),
+            "auto".into(),
+            None,
+        );
+        let second = super::FoundryLocalWhisperAsr::new(
+            std::sync::Arc::clone(&runtime),
+            "whisper-medium".into(),
+            "auto".into(),
+            None,
+        );
+
+        assert_ne!(first.route_epoch, second.route_epoch);
+        assert_eq!(runtime.route_epoch_snapshot(), second.route_epoch);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn foundry_provider_route_is_not_rebased_by_a_later_setting_change() {
+        let runtime = std::sync::Arc::new(super::FoundryLocalRuntime::new());
+        let provider = super::FoundryLocalWhisperAsr::new(
+            std::sync::Arc::clone(&runtime),
+            "whisper-small".into(),
+            "auto".into(),
+            None,
+        );
+        let recording_route = provider.route_epoch;
+
+        runtime.invalidate_route();
+
+        assert_ne!(runtime.route_epoch_snapshot(), recording_route);
+        assert_eq!(provider.route_epoch, recording_route);
     }
 
     #[cfg(target_os = "windows")]

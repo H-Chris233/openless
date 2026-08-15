@@ -903,27 +903,46 @@ struct PreparedWindowsImeSessionSlot {
     prepared: PreparedWindowsImeSession,
 }
 
-/// 历史音频静默重试的 ASR 资源护栏。
+/// 历史音频重转录的 ASR 资源护栏。
 ///
-/// 重试 future 被 select 丢弃时，局部 QaAsrStart 不会再经过正常的
-/// end_session 收尾；这里用 Drop 补 cancel 和本地模型释放，尤其覆盖
-/// spawn_blocking 已经开始运行的本地 ASR。
+/// 静默重试 future 被 select 丢弃时，局部 QaAsrStart 不会再经过正常的 end_session
+/// 收尾；这里用 Drop 补 cancel 和本地模型释放。Foundry 的普通历史重转录也持有该 guard，
+/// 确保成功、失败和 future 提前结束都能调度模型释放。
 struct CancellableRetranscribeGuard {
     inner: Arc<Inner>,
     asr: Option<ActiveAsr>,
     session_id: SessionId,
+    cancel_on_drop: bool,
 }
 
 impl CancellableRetranscribeGuard {
-    fn new(inner: Arc<Inner>, asr: ActiveAsr, session_id: SessionId) -> Self {
+    fn new(inner: Arc<Inner>, asr: ActiveAsr, session_id: SessionId, cancel_on_drop: bool) -> Self {
         Self {
             inner,
             asr: Some(asr),
             session_id,
+            cancel_on_drop,
         }
     }
 
     fn disarm(mut self) {
+        self.asr.take();
+    }
+
+    #[cfg(target_os = "windows")]
+    fn finish_foundry(
+        mut self,
+        primary_recovery: Option<crate::asr::local::foundry_runtime::FoundryPrimaryRecoveryToken>,
+    ) {
+        debug_assert!(matches!(
+            self.asr.as_ref(),
+            Some(ActiveAsr::FoundryLocalWhisper(_))
+        ));
+        schedule_foundry_local_asr_release(
+            &self.inner,
+            AsrReleaseSession::Dictation(self.session_id),
+            primary_recovery,
+        );
         self.asr.take();
     }
 }
@@ -933,9 +952,31 @@ impl Drop for CancellableRetranscribeGuard {
         let Some(asr) = self.asr.take() else {
             return;
         };
-        let asr_for_release = asr.clone();
-        cancel_active_asr(asr);
-        dictation::schedule_cancelled_asr_release(&self.inner, &asr_for_release, self.session_id);
+        if self.cancel_on_drop {
+            cancel_active_asr(asr.clone());
+        }
+        dictation::schedule_cancelled_asr_release(&self.inner, &asr, self.session_id);
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RetranscribeCompletion {
+    Disarm,
+    ReleaseFoundry(
+        Option<crate::asr::local::foundry_runtime::FoundryPrimaryRecoveryToken>,
+    ),
+}
+
+#[cfg(target_os = "windows")]
+fn retranscribe_completion(
+    is_foundry: bool,
+    primary_recovery: Option<crate::asr::local::foundry_runtime::FoundryPrimaryRecoveryToken>,
+) -> RetranscribeCompletion {
+    if is_foundry {
+        RetranscribeCompletion::ReleaseFoundry(primary_recovery)
+    } else {
+        RetranscribeCompletion::Disarm
     }
 }
 
@@ -2429,11 +2470,17 @@ impl Coordinator {
         if let Some(label_slot) = attempted_label {
             *label_slot = Some(asr_call_label.clone());
         }
-        let retry_guard = if cancel_on_drop {
+        #[cfg(target_os = "windows")]
+        let is_foundry_retranscribe =
+            matches!(start.active_asr(), ActiveAsr::FoundryLocalWhisper(_));
+        #[cfg(not(target_os = "windows"))]
+        let is_foundry_retranscribe = false;
+        let retry_guard = if cancel_on_drop || is_foundry_retranscribe {
             Some(CancellableRetranscribeGuard::new(
                 Arc::clone(inner),
                 start.active_asr(),
                 inner.state.lock().session_id,
+                cancel_on_drop,
             ))
         } else {
             None
@@ -2446,6 +2493,8 @@ impl Coordinator {
         let elevenlabs_timeout = crate::asr::elevenlabs::transcribe_timeout(
             crate::asr::pcm::pcm_duration_ms(&pcm) as f64 / 1000.0,
         );
+        #[cfg(target_os = "windows")]
+        let mut foundry_primary_recovery = None;
         let raw = match start.active_asr() {
             ActiveAsr::Volcengine(asr) => {
                 asr.send_last_frame().await.map_err(|e| e.to_string())?;
@@ -2505,10 +2554,19 @@ impl Coordinator {
             #[cfg(target_os = "windows")]
             ActiveAsr::FoundryLocalWhisper(local) => {
                 let audio_secs = (local.buffer_duration_ms() as f64) / 1000.0;
-                local
-                    .transcribe(windows_local_asr_transcribe_timeout(audio_secs))
+                let outcome = local
+                    .transcribe_with_fallback_notice(
+                        windows_local_asr_transcribe_timeout(audio_secs),
+                        Arc::new(|_| {}),
+                    )
                     .await
-                    .map_err(|e| e.to_string())?
+                    .map_err(|e| e.to_string())?;
+                debug_assert_eq!(
+                    outcome.used_cpu_fallback,
+                    outcome.primary_recovery.is_some()
+                );
+                foundry_primary_recovery = outcome.primary_recovery;
+                outcome.raw
             }
             #[cfg(target_os = "windows")]
             ActiveAsr::SherpaOnnxLocal(local) => {
@@ -2537,6 +2595,14 @@ impl Coordinator {
                 .map_err(|e| e.to_string())?,
         };
         if let Some(guard) = retry_guard {
+            #[cfg(target_os = "windows")]
+            match retranscribe_completion(is_foundry_retranscribe, foundry_primary_recovery) {
+                RetranscribeCompletion::ReleaseFoundry(primary_recovery) => {
+                    guard.finish_foundry(primary_recovery);
+                }
+                RetranscribeCompletion::Disarm => guard.disarm(),
+            }
+            #[cfg(not(target_os = "windows"))]
             guard.disarm();
         }
         Ok((raw.text, asr_call_label))
@@ -4206,6 +4272,26 @@ mod tests {
             &runtime,
             &coordinator.inner.foundry_local_runtime
         ));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn foundry_retranscription_completion_requires_release_with_recovery_token() {
+        let runtime = crate::asr::local::FoundryLocalRuntime::new();
+        let token = crate::asr::local::foundry_runtime::FoundryPrimaryRecoveryToken::new(
+            "whisper-medium",
+            "whisper-medium-cuda-gpu:4",
+            runtime.begin_route(),
+        );
+
+        assert_eq!(
+            retranscribe_completion(true, Some(token.clone())),
+            RetranscribeCompletion::ReleaseFoundry(Some(token))
+        );
+        assert_eq!(
+            retranscribe_completion(false, None),
+            RetranscribeCompletion::Disarm
+        );
     }
 
     #[cfg(target_os = "windows")]
