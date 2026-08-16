@@ -105,7 +105,6 @@ import {
 import {
     DownloadProgressBlock,
     FoundryPrepareProgressBlock,
-    MetalToolchainGuide,
     ModelDetailPanel,
     ModelSidebar,
     type SidebarModelEntry,
@@ -2034,8 +2033,6 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                     </div>
                 </Card>
             )}
-
-            {supportsQwen3Mlx && <MetalToolchainGuide />}
 
             {/* ─── 模型管理看板：左侧模型选择（竖排，已下载打绿勾），右侧详情
                  （HF 实时抓取的尺寸/文件数）+ 操作。全平台归一化（Qwen3 /

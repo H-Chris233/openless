@@ -244,6 +244,8 @@ The active codebase lives in `openless-all/app/` (Tauri 2 + Rust + React/TS). Th
 
 Rust 1.88 is the minimum supported toolchain for source builds; the latest stable Rust is recommended. CI verifies both Rust 1.88 and stable on macOS, Windows, and Linux.
 
+On Apple Silicon, compiling the optional Qwen3-ASR MLX backend requires Xcode's MetalToolchain component. Install it with `xcodebuild -downloadComponent MetalToolchain` and verify it with `xcrun --find metal`. This is a source-build dependency; packaged OpenLess applications do not require it at runtime.
+
 ```bash
 # First clone only — pull in vendored submodules
 git submodule update --init --recursive

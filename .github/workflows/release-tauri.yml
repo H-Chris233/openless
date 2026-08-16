@@ -76,9 +76,6 @@ jobs:
       - name: Disable macOS-only Qwen3 MLX dependency
         if: ${{ !startsWith(matrix.platform, 'macos') }}
         run: node openless-all/app/scripts/ci-disable-macos-qwen3.mjs
-          # vendor/qwen-asr 仅 macOS 上 build.rs 会编译（build.rs:49 build_qwen_asr_macos）；
-          # Windows/Linux 的 cargo build 不需要子模块，去掉非 macOS job 的递归拉取。
-          submodules: ${{ startsWith(matrix.platform, 'macos') && 'recursive' || 'false' }}
 
       - uses: actions/setup-node@v4
         with:

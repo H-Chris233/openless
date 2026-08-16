@@ -276,7 +276,11 @@ pub(crate) fn hide_vocab_suggestion_card(inner: &Arc<Inner>) {
         let Some(window) = app.get_webview_window("capsule") else {
             return;
         };
-        let _ = app.emit_to("capsule", "vocab:suggested", Vec::<crate::types::PendingCorrection>::new());
+        let _ = app.emit_to(
+            "capsule",
+            "vocab:suggested",
+            Vec::<crate::types::PendingCorrection>::new(),
+        );
         // 穿透必须还回去，否则胶囊会一直挡着屏幕底部那一块。
         #[cfg(not(mobile))]
         if let Err(e) = window.set_ignore_cursor_events(true) {
@@ -309,9 +313,7 @@ pub(crate) fn hide_vocab_suggestion_card(inner: &Arc<Inner>) {
 /// 这条主路径，也就是上面那个 bug 的实际触发路径。三处各写各的，漏一处就等于没修。
 pub(crate) fn disarm_edit_watch(inner: &Arc<Inner>) {
     *inner.edit_watcher.lock() = None;
-    inner
-        .edit_watch_generation
-        .fetch_add(1, Ordering::SeqCst);
+    inner.edit_watch_generation.fetch_add(1, Ordering::SeqCst);
 }
 
 /// 把卡片放到屏幕**右下角**。
@@ -734,6 +736,9 @@ struct Inner {
     local_asr_cache: Arc<crate::asr::local::LocalAsrCache>,
     #[cfg(target_os = "macos")]
     local_whisper_cache: Arc<crate::asr::local::LocalWhisperCache>,
+    /// 串行化 Qwen / Whisper 的大模型加载与主动释放。供应商切换会先更新 Vault，
+    /// 再等待正在进行的旧加载完成并释放，避免旧预加载在切换后把非目标模型写回 cache。
+    local_asr_lifecycle: Arc<Mutex<()>>,
     #[cfg(target_os = "windows")]
     foundry_local_runtime: Arc<FoundryLocalRuntime>,
     /// Windows sherpa-onnx 本地 ASR runtime。与 Foundry 同处一个
@@ -1077,6 +1082,7 @@ impl Coordinator {
                     local_asr_cache: Arc::new(crate::asr::local::LocalAsrCache::new()),
                     #[cfg(target_os = "macos")]
                     local_whisper_cache: Arc::new(crate::asr::local::LocalWhisperCache::new()),
+                    local_asr_lifecycle: Arc::new(Mutex::new(())),
                     shutdown: AtomicBool::new(false),
                     #[cfg(not(mobile))]
                     remote_audio_sink: Mutex::new(None),
@@ -1158,7 +1164,7 @@ impl Coordinator {
                 recorder: Mutex::new(None),
                 audio_archive_active: AtomicBool::new(false),
                 edit_watcher: Mutex::new(None),
-                    edit_watch_generation: std::sync::atomic::AtomicU64::new(0),
+                edit_watch_generation: std::sync::atomic::AtomicU64::new(0),
                 pending_corrections: Mutex::new(Vec::new()),
                 vocab_card_visible: AtomicBool::new(false),
                 recording_mute: Mutex::new(SharedRecordingMuteState::new()),
@@ -1204,6 +1210,7 @@ impl Coordinator {
                 local_asr_cache: Arc::new(crate::asr::local::LocalAsrCache::new()),
                 #[cfg(target_os = "macos")]
                 local_whisper_cache: Arc::new(crate::asr::local::LocalWhisperCache::new()),
+                local_asr_lifecycle: Arc::new(Mutex::new(())),
                 foundry_local_runtime,
                 sherpa_onnx_runtime,
                 shutdown: AtomicBool::new(false),
@@ -1226,7 +1233,7 @@ impl Coordinator {
         }
     }
 
-    /// 后台预加载当前本地 Qwen3-ASR 后端；当用户在 UI 切到对应 provider 时调一次。
+    /// 后台预加载当前本地 Qwen3-ASR / Whisper 后端；切到对应 provider 时调一次。
     /// 加载是阻塞且数秒，所以放 spawn_blocking 里，不影响 UI 响应。
     /// 模型未下载或当前平台不支持该后端时静默跳过。
     pub fn preload_local_asr_in_background(self: &Arc<Self>) {
@@ -1234,61 +1241,68 @@ impl Coordinator {
         {
             let inner = Arc::clone(&self.inner);
             tauri::async_runtime::spawn(async move {
-                let prefs = inner.prefs.get();
-                let model_id =
-                    match crate::asr::local::ModelId::from_str(&prefs.local_asr_active_model) {
-                        Some(m) => m,
-                        None => return,
-                    };
-                if !model_id.is_qwen()
-                    || !crate::asr::local::is_local_qwen3(&prefs.active_asr_provider)
-                {
-                    return;
-                }
-                let Some(backend) =
-                    crate::asr::local::qwen_backend_for_provider(&prefs.active_asr_provider)
-                else {
-                    return;
-                };
-                if !crate::asr::local::models::is_downloaded(model_id) {
-                    log::info!(
-                        "[coord] local ASR preload skipped: model {} not downloaded",
-                        model_id.as_str()
-                    );
-                    return;
-                }
-                let dir = match crate::asr::local::models::model_dir(model_id) {
-                    Ok(d) => d,
-                    Err(_) => return,
-                };
-                let cache = Arc::clone(&inner.local_asr_cache);
-                let mid = model_id.as_str().to_string();
-                let _ = tauri::async_runtime::spawn_blocking(move || {
-                    if let Err(e) = cache.get_or_load(backend, &mid, &dir) {
-                        log::warn!("[coord] local ASR preload failed: {e:#}");
+                // Vault 是运行时 ASR 路由的单一真相；设置页会在随后同步 preferences，
+                // 这里不能读取可能仍是旧值的 prefs 快照。
+                let provider = CredentialsVault::get_active_asr();
+                if crate::asr::local::is_local_qwen3(&provider) {
+                    if let Err(error) = preload_local_qwen3(&inner, &provider).await {
+                        log::warn!("[coord] local Qwen3 preload failed: {error:#}");
                     }
-                })
-                .await;
-                // 预热加载完后推一次状态，前端零轮询更新「已加载」。
-                emit_local_asr_engine_status(&inner);
+                    return;
+                }
+
+                #[cfg(target_os = "macos")]
+                if crate::asr::local::is_local_whisper(&provider) {
+                    if let Err(error) = preload_local_whisper(&inner).await {
+                        log::warn!("[coord] local Whisper preload failed: {error:#}");
+                    }
+                    return;
+                }
             });
         }
-        #[cfg(not(target_os = "macos"))]
-        {
-            // no-op
+    }
+
+    /// 供应商切换时只释放 Qwen，状态由切换流程在所有 runtime 处理完成后统一上报。
+    pub(crate) fn release_local_qwen_engine(&self) {
+        self.release_local_asr_engines(true, false);
+    }
+
+    /// 供应商切换时只释放 Whisper；非 macOS 平台没有该 cache，保持 no-op。
+    pub(crate) fn release_local_whisper_engine(&self) {
+        self.release_local_asr_engines(false, true);
+    }
+
+    /// 在同一生命周期门闩内释放所有非目标 Qwen / Whisper cache，避免两个粒度化
+    /// release 之间有旧预加载任务插入模型。Foundry / Sherpa 由各自 runtime 管理。
+    pub(crate) fn release_inactive_local_asr_engines(
+        &self,
+        release_qwen: bool,
+        release_whisper: bool,
+    ) {
+        self.release_local_asr_engines(release_qwen, release_whisper);
+    }
+
+    fn release_local_asr_engines(&self, release_qwen: bool, release_whisper: bool) {
+        let _lifecycle_guard = self.inner.local_asr_lifecycle.lock();
+        if release_qwen {
+            self.inner.local_asr_cache.release_now();
         }
+        #[cfg(target_os = "macos")]
+        if release_whisper {
+            self.inner.local_whisper_cache.release_now();
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = release_whisper;
     }
 
     /// 释放当前缓存的本地 ASR 引擎（用户主动点 / 或 删除模型时调）。
     pub fn release_local_asr_engine(&self) {
-        self.inner.local_asr_cache.release_now();
-        #[cfg(target_os = "macos")]
-        self.inner.local_whisper_cache.release_now();
+        self.release_local_asr_engines(true, true);
         emit_local_asr_engine_status(&self.inner);
     }
 
     pub fn local_asr_loaded_model(&self) -> Option<String> {
-        self.inner.local_asr_cache.loaded_model_id()
+        active_local_asr_loaded_model(&self.inner)
     }
 
     /// 主动把当前本地 ASR 引擎状态推给前端（keepLoadedSecs 变更等命令侧调用）。
@@ -2364,10 +2378,8 @@ impl Coordinator {
                 .get_or_default_active(&prefs.active_style_pack_id)
                 .map_err(|e| e.to_string())?,
         };
-        let style_system_prompt = crate::types::style_pack_prompt(
-            &pack,
-            crate::types::StylePromptKind::DictationAsr,
-        );
+        let style_system_prompt =
+            crate::types::style_pack_prompt(&pack, crate::types::StylePromptKind::DictationAsr);
         let working_languages = prefs.working_languages;
         let chinese_script_preference = prefs.chinese_script_preference;
         let output_language_preference = prefs.output_language_preference;
@@ -2519,12 +2531,10 @@ impl Coordinator {
                     .map_err(|_| "重新转录超时".to_string())?
                     .map_err(|e| e.to_string())?
             }
-            ActiveAsr::ElevenLabs(e) => {
-                tokio::time::timeout(elevenlabs_timeout, e.transcribe())
-                    .await
-                    .map_err(|_| "重新转录超时".to_string())?
-                    .map_err(|e| e.to_string())?
-            }
+            ActiveAsr::ElevenLabs(e) => tokio::time::timeout(elevenlabs_timeout, e.transcribe())
+                .await
+                .map_err(|_| "重新转录超时".to_string())?
+                .map_err(|e| e.to_string())?,
             #[cfg(target_os = "windows")]
             ActiveAsr::FoundryLocalWhisper(local) => {
                 let audio_secs = (local.buffer_duration_ms() as f64) / 1000.0;
@@ -3399,7 +3409,10 @@ mod tests {
         let ordered = super::prioritize_vocab_for_asr(entries);
 
         let pos = |p: &str| ordered.iter().position(|x| x == p).expect("phrase kept");
-        assert!(pos("hermes") < pos("scrap"), "命中多的必须排在刚收进来的碎片前面");
+        assert!(
+            pos("hermes") < pos("scrap"),
+            "命中多的必须排在刚收进来的碎片前面"
+        );
         assert!(pos("win-shukong") < pos("scrap"));
         assert!(pos("hermes") < pos("win-shukong"), "命中多的在前");
     }
@@ -3443,7 +3456,10 @@ mod tests {
     fn learned_vocab_does_not_consume_fresh_manual_seats() {
         let mut entries = Vec::new();
         for i in 0..super::FRESH_VOCAB_SEATS {
-            entries.push(learned_vocab_entry(&format!("learned{i}"), 1_000 - i as u64));
+            entries.push(learned_vocab_entry(
+                &format!("learned{i}"),
+                1_000 - i as u64,
+            ));
             entries.push(vocab_entry(&format!("manual{i}"), 0));
         }
 

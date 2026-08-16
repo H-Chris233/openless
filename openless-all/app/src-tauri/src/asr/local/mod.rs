@@ -51,6 +51,8 @@ pub use local_provider::LocalQwenAsr;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub use mlx_qwen_engine::MlxQwenAsrEngine;
 #[cfg(target_os = "macos")]
+pub(crate) use whisper_provider::WhisperEngine;
+#[cfg(target_os = "macos")]
 pub use whisper_provider::MODEL_ID as WHISPER_MODEL_ID;
 #[cfg(target_os = "macos")]
 pub use whisper_provider::{
@@ -137,6 +139,53 @@ impl LocalQwenEngine {
             Self::Mlx(engine) => engine.transcribe_pcm(samples),
             Self::C(engine) => engine.transcribe_audio(samples),
         }
+    }
+
+    /// Dictation 转写保持各后端原有语义：MLX 整段 batch；C 追加 0.5 秒静音后
+    /// 走流式解码，并将稳定 token 交给调用方实时显示。
+    pub fn transcribe_dictation_with_handler<F>(
+        &self,
+        mut samples: Vec<f32>,
+        handler: F,
+    ) -> anyhow::Result<String>
+    where
+        F: FnMut(&str) + Send + 'static,
+    {
+        match self {
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            Self::Mlx(engine) => engine.transcribe_pcm(&samples),
+            Self::C(engine) => {
+                append_c_stream_tail_padding(&mut samples);
+                engine.transcribe_stream_with_handler(&samples, handler)
+            }
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+const C_STREAM_TAIL_PADDING_SAMPLES: usize = 8_000;
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn append_c_stream_tail_padding(samples: &mut Vec<f32>) {
+    samples.resize(samples.len() + C_STREAM_TAIL_PADDING_SAMPLES, 0.0);
+}
+
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+mod qwen_dictation_tests {
+    use super::*;
+
+    #[test]
+    fn c_stream_padding_adds_half_a_second_without_changing_existing_audio() {
+        let mut samples = vec![0.25, -0.5, 1.0];
+        let original = samples.clone();
+
+        append_c_stream_tail_padding(&mut samples);
+
+        assert_eq!(&samples[..original.len()], original.as_slice());
+        assert_eq!(samples.len(), original.len() + 8_000);
+        assert!(samples[original.len()..]
+            .iter()
+            .all(|sample| *sample == 0.0));
     }
 }
 

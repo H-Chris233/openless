@@ -239,8 +239,13 @@ pub fn local_asr_delete_model(coord: CoordinatorState<'_>, model_id: String) -> 
     let id = ModelId::from_str(&model_id).ok_or_else(|| format!("unknown model id: {model_id}"))?;
     // 如果内存里加载的就是要删的这个模型，先释放：否则 mmap 残留指向已 unlink 的文件，
     // 且 RAM 直到下次切模型 / 用户手动按"释放"才回收。
-    if id.is_whisper() || coord.local_asr_loaded_model().as_deref() == Some(id.as_str()) {
-        coord.release_local_asr_engine();
+    if coord.local_asr_loaded_model().as_deref() == Some(id.as_str()) {
+        if id.is_whisper() {
+            coord.release_local_whisper_engine();
+        } else {
+            coord.release_local_qwen_engine();
+        }
+        coord.emit_local_asr_engine_status();
     }
     crate::asr::local::models::delete_model(id).map_err(|e| e.to_string())
 }
@@ -294,9 +299,10 @@ pub struct LocalAsrEngineStatus {
 #[tauri::command]
 pub fn local_asr_engine_status(coord: CoordinatorState<'_>) -> LocalAsrEngineStatus {
     let prefs = coord.prefs().get();
+    let model_id = coord.local_asr_loaded_model();
     LocalAsrEngineStatus {
-        loaded: coord.local_asr_loaded_model().is_some(),
-        model_id: coord.local_asr_loaded_model(),
+        loaded: model_id.is_some(),
+        model_id,
         keep_loaded_secs: prefs.local_asr_keep_loaded_secs,
     }
 }

@@ -44,6 +44,27 @@ if (intelMacIds.has('local-qwen3-mlx') || !intelMacIds.has('local-qwen3-c')) {
   throw new Error('Intel macOS must expose C/CPU Qwen3 but not MLX');
 }
 
+const legacyQwenEditIds = new Set(
+  presetsFor('asr', 'mac', true, 'local-qwen3').map(preset => preset.id),
+);
+if (!legacyQwenEditIds.has('local-qwen3')) {
+  throw new Error('editing a legacy local-qwen3 channel must keep its current option visible');
+}
+
+const legacyBailianEditIds = new Set(
+  presetsFor('asr', 'linux', true, 'bailian-qwen3-realtime').map(preset => preset.id),
+);
+if (!legacyBailianEditIds.has('bailian-qwen3-realtime')) {
+  throw new Error('editing a legacy Bailian channel must keep its current option visible');
+}
+
+const unknownEditIds = new Set(
+  presetsFor('asr', 'mac', true, 'unknown-provider').map(preset => preset.id),
+);
+if (unknownEditIds.has('unknown-provider')) {
+  throw new Error('unknown provider ids must not be injected into preset options');
+}
+
 if (!shouldRecycleDraft('draft-1', false)) {
   throw new Error('an untouched draft must be recycled');
 }
