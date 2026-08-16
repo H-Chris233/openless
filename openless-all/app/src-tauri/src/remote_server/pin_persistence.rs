@@ -563,7 +563,17 @@ mod tests {
         let path = root.pin_path();
         let target = root.0.join("outside-target.txt");
         std::fs::write(&target, "123456").unwrap();
-        symlink_file(&target, &path).unwrap();
+        match symlink_file(&target, &path) {
+            Ok(()) => {}
+            // Creating Windows symlinks requires SeCreateSymbolicLinkPrivilege unless
+            // Developer Mode is enabled. Keep the security assertion, but do not turn
+            // a missing test-environment privilege into a product-test failure.
+            Err(error) if error.raw_os_error() == Some(1314) => {
+                eprintln!("skipping Windows symlink test: symbolic-link privilege is unavailable");
+                return;
+            }
+            Err(error) => panic!("failed to create test symlink: {error}"),
+        }
 
         assert!(load_or_create_test_pin(&path).is_err());
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "123456");

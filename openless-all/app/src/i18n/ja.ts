@@ -432,6 +432,12 @@ export const ja: typeof zhCN = {
     accept: '覚える',
     reject: '不要',
   },
+  insertFallbackCard: {
+    copy: 'コピー',
+    copied: 'コピーしました',
+    copyFailed: 'コピーに失敗',
+    dismiss: '閉じる',
+  },
   vocab: {
     kicker: 'VOCABULARY',
     title: '語彙',
@@ -859,6 +865,10 @@ export const ja: typeof zhCN = {
       windowsInsertionModeTsf: 'TSF IME（既定）',
       windowsInsertionModeSendInput: 'SendInput キー入力シミュレーション',
       windowsInsertionModePaste: 'クリップボード貼り付け（Ctrl+V など）',
+      macosNewlineModeLabel: '改行の送り方',
+      macosNewlineModeDesc: '逐次入力時に改行をどのキーで送るか。チャットでは通常の Return は「送信」になります。改行で複数メッセージに分けるスタイルパックを使う場合以外は Shift+Return のままに。',
+      macosNewlineModeShiftReturn: 'Shift+Return（チャットで改行）',
+      macosNewlineModeReturn: 'Return（複数メッセージに分割）',
       windowsSendInputNewlineModeLabel: 'SendInput 改行シミュレーション',
       windowsSendInputNewlineModeDesc: 'SendInput で改行をどのキーとして送るか。チャット入力は Shift+Enter、メモ帳 / VS Code などは Enter。',
       windowsSendInputNewlineModeEnter: 'Enter（多くのエディタ）',
@@ -1061,6 +1071,8 @@ export const ja: typeof zhCN = {
       asrMissingTextField: 'ASR の応答に text フィールドがありません。',
       apiKeyMissing: 'API Key が空です。',
       endpointMissing: 'Endpoint が空です。',
+      volcengineAppIdMissing: 'APP ID が空です。',
+      volcengineAccessTokenMissing: 'Access Token が空です。',
       requestTimeout: 'リクエストがタイムアウトしました。後で再試行してください。',
     },
     shortcuts: {
