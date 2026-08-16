@@ -194,12 +194,10 @@ function Invoke-HotkeyAttempt($ExpectedPattern, $UnexpectedPattern, $Label) {
   Remove-Item -LiteralPath $logPath -Force -ErrorAction SilentlyContinue
 
   $env:OPENLESS_SHOW_MAIN_ON_START = "1"
-  $env:OPENLESS_ACCEPT_SYNTHETIC_HOTKEY_EVENTS = "1"
   try {
     Start-Process -FilePath $ExePath -WorkingDirectory (Split-Path $ExePath -Parent) | Out-Null
   } finally {
     Remove-Item Env:OPENLESS_SHOW_MAIN_ON_START -ErrorAction SilentlyContinue
-    Remove-Item Env:OPENLESS_ACCEPT_SYNTHETIC_HOTKEY_EVENTS -ErrorAction SilentlyContinue
   }
 
   $notepad = $null

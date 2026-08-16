@@ -340,6 +340,253 @@ fn position_vocab_card<R: tauri::Runtime>(
     window.set_position(tauri::LogicalPosition::new(x, y))
 }
 
+/// 兜底卡片的窗口宽度（逻辑点）。比词条卡片宽一点 —— 这张要放一整段话。
+const FALLBACK_CARD_WIDTH: f64 = 360.0;
+/// Webview 首次渲染前的安全高度。真实高度由卡片 DOM 测量后通过 IPC 回报。
+const FALLBACK_CARD_INITIAL_HEIGHT: f64 = 260.0;
+/// 尺寸 IPC 的原生安全边界，不表达任何 CSS 布局规则。
+const FALLBACK_CARD_MIN_HEIGHT: f64 = 96.0;
+const FALLBACK_CARD_MAX_HEIGHT: f64 = 320.0;
+
+/// 把兜底卡片摆到屏幕**水平居中、偏下**的位置。
+///
+/// 与词条卡片的右下角不同：那张是「瞄一眼就完事」的建议，躲在角落里不打扰人正好；
+/// 这张是用户切走窗口后要**读完再决定复不复制**的内容，藏在角落容易整个错过。
+/// 底部居中是录音胶囊本来就在的那条视线，用户的眼睛已经习惯往那儿看。
+///
+/// 垂直方向沿用胶囊那套「距底 80pt 给 Dock 留位」，卡片比胶囊高，往上长。
+fn position_fallback_card<R: tauri::Runtime>(
+    window: &tauri::WebviewWindow<R>,
+    width: f64,
+    height: f64,
+) -> tauri::Result<()> {
+    let Some(monitor) = window.current_monitor()? else {
+        return Ok(());
+    };
+    let scale = monitor.scale_factor();
+    let size = monitor.size();
+    let pos = monitor.position();
+    let (mon_w, mon_h) = (size.width as f64 / scale, size.height as f64 / scale);
+    let (mon_x, mon_y) = (pos.x as f64 / scale, pos.y as f64 / scale);
+    let x = mon_x + (mon_w - width) / 2.0;
+    let y = mon_y + mon_h - height - 80.0;
+    window.set_position(tauri::LogicalPosition::new(x, y))
+}
+
+fn validated_fallback_card_height(
+    active_presentation_id: Option<u64>,
+    presentation_id: u64,
+    height: f64,
+) -> Result<Option<f64>, String> {
+    if !height.is_finite() {
+        return Err("fallback card height must be finite".into());
+    }
+    if active_presentation_id != Some(presentation_id) {
+        return Ok(None);
+    }
+    Ok(Some(
+        height
+            .ceil()
+            .clamp(FALLBACK_CARD_MIN_HEIGHT, FALLBACK_CARD_MAX_HEIGHT),
+    ))
+}
+
+/// 文本没能落到目标 app 时，把它连同一个复制按钮弹出来。
+///
+/// 为什么需要这张卡片：这些场景下唯一的兜底是「把文本写进剪贴板」，而它既依赖一个
+/// 默认可关的开关，用户也**根本不知道文本在剪贴板里** —— 没有任何提示。屏幕上要么
+/// 什么都没有，要么只有半截。
+///
+/// 窗口机制整套照搬 [`show_vocab_suggestion_card`]（复用胶囊窗口、关穿透、缩尺寸、
+/// 右下角定位），理由见那里。多的一件事是 `insert_fallback_card_visible`：这张卡片
+/// 在会话收尾那一刻弹出，而收尾自己安排了一次 `schedule_capsule_idle` → `hide()`，
+/// 必须让那次 hide 认得出卡片并让路。
+pub(crate) fn show_insert_fallback_card(inner: &Arc<Inner>, text: String, reason: &'static str) {
+    if text.trim().is_empty() {
+        return;
+    }
+    let Some(app) = inner.app.lock().clone() else {
+        return;
+    };
+    let app_for_main = app.clone();
+    let inner_for_main = Arc::clone(inner);
+    let _ = app.run_on_main_thread(move || {
+        let app = app_for_main;
+        let inner = inner_for_main;
+        // 与词条卡片同一道闸、同一理由：听写不在 Idle 就绝不碰这个窗口，否则等于把
+        // 正在进行的那次听写的胶囊弄没了。收尾路径是先把 phase 置回 Idle 再走到这里的。
+        if inner.state.lock().phase != crate::coordinator_state::SessionPhase::Idle {
+            log::debug!("[fallback-card] suppressed: a dictation session is in flight");
+            inner.insert_fallback_text.lock().take();
+            return;
+        }
+        let Some(window) = app.get_webview_window("capsule") else {
+            return;
+        };
+        let presentation_id = inner
+            .insert_fallback_presentation_id
+            .fetch_add(1, Ordering::SeqCst)
+            .wrapping_add(1);
+        let payload = crate::types::InsertFallbackCardPayload {
+            text,
+            reason: reason.to_string(),
+            presentation_id,
+        };
+        inner.insert_fallback_deferred_capsule.lock().take();
+        inner
+            .insert_fallback_card_visible
+            .store(true, Ordering::SeqCst);
+        #[cfg(not(mobile))]
+        if let Err(e) = window.set_ignore_cursor_events(false) {
+            log::warn!("[fallback-card] set_ignore_cursor_events(false) failed: {e}");
+        }
+        // 穿透状态有缓存（`capsule_cursor_passthrough`，emit_capsule 靠它跳过重复调用）。
+        // 直接碰了窗口就必须同步它，否则缓存与窗口真实状态分家，下次 emit_capsule
+        // 会以为「没变化」而跳过该调的那一次 —— 表现是胶囊之后一直挡着屏幕不放。
+        #[cfg(not(mobile))]
+        inner
+            .capsule_cursor_passthrough
+            .store(false, Ordering::SeqCst);
+        if let Err(e) = window.set_size(tauri::LogicalSize::new(
+            FALLBACK_CARD_WIDTH,
+            FALLBACK_CARD_INITIAL_HEIGHT,
+        )) {
+            log::warn!("[fallback-card] resize failed: {e}");
+        }
+        if let Err(e) = position_fallback_card(
+            &window,
+            FALLBACK_CARD_WIDTH,
+            FALLBACK_CARD_INITIAL_HEIGHT,
+        ) {
+            log::warn!("[fallback-card] position failed: {e}");
+        }
+        // 位置同理：`maybe_position_capsule_bottom_center` 的去重缓存只记「显示器 +
+        // 翻译态」，卡片这一挪它一无所知。不清掉的话下一次录音会判定「没变化」→
+        // 跳过重新定位 → 胶囊留在卡片挪过去的右下角。
+        *inner.capsule_layout.lock() = None;
+        let _ = app.emit_to("capsule", "insert:fallback", &payload);
+        show_capsule_window_for_recording(&app, &window, true);
+        #[cfg(target_os = "macos")]
+        crate::restore_main_window_key_if_active(&app);
+        log::info!(
+            "[fallback-card] shown: reason={reason} chars={}",
+            payload.text.chars().count()
+        );
+    });
+}
+
+fn report_insert_fallback_card_height(
+    inner: &Arc<Inner>,
+    presentation_id: u64,
+    height: f64,
+) -> Result<(), String> {
+    let active_presentation_id = inner
+        .insert_fallback_card_visible
+        .load(Ordering::SeqCst)
+        .then(|| {
+            inner
+                .insert_fallback_presentation_id
+                .load(Ordering::SeqCst)
+        });
+    let Some(height) =
+        validated_fallback_card_height(active_presentation_id, presentation_id, height)?
+    else {
+        return Ok(());
+    };
+    let Some(app) = inner.app.lock().clone() else {
+        return Ok(());
+    };
+    let app_for_main = app.clone();
+    let inner_for_main = Arc::clone(inner);
+    app.run_on_main_thread(move || {
+        if !inner_for_main
+            .insert_fallback_card_visible
+            .load(Ordering::SeqCst)
+            || inner_for_main
+                .insert_fallback_presentation_id
+                .load(Ordering::SeqCst)
+                != presentation_id
+        {
+            return;
+        }
+        let Some(window) = app_for_main.get_webview_window("capsule") else {
+            return;
+        };
+        if let Err(e) = window.set_size(tauri::LogicalSize::new(FALLBACK_CARD_WIDTH, height)) {
+            log::warn!("[fallback-card] measured resize failed: {e}");
+        }
+        if let Err(e) = position_fallback_card(&window, FALLBACK_CARD_WIDTH, height) {
+            log::warn!("[fallback-card] measured position failed: {e}");
+        }
+    })
+    .map_err(|e| e.to_string())
+}
+
+/// 收起兜底卡片：把窗口完整还给胶囊。
+///
+/// 与 [`hide_vocab_suggestion_card`] 同款：**没有卡片时必须原样返回**，否则每次听写
+/// 开始都会去 hide 那个窗口，和 `emit_capsule` 的 show 抢。
+pub(crate) fn hide_insert_fallback_card(inner: &Arc<Inner>) {
+    inner.insert_fallback_text.lock().take();
+    let _event_guard = inner.capsule_event_lock.lock();
+    if !inner
+        .insert_fallback_card_visible
+        .swap(false, Ordering::SeqCst)
+    {
+        return;
+    }
+    let deferred_capsule = inner.insert_fallback_deferred_capsule.lock().take();
+    let Some(app) = inner.app.lock().clone() else {
+        return;
+    };
+    let app_for_main = app.clone();
+    let inner_for_main = Arc::clone(inner);
+    let _ = app.run_on_main_thread(move || {
+        let app = app_for_main;
+        let inner = inner_for_main;
+        let Some(window) = app.get_webview_window("capsule") else {
+            return;
+        };
+        let _ = app.emit_to(
+            "capsule",
+            "insert:fallback",
+            None::<crate::types::InsertFallbackCardPayload>,
+        );
+        // 先隐藏再改几何：复原要同时动尺寸和位置，窗口还亮着时改就有概率被合成出
+        // 一帧「卡片被拉宽、还横着飞过半个屏幕」。
+        let _ = window.hide();
+        if let Some(payload) = deferred_capsule {
+            // 卡片期间 QA / Selection Polish 仍会推进胶囊状态，只是不能碰共享窗口。
+            // 卡片释放后把最新状态一次性应用回来；若最新是 Idle，该 helper 会正常隐藏。
+            apply_capsule_window_payload(&inner, &app, &window, &payload, false, true);
+            return;
+        }
+        // 卡片期间没有任何胶囊事件：恢复默认隐藏态。
+        // 穿透必须还回去，否则胶囊会一直挡着屏幕那一块。
+        #[cfg(not(mobile))]
+        if let Err(e) = window.set_ignore_cursor_events(true) {
+            log::warn!("[fallback-card] restoring cursor passthrough failed: {e}");
+        }
+        #[cfg(not(mobile))]
+        inner
+            .capsule_cursor_passthrough
+            .store(true, Ordering::SeqCst);
+        // 尺寸也必须还回去 —— 卡片把窗口缩到过自己的大小，不复原的话下一次胶囊
+        // 就挤在一个卡片大小的窗口里，等于看不见。
+        let bounds = crate::capsule_window_bounds(false);
+        if let Err(e) = window.set_size(tauri::LogicalSize::new(bounds.width, bounds.height)) {
+            log::warn!("[fallback-card] restoring capsule size failed: {e}");
+        }
+        // 位置一样要还 —— 卡片把窗口挪到了右下角，胶囊的位置是底部居中。只还尺寸
+        // 不还位置，下一次录音胶囊就出现在右下角（词条卡片在真机上踩过这个 bug）。
+        // 清缓存和这次重定位两件都要做，理由见 `hide_vocab_suggestion_card`。
+        *inner.capsule_layout.lock() = None;
+        if let Err(e) = crate::position_capsule_bottom_center(&window, false) {
+            log::warn!("[fallback-card] restoring capsule position failed: {e}");
+        }
+    });
+}
+
 #[derive(Clone)]
 enum ActiveAsr {
     Volcengine(Arc<VolcengineStreamingASR>),
@@ -777,6 +1024,27 @@ struct Inner {
     /// 门控 `hide_vocab_suggestion_card`：没有卡片时它必须什么都不做，否则每次听写
     /// 开始都会去 hide 胶囊窗口，和 `emit_capsule` 的 show 抢同一个窗口。
     vocab_card_visible: AtomicBool,
+    /// 「流式上屏被焦点守卫拦下」的信号，值是那次的**完整**文本。
+    ///
+    /// 只有那条路径会往里放东西——它是唯一一处「屏幕上的内容 ≠ 完整结果」的场景：
+    /// `polished` 按约定只保留真打出去的半截，而切走窗口的用户要的是整段。收尾处
+    /// (`maybe_show_insert_fallback_card`) 取走它，据此把 `InsertStatus` 从 `Inserted`
+    /// 纠正成 `CopiedFallback`，并决定卡片弹什么内容、标题怎么写。
+    ///
+    /// **取走即消费**，不是「卡片当前内容」的镜像——卡片内容随事件发给前端，后端不留。
+    /// 会话被取消时这里可能有残留，下一轮 `begin_session_as` 的 hide 会清掉。
+    insert_fallback_text: Mutex<Option<String>>,
+    /// 兜底卡片是不是正占着胶囊窗口。与 `vocab_card_visible` 同一职责、同一理由。
+    ///
+    /// 还多担一件事：这张卡片是在**会话收尾那一刻**弹的，而收尾会安排一次
+    /// `schedule_capsule_idle` → `window.hide()`。可见时那次 hide 必须让路，
+    /// 否则卡片刚出现就被自己这轮会话的收尾干掉。
+    insert_fallback_card_visible: AtomicBool,
+    /// 每次展示递增；前端尺寸回报必须携带当前代次，旧卡片的迟到 IPC 才不能缩放新卡片。
+    insert_fallback_presentation_id: AtomicU64,
+    /// 卡片占用共享窗口期间收到的最新胶囊状态。事件仍下发给 webview，但原生窗口变化
+    /// 延后；卡片关闭时用这份 payload 恢复仍在进行的 QA / Selection Polish。
+    insert_fallback_deferred_capsule: Mutex<Option<CapsulePayload>>,
     recording_mute: Mutex<SharedRecordingMuteState>,
     hotkey: Mutex<Option<HotkeyMonitor>>,
     hotkey_status: Mutex<HotkeyStatus>,
@@ -1039,6 +1307,10 @@ impl Coordinator {
                     edit_watch_generation: std::sync::atomic::AtomicU64::new(0),
                     pending_corrections: Mutex::new(Vec::new()),
                     vocab_card_visible: AtomicBool::new(false),
+                    insert_fallback_text: Mutex::new(None),
+                    insert_fallback_card_visible: AtomicBool::new(false),
+                    insert_fallback_presentation_id: AtomicU64::new(0),
+                    insert_fallback_deferred_capsule: Mutex::new(None),
                     recording_mute: Mutex::new(SharedRecordingMuteState::new()),
                     hotkey: Mutex::new(None),
                     hotkey_status: Mutex::new(HotkeyStatus::default()),
@@ -1167,6 +1439,10 @@ impl Coordinator {
                 edit_watch_generation: std::sync::atomic::AtomicU64::new(0),
                 pending_corrections: Mutex::new(Vec::new()),
                 vocab_card_visible: AtomicBool::new(false),
+                insert_fallback_text: Mutex::new(None),
+                insert_fallback_card_visible: AtomicBool::new(false),
+                insert_fallback_presentation_id: AtomicU64::new(0),
+                insert_fallback_deferred_capsule: Mutex::new(None),
                 recording_mute: Mutex::new(SharedRecordingMuteState::new()),
                 hotkey: Mutex::new(None),
                 hotkey_status: Mutex::new(HotkeyStatus::default()),
@@ -1964,6 +2240,19 @@ impl Coordinator {
     /// 卡片 10 秒到期，或新一轮听写开始。
     pub fn dismiss_vocab_suggestions(&self) {
         hide_vocab_suggestion_card(&self.inner);
+    }
+
+    /// 落字失败兜底卡片自己关掉了（用户点关闭 / TTL 到时）。
+    pub fn dismiss_insert_fallback_card(&self) {
+        hide_insert_fallback_card(&self.inner);
+    }
+
+    pub fn report_insert_fallback_card_height(
+        &self,
+        presentation_id: u64,
+        height: f64,
+    ) -> Result<(), String> {
+        report_insert_fallback_card_height(&self.inner, presentation_id, height)
     }
 
     /// 用户关掉了「光标上下文」开关 —— 立刻停掉一切还在跑的观察，别等它自己超时。
@@ -3386,6 +3675,40 @@ fn resolve_ark_endpoint_with_policy(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fallback_card_height_report_rejects_non_finite_values() {
+        assert!(super::validated_fallback_card_height(Some(7), 7, f64::NAN).is_err());
+        assert!(super::validated_fallback_card_height(Some(7), 7, f64::INFINITY).is_err());
+    }
+
+    #[test]
+    fn fallback_card_height_report_ignores_stale_presentations() {
+        assert_eq!(
+            super::validated_fallback_card_height(Some(8), 7, 180.0).unwrap(),
+            None
+        );
+        assert_eq!(
+            super::validated_fallback_card_height(None, 7, 180.0).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn fallback_card_height_report_clamps_to_native_safety_bounds() {
+        assert_eq!(
+            super::validated_fallback_card_height(Some(7), 7, 40.0).unwrap(),
+            Some(96.0)
+        );
+        assert_eq!(
+            super::validated_fallback_card_height(Some(7), 7, 500.0).unwrap(),
+            Some(320.0)
+        );
+        assert_eq!(
+            super::validated_fallback_card_height(Some(7), 7, 181.2).unwrap(),
+            Some(182.0)
+        );
+    }
+
     /// 造一条词典条目。传给 `prioritize_vocab_for_asr` 时必须是词典的原始顺序
     /// （最近添加在前）。
     fn vocab_entry(phrase: &str, hits: u64) -> crate::types::DictionaryEntry {
@@ -4513,7 +4836,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stop_dictation_from_listening_without_asr_returns_idle() {
+    async fn stop_dictation_from_listening_without_asr_returns_idle_and_hides_capsule() {
         let coordinator = Coordinator::new();
         {
             let mut state = coordinator.inner.state.lock();
@@ -4524,6 +4847,20 @@ mod tests {
         coordinator.stop_dictation().await.unwrap();
 
         assert_eq!(coordinator.inner.state.lock().phase, SessionPhase::Idle);
+        tokio::time::sleep(std::time::Duration::from_millis(
+            CAPSULE_AUTO_HIDE_DELAY_MS + 100,
+        ))
+        .await;
+        assert_eq!(
+            coordinator
+                .inner
+                .last_capsule_state
+                .lock()
+                .as_ref()
+                .copied(),
+            Some(CapsuleState::Idle),
+            "无 ASR 句柄的停止路径也必须调度胶囊隐藏"
+        );
     }
 
     #[tokio::test]
@@ -4659,6 +4996,20 @@ mod tests {
     #[tokio::test]
     async fn toggle_press_within_cooldown_is_dropped() {
         let coordinator = Coordinator::new();
+        // Coordinator::new() 读取真实持久化偏好；测试必须固定自己的模式，不能让本机
+        // 当前设置（例如 Hold/Auto）改变该用例验证的 Toggle 冷却语义。
+        coordinator
+            .inner
+            .prefs
+            .set(crate::types::UserPreferences {
+                hotkey: crate::types::HotkeyBinding {
+                    trigger: HotkeyTrigger::RightControl,
+                    mode: HotkeyMode::Toggle,
+                    keys: None,
+                },
+                ..Default::default()
+            })
+            .unwrap();
         // Idle + 冷却未过期：模拟「识别中按下 → 会话收尾 → bridge 取出该 Pressed」的时刻。
         *coordinator.inner.session_cooldown_until.lock() = Some(
             std::time::Instant::now() + std::time::Duration::from_millis(POST_SESSION_COOLDOWN_MS),

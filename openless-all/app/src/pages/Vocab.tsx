@@ -557,6 +557,11 @@ function VocabChip({ entry, onRemove, onToggle }: VocabChipProps) {
         // 80px 高，chip borderRadius: 999 把高度变大渲染成"超大椭圆"。alignSelf:flex-start
         // 阻止拉伸，chip 始终保持 content 高度。
         alignSelf: 'flex-start',
+        // flex item 默认按最长内容计算最小宽度，超长词条会把右侧操作按钮挤出容器。
+        // 允许 chip 收缩到容器内，文本区域再单独截断，确保删除按钮始终可见。
+        minWidth: 0,
+        maxWidth: '100%',
+        boxSizing: 'border-box',
         display: 'inline-flex', alignItems: 'center', gap: 6,
         padding: '5px 10px 5px 12px',
         borderRadius: 999,
@@ -572,7 +577,16 @@ function VocabChip({ entry, onRemove, onToggle }: VocabChipProps) {
       <button
         onClick={onToggle}
         title={enabled ? t('vocab.tipDisabled') : t('vocab.tipEnabled')}
-        style={{ background: 'transparent', border: 0, padding: 0, color: 'inherit', fontFamily: 'inherit', cursor: 'default' }}
+        style={{
+          minWidth: 0,
+          flex: '1 1 auto',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+          textAlign: 'left',
+          background: 'transparent', border: 0, padding: 0,
+          color: 'inherit', fontFamily: 'inherit', cursor: 'default',
+        }}
       >
         {entry.phrase}
       </button>
@@ -581,6 +595,7 @@ function VocabChip({ entry, onRemove, onToggle }: VocabChipProps) {
           minWidth: 18, height: 18, padding: '0 5px',
           borderRadius: 999, fontSize: 10, fontWeight: 600,
           display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+          flexShrink: 0,
           background: entry.hits > 0 && enabled ? 'var(--ol-blue)' : 'rgba(0,0,0,0.06)',
           color: entry.hits > 0 && enabled ? '#fff' : 'var(--ol-ink-4)',
           fontFamily: 'var(--ol-font-sans)',
@@ -592,7 +607,8 @@ function VocabChip({ entry, onRemove, onToggle }: VocabChipProps) {
         style={{
           width: 14, height: 14, padding: 0, border: 0, borderRadius: 999,
           background: 'transparent', color: 'var(--ol-ink-4)',
-          display: 'inline-flex', alignItems: 'center', justifyContent: 'center', cursor: 'default',
+          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+          flexShrink: 0, cursor: 'default',
         }}
       >
         <svg width="8" height="8" viewBox="0 0 8 8"><path d="M1 1l6 6M7 1l-6 6" stroke="currentColor" strokeWidth="1.4" /></svg>
