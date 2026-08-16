@@ -595,10 +595,16 @@ pub(super) async fn transcribe_overlay_dictation_asr(
             debug_assert!(uses_global_timeout);
             let audio_secs = (local.buffer_duration_ms() as f64) / 1000.0;
             let timeout_duration = local_qwen_transcribe_timeout(audio_secs);
-            let local_for_cancel = Arc::clone(&local);
             let result = tokio::time::timeout(timeout_duration, local.transcribe()).await;
             if result.is_err() {
-                local_for_cancel.cancel();
+                // 超时只放弃结果：解码任务仍在 spawn_blocking 里跑并持有引擎锁，
+                // cancel() 中止不了它。驱逐引擎让下次会话加载新引擎（与
+                // coordinator/dictation.rs 同款处理）。
+                log::warn!(
+                    "[coord] QA local Qwen3-ASR 超时 {}s，驱逐引擎避免下次会话排队",
+                    timeout_duration.as_secs()
+                );
+                _inner.local_asr_cache.release_now();
             }
             _inner.local_asr_cache.touch();
             schedule_local_asr_release(_inner);
@@ -1425,10 +1431,16 @@ pub(super) async fn end_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
                 audio_secs,
                 timeout_duration.as_secs()
             );
-            let local_for_cancel = Arc::clone(&local);
             let result = tokio::time::timeout(timeout_duration, local.transcribe()).await;
             if result.is_err() {
-                local_for_cancel.cancel();
+                // 超时只放弃结果：解码任务仍在 spawn_blocking 里跑并持有引擎锁，
+                // cancel() 中止不了它。驱逐引擎让下次会话加载新引擎（与
+                // coordinator/dictation.rs 同款处理）。
+                log::warn!(
+                    "[coord] QA local Qwen3-ASR 超时 {}s，驱逐引擎避免下次会话排队",
+                    timeout_duration.as_secs()
+                );
+                inner.local_asr_cache.release_now();
             }
             inner.local_asr_cache.touch();
             schedule_local_asr_release(inner);

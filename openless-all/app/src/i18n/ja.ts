@@ -1579,7 +1579,7 @@ export const ja: typeof zhCN = {
     sizeUnknown: 'サイズ不明',
     performanceWarning: 'ローカル ASR はオフラインやプライバシー重視のシーンに最適。初回使用時にモデルのダウンロードが必要。',
     metalToolchainTitle: 'macOS MLX 初回ビルド要件',
-    metalToolchainDesc: '開発版の初回ビルドで MetalToolchain が不足している場合は、先に Xcode コンポーネントをインストールしてください。',
+    metalToolchainDesc: 'ソースコードからのビルド時のみ必要です。MetalToolchain を既にインストールしている場合は無視して構いません。ビルドで不足と表示されたら、先に Xcode コンポーネントをインストールしてください。',
     metalToolchainStep: 'ターミナルで次のコマンドを実行してから OpenLess を再起動してください：',
     metalToolchainCopy: 'コマンドをコピー',
     metalToolchainCopied: 'コピーしました',

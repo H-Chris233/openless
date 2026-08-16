@@ -1609,7 +1609,7 @@ export const zhCN = {
     sizeUnknown: '尺寸未知',
     performanceWarning: '本地 ASR 适合离线或隐私敏感场景，首次使用需下载模型。',
     metalToolchainTitle: 'macOS MLX 首次构建要求',
-    metalToolchainDesc: '如果首次运行开发版时提示 MetalToolchain 缺失，请先安装 Xcode 组件。',
+    metalToolchainDesc: '仅源码构建期要求；已安装 MetalToolchain 的用户可忽略本提示。如果构建报缺失，请先安装 Xcode 组件。',
     metalToolchainStep: '在终端执行下面的命令，完成后重新启动 OpenLess：',
     metalToolchainCopy: '复制命令',
     metalToolchainCopied: '已复制',

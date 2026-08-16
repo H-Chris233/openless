@@ -2556,10 +2556,16 @@ impl Coordinator {
                 let dur =
                     local_qwen_transcribe_timeout((local.buffer_duration_ms() as f64) / 1000.0);
                 inner.local_asr_cache.touch();
-                let local_for_cancel = Arc::clone(&local);
                 let out = tokio::time::timeout(dur, local.transcribe()).await;
                 if out.is_err() {
-                    local_for_cancel.cancel();
+                    // 超时只放弃结果：解码任务仍在 spawn_blocking 里跑并持有引擎锁，
+                    // cancel() 中止不了它。驱逐引擎让下次会话加载新引擎（与
+                    // coordinator/dictation.rs 同款处理）。
+                    log::warn!(
+                        "[coord] 重新转录超时 {}s，驱逐本地 Qwen3-ASR 引擎",
+                        dur.as_secs()
+                    );
+                    inner.local_asr_cache.release_now();
                 }
                 let out = out
                     .map_err(|_| "重新转录超时".to_string())?

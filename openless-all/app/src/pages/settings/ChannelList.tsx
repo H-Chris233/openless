@@ -155,7 +155,10 @@ export function ChannelList({
   const { t } = useTranslation();
   const mobile = useMobileLayout();
   const os = detectOS();
-  const [supportsQwen3Mlx, setSupportsQwen3Mlx] = useState(os === 'mac');
+  // 初值 false：getPlatformCapabilities() 的权威值是架构感知的（Apple Silicon /
+  // Intel），以 os === 'mac' 起步会让 Intel Mac 打开下拉时闪现一次 MLX 预设，
+  // 再由异步纠正消失。Apple Silicon 上 MLX 选项晚一帧出现，可接受。
+  const [supportsQwen3Mlx, setSupportsQwen3Mlx] = useState(false);
   const presets = presetsFor(kind, os, supportsQwen3Mlx);
   const [channels, setChannels] = useState<Channel[]>([]);
   const [models, setModels] = useState<Record<string, string>>({});

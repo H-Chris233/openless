@@ -32,6 +32,27 @@ impl MlxQwenAsrEngine {
     }
 
     pub fn transcribe_pcm(&self, samples: &[f32]) -> Result<String> {
+        // 临时 WAV 用 guard 兜底清理：解码 panic、锁中毒提前 return 时也不会
+        // 把文件泄漏到系统临时目录。
+        let wav = TempWav::new(samples)?;
+        let path_string = wav.path.to_string_lossy().into_owned();
+        let output = self
+            .inference
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Qwen3-ASR MLX 引擎锁已中毒"))?
+            .transcribe(&path_string, None)
+            .context("Qwen3-ASR MLX batch 解码失败")?;
+        Ok(output.text.trim().to_string())
+    }
+}
+
+/// 临时 WAV 的 RAII 清理 guard：Drop 时删除文件。
+struct TempWav {
+    path: std::path::PathBuf,
+}
+
+impl TempWav {
+    fn new(samples: &[f32]) -> Result<Self> {
         let path =
             std::env::temp_dir().join(format!("openless-qwen3-{}.wav", uuid::Uuid::new_v4()));
         let pcm: Vec<i16> = samples
@@ -40,16 +61,13 @@ impl MlxQwenAsrEngine {
             .collect();
         std::fs::write(&path, crate::asr::wav::encode_wav_16k_mono(&pcm))
             .with_context(|| format!("写入临时 Qwen3-ASR 音频失败: {}", path.display()))?;
+        Ok(Self { path })
+    }
+}
 
-        let path_string = path.to_string_lossy().into_owned();
-        let result = self
-            .inference
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Qwen3-ASR MLX 引擎锁已中毒"))?
-            .transcribe(&path_string, None)
-            .context("Qwen3-ASR MLX batch 解码失败");
-        let _ = std::fs::remove_file(&path);
-        result.map(|output| output.text.trim().to_string())
+impl Drop for TempWav {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
     }
 }
 

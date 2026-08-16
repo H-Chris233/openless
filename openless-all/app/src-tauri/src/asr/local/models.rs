@@ -110,6 +110,16 @@ impl ModelId {
     }
 }
 
+/// Turbo 全精度与 Q5 量化共用同一目录（见 `model_dir`）：返回共享目录的
+/// "伙伴"文件名（Turbo ↔ Q5 互相认账），非共享目录的模型返回 None。
+fn shared_dir_peer_file(id: ModelId) -> Option<&'static str> {
+    match id {
+        ModelId::WhisperLargeV3Turbo => Some("ggml-large-v3-turbo-q5_0.bin"),
+        ModelId::WhisperLargeV3TurboQ5 => Some("ggml-large-v3-turbo.bin"),
+        _ => None,
+    }
+}
+
 /// 模型在本地的根目录（可能不存在）。
 pub fn model_dir(id: ModelId) -> Result<PathBuf> {
     if id.is_whisper() {
@@ -134,7 +144,12 @@ pub fn is_downloaded(id: ModelId) -> bool {
         Err(_) => return false,
     };
     if let Some(file_name) = id.file_name() {
-        return dir.join(file_name).is_file();
+        // Turbo 与 Q5 共用目录：任一目标文件存在即视为已下载，与后端
+        // `model_path_for_model` 的 q5 回退保持一致，避免 UI 显示"未下载"。
+        return dir.join(file_name).is_file()
+            || shared_dir_peer_file(id)
+                .map(|peer| dir.join(peer).is_file())
+                .unwrap_or(false);
     }
     dir.join(READY_SENTINEL).exists()
 }
@@ -149,6 +164,13 @@ pub fn downloaded_bytes(id: ModelId) -> u64 {
         let dest = dir.join(file_name);
         if let Ok(meta) = std::fs::metadata(&dest) {
             return meta.len();
+        }
+        // Turbo 与 Q5 共用目录：目标文件缺失时按伙伴文件计（同 is_downloaded）。
+        // 下载进度不跨认账：.partial 只按各自目标文件算。
+        if let Some(peer) = shared_dir_peer_file(id) {
+            if let Ok(meta) = std::fs::metadata(dir.join(peer)) {
+                return meta.len();
+            }
         }
         return super::download::partial_actual_size(&dest.with_extension("partial"));
     }
@@ -213,10 +235,17 @@ pub fn list_status() -> Vec<ModelStatus> {
 pub fn delete_model(id: ModelId) -> Result<()> {
     let dir = model_dir(id)?;
     if let Some(file_name) = id.file_name() {
-        let dest = dir.join(file_name);
-        let _ = std::fs::remove_file(&dest);
-        let _ = std::fs::remove_file(dest.with_extension("partial"));
-        let _ = std::fs::remove_file(dest.with_extension("partial.idx"));
+        // Turbo 与 Q5 共用目录：删除时两个格式的文件一起删（含各自的 partial），
+        // 避免删了 turbo 留着 q5、UI 仍显示另一个模型"已下载"。
+        let mut targets = vec![dir.join(file_name)];
+        if let Some(peer) = shared_dir_peer_file(id) {
+            targets.push(dir.join(peer));
+        }
+        for dest in targets {
+            let _ = std::fs::remove_file(&dest);
+            let _ = std::fs::remove_file(dest.with_extension("partial"));
+            let _ = std::fs::remove_file(dest.with_extension("partial.idx"));
+        }
         if dir.exists() && dir.read_dir()?.next().is_none() {
             let _ = std::fs::remove_dir(&dir);
         }

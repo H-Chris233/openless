@@ -1579,7 +1579,7 @@ export const ko: typeof zhCN = {
     sizeUnknown: '크기 알 수 없음',
     performanceWarning: '로컬 ASR 은 오프라인 또는 개인정보 보호 시나리오에 적합. 첫 사용 시 모델 다운로드 필요.',
     metalToolchainTitle: 'macOS MLX 최초 빌드 요구 사항',
-    metalToolchainDesc: '개발 버전 최초 빌드에서 MetalToolchain이 없다고 표시되면 먼저 Xcode 구성 요소를 설치하세요.',
+    metalToolchainDesc: '소스 코드 빌드 시에만 필요합니다. MetalToolchain을 이미 설치한 경우 이 안내를 무시해도 됩니다. 빌드에서 없다고 표시되면 먼저 Xcode 구성 요소를 설치하세요.',
     metalToolchainStep: '터미널에서 아래 명령을 실행한 후 OpenLess를 다시 시작하세요:',
     metalToolchainCopy: '명령 복사',
     metalToolchainCopied: '복사됨',

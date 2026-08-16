@@ -117,31 +117,96 @@ async fn fetch_file_list(
     mirror: Mirror,
 ) -> Result<Vec<RemoteFile>> {
     let repo = model_id.hf_repo();
-    let url = format!("{}/api/models/{}/tree/main", mirror.base_url(), repo);
-    let resp = client
-        .get(&url)
-        .send()
-        .await
-        .with_context(|| format!("HF tree API GET 失败: {url}"))?;
-    if !resp.status().is_success() {
-        anyhow::bail!("HF tree API HTTP {}: {url}", resp.status());
+    // HF tree API 用 `Link: rel="next"` 游标分页（`offset` 参数会被服务器静默
+    // 忽略）。当前模型仓库（whisper.cpp / Qwen）根目录都远小于单页上限 1000，
+    // 游标翻页仅为防御未来超大仓库，避免静默丢文件导致下载列表缺项。
+    // 游标是服务器自身生成的 base64url 片段，原样回传即可（依赖该字符集）。
+    const PAGE_SIZE: usize = 1000;
+    // 防御上限：服务器异常持续返回 next 时不至于无限循环（正常仓库一页取完）。
+    const MAX_PAGES: usize = 100;
+    let mut cursor: Option<String> = None;
+    let mut files: Vec<RemoteFile> = Vec::new();
+    for _ in 0..MAX_PAGES {
+        let mut url = format!(
+            "{}/api/models/{}/tree/main?limit={PAGE_SIZE}",
+            mirror.base_url(),
+            repo
+        );
+        if let Some(c) = &cursor {
+            url.push_str(&format!("&cursor={c}"));
+        }
+        let resp = client
+            .get(&url)
+            .send()
+            .await
+            .with_context(|| format!("HF tree API GET 失败: {url}"))?;
+        if !resp.status().is_success() {
+            anyhow::bail!("HF tree API HTTP {}: {url}", resp.status());
+        }
+        // json() 会消费 response，先取 Link header（分页游标）。
+        let headers = resp.headers().clone();
+        let entries: Vec<HfTreeEntry> = resp
+            .json()
+            .await
+            .with_context(|| format!("HF tree JSON 解码失败: {url}"))?;
+        files.extend(
+            entries
+                .iter()
+                .filter(|e| e.entry_type == "file" && keep_file(&e.path, model_id))
+                .map(|e| RemoteFile {
+                    path: e.path.clone(),
+                    size: e.size.unwrap_or(0),
+                }),
+        );
+        cursor = next_page_cursor(&headers);
+        if cursor.is_none() {
+            break;
+        }
     }
-    let entries: Vec<HfTreeEntry> = resp
-        .json()
-        .await
-        .with_context(|| format!("HF tree JSON 解码失败: {url}"))?;
-    let files: Vec<RemoteFile> = entries
-        .into_iter()
-        .filter(|e| e.entry_type == "file" && keep_file(&e.path, model_id))
-        .map(|e| RemoteFile {
-            path: e.path,
-            size: e.size.unwrap_or(0),
-        })
-        .collect();
+    if cursor.is_some() {
+        // 100 页（10 万条目）仍翻不完只可能是服务器病态（游标循环）：
+        // 显式失败，避免静默返回缺项列表传导到模型加载期。
+        anyhow::bail!("HF tree 分页超过 {MAX_PAGES} 页仍未结束 (repo={repo})");
+    }
     if files.is_empty() {
         anyhow::bail!("HF tree 返回空文件列表 (repo={repo})");
     }
     Ok(files)
+}
+
+/// 从响应 Link header 提取 `rel="next"` 的游标（RFC 8288 简化解析）。
+/// 服务器可能拆成多个 Link header 行，逐行解析；没有下一页（header 缺失
+/// 或已是最后一页）返回 None。
+fn next_page_cursor(headers: &reqwest::header::HeaderMap) -> Option<String> {
+    headers
+        .get_all(reqwest::header::LINK)
+        .iter()
+        .find_map(|value| {
+            let link = value.to_str().ok()?;
+            link.split(',').find_map(|part| {
+                let (url_part, rel) = part.split(';').fold(
+                    (None::<&str>, None::<&str>),
+                    |(url_part, rel), segment| {
+                        let segment = segment.trim();
+                        if segment.starts_with('<') && segment.ends_with('>') {
+                            (Some(&segment[1..segment.len() - 1]), rel)
+                        } else if let Some(value) = segment.strip_prefix("rel=") {
+                            (url_part, Some(value.trim_matches('"')))
+                        } else {
+                            (url_part, rel)
+                        }
+                    },
+                );
+                if rel != Some("next") {
+                    return None;
+                }
+                url_part?
+                    .split('?')
+                    .nth(1)?
+                    .split('&')
+                    .find_map(|pair| pair.strip_prefix("cursor=").map(|v| v.to_string()))
+            })
+        })
 }
 
 fn keep_file(path: &str, model_id: ModelId) -> bool {
@@ -1279,10 +1344,69 @@ fn emit_cancelled(
 #[cfg(test)]
 mod tests {
     use super::{
-        existing_file_is_complete, first_readme_paragraph, is_link_only_line,
+        existing_file_is_complete, first_readme_paragraph, is_link_only_line, next_page_cursor,
         remove_partial_artifacts, strip_markdown_inline, truncate_description,
         HF_CARD_DESC_MAX_CHARS,
     };
+
+    fn headers_with_link(link: &str) -> reqwest::header::HeaderMap {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::LINK,
+            link.parse().expect("valid link header"),
+        );
+        headers
+    }
+
+    #[test]
+    fn cursor_parses_real_hf_next_link() {
+        // 实测自 HF tree API 的 Link header（cursor 为 base64）。
+        let link = "<https://huggingface.co/api/models/ggerganov/whisper.cpp/tree/main?expand=false&limit=3&cursor=ZXlKbWFXeGxYMjVoYldVaU9pSm5aMjFzTFdKaGMyVXRaVzVqYjJSbGNpNXRiRzF2WkdWc1l5NTZhWEFpTENKMGNtVmxYMjlwWkNJNklqTmpNRGhqTURjM05qVXdOR1l5WWpkaFpXTmlPRE5tT0RsbFlUZGpPV0l5WVdReU9EQmxaamdpZlE9PToz>; rel=\"next\"";
+        let headers = headers_with_link(link);
+        assert_eq!(
+            next_page_cursor(&headers).as_deref(),
+            Some("ZXlKbWFXeGxYMjVoYldVaU9pSm5aMjFzTFdKaGMyVXRaVzVqYjJSbGNpNXRiRzF2WkdWc1l5NTZhWEFpTENKMGNtVmxYMjlwWkNJNklqTmpNRGhqTURjM05qVXdOR1l5WWpkaFpXTmlPRE5tT0RsbFlUZGpPV0l5WVdReU9EQmxaamdpZlE9PToz")
+        );
+    }
+
+    #[test]
+    fn cursor_none_without_link_header() {
+        assert_eq!(next_page_cursor(&reqwest::header::HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn cursor_ignores_non_next_links() {
+        let link = "<https://huggingface.co/api/models/x/tree/main?limit=3>; rel=\"last\"";
+        assert_eq!(next_page_cursor(&headers_with_link(link)), None);
+    }
+
+    #[test]
+    fn cursor_picks_next_among_multiple_links() {
+        let link = "<https://huggingface.co/api/models/x/tree/main?limit=3>; rel=\"prev\", <https://huggingface.co/api/models/x/tree/main?limit=3&cursor=abc123>; rel=\"next\"";
+        assert_eq!(
+            next_page_cursor(&headers_with_link(link)).as_deref(),
+            Some("abc123")
+        );
+    }
+
+    #[test]
+    fn cursor_reads_next_from_second_link_header_line() {
+        // 服务器把 prev / next 拆成两个独立 Link header 行时也能取到 next。
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.append(
+            reqwest::header::LINK,
+            "<https://huggingface.co/api/models/x/tree/main?limit=3>; rel=\"prev\""
+                .parse()
+                .expect("valid link header"),
+        );
+        headers.append(
+            reqwest::header::LINK,
+            "<https://huggingface.co/api/models/x/tree/main?limit=3&cursor=def456>; rel=\"next\""
+                .parse()
+                .expect("valid link header"),
+        );
+        assert_eq!(next_page_cursor(&headers).as_deref(), Some("def456"));
+    }
 
     #[test]
     fn complete_when_size_matches() {

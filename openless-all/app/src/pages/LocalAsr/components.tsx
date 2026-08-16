@@ -36,7 +36,7 @@ export function MetalToolchainGuide() {
         <Collapsible
             title={t("localAsr.metalToolchainTitle")}
             desc={t("localAsr.metalToolchainDesc")}
-            defaultOpen={import.meta.env.DEV}
+            defaultOpen={false}
         >
             <div
                 style={{

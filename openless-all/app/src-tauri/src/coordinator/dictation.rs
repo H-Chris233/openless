@@ -3703,10 +3703,17 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                         audio_secs,
                         timeout_duration.as_secs()
                     );
-                    let local_for_cancel = Arc::clone(&local);
                     let result = tokio::time::timeout(timeout_duration, local.transcribe()).await;
                     if result.is_err() {
-                        local_for_cancel.cancel();
+                        // 超时只放弃结果：spawn_blocking 里的解码任务仍在跑并持有引擎锁，
+                        // cancel() 只能关 token 门控、中止不了它。直接驱逐引擎，让下次
+                        // 会话加载新引擎而不是排队等旧任务跑完（旧任务持有的 Arc 会在
+                        // 完成后自动释放内存）。
+                        log::warn!(
+                            "[coord] local Qwen3-ASR 超时 {}s，驱逐引擎避免下次会话排队",
+                            timeout_duration.as_secs()
+                        );
+                        inner.local_asr_cache.release_now();
                     }
                     inner.local_asr_cache.touch();
                     schedule_local_asr_release(inner);
