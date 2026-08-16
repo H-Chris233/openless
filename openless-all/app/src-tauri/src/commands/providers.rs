@@ -901,7 +901,7 @@ pub(crate) fn active_asr_is_keyless_for_validation(provider: &str) -> bool {
         return false;
     }
     crate::asr::local::qwen_backend_for_provider(provider).is_some()
-        || crate::asr::local::is_local_whisper(provider)
+        || (cfg!(target_os = "macos") && crate::asr::local::is_local_whisper(provider))
         || active_apple_speech_asr_is_supported(provider)
         || active_foundry_asr_is_supported(provider)
         || active_sherpa_asr_is_supported(provider)

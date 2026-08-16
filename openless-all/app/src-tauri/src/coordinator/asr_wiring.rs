@@ -269,12 +269,30 @@ pub(super) fn ensure_local_whisper_model_ready() -> Result<(), String> {
 
 /// 引擎加载/释放/keepLoadedSecs 变化时主动推给前端，前端 listen
 /// `local-asr:engine-changed` 即可零轮询同步 UI（issue #470 / #6）。
-/// 只反映 Qwen3 这一路（loaded_model_id / prefs），不碰 Foundry / Sherpa。
+/// 反映当前选中的 Qwen3 / Whisper cache，不碰 Foundry / Sherpa。
 /// 仅用桌面端跨平台符号；Android 无本地 ASR 引擎（LocalAsrEngineStatus 不在该 target
 /// 编译），单独给 no-op stub（见下），让各调用点在所有平台统一编译。
 #[cfg(not(target_os = "android"))]
+pub(super) fn active_local_asr_loaded_model(inner: &Arc<Inner>) -> Option<String> {
+    let provider = CredentialsVault::get_active_asr();
+    if crate::asr::local::is_local_qwen3(&provider) {
+        return inner.local_asr_cache.loaded_model_id();
+    }
+    #[cfg(target_os = "macos")]
+    if crate::asr::local::is_local_whisper(&provider) {
+        return inner.local_whisper_cache.loaded_model_id();
+    }
+    None
+}
+
+#[cfg(target_os = "android")]
+pub(super) fn active_local_asr_loaded_model(_inner: &Arc<Inner>) -> Option<String> {
+    None
+}
+
+#[cfg(not(target_os = "android"))]
 pub(super) fn emit_local_asr_engine_status(inner: &Arc<Inner>) {
-    let model_id = inner.local_asr_cache.loaded_model_id();
+    let model_id = active_local_asr_loaded_model(inner);
     let keep_loaded_secs = inner.prefs.get().local_asr_keep_loaded_secs;
     let status = crate::commands::LocalAsrEngineStatus {
         loaded: model_id.is_some(),
@@ -317,12 +335,16 @@ pub(super) fn schedule_local_whisper_release(inner: &Arc<Inner>) {
     let cache = Arc::clone(&inner.local_whisper_cache);
     if keep_secs == 0 {
         cache.release_now();
+        emit_local_asr_engine_status(inner);
         return;
     }
     let threshold = std::time::Duration::from_secs(keep_secs as u64);
+    let inner = Arc::clone(inner);
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(threshold).await;
-        cache.release_if_idle(threshold);
+        if cache.release_if_idle(threshold) {
+            emit_local_asr_engine_status(&inner);
+        }
     });
 }
 
@@ -393,6 +415,66 @@ pub(super) fn schedule_sherpa_onnx_release(inner: &Arc<Inner>, session: AsrRelea
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
+fn selected_local_qwen_target(
+    inner: &Arc<Inner>,
+) -> anyhow::Result<(crate::asr::local::ModelId, std::path::PathBuf)> {
+    let prefs = inner.prefs.get();
+    let model_id = crate::asr::local::ModelId::from_str(&prefs.local_asr_active_model)
+        .filter(|id| id.is_qwen())
+        .ok_or_else(|| anyhow::anyhow!("未知本地模型 id: {}", prefs.local_asr_active_model))?;
+    let dir = crate::asr::local::models::model_dir(model_id)?;
+    Ok((model_id, dir))
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn load_current_local_qwen_engine(
+    inner: &Arc<Inner>,
+    backend: crate::asr::local::QwenBackend,
+    model_id: &str,
+    model_dir: &std::path::Path,
+) -> anyhow::Result<Arc<crate::asr::local::LocalQwenEngine>> {
+    let _lifecycle_guard = inner.local_asr_lifecycle.lock();
+    let target_is_current = || {
+        crate::asr::local::qwen_backend_for_provider(&CredentialsVault::get_active_asr())
+            == Some(backend)
+    };
+    if !target_is_current() {
+        anyhow::bail!("本地 Qwen3-ASR 加载目标已切换，取消旧后端加载");
+    }
+
+    let engine = inner
+        .local_asr_cache
+        .get_or_load(backend, model_id, model_dir)?;
+    if !target_is_current() {
+        drop(engine);
+        inner.local_asr_cache.release_now();
+        anyhow::bail!("本地 Qwen3-ASR 加载期间目标已切换，丢弃旧后端");
+    }
+    Ok(engine)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub(super) async fn preload_local_qwen3(
+    inner: &Arc<Inner>,
+    provider_id: &str,
+) -> anyhow::Result<()> {
+    let backend = crate::asr::local::qwen_backend_for_provider(provider_id)
+        .ok_or_else(|| anyhow::anyhow!("本地 Qwen3-ASR 渠道 {provider_id} 不支持当前系统"))?;
+    let (model_id, dir) = selected_local_qwen_target(inner)?;
+    let model_id = model_id.as_str().to_string();
+    let load_inner = Arc::clone(inner);
+    tauri::async_runtime::spawn_blocking(move || {
+        let engine = load_current_local_qwen_engine(&load_inner, backend, &model_id, &dir)?;
+        drop(engine);
+        Ok::<(), anyhow::Error>(())
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("spawn_blocking join failed: {e:#}"))??;
+    emit_local_asr_engine_status(inner);
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 /// 返回 (provider, 实际加载的模型 id)。模型 id 是 ModelId 校验归一后的值，调用方
 /// 直接用它做历史归因（构建时快照，PR #826 review）。
 pub(super) async fn build_local_qwen3(
@@ -401,43 +483,94 @@ pub(super) async fn build_local_qwen3(
 ) -> anyhow::Result<(Arc<crate::asr::local::LocalQwenAsr>, String)> {
     let backend = crate::asr::local::qwen_backend_for_provider(provider_id)
         .ok_or_else(|| anyhow::anyhow!("本地 Qwen3-ASR 渠道 {provider_id} 不支持当前系统"))?;
-    let prefs = inner.prefs.get();
-    let model_id = crate::asr::local::ModelId::from_str(&prefs.local_asr_active_model)
-        .filter(|id| id.is_qwen())
-        .ok_or_else(|| anyhow::anyhow!("未知本地模型 id: {}", prefs.local_asr_active_model))?;
-    let dir = crate::asr::local::models::model_dir(model_id)?;
+    let (model_id, dir) = selected_local_qwen_target(inner)?;
+    let app = inner
+        .app
+        .lock()
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("AppHandle 未绑定"))?;
     // 走缓存：如果已有同 id 的引擎在内存里就直接复用，避免每次会话都重加载
     // 1.2GB+ 模型。第一次加载阻塞数秒，spawn_blocking 不卡 tokio runtime。
-    let cache = Arc::clone(&inner.local_asr_cache);
     let mid = model_id.as_str().to_string();
-    let engine =
-        tauri::async_runtime::spawn_blocking(move || cache.get_or_load(backend, &mid, &dir))
-            .await
-            .map_err(|e| anyhow::anyhow!("spawn_blocking join failed: {e:#}"))??;
+    let load_inner = Arc::clone(inner);
+    let engine = tauri::async_runtime::spawn_blocking(move || {
+        load_current_local_qwen_engine(&load_inner, backend, &mid, &dir)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("spawn_blocking join failed: {e:#}"))??;
     // 加载完成（含缓存命中刷新 last_used）后推一次状态，前端零轮询更新「已加载」。
     emit_local_asr_engine_status(inner);
     let model_label = model_id.as_str().to_string();
     Ok((
-        Arc::new(crate::asr::local::LocalQwenAsr::new(engine)),
+        Arc::new(crate::asr::local::LocalQwenAsr::new(app, engine)),
         model_label,
     ))
+}
+
+#[cfg(target_os = "macos")]
+fn selected_local_whisper_target(
+    inner: &Arc<Inner>,
+) -> anyhow::Result<(String, std::path::PathBuf)> {
+    let model_id = crate::asr::local::ModelId::from_str(&inner.prefs.get().local_asr_active_model)
+        .filter(|id| id.is_whisper())
+        .map(|id| id.as_str().to_string())
+        .unwrap_or_else(|| crate::asr::local::WHISPER_MODEL_ID.to_string());
+    let path = crate::asr::local::whisper_model_path_for_model(&model_id)?;
+    Ok((model_id, path))
+}
+
+#[cfg(target_os = "macos")]
+fn load_current_local_whisper_engine(
+    inner: &Arc<Inner>,
+    model_id: &str,
+    model_path: &std::path::Path,
+) -> anyhow::Result<Arc<crate::asr::local::WhisperEngine>> {
+    let _lifecycle_guard = inner.local_asr_lifecycle.lock();
+    let target_is_current =
+        || crate::asr::local::is_local_whisper(&CredentialsVault::get_active_asr());
+    if !target_is_current() {
+        anyhow::bail!("本地 Whisper 加载目标已切换，取消旧后端加载");
+    }
+
+    let engine = inner
+        .local_whisper_cache
+        .get_or_load(model_id, model_path)?;
+    if !target_is_current() {
+        drop(engine);
+        inner.local_whisper_cache.release_now();
+        anyhow::bail!("本地 Whisper 加载期间目标已切换，丢弃旧后端");
+    }
+    Ok(engine)
+}
+
+#[cfg(target_os = "macos")]
+pub(super) async fn preload_local_whisper(inner: &Arc<Inner>) -> anyhow::Result<()> {
+    let (model_id, path) = selected_local_whisper_target(inner)?;
+    let load_inner = Arc::clone(inner);
+    tauri::async_runtime::spawn_blocking(move || {
+        let engine = load_current_local_whisper_engine(&load_inner, &model_id, &path)?;
+        drop(engine);
+        Ok::<(), anyhow::Error>(())
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("spawn_blocking join failed: {e:#}"))??;
+    emit_local_asr_engine_status(inner);
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
 pub(super) async fn build_local_whisper(
     inner: &Arc<Inner>,
 ) -> anyhow::Result<(Arc<crate::asr::local::LocalWhisperAsr>, String)> {
-    let model_id = crate::asr::local::ModelId::from_str(&inner.prefs.get().local_asr_active_model)
-        .filter(|id| id.is_whisper())
-        .map(|id| id.as_str().to_string())
-        .unwrap_or_else(|| crate::asr::local::WHISPER_MODEL_ID.to_string());
-    let path = crate::asr::local::whisper_model_path_for_model(&model_id)?;
-    let cache = Arc::clone(&inner.local_whisper_cache);
+    let (model_id, path) = selected_local_whisper_target(inner)?;
     let cache_model_id = model_id.clone();
-    let engine =
-        tauri::async_runtime::spawn_blocking(move || cache.get_or_load(&cache_model_id, &path))
-            .await
-            .map_err(|e| anyhow::anyhow!("spawn_blocking join failed: {e:#}"))??;
+    let load_inner = Arc::clone(inner);
+    let engine = tauri::async_runtime::spawn_blocking(move || {
+        load_current_local_whisper_engine(&load_inner, &cache_model_id, &path)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("spawn_blocking join failed: {e:#}"))??;
+    emit_local_asr_engine_status(inner);
     let language = inner
         .prefs
         .get()

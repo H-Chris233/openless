@@ -24,6 +24,9 @@ else
   echo "▶ 检测到 Apple 签名环境，交给 Tauri 做 Developer ID 签名 / 公证"
 fi
 
+echo "▶ 检查 Apple Silicon MLX 构建依赖"
+npm run check:macos-metal-toolchain
+
 echo "▶ tauri build"
 TAURI_BUILD_ARGS=(build)
 if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ] || [ -n "${TAURI_SIGNING_PRIVATE_KEY_PATH:-}" ]; then

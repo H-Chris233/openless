@@ -110,21 +110,25 @@ impl LocalWhisperCache {
     }
 
     pub fn release_if_idle(&self, threshold: Duration) -> bool {
-        let should_release = self
-            .inner
-            .lock()
-            .as_ref()
-            .map(|cached| cached.last_used.elapsed() >= threshold)
-            .unwrap_or(false);
-        if should_release {
-            self.inner.lock().take();
-            return true;
+        let mut slot = self.inner.lock();
+        match slot.as_ref() {
+            Some(cached) if cached.last_used.elapsed() >= threshold => {
+                slot.take();
+                true
+            }
+            _ => false,
         }
-        false
     }
 
     pub fn release_now(&self) {
         self.inner.lock().take();
+    }
+
+    pub fn loaded_model_id(&self) -> Option<String> {
+        self.inner
+            .lock()
+            .as_ref()
+            .map(|cached| cached.model_id.clone())
     }
 }
 

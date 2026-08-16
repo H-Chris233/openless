@@ -285,7 +285,9 @@ pub(super) fn show_capsule_window_no_activate<R: tauri::Runtime>(
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(30));
             let _ = app.run_on_main_thread(move || {
-                let Ok(handle) = window.ns_window() else { return };
+                let Ok(handle) = window.ns_window() else {
+                    return;
+                };
                 let ns_window = handle as *mut AnyObject;
                 if ns_window.is_null() {
                     return;

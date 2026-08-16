@@ -740,6 +740,7 @@ export function Capsule({ os: forcedOs }: CapsuleProps = {}) {
   const [state, setState] = useState<CapsuleState>(preview.state);
   const [level, setLevel] = useState<number>(preview.level);
   const [message, setMessage] = useState<string | undefined>(preview.message);
+  const [localAsrText, setLocalAsrText] = useState('');
   const [translation, setTranslation] = useState<boolean>(preview.translation);
   const [selectionPolish, setSelectionPolish] = useState<boolean>(preview.selectionPolish);
   // 胶囊样式（siri / classic）：随 capsule:state payload 下发；设置里切换后还会经
@@ -809,6 +810,7 @@ export function Capsule({ os: forcedOs }: CapsuleProps = {}) {
         setState(p.state);
         setLevel(p.level ?? 0);
         setMessage(p.message ?? undefined);
+        if (p.state === 'recording') setLocalAsrText('');
         setTranslation(p.translation === true);
         setWarming(p.warming === true);
         setSelectionPolish(p.selectionPolish === true);
@@ -816,15 +818,20 @@ export function Capsule({ os: forcedOs }: CapsuleProps = {}) {
         if (p.insertedChars != null) insertedCharsRef.current = p.insertedChars;
         operatingRef.current = p.operating === true;
       });
+      const tokenHandle = await listen<string>('local-asr-token', event => {
+        setLocalAsrText(prev => prev + event.payload);
+      });
       const suggestHandle = await listen<PendingCorrection[]>('vocab:suggested', event => {
         setSuggestions(event.payload ?? []);
       });
       if (cancelled) {
         handle();
+        tokenHandle();
         suggestHandle();
       } else {
         unlisten = () => {
           handle();
+          tokenHandle();
           suggestHandle();
         };
       }
@@ -937,7 +944,11 @@ export function Capsule({ os: forcedOs }: CapsuleProps = {}) {
   const renderedSelectionPolish = state === 'idle'
     ? lastVisibleSelectionPolish
     : selectionPolish;
-  const renderedMessage = state === 'idle' ? lastVisibleMessage : message;
+  const renderedMessage = state === 'idle'
+    ? lastVisibleMessage
+    : state === 'transcribing' && localAsrText
+      ? localAsrText
+      : message;
 
   return (
     <div

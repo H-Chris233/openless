@@ -595,7 +595,11 @@ pub(super) async fn transcribe_overlay_dictation_asr(
             debug_assert!(uses_global_timeout);
             let audio_secs = (local.buffer_duration_ms() as f64) / 1000.0;
             let timeout_duration = local_qwen_transcribe_timeout(audio_secs);
+            let local_for_cancel = Arc::clone(&local);
             let result = tokio::time::timeout(timeout_duration, local.transcribe()).await;
+            if result.is_err() {
+                local_for_cancel.cancel();
+            }
             _inner.local_asr_cache.touch();
             schedule_local_asr_release(_inner);
             match result {
@@ -607,9 +611,8 @@ pub(super) async fn transcribe_overlay_dictation_asr(
         #[cfg(target_os = "macos")]
         ActiveAsr::LocalWhisper(local) => {
             debug_assert!(!uses_global_timeout);
-            let timeout_duration = local_whisper_transcribe_timeout(
-                (local.buffer_duration_ms() as f64) / 1000.0,
-            );
+            let timeout_duration =
+                local_whisper_transcribe_timeout((local.buffer_duration_ms() as f64) / 1000.0);
             let result = tokio::time::timeout(timeout_duration, local.transcribe()).await;
             _inner.local_whisper_cache.touch();
             schedule_local_whisper_release(_inner);
@@ -1422,7 +1425,11 @@ pub(super) async fn end_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
                 audio_secs,
                 timeout_duration.as_secs()
             );
+            let local_for_cancel = Arc::clone(&local);
             let result = tokio::time::timeout(timeout_duration, local.transcribe()).await;
+            if result.is_err() {
+                local_for_cancel.cancel();
+            }
             inner.local_asr_cache.touch();
             schedule_local_asr_release(inner);
             match result {
@@ -1449,9 +1456,8 @@ pub(super) async fn end_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
         #[cfg(target_os = "macos")]
         ActiveAsr::LocalWhisper(local) => {
             debug_assert!(!uses_global_timeout);
-            let timeout_duration = local_whisper_transcribe_timeout(
-                (local.buffer_duration_ms() as f64) / 1000.0,
-            );
+            let timeout_duration =
+                local_whisper_transcribe_timeout((local.buffer_duration_ms() as f64) / 1000.0);
             let result = tokio::time::timeout(timeout_duration, local.transcribe()).await;
             inner.local_whisper_cache.touch();
             schedule_local_whisper_release(inner);

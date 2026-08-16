@@ -17,6 +17,7 @@
    - 构建脚本 / 模型下载脚本
    - 新增二进制、大文件、网络下载地址或 shell 命令
    - FFI API 是否改变：`qwen_load`、`qwen_free`、`qwen_set_token_callback`、`qwen_transcribe_audio`、`qwen_transcribe_stream`
+   - Dictation 行为是否改变：C 后端必须继续使用 stream、发送 `local-asr-token`，并保留 0.5 秒尾部静音收尾；MLX 后端保持 batch
 3. 在 OpenLess 主仓更新 submodule：
    ```bash
    git submodule sync --recursive openless-all/app/src-tauri/vendor/qwen-asr
@@ -46,4 +47,5 @@
 - 旧 submodule commit 和新 submodule commit。
 - 已审查的 upstream commit 范围。
 - 是否有 FFI API、模型文件结构、下载脚本或构建参数变化。
+- 是否改变 stream/batch、token 回调、取消门控或尾部静音语义。
 - 已运行的验证命令和未覆盖的平台。

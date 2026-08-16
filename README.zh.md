@@ -244,6 +244,8 @@ OpenLess 只做一件事:**把语音变成可用的书面文字(尤其是 AI 提
 
 Rust 1.88 是从源码构建所支持的最低工具链版本；建议使用最新 stable Rust。CI 会在 macOS、Windows 和 Linux 上同时验证 Rust 1.88 与 stable。
 
+Apple Silicon 编译可选的 Qwen3-ASR MLX 后端时需要 Xcode 的 MetalToolchain 组件。执行 `xcodebuild -downloadComponent MetalToolchain` 安装，并用 `xcrun --find metal` 验证。它只属于源码构建依赖，已打包的 OpenLess 应用运行时不需要该组件。
+
 ```bash
 # 仅首次克隆——拉取 vendored 子模块
 git submodule update --init --recursive
