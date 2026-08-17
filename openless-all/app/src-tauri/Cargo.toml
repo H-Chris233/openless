@@ -182,12 +182,6 @@ lto = "thin"
 codegen-units = 1
 strip = "symbols"
 
-# macOS Homebrew rustc 下 `symbols` 会破坏 proc-macro dylib（rustc 报
-# "mis-aligned LINKEDIT string pool"），macOS 发布产物退回 debuginfo。
-# 仅限 macOS：Windows / Linux / Android 的产物继续完整 strip 符号表。
-[target.'cfg(target_os = "macos")'.profile.release]
-strip = "debuginfo"
-
 # issue #801: wayland-scanner 0.31.10 still pins vulnerable quick-xml 0.39.
 # This local copy backports upstream security commit d07c4f91f28b without
 # pulling the breaking, unreleased wayland-rs master branch.

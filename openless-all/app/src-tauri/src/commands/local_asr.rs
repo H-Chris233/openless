@@ -20,13 +20,19 @@ pub struct LocalAsrSettings {
 #[tauri::command]
 pub fn local_asr_get_settings(coord: CoordinatorState<'_>) -> LocalAsrSettings {
     let prefs = coord.prefs().get();
+    let active_provider = CredentialsVault::get_active_asr();
     let models_base_dir = non_empty_string(prefs.local_asr_models_base_dir.clone());
     let models_root_dir = crate::persistence::models_root_for_base_dir(models_base_dir.as_deref())
         .map(|path| path.display().to_string())
         .unwrap_or_default();
+    let active_model = if crate::asr::local::is_local_whisper(&active_provider) {
+        prefs.local_whisper_active_model
+    } else {
+        prefs.local_asr_active_model
+    };
     LocalAsrSettings {
         provider_id: LOCAL_PROVIDER_ID.into(),
-        active_model: prefs.local_asr_active_model,
+        active_model,
         mirror: prefs.local_asr_mirror,
         models_base_dir,
         models_root_dir,
@@ -168,11 +174,17 @@ pub fn local_asr_set_active_model(
     coord: CoordinatorState<'_>,
     model_id: String,
 ) -> Result<(), String> {
-    if ModelId::from_str(&model_id).is_none() {
+    let model =
+        ModelId::from_str(&model_id).ok_or_else(|| format!("unknown model id: {model_id}"))?;
+    if !model.is_qwen() && !model.is_whisper() {
         return Err(format!("unknown model id: {model_id}"));
     }
     let mut prefs = coord.prefs().get();
-    prefs.local_asr_active_model = model_id;
+    if model.is_whisper() {
+        prefs.local_whisper_active_model = model_id;
+    } else {
+        prefs.local_asr_active_model = model_id;
+    }
     coord.prefs().set(prefs).map_err(|e| e.to_string())
 }
 

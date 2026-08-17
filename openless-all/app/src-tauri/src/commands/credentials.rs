@@ -57,7 +57,7 @@ pub(crate) fn asr_configured_for_provider(provider: &str, snap: &CredentialsSnap
         {
             let model_id = crate::persistence::PreferencesStore::new()
                 .ok()
-                .map(|store| store.get().local_asr_active_model)
+                .map(|store| store.get().local_whisper_active_model)
                 .filter(|id| {
                     crate::asr::local::ModelId::from_str(id)
                         .map(|model| model.is_whisper())

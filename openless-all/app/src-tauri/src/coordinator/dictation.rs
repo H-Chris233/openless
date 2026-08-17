@@ -3237,13 +3237,11 @@ pub(super) fn schedule_cancelled_asr_release(
         }
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         ActiveAsr::Local(_) => {
-            inner.local_asr_cache.touch();
-            schedule_local_asr_release(inner);
+            release_local_asr_engines_now(inner, true, false);
         }
         #[cfg(target_os = "macos")]
         ActiveAsr::LocalWhisper(_) => {
-            inner.local_whisper_cache.touch();
-            schedule_local_whisper_release(inner);
+            release_local_asr_engines_now(inner, false, true);
         }
         _ => {}
     }
@@ -3745,20 +3743,23 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                         audio_secs,
                         timeout_duration.as_secs()
                     );
-                    let result = tokio::time::timeout(timeout_duration, local.transcribe()).await;
+                    let result =
+                        tokio::time::timeout(timeout_duration, local.clone().transcribe()).await;
                     if result.is_err() {
                         // 超时只放弃结果：spawn_blocking 里的解码任务仍在跑并持有引擎锁，
                         // cancel() 只能关 token 门控、中止不了它。直接驱逐引擎，让下次
                         // 会话加载新引擎而不是排队等旧任务跑完（旧任务持有的 Arc 会在
                         // 完成后自动释放内存）。
+                        local.cancel();
                         log::warn!(
                             "[coord] local Qwen3-ASR 超时 {}s，驱逐引擎避免下次会话排队",
                             timeout_duration.as_secs()
                         );
-                        inner.local_asr_cache.release_now();
+                        release_local_asr_engines_now(inner, true, false);
+                    } else {
+                        inner.local_asr_cache.touch();
+                        schedule_local_asr_release(inner);
                     }
-                    inner.local_asr_cache.touch();
-                    schedule_local_asr_release(inner);
                     match result {
                         Ok(Ok(r)) => Ok(r),
                         Ok(Err(e)) => {
@@ -3826,9 +3827,21 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                         audio_secs,
                         timeout_duration.as_secs()
                     );
-                    let result = tokio::time::timeout(timeout_duration, local.transcribe()).await;
-                    inner.local_whisper_cache.touch();
-                    schedule_local_whisper_release(inner);
+                    let result =
+                        tokio::time::timeout(timeout_duration, local.clone().transcribe()).await;
+                    if result.is_err() {
+                        // `spawn_blocking` 不可被 timeout 中止；立即驱逐 cache，避免
+                        // 下一次会话等待仍持有 WhisperContext 锁的旧 native 任务。
+                        local.cancel();
+                        log::warn!(
+                            "[coord] local Whisper 超时 {}s，驱逐引擎避免下次会话排队",
+                            timeout_duration.as_secs()
+                        );
+                        release_local_asr_engines_now(inner, false, true);
+                    } else {
+                        inner.local_whisper_cache.touch();
+                        schedule_local_whisper_release(inner);
+                    }
                     match result {
                         Ok(Ok(raw)) => Ok(raw),
                         Ok(Err(error)) => Err(TranscribeFail::new(

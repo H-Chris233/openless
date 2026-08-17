@@ -205,6 +205,9 @@ impl LocalWhisperAsr {
         let audio = pcm_to_f32(&pcm);
         let engine = Arc::clone(&self.engine);
         let language = self.language.clone();
+        // `spawn_blocking` 无法被 tokio::time::timeout 中止；调用方取消或超时后只会
+        // 放弃等待结果，native Whisper 解码仍可能继续运行。Coordinator 会先驱逐
+        // cache，再让后续会话加载新的 WhisperContext，避免复用仍在解码的旧锁。
         let text =
             tauri::async_runtime::spawn_blocking(move || engine.transcribe(&audio, &language))
                 .await

@@ -1559,16 +1559,7 @@ impl Coordinator {
     }
 
     fn release_local_asr_engines(&self, release_qwen: bool, release_whisper: bool) {
-        let _lifecycle_guard = self.inner.local_asr_lifecycle.lock();
-        if release_qwen {
-            self.inner.local_asr_cache.release_now();
-        }
-        #[cfg(target_os = "macos")]
-        if release_whisper {
-            self.inner.local_whisper_cache.release_now();
-        }
-        #[cfg(not(target_os = "macos"))]
-        let _ = release_whisper;
+        release_local_asr_engines_now(&self.inner, release_qwen, release_whisper);
     }
 
     /// 释放当前缓存的本地 ASR 引擎（用户主动点 / 或 删除模型时调）。
@@ -2844,35 +2835,44 @@ impl Coordinator {
             ActiveAsr::Local(local) => {
                 let dur =
                     local_qwen_transcribe_timeout((local.buffer_duration_ms() as f64) / 1000.0);
-                inner.local_asr_cache.touch();
-                let out = tokio::time::timeout(dur, local.transcribe()).await;
+                let out = tokio::time::timeout(dur, local.clone().transcribe()).await;
                 if out.is_err() {
                     // 超时只放弃结果：解码任务仍在 spawn_blocking 里跑并持有引擎锁，
                     // cancel() 中止不了它。驱逐引擎让下次会话加载新引擎（与
                     // coordinator/dictation.rs 同款处理）。
+                    local.cancel();
                     log::warn!(
                         "[coord] 重新转录超时 {}s，驱逐本地 Qwen3-ASR 引擎",
                         dur.as_secs()
                     );
-                    inner.local_asr_cache.release_now();
+                    release_local_asr_engines_now(inner, true, false);
+                } else {
+                    inner.local_asr_cache.touch();
+                    schedule_local_asr_release(inner);
                 }
                 let out = out
                     .map_err(|_| "重新转录超时".to_string())?
                     .map_err(|e| e.to_string())?;
-                schedule_local_asr_release(inner);
                 out
             }
             #[cfg(target_os = "macos")]
             ActiveAsr::LocalWhisper(local) => {
                 let dur =
                     local_whisper_transcribe_timeout((local.buffer_duration_ms() as f64) / 1000.0);
-                inner.local_whisper_cache.touch();
-                let out = tokio::time::timeout(dur, local.transcribe())
-                    .await
-                    .map_err(|_| "重新转录超时".to_string())?
-                    .map_err(|e| e.to_string())?;
-                schedule_local_whisper_release(inner);
-                out
+                let out = tokio::time::timeout(dur, local.clone().transcribe()).await;
+                if out.is_err() {
+                    local.cancel();
+                    log::warn!(
+                        "[coord] 重新转录 Whisper 超时 {}s，驱逐本地引擎",
+                        dur.as_secs()
+                    );
+                    release_local_asr_engines_now(inner, false, true);
+                } else {
+                    inner.local_whisper_cache.touch();
+                    schedule_local_whisper_release(inner);
+                }
+                out.map_err(|_| "重新转录超时".to_string())?
+                    .map_err(|e| e.to_string())?
             }
             #[cfg(target_os = "macos")]
             ActiveAsr::AppleSpeech(local) => tokio::time::timeout(timeout, local.transcribe())

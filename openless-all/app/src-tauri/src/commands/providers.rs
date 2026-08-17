@@ -388,7 +388,7 @@ async fn validate_asr_provider(scope: &ProviderScope) -> Result<(), String> {
         {
             let model_id = crate::persistence::PreferencesStore::new()
                 .ok()
-                .map(|store| store.get().local_asr_active_model)
+                .map(|store| store.get().local_whisper_active_model)
                 .filter(|id| {
                     crate::asr::local::ModelId::from_str(id)
                         .map(|model| model.is_whisper())

@@ -247,7 +247,7 @@ pub(super) fn ensure_local_qwen3_model_ready() -> Result<(), String> {
 #[cfg(target_os = "macos")]
 pub(super) fn ensure_local_whisper_model_ready() -> Result<(), String> {
     let model_id = crate::persistence::PreferencesStore::new()
-        .map(|store| store.get().local_asr_active_model)
+        .map(|store| store.get().local_whisper_active_model)
         .ok()
         .filter(|id| {
             crate::asr::local::ModelId::from_str(id)
@@ -308,6 +308,46 @@ pub(super) fn emit_local_asr_engine_status(inner: &Arc<Inner>) {
 #[cfg(target_os = "android")]
 pub(super) fn emit_local_asr_engine_status(_inner: &Arc<Inner>) {}
 
+/// 统一通过本地 ASR 生命周期门闩驱逐 Qwen / Whisper cache。
+///
+/// `spawn_blocking` 被 timeout 或取消时不会停止 native 解码；此时只丢弃
+/// future 会让旧引擎继续持有 context 锁。驱逐 cache 后下一次会话可以加载
+/// 新引擎，旧任务仍由自身持有的 `Arc` 安全收尾。
+#[cfg(not(target_os = "android"))]
+fn release_local_asr_engines_locked(
+    inner: &Arc<Inner>,
+    release_qwen: bool,
+    release_whisper: bool,
+) {
+    if release_qwen {
+        inner.local_asr_cache.release_now();
+    }
+    #[cfg(target_os = "macos")]
+    if release_whisper {
+        inner.local_whisper_cache.release_now();
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = release_whisper;
+}
+
+#[cfg(not(target_os = "android"))]
+pub(super) fn release_local_asr_engines_now(
+    inner: &Arc<Inner>,
+    release_qwen: bool,
+    release_whisper: bool,
+) {
+    let _lifecycle_guard = inner.local_asr_lifecycle.lock();
+    release_local_asr_engines_locked(inner, release_qwen, release_whisper);
+}
+
+#[cfg(target_os = "android")]
+pub(super) fn release_local_asr_engines_now(
+    _inner: &Arc<Inner>,
+    _release_qwen: bool,
+    _release_whisper: bool,
+) {
+}
+
 /// 一次 dictation 结束后，按 prefs.local_asr_keep_loaded_secs 决定何时释放
 /// 内存里的 Qwen3-ASR 引擎。0 = 立即释放；其它值 = sleep N 秒后看 last_used。
 /// 多次会话叠加多个 sleep 任务，每个独立 check：只要中间又被使用过就跳过释放。
@@ -315,7 +355,7 @@ pub(super) fn schedule_local_asr_release(inner: &Arc<Inner>) {
     let keep_secs = inner.prefs.get().local_asr_keep_loaded_secs;
     let cache = Arc::clone(&inner.local_asr_cache);
     if keep_secs == 0 {
-        cache.release_now();
+        release_local_asr_engines_now(inner, true, false);
         emit_local_asr_engine_status(inner);
         return;
     }
@@ -323,7 +363,11 @@ pub(super) fn schedule_local_asr_release(inner: &Arc<Inner>) {
     let inner = Arc::clone(inner);
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(dur).await;
-        if cache.release_if_idle(dur) {
+        let released = {
+            let _lifecycle_guard = inner.local_asr_lifecycle.lock();
+            cache.release_if_idle(dur)
+        };
+        if released {
             emit_local_asr_engine_status(&inner);
         }
     });
@@ -334,7 +378,7 @@ pub(super) fn schedule_local_whisper_release(inner: &Arc<Inner>) {
     let keep_secs = inner.prefs.get().local_asr_keep_loaded_secs;
     let cache = Arc::clone(&inner.local_whisper_cache);
     if keep_secs == 0 {
-        cache.release_now();
+        release_local_asr_engines_now(inner, false, true);
         emit_local_asr_engine_status(inner);
         return;
     }
@@ -342,7 +386,11 @@ pub(super) fn schedule_local_whisper_release(inner: &Arc<Inner>) {
     let inner = Arc::clone(inner);
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(threshold).await;
-        if cache.release_if_idle(threshold) {
+        let released = {
+            let _lifecycle_guard = inner.local_asr_lifecycle.lock();
+            cache.release_if_idle(threshold)
+        };
+        if released {
             emit_local_asr_engine_status(&inner);
         }
     });
@@ -435,8 +483,13 @@ fn load_current_local_qwen_engine(
 ) -> anyhow::Result<Arc<crate::asr::local::LocalQwenEngine>> {
     let _lifecycle_guard = inner.local_asr_lifecycle.lock();
     let target_is_current = || {
+        let prefs = inner.prefs.get();
+        let model_matches = crate::asr::local::ModelId::from_str(&prefs.local_asr_active_model)
+            .filter(|id| id.is_qwen())
+            .is_some_and(|id| id.as_str() == model_id);
         crate::asr::local::qwen_backend_for_provider(&CredentialsVault::get_active_asr())
             == Some(backend)
+            && model_matches
     };
     if !target_is_current() {
         anyhow::bail!("本地 Qwen3-ASR 加载目标已切换，取消旧后端加载");
@@ -447,7 +500,7 @@ fn load_current_local_qwen_engine(
         .get_or_load(backend, model_id, model_dir)?;
     if !target_is_current() {
         drop(engine);
-        inner.local_asr_cache.release_now();
+        release_local_asr_engines_locked(inner, true, false);
         anyhow::bail!("本地 Qwen3-ASR 加载期间目标已切换，丢弃旧后端");
     }
     Ok(engine)
@@ -511,10 +564,11 @@ pub(super) async fn build_local_qwen3(
 fn selected_local_whisper_target(
     inner: &Arc<Inner>,
 ) -> anyhow::Result<(String, std::path::PathBuf)> {
-    let model_id = crate::asr::local::ModelId::from_str(&inner.prefs.get().local_asr_active_model)
-        .filter(|id| id.is_whisper())
-        .map(|id| id.as_str().to_string())
-        .unwrap_or_else(|| crate::asr::local::WHISPER_MODEL_ID.to_string());
+    let model_id =
+        crate::asr::local::ModelId::from_str(&inner.prefs.get().local_whisper_active_model)
+            .filter(|id| id.is_whisper())
+            .map(|id| id.as_str().to_string())
+            .unwrap_or_else(|| crate::asr::local::WHISPER_MODEL_ID.to_string());
     let path = crate::asr::local::whisper_model_path_for_model(&model_id)?;
     Ok((model_id, path))
 }
@@ -526,8 +580,14 @@ fn load_current_local_whisper_engine(
     model_path: &std::path::Path,
 ) -> anyhow::Result<Arc<crate::asr::local::WhisperEngine>> {
     let _lifecycle_guard = inner.local_asr_lifecycle.lock();
-    let target_is_current =
-        || crate::asr::local::is_local_whisper(&CredentialsVault::get_active_asr());
+    let target_is_current = || {
+        let prefs = inner.prefs.get();
+        let model_matches = crate::asr::local::ModelId::from_str(&prefs.local_whisper_active_model)
+            .filter(|id| id.is_whisper())
+            .map(|id| id.as_str() == model_id)
+            .unwrap_or(model_id == crate::asr::local::WHISPER_MODEL_ID);
+        crate::asr::local::is_local_whisper(&CredentialsVault::get_active_asr()) && model_matches
+    };
     if !target_is_current() {
         anyhow::bail!("本地 Whisper 加载目标已切换，取消旧后端加载");
     }
@@ -537,7 +597,7 @@ fn load_current_local_whisper_engine(
         .get_or_load(model_id, model_path)?;
     if !target_is_current() {
         drop(engine);
-        inner.local_whisper_cache.release_now();
+        release_local_asr_engines_locked(inner, false, true);
         anyhow::bail!("本地 Whisper 加载期间目标已切换，丢弃旧后端");
     }
     Ok(engine)

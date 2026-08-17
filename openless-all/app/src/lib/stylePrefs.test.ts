@@ -77,6 +77,7 @@ const previousPrefs: UserPreferences = {
   codingAgentPanelHotkey: { primary: 'Enter', modifiers: ['cmd', 'shift'] },
   codingAgentQuickHotkey: null,
   localAsrActiveModel: '',
+  localWhisperActiveModel: 'whisper-large-v3-turbo',
   localAsrMirror: 'huggingface',
   localAsrKeepLoadedSecs: 300,
   foundryLocalAsrModel: '',

@@ -158,7 +158,9 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
     const { t } = useTranslation()
     const { prefs, updatePrefs } = useHotkeySettings()
     const [settings, setSettings] = useState<LocalAsrSettings | null>(null)
-    const [supportsQwen3Mlx, setSupportsQwen3Mlx] = useState(IS_MAC)
+    // MetalToolchain 检查发生在源码构建前；这里的提示只服务于已经成功
+    // 启动的应用，等待 native capability 查询完成，避免 Intel Mac 先闪现 MLX。
+    const [supportsQwen3Mlx, setSupportsQwen3Mlx] = useState(false)
     const [models, setModels] = useState<LocalAsrModelStatus[]>([])
     // 两栏看板：右侧当前选中的模型（默认选第一个已下载的）。
     const [selectedModelId, setSelectedModelId] = useState<string | null>(null)
@@ -1522,12 +1524,16 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
             await setActiveAsrProvider(provider)
             await updatePrefs((current) =>
                 current.activeAsrProvider === provider &&
-                current.localAsrActiveModel === modelId
+                (provider === "local-whisper"
+                    ? current.localWhisperActiveModel === modelId
+                    : current.localAsrActiveModel === modelId)
                     ? current
                     : {
                           ...current,
                           activeAsrProvider: provider,
-                          localAsrActiveModel: modelId,
+                          ...(provider === "local-whisper"
+                              ? { localWhisperActiveModel: modelId }
+                              : { localAsrActiveModel: modelId }),
                       },
             )
             await refresh()

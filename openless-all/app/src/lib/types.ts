@@ -431,8 +431,10 @@ export interface UserPreferences {
   codingAgentPanelHotkey: ShortcutBinding | null;
   /** 热键 2：快取用键（选中→Claude→回插）。null = 未配置。 */
   codingAgentQuickHotkey: ShortcutBinding | null;
-  /** 本地 Qwen3-ASR 当前激活的模型 id。仅在 activeAsrProvider === 'local-qwen3' 时有意义。 */
+  /** 本地 Qwen3-ASR 当前激活的模型 id。仅在 local-qwen3 系列 provider 时有意义。 */
   localAsrActiveModel: string;
+  /** macOS 本地 Whisper 当前激活的模型 id。 */
+  localWhisperActiveModel: string;
   /** 本地模型下载源镜像（'huggingface' / 'hf-mirror'）。 */
   localAsrMirror: string;
   /** 本地 ASR 引擎在内存中的保留时长（秒）。0 = 说完话即释放；

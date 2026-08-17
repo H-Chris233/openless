@@ -20,8 +20,8 @@ OpenLess 的 Qwen3-ASR MLX 后端需要 Apple MetalToolchain。
 
   xcrun --find metal
 
-然后重新运行：
+然后重新运行源码构建命令（例如）：
 
-  pnpm tauri dev
+  ./scripts/build-mac.sh
 `)
 process.exit(1)

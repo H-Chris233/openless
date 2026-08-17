@@ -1063,9 +1063,13 @@ pub struct UserPreferences {
     #[serde(default = "default_remote_input_mode")]
     pub remote_input_default_mode: String,
     /// 本地 Qwen3-ASR 当前激活的模型 id（"qwen3-asr-0.6b" / "qwen3-asr-1.7b"）。
-    /// 仅在 active_asr_provider == "local-qwen3" 时有意义。
+    /// 仅在 active_asr_provider 为 local-qwen3 / local-qwen3-mlx / local-qwen3-c 时有意义。
     #[serde(default = "default_local_asr_model")]
     pub local_asr_active_model: String,
+    /// macOS 本地 Whisper 当前激活的模型 id。与 Qwen 偏好分开保存，避免在
+    /// 设置页测试 Whisper 时覆盖 Qwen 的模型选择。
+    #[serde(default = "default_local_whisper_model")]
+    pub local_whisper_active_model: String,
     /// 本地模型下载源镜像（"huggingface" / "hf-mirror"）。
     #[serde(default = "default_local_asr_mirror")]
     pub local_asr_mirror: String,
@@ -1226,6 +1230,17 @@ fn default_local_asr_model() -> String {
     "qwen3-asr-0.6b".into()
 }
 
+fn default_local_whisper_model() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        crate::asr::local::WHISPER_MODEL_ID.into()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        "whisper-large-v3-turbo".into()
+    }
+}
+
 fn default_remote_input_port() -> u16 {
     8443
 }
@@ -1383,6 +1398,9 @@ struct UserPreferencesWire {
     remote_input_default_mode: String,
     #[serde(default = "default_local_asr_model")]
     local_asr_active_model: String,
+    /// `None` 保留“旧配置没有该字段”的信息，供本地 ASR 模型偏好迁移使用。
+    #[serde(default)]
+    local_whisper_active_model: Option<String>,
     #[serde(default = "default_local_asr_mirror")]
     local_asr_mirror: String,
     #[serde(default = "default_local_asr_keep_loaded_secs")]
@@ -1461,6 +1479,33 @@ where
     Option::<ShortcutBinding>::deserialize(deserializer).map(Some)
 }
 
+/// 将旧版共用的 `localAsrActiveModel` 迁移到彼此独立的 Qwen / Whisper 偏好。
+///
+/// 旧字段长期被两套 provider 共用，因此不能只按字符串复制：旧值是 Qwen 时
+/// Whisper 应回到默认值；旧值误存为 Whisper 时则把它迁移到 Whisper，并让
+/// Qwen 回到默认值。新字段显式存在时优先使用它，但只接受 Whisper 模型 id。
+fn migrate_local_asr_models(
+    legacy_model: String,
+    whisper_model: Option<String>,
+) -> (String, String) {
+    let legacy_id = crate::asr::local::ModelId::from_str(&legacy_model);
+    let qwen_model = legacy_id
+        .filter(|id| id.is_qwen())
+        .map(|id| id.as_str().to_string())
+        .unwrap_or_else(default_local_asr_model);
+    let migrated_whisper = match whisper_model {
+        Some(model) => crate::asr::local::ModelId::from_str(&model)
+            .filter(|id| id.is_whisper())
+            .map(|id| id.as_str().to_string())
+            .unwrap_or_else(default_local_whisper_model),
+        None => legacy_id
+            .filter(|id| id.is_whisper())
+            .map(|id| id.as_str().to_string())
+            .unwrap_or_else(default_local_whisper_model),
+    };
+    (qwen_model, migrated_whisper)
+}
+
 impl Default for UserPreferencesWire {
     fn default() -> Self {
         let prefs = UserPreferences::default();
@@ -1524,6 +1569,8 @@ impl Default for UserPreferencesWire {
             remote_input_pin: prefs.remote_input_pin,
             remote_input_default_mode: prefs.remote_input_default_mode,
             local_asr_active_model: prefs.local_asr_active_model,
+            // 新字段必须保持 None：旧配置反序列化时需要区分“字段缺失”和显式值。
+            local_whisper_active_model: None,
             local_asr_mirror: prefs.local_asr_mirror,
             local_asr_keep_loaded_secs: prefs.local_asr_keep_loaded_secs,
             local_asr_models_base_dir: prefs.local_asr_models_base_dir,
@@ -1598,6 +1645,8 @@ impl<'de> Deserialize<'de> for UserPreferences {
         } else {
             true
         };
+        let (local_asr_active_model, local_whisper_active_model) =
+            migrate_local_asr_models(wire.local_asr_active_model, wire.local_whisper_active_model);
 
         Ok(Self {
             hotkey: wire.hotkey,
@@ -1673,7 +1722,8 @@ impl<'de> Deserialize<'de> for UserPreferences {
             switch_style_hotkey: wire.switch_style_hotkey,
             open_app_hotkey: wire.open_app_hotkey,
             style_pack_hotkeys: wire.style_pack_hotkeys,
-            local_asr_active_model: wire.local_asr_active_model,
+            local_asr_active_model,
+            local_whisper_active_model,
             local_asr_mirror: wire.local_asr_mirror,
             local_asr_keep_loaded_secs: wire.local_asr_keep_loaded_secs,
             local_asr_models_base_dir: wire.local_asr_models_base_dir,
@@ -2492,6 +2542,7 @@ impl Default for UserPreferences {
             remote_input_pin: String::new(),
             remote_input_default_mode: default_remote_input_mode(),
             local_asr_active_model: default_local_asr_model(),
+            local_whisper_active_model: default_local_whisper_model(),
             local_asr_mirror: default_local_asr_mirror(),
             local_asr_keep_loaded_secs: default_local_asr_keep_loaded_secs(),
             local_asr_models_base_dir: String::new(),
@@ -3409,6 +3460,35 @@ mod translation_effective_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_asr_model_preferences_migrate_without_cross_provider_overwrite() {
+        let old_qwen: UserPreferences =
+            serde_json::from_str(r#"{"localAsrActiveModel":"qwen3-asr-1.7b"}"#).unwrap();
+        assert_eq!(old_qwen.local_asr_active_model, "qwen3-asr-1.7b");
+        assert_eq!(
+            old_qwen.local_whisper_active_model,
+            default_local_whisper_model()
+        );
+
+        let old_whisper: UserPreferences =
+            serde_json::from_str(r#"{"localAsrActiveModel":"whisper-small"}"#).unwrap();
+        assert_eq!(
+            old_whisper.local_asr_active_model,
+            default_local_asr_model()
+        );
+        assert_eq!(old_whisper.local_whisper_active_model, "whisper-small");
+
+        let separated: UserPreferences = serde_json::from_str(
+            r#"{
+                "localAsrActiveModel":"qwen3-asr-1.7b",
+                "localWhisperActiveModel":"whisper-medium"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(separated.local_asr_active_model, "qwen3-asr-1.7b");
+        assert_eq!(separated.local_whisper_active_model, "whisper-medium");
+    }
 
     #[test]
     fn salvage_preserves_valid_fields_when_one_value_is_invalid() {
