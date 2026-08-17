@@ -1261,6 +1261,34 @@ fn persist_and_commit_remote_pin(
     Ok(pin)
 }
 
+/// 重转录请求的错误分类：静默重试循环要区分「可再试的瞬态错误」与「Foundry
+/// GPU→CPU 回退已到终态」——终态错误再重试只会重新命中同一 CUDA 路径
+/// （PR #945 review P1-1），应立即耗尽重试而不是空转。
+pub(super) enum RetranscribeError {
+    Retryable(String),
+    TerminalFoundryFallback(String),
+}
+
+impl RetranscribeError {
+    /// 面向用户 / 历史重转录的错误消息。
+    pub(super) fn into_string(self) -> String {
+        match self {
+            Self::Retryable(message) | Self::TerminalFoundryFallback(message) => message,
+        }
+    }
+
+    /// 终态 Foundry 回退失败：静默重试循环据此跳过剩余重试次数。
+    pub(super) const fn is_terminal(&self) -> bool {
+        matches!(self, Self::TerminalFoundryFallback(_))
+    }
+}
+
+impl From<String> for RetranscribeError {
+    fn from(message: String) -> Self {
+        Self::Retryable(message)
+    }
+}
+
 impl Coordinator {
     pub fn new() -> Self {
         #[cfg(target_os = "windows")]
@@ -2729,13 +2757,15 @@ impl Coordinator {
     /// 返回 (转写文本, 本次实际构建的 ASR (provider, model) 快照)。快照供命令层把
     /// 「重转用了哪个模型」写回历史（构建时归因，PR #826 review）。
     pub async fn retranscribe_pcm(&self, pcm: Vec<u8>) -> Result<(String, AsrCallLabel), String> {
-        self.retranscribe_pcm_inner(pcm, false, None).await
+        self.retranscribe_pcm_inner(pcm, false, None)
+            .await
+            .map_err(RetranscribeError::into_string)
     }
 
     pub(super) async fn retranscribe_pcm_until_cancelled(
         &self,
         pcm: Vec<u8>,
-    ) -> (Result<String, String>, Option<AsrCallLabel>) {
+    ) -> (Result<String, RetranscribeError>, Option<AsrCallLabel>) {
         // 自动静默重试会重新读取当前设置并构建一条全新的 ASR 会话，因此必须把这次
         // 实际构建的标签交还给调用方。即使请求最终失败，也保留“本次尝试了谁”，让
         // 彻底失败的历史不会退回首次会话的旧归因。
@@ -2752,7 +2782,7 @@ impl Coordinator {
         pcm: Vec<u8>,
         cancel_on_drop: bool,
         attempted_label: Option<&mut Option<AsrCallLabel>>,
-    ) -> Result<(String, AsrCallLabel), String> {
+    ) -> Result<(String, AsrCallLabel), RetranscribeError> {
         let inner = &self.inner;
         let active_asr = CredentialsVault::get_active_asr();
         let (start, asr_call_label) = build_qa_asr_start(inner, &active_asr).await?;
@@ -2843,13 +2873,35 @@ impl Coordinator {
             #[cfg(target_os = "windows")]
             ActiveAsr::FoundryLocalWhisper(local) => {
                 let audio_secs = (local.buffer_duration_ms() as f64) / 1000.0;
-                let outcome = local
+                // 保留 anyhow::Error 以便按「终态回退失败」分类：静默重试循环据此
+                // 跳过剩余重试，避免重新命中同一 CUDA 路径（PR #945 review P1-1）。
+                let outcome = match local
                     .transcribe_with_fallback_notice(
                         windows_local_asr_transcribe_timeout(audio_secs),
                         Arc::new(|_| {}),
                     )
                     .await
-                    .map_err(|e| e.to_string())?;
+                {
+                    Ok(outcome) => outcome,
+                    Err(error)
+                        if crate::asr::local::foundry_runtime::is_terminal_foundry_fallback_error(
+                            &error,
+                        ) =>
+                    {
+                        // 完整错误链只进日志；面向用户的消息用精简文案（与
+                        // dictation/qa 首轮的 P2-2 处理一致）。此消息会经
+                        // retranscribe_pcm 原样展示在历史重转录入口，不能带
+                        // 原始 SDK 文本。
+                        log::error!(
+                            "[coord] Foundry Local Whisper retranscribe reached terminal fallback error: {error:#}"
+                        );
+                        return Err(RetranscribeError::TerminalFoundryFallback(
+                            crate::asr::local::foundry_runtime::FOUNDRY_FALLBACK_TERMINAL_USER_MESSAGE
+                                .to_string(),
+                        ));
+                    }
+                    Err(error) => return Err(RetranscribeError::Retryable(error.to_string())),
+                };
                 debug_assert_eq!(
                     outcome.used_cpu_fallback,
                     outcome.primary_recovery.is_some()

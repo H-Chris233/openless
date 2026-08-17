@@ -90,7 +90,19 @@ pub(crate) fn is_terminal_foundry_fallback_error(error: &anyhow::Error) -> bool 
     })
 }
 
+/// Foundry GPU→CPU 回退终态错误面向用户的精简文案（PR #945 review P2-2）。
+///
+/// 重转录/听写/QA 三处消费点共用，避免文案分叉；原始 GPU/CPU SDK 错误
+/// 只出现在日志与 err 字段，不直接展示给用户。仅 Windows 存在 Foundry
+/// provider，非 Windows 目标无需编译（避免 dead_code 警告）。
 #[cfg(target_os = "windows")]
+pub(crate) const FOUNDRY_FALLBACK_TERMINAL_USER_MESSAGE: &str =
+    "本地识别失败: GPU 识别异常，且 CPU 回退未能完成（详情见日志）";
+
+#[cfg(target_os = "windows")]
+// PR #945 review P2-1：transcribe_audio_file 死代码已删除；此 allow 仍需保留，
+// 覆盖 ensure_loaded 等其他 pre-existing 死代码（删除它们涉及公共 API 形状变更，
+// 留作后续跟进）。
 #[allow(dead_code)]
 mod imp {
     use super::{FoundryPrimaryRecoveryToken, FoundryRouteEpoch};
@@ -657,6 +669,14 @@ mod imp {
     }
 
     pub struct FoundryLocalRuntime {
+        /// 串行化 runtime 内所有「物理状态」操作（下载/加载/卸载/推理），防止
+        /// release/delete/prepare 与在途转写交错破坏 SDK 状态。
+        ///
+        /// 锁粒度 trade-off（PR #945 review P1-3）：`transcribe_audio_files` 整段录音
+        /// 单次持锁，期间 `release_now`/`delete_model`/`prepare` 都会等待；首次 CPU
+        /// 回退下载可能数百 MB、持续数十秒。该等待有界于转写 timeout 预算，且取消
+        /// 仍可中断（`cancel_prepare` + `check_prepare_cancelled`）。若未来要缩小粒度，
+        /// 可让下载阶段不持锁、下载完成后重新校验 route epoch 再持锁加载/推理。
         lifecycle: AsyncMutex<()>,
         cancel_prepare: Arc<AtomicBool>,
         temporary_cpu_fallback_sequence: AtomicU64,
@@ -786,29 +806,10 @@ mod imp {
             Ok(catalog)
         }
 
-        pub async fn transcribe_audio_file(
-            &self,
-            alias: &str,
-            runtime_source: &str,
-            language_hint: Option<&str>,
-            audio_path: &Path,
-            audio_timeout: std::time::Duration,
-        ) -> Result<String> {
-            let route_epoch = self.begin_route();
-            let outcome = self
-                .transcribe_audio_files(
-                    route_epoch,
-                    alias,
-                    runtime_source,
-                    language_hint,
-                    &[audio_path.to_path_buf()],
-                    audio_timeout,
-                    Arc::new(|_| {}),
-                )
-                .await?;
-            Ok(outcome.texts.into_iter().next().unwrap_or_default())
-        }
-
+        /// 整段录音（所有分片 + CPU 回退的首次下载/加载）在单次 lifecycle 锁持有内
+        /// 完成。锁期间 `release_now`/`delete_model`/`prepare` 会等待，首次 CPU 回退
+        /// 下载可达数百 MB；该等待有界于 `audio_timeout`，取消仍可中断（见
+        /// `FoundryLocalRuntime::lifecycle` 字段注释的 trade-off，PR #945 review P1-3）。
         pub(crate) async fn transcribe_audio_files(
             &self,
             route_epoch: FoundryRouteEpoch,
@@ -855,7 +856,16 @@ mod imp {
 
         pub async fn release_now(&self) -> Result<()> {
             self.advance_route_epoch();
+            let wait_started = Instant::now();
             let _lifecycle = self.lifecycle.lock().await;
+            let waited_ms = wait_started.elapsed().as_millis();
+            if waited_ms >= 100 {
+                // 长时间等待说明有在途转写/下载持锁（PR #945 review P1-3），
+                // 记日志便于真机定位「点释放模型无响应」的阻塞点。
+                log::info!(
+                    "[foundry-asr] release_now waited {waited_ms} ms for lifecycle lock (in-flight transcribe/download)"
+                );
+            }
             self.release_now_locked().await
         }
 
@@ -2300,17 +2310,6 @@ impl FoundryLocalRuntime {
         &self,
     ) -> anyhow::Result<Vec<super::foundry::FoundryCatalogModel>> {
         Ok(super::foundry::static_catalog_models())
-    }
-
-    pub async fn transcribe_audio_file(
-        &self,
-        alias: &str,
-        _runtime_source: &str,
-        _language_hint: Option<&str>,
-        _audio_path: &std::path::Path,
-        _audio_timeout: std::time::Duration,
-    ) -> anyhow::Result<String> {
-        anyhow::bail!("Foundry Local Whisper is only available on Windows: {alias}");
     }
 
     pub(crate) async fn transcribe_audio_files(

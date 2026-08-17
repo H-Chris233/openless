@@ -1403,11 +1403,18 @@ pub(super) async fn end_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
                         return Ok(());
                     }
                     log::error!("[coord] QA Foundry Local Whisper transcribe failed: {e:#}");
-                    finish_qa_with_error_if_current(
-                        inner,
-                        session_id,
-                        format!("本地识别失败: {e}"),
-                    );
+                    // 终态错误面向用户的消息精简（PR #945 review P2-2）：原始 GPU/CPU
+                    // SDK 错误保留在上方日志，不把冗长的引擎错误文本直接展示给用户。
+                    let user_msg =
+                        if crate::asr::local::foundry_runtime::is_terminal_foundry_fallback_error(
+                            &e,
+                        ) {
+                            crate::asr::local::foundry_runtime::FOUNDRY_FALLBACK_TERMINAL_USER_MESSAGE
+                                .to_string()
+                        } else {
+                            format!("本地识别失败: {e}")
+                        };
+                    finish_qa_with_error_if_current(inner, session_id, user_msg);
                     return Err(e.to_string());
                 }
                 },
