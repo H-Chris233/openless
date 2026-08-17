@@ -551,20 +551,47 @@ pub(super) async fn transcribe_overlay_dictation_asr(
             debug_assert!(!uses_global_timeout);
             let audio_secs = (local.buffer_duration_ms() as f64) / 1000.0;
             let timeout_duration = windows_local_asr_transcribe_timeout(audio_secs);
-            match local.transcribe(timeout_duration).await {
-                Ok(raw) => {
+            let notices = foundry_dictation_fallback_notice_callback(_inner, _current_session_id);
+            tokio::select! {
+                result = local.transcribe_with_fallback_notice(timeout_duration, notices) => match result {
+                    Ok(outcome) => {
+                        debug_assert_eq!(
+                            outcome.used_cpu_fallback,
+                            outcome.primary_recovery.is_some()
+                        );
+                        if _inner.state.lock().cancelled {
+                            local.cancel();
+                            schedule_foundry_local_asr_release(
+                                _inner,
+                                AsrReleaseSession::Dictation(_current_session_id),
+                                None,
+                            );
+                            return OverlayDictationTranscribeOutcome::Cancelled;
+                        }
+                        schedule_foundry_local_asr_release(
+                            _inner,
+                            AsrReleaseSession::Dictation(_current_session_id),
+                            outcome.primary_recovery,
+                        );
+                        Ok(outcome.raw)
+                    }
+                    Err(error) => {
+                        schedule_foundry_local_asr_release(
+                            _inner,
+                            AsrReleaseSession::Dictation(_current_session_id),
+                            None,
+                        );
+                        Err(error.to_string())
+                    }
+                },
+                _ = wait_for_overlay_dictation_cancel(_inner, _current_session_id) => {
+                    local.cancel();
                     schedule_foundry_local_asr_release(
                         _inner,
                         AsrReleaseSession::Dictation(_current_session_id),
+                        None,
                     );
-                    Ok(raw)
-                }
-                Err(error) => {
-                    schedule_foundry_local_asr_release(
-                        _inner,
-                        AsrReleaseSession::Dictation(_current_session_id),
-                    );
-                    Err(error.to_string())
+                    return OverlayDictationTranscribeOutcome::Cancelled;
                 }
             }
         }
@@ -1335,13 +1362,37 @@ pub(super) async fn end_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
                 audio_secs,
                 timeout_duration.as_secs()
             );
-            match local.transcribe(timeout_duration).await {
-                Ok(r) => {
-                    schedule_foundry_local_asr_release(inner, AsrReleaseSession::Qa(qa_session_id));
-                    r
+            let notices = foundry_qa_fallback_notice_callback(inner, session_id);
+            tokio::select! {
+                result = local.transcribe_with_fallback_notice(timeout_duration, notices) => match result {
+                Ok(outcome) => {
+                    debug_assert_eq!(
+                        outcome.used_cpu_fallback,
+                        outcome.primary_recovery.is_some()
+                    );
+                    if !qa_turn_can_continue(&inner.qa_state.lock(), session_id) {
+                        local.cancel();
+                        schedule_foundry_local_asr_release(
+                            inner,
+                            AsrReleaseSession::Qa(qa_session_id),
+                            None,
+                        );
+                        finish_qa_idle_silently_if_current(inner, session_id);
+                        return Ok(());
+                    }
+                    schedule_foundry_local_asr_release(
+                        inner,
+                        AsrReleaseSession::Qa(qa_session_id),
+                        outcome.primary_recovery,
+                    );
+                    outcome.raw
                 }
                 Err(e) => {
-                    schedule_foundry_local_asr_release(inner, AsrReleaseSession::Qa(qa_session_id));
+                    schedule_foundry_local_asr_release(
+                        inner,
+                        AsrReleaseSession::Qa(qa_session_id),
+                        None,
+                    );
                     if inner.qa_state.lock().cancelled {
                         log::info!(
                             "[coord] QA Foundry Local Whisper transcribe cancelled — discarding transcript"
@@ -1352,12 +1403,30 @@ pub(super) async fn end_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
                         return Ok(());
                     }
                     log::error!("[coord] QA Foundry Local Whisper transcribe failed: {e:#}");
-                    finish_qa_with_error_if_current(
-                        inner,
-                        session_id,
-                        format!("本地识别失败: {e}"),
-                    );
+                    // 终态错误面向用户的消息精简（PR #945 review P2-2）：原始 GPU/CPU
+                    // SDK 错误保留在上方日志，不把冗长的引擎错误文本直接展示给用户。
+                    let user_msg =
+                        if crate::asr::local::foundry_runtime::is_terminal_foundry_fallback_error(
+                            &e,
+                        ) {
+                            crate::asr::local::foundry_runtime::FOUNDRY_FALLBACK_TERMINAL_USER_MESSAGE
+                                .to_string()
+                        } else {
+                            format!("本地识别失败: {e}")
+                        };
+                    finish_qa_with_error_if_current(inner, session_id, user_msg);
                     return Err(e.to_string());
+                }
+                },
+                _ = wait_for_qa_processing_cancel(inner, session_id) => {
+                    local.cancel();
+                    schedule_foundry_local_asr_release(
+                        inner,
+                        AsrReleaseSession::Qa(qa_session_id),
+                        None,
+                    );
+                    finish_qa_idle_silently_if_current(inner, session_id);
+                    return Ok(());
                 }
             }
         }

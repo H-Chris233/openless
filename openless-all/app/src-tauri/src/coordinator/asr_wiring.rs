@@ -279,7 +279,10 @@ pub(super) enum AsrReleaseSession {
 }
 
 #[cfg(target_os = "windows")]
-pub(super) fn asr_release_session_is_current(inner: &Arc<Inner>, session: AsrReleaseSession) -> bool {
+pub(super) fn asr_release_session_is_current(
+    inner: &Arc<Inner>,
+    session: AsrReleaseSession,
+) -> bool {
     match session {
         AsrReleaseSession::Dictation(session_id) => inner.state.lock().session_id == session_id,
         AsrReleaseSession::Qa(session_id) => inner.qa_state.lock().session_id == session_id,
@@ -287,18 +290,50 @@ pub(super) fn asr_release_session_is_current(inner: &Arc<Inner>, session: AsrRel
 }
 
 #[cfg(target_os = "windows")]
-pub(super) fn schedule_foundry_local_asr_release(inner: &Arc<Inner>, session: AsrReleaseSession) {
+pub(super) fn schedule_foundry_local_asr_release(
+    inner: &Arc<Inner>,
+    session: AsrReleaseSession,
+    primary_recovery: Option<crate::asr::local::foundry_runtime::FoundryPrimaryRecoveryToken>,
+) {
     let keep_secs = foundry_local_asr_release_keep_secs(inner);
     let runtime = Arc::clone(&inner.foundry_local_runtime);
+    let scheduled_epoch = runtime.route_epoch_snapshot();
     let inner = Arc::clone(inner);
     tauri::async_runtime::spawn(async move {
-        if keep_secs > 0 {
-            tokio::time::sleep(std::time::Duration::from_secs(keep_secs as u64)).await;
+        let deadline = tokio::time::Instant::now()
+            .checked_add(std::time::Duration::from_secs(keep_secs as u64));
+        if let Some(token) = primary_recovery.as_ref() {
+            if keep_secs == 0 {
+                if let Err(error) = runtime.release_if_route_epoch(token.route_epoch()).await {
+                    log::warn!(
+                        "[foundry-asr] immediate temporary fallback cleanup failed: {error:#}"
+                    );
+                }
+                return;
+            }
+            match runtime.restore_primary_for_keep_alive(token).await {
+                Ok(true) => {}
+                Ok(false) => return,
+                Err(error) => {
+                    log::warn!("[foundry-asr] background primary recovery failed: {error:#}");
+                    return;
+                }
+            }
+        }
+        if let Some(deadline) = deadline {
+            tokio::time::sleep_until(deadline).await;
         }
         if !asr_release_session_is_current(&inner, session) {
             return;
         }
-        if let Err(error) = runtime.release_now().await {
+        let release = match primary_recovery.as_ref() {
+            Some(token) => runtime.release_primary_if_current(token).await.map(|_| ()),
+            None => runtime
+                .release_if_route_epoch(scheduled_epoch)
+                .await
+                .map(|_| ()),
+        };
+        if let Err(error) = release {
             log::warn!("[foundry-asr] scheduled release failed: {error:#}");
         }
     });
