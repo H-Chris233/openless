@@ -208,14 +208,15 @@ impl FoundryLocalWhisperAsr {
         self.cancel_generation.fetch_add(1, Ordering::SeqCst);
         #[cfg(target_os = "windows")]
         {
-            self.runtime.request_cancel_prepare();
-            // `end_session` 会 drop 在途 future；若此时已切到临时 CPU，不能等待普通模型
-            // 保活计时器才释放。lease 上界将清理限定到当前录音，避免旧取消影响下一段录音。
-            if let Some(cancelled_through) = self.runtime.cancellation_cleanup_lease() {
+            // 旧 provider 不能取消新 route；runtime 同时返回当前 route 的精确 CPU lease，
+            // 避免跨会话取消共享的 prepare 标志或误卸载新录音的临时模型。
+            if let Some(cancelled_lease) =
+                self.runtime.request_cancel_transcription(self.route_epoch)
+            {
                 let runtime = Arc::clone(&self.runtime);
                 tauri::async_runtime::spawn(async move {
                     if let Err(error) = runtime
-                        .release_temporary_cpu_fallback(cancelled_through)
+                        .release_temporary_cpu_fallback(cancelled_lease)
                         .await
                     {
                         log::warn!(

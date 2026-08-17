@@ -212,9 +212,9 @@ mod imp {
 
     fn should_release_temporary_cpu_fallback(
         loaded_lease: Option<FoundryTemporaryCpuFallbackLease>,
-        cancelled_through: FoundryTemporaryCpuFallbackLease,
+        cancelled_lease: FoundryTemporaryCpuFallbackLease,
     ) -> bool {
-        loaded_lease.is_some_and(|lease| lease <= cancelled_through)
+        loaded_lease == Some(cancelled_lease)
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -773,6 +773,37 @@ mod imp {
             self.cancel_prepare.store(true, Ordering::SeqCst);
         }
 
+        /// 仅取消仍属于指定 route 的 ASR 操作，并返回该操作当前持有的临时 CPU lease。
+        ///
+        /// route 校验与代数推进使用 CAS，避免旧 provider 在新录音刚开始时把共享
+        /// `cancel_prepare` 标志写给新录音。清理 lease 从 state 读取精确值，不使用
+        /// runtime 全局序列上界，避免旧取消误卸载新录音的 CPU 模型。
+        pub(crate) fn request_cancel_transcription(
+            &self,
+            expected_epoch: FoundryRouteEpoch,
+        ) -> Option<FoundryTemporaryCpuFallbackLease> {
+            let state = self.state.lock();
+            let current = self.route_epoch.load(Ordering::SeqCst);
+            if current != expected_epoch.0
+                || self
+                    .route_epoch
+                    .compare_exchange(
+                        current,
+                        current.wrapping_add(1),
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    )
+                    .is_err()
+            {
+                return None;
+            }
+            self.cancel_prepare.store(true, Ordering::SeqCst);
+            state
+                .loaded
+                .as_ref()
+                .and_then(|loaded| loaded.temporary_cpu_fallback_lease)
+        }
+
         #[cfg(test)]
         pub(crate) fn cancel_prepare_requested_for_tests(&self) -> bool {
             self.cancel_prepare.load(Ordering::SeqCst)
@@ -896,26 +927,17 @@ mod imp {
             Ok(true)
         }
 
-        /// 返回当前取消可清理到的 CPU 回退 lease 上界。
-        ///
-        /// 该值覆盖已经开始但尚未完成加载的回退；后续录音一定分配更高 lease，因此旧取消
-        /// 不会影响下一段录音。
-        pub fn cancellation_cleanup_lease(&self) -> Option<FoundryTemporaryCpuFallbackLease> {
-            let sequence = self.temporary_cpu_fallback_sequence.load(Ordering::SeqCst);
-            (sequence != 0).then_some(FoundryTemporaryCpuFallbackLease(sequence))
-        }
-
-        /// 取消当前录音时仅清理不晚于 `cancelled_through` 的临时 CPU 模型；正常 alias 模型仍遵循
-        /// 用户已有的保活设置。该方法会等待在途下载/加载/推理释放 lifecycle 锁。
+        /// 取消当前录音时仅清理精确匹配的临时 CPU 模型；正常 alias 模型仍遵循用户已有的
+        /// 保活设置。该方法会等待在途下载/加载/推理释放 lifecycle 锁。
         pub async fn release_temporary_cpu_fallback(
             &self,
-            cancelled_through: FoundryTemporaryCpuFallbackLease,
+            cancelled_lease: FoundryTemporaryCpuFallbackLease,
         ) -> Result<()> {
             let _lifecycle = self.lifecycle.lock().await;
             let temporary_cpu = self.loaded_model_snapshot().filter(|loaded| {
                 should_release_temporary_cpu_fallback(
                     loaded.temporary_cpu_fallback_lease,
-                    cancelled_through,
+                    cancelled_lease,
                 )
             });
             if let Some(loaded) = temporary_cpu {
@@ -2175,12 +2197,11 @@ mod imp {
         }
 
         #[test]
-        fn cancelled_recording_cleanup_cannot_release_a_newer_cpu_fallback_lease() {
+        fn cancelled_recording_cleanup_matches_only_its_cpu_fallback_lease() {
             let runtime = FoundryLocalRuntime::new();
             let cancelled_lease = runtime.next_temporary_cpu_fallback_lease();
             let newer_lease = runtime.next_temporary_cpu_fallback_lease();
 
-            assert_eq!(runtime.cancellation_cleanup_lease(), Some(newer_lease));
             assert!(should_release_temporary_cpu_fallback(
                 Some(cancelled_lease),
                 cancelled_lease
@@ -2189,6 +2210,31 @@ mod imp {
                 Some(newer_lease),
                 cancelled_lease
             ));
+        }
+
+        #[test]
+        fn stale_transcription_cancel_cannot_touch_the_current_route() {
+            let runtime = FoundryLocalRuntime::new();
+            let old_route = runtime.begin_route();
+            let current_route = runtime.begin_route();
+
+            assert_eq!(
+                runtime.request_cancel_transcription(old_route),
+                None,
+                "a stale provider must not cancel the current route"
+            );
+            assert_eq!(runtime.route_epoch_snapshot(), current_route);
+            assert!(!runtime.cancel_prepare_requested_for_tests());
+        }
+
+        #[test]
+        fn current_transcription_cancel_invalidates_its_route() {
+            let runtime = FoundryLocalRuntime::new();
+            let route = runtime.begin_route();
+
+            assert_eq!(runtime.request_cancel_transcription(route), None);
+            assert_ne!(runtime.route_epoch_snapshot(), route);
+            assert!(runtime.cancel_prepare_requested_for_tests());
         }
 
         #[test]
@@ -2329,10 +2375,6 @@ impl FoundryLocalRuntime {
         Ok(())
     }
 
-    pub fn cancellation_cleanup_lease(&self) -> Option<FoundryTemporaryCpuFallbackLease> {
-        None
-    }
-
     pub async fn release_temporary_cpu_fallback(
         &self,
         _lease: FoundryTemporaryCpuFallbackLease,
@@ -2378,7 +2420,6 @@ mod tests {
         let runtime = FoundryLocalRuntime::new();
 
         runtime.release_now().await.unwrap();
-        assert_eq!(runtime.cancellation_cleanup_lease(), None);
 
         let status = runtime.status_snapshot("whisper-small", "auto").await;
         assert_eq!(status.loaded_model_id, None);
