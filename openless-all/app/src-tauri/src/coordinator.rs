@@ -1183,27 +1183,46 @@ struct PreparedWindowsImeSessionSlot {
     prepared: PreparedWindowsImeSession,
 }
 
-/// 历史音频静默重试的 ASR 资源护栏。
+/// 历史音频重转录的 ASR 资源护栏。
 ///
-/// 重试 future 被 select 丢弃时，局部 QaAsrStart 不会再经过正常的
-/// end_session 收尾；这里用 Drop 补 cancel 和本地模型释放，尤其覆盖
-/// spawn_blocking 已经开始运行的本地 ASR。
+/// 静默重试 future 被 select 丢弃时，局部 QaAsrStart 不会再经过正常的 end_session
+/// 收尾；这里用 Drop 补 cancel 和本地模型释放。Foundry 的普通历史重转录也持有该 guard，
+/// 确保成功、失败和 future 提前结束都能调度模型释放。
 struct CancellableRetranscribeGuard {
     inner: Arc<Inner>,
     asr: Option<ActiveAsr>,
     session_id: SessionId,
+    cancel_on_drop: bool,
 }
 
 impl CancellableRetranscribeGuard {
-    fn new(inner: Arc<Inner>, asr: ActiveAsr, session_id: SessionId) -> Self {
+    fn new(inner: Arc<Inner>, asr: ActiveAsr, session_id: SessionId, cancel_on_drop: bool) -> Self {
         Self {
             inner,
             asr: Some(asr),
             session_id,
+            cancel_on_drop,
         }
     }
 
     fn disarm(mut self) {
+        self.asr.take();
+    }
+
+    #[cfg(target_os = "windows")]
+    fn finish_foundry(
+        mut self,
+        primary_recovery: Option<crate::asr::local::foundry_runtime::FoundryPrimaryRecoveryToken>,
+    ) {
+        debug_assert!(matches!(
+            self.asr.as_ref(),
+            Some(ActiveAsr::FoundryLocalWhisper(_))
+        ));
+        schedule_foundry_local_asr_release(
+            &self.inner,
+            AsrReleaseSession::Dictation(self.session_id),
+            primary_recovery,
+        );
         self.asr.take();
     }
 }
@@ -1213,9 +1232,31 @@ impl Drop for CancellableRetranscribeGuard {
         let Some(asr) = self.asr.take() else {
             return;
         };
-        let asr_for_release = asr.clone();
-        cancel_active_asr(asr);
-        dictation::schedule_cancelled_asr_release(&self.inner, &asr_for_release, self.session_id);
+        if self.cancel_on_drop {
+            cancel_active_asr(asr.clone());
+        }
+        dictation::schedule_cancelled_asr_release(&self.inner, &asr, self.session_id);
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RetranscribeCompletion {
+    Disarm,
+    ReleaseFoundry(
+        Option<crate::asr::local::foundry_runtime::FoundryPrimaryRecoveryToken>,
+    ),
+}
+
+#[cfg(target_os = "windows")]
+fn retranscribe_completion(
+    is_foundry: bool,
+    primary_recovery: Option<crate::asr::local::foundry_runtime::FoundryPrimaryRecoveryToken>,
+) -> RetranscribeCompletion {
+    if is_foundry {
+        RetranscribeCompletion::ReleaseFoundry(primary_recovery)
+    } else {
+        RetranscribeCompletion::Disarm
     }
 }
 
@@ -1230,6 +1271,34 @@ fn persist_and_commit_remote_pin(
     *slot.lock() = Some(pin.clone());
     refresh();
     Ok(pin)
+}
+
+/// 重转录请求的错误分类：静默重试循环要区分「可再试的瞬态错误」与「Foundry
+/// GPU→CPU 回退已到终态」——终态错误再重试只会重新命中同一 CUDA 路径
+/// （PR #945 review P1-1），应立即耗尽重试而不是空转。
+pub(super) enum RetranscribeError {
+    Retryable(String),
+    TerminalFoundryFallback(String),
+}
+
+impl RetranscribeError {
+    /// 面向用户 / 历史重转录的错误消息。
+    pub(super) fn into_string(self) -> String {
+        match self {
+            Self::Retryable(message) | Self::TerminalFoundryFallback(message) => message,
+        }
+    }
+
+    /// 终态 Foundry 回退失败：静默重试循环据此跳过剩余重试次数。
+    pub(super) const fn is_terminal(&self) -> bool {
+        matches!(self, Self::TerminalFoundryFallback(_))
+    }
+}
+
+impl From<String> for RetranscribeError {
+    fn from(message: String) -> Self {
+        Self::Retryable(message)
+    }
 }
 
 impl Coordinator {
@@ -2714,13 +2783,15 @@ impl Coordinator {
     /// 返回 (转写文本, 本次实际构建的 ASR (provider, model) 快照)。快照供命令层把
     /// 「重转用了哪个模型」写回历史（构建时归因，PR #826 review）。
     pub async fn retranscribe_pcm(&self, pcm: Vec<u8>) -> Result<(String, AsrCallLabel), String> {
-        self.retranscribe_pcm_inner(pcm, false, None).await
+        self.retranscribe_pcm_inner(pcm, false, None)
+            .await
+            .map_err(RetranscribeError::into_string)
     }
 
     pub(super) async fn retranscribe_pcm_until_cancelled(
         &self,
         pcm: Vec<u8>,
-    ) -> (Result<String, String>, Option<AsrCallLabel>) {
+    ) -> (Result<String, RetranscribeError>, Option<AsrCallLabel>) {
         // 自动静默重试会重新读取当前设置并构建一条全新的 ASR 会话，因此必须把这次
         // 实际构建的标签交还给调用方。即使请求最终失败，也保留“本次尝试了谁”，让
         // 彻底失败的历史不会退回首次会话的旧归因。
@@ -2737,18 +2808,24 @@ impl Coordinator {
         pcm: Vec<u8>,
         cancel_on_drop: bool,
         attempted_label: Option<&mut Option<AsrCallLabel>>,
-    ) -> Result<(String, AsrCallLabel), String> {
+    ) -> Result<(String, AsrCallLabel), RetranscribeError> {
         let inner = &self.inner;
         let active_asr = CredentialsVault::get_active_asr();
         let (start, asr_call_label) = build_qa_asr_start(inner, &active_asr).await?;
         if let Some(label_slot) = attempted_label {
             *label_slot = Some(asr_call_label.clone());
         }
-        let retry_guard = if cancel_on_drop {
+        #[cfg(target_os = "windows")]
+        let is_foundry_retranscribe =
+            matches!(start.active_asr(), ActiveAsr::FoundryLocalWhisper(_));
+        #[cfg(not(target_os = "windows"))]
+        let is_foundry_retranscribe = false;
+        let retry_guard = if cancel_on_drop || is_foundry_retranscribe {
             Some(CancellableRetranscribeGuard::new(
                 Arc::clone(inner),
                 start.active_asr(),
                 inner.state.lock().session_id,
+                cancel_on_drop,
             ))
         } else {
             None
@@ -2761,6 +2838,8 @@ impl Coordinator {
         let elevenlabs_timeout = crate::asr::elevenlabs::transcribe_timeout(
             crate::asr::pcm::pcm_duration_ms(&pcm) as f64 / 1000.0,
         );
+        #[cfg(target_os = "windows")]
+        let mut foundry_primary_recovery = None;
         let raw = match start.active_asr() {
             ActiveAsr::Volcengine(asr) => {
                 asr.send_last_frame().await.map_err(|e| e.to_string())?;
@@ -2818,10 +2897,41 @@ impl Coordinator {
             #[cfg(target_os = "windows")]
             ActiveAsr::FoundryLocalWhisper(local) => {
                 let audio_secs = (local.buffer_duration_ms() as f64) / 1000.0;
-                local
-                    .transcribe(windows_local_asr_transcribe_timeout(audio_secs))
+                // 保留 anyhow::Error 以便按「终态回退失败」分类：静默重试循环据此
+                // 跳过剩余重试，避免重新命中同一 CUDA 路径（PR #945 review P1-1）。
+                let outcome = match local
+                    .transcribe_with_fallback_notice(
+                        windows_local_asr_transcribe_timeout(audio_secs),
+                        Arc::new(|_| {}),
+                    )
                     .await
-                    .map_err(|e| e.to_string())?
+                {
+                    Ok(outcome) => outcome,
+                    Err(error)
+                        if crate::asr::local::foundry_runtime::is_terminal_foundry_fallback_error(
+                            &error,
+                        ) =>
+                    {
+                        // 完整错误链只进日志；面向用户的消息用精简文案（与
+                        // dictation/qa 首轮的 P2-2 处理一致）。此消息会经
+                        // retranscribe_pcm 原样展示在历史重转录入口，不能带
+                        // 原始 SDK 文本。
+                        log::error!(
+                            "[coord] Foundry Local Whisper retranscribe reached terminal fallback error: {error:#}"
+                        );
+                        return Err(RetranscribeError::TerminalFoundryFallback(
+                            crate::asr::local::foundry_runtime::FOUNDRY_FALLBACK_TERMINAL_USER_MESSAGE
+                                .to_string(),
+                        ));
+                    }
+                    Err(error) => return Err(RetranscribeError::Retryable(error.to_string())),
+                };
+                debug_assert_eq!(
+                    outcome.used_cpu_fallback,
+                    outcome.primary_recovery.is_some()
+                );
+                foundry_primary_recovery = outcome.primary_recovery;
+                outcome.raw
             }
             #[cfg(target_os = "windows")]
             ActiveAsr::SherpaOnnxLocal(local) => {
@@ -2881,6 +2991,14 @@ impl Coordinator {
                 .map_err(|e| e.to_string())?,
         };
         if let Some(guard) = retry_guard {
+            #[cfg(target_os = "windows")]
+            match retranscribe_completion(is_foundry_retranscribe, foundry_primary_recovery) {
+                RetranscribeCompletion::ReleaseFoundry(primary_recovery) => {
+                    guard.finish_foundry(primary_recovery);
+                }
+                RetranscribeCompletion::Disarm => guard.disarm(),
+            }
+            #[cfg(not(target_os = "windows"))]
             guard.disarm();
         }
         Ok((raw.text, asr_call_label))
@@ -4590,6 +4708,26 @@ mod tests {
             &runtime,
             &coordinator.inner.foundry_local_runtime
         ));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn foundry_retranscription_completion_requires_release_with_recovery_token() {
+        let runtime = crate::asr::local::FoundryLocalRuntime::new();
+        let token = crate::asr::local::foundry_runtime::FoundryPrimaryRecoveryToken::new(
+            "whisper-medium",
+            "whisper-medium-cuda-gpu:4",
+            runtime.begin_route(),
+        );
+
+        assert_eq!(
+            retranscribe_completion(true, Some(token.clone())),
+            RetranscribeCompletion::ReleaseFoundry(Some(token))
+        );
+        assert_eq!(
+            retranscribe_completion(false, None),
+            RetranscribeCompletion::Disarm
+        );
     }
 
     #[cfg(target_os = "windows")]

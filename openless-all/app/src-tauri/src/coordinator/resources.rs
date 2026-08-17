@@ -5,7 +5,78 @@ use crate::recorder::Recorder;
 use crate::types::CapsuleState;
 use tauri::Manager;
 
+#[cfg(target_os = "windows")]
+use crate::asr::local::foundry_runtime::{FoundryFallbackNotice, FoundryFallbackNoticeCallback};
+
+#[cfg(target_os = "windows")]
+use super::QaPhase;
 use super::{emit_capsule, ActiveAsr, AsrCallLabel, Inner};
+
+/// 把 Foundry GPU→CPU 回退的内部通知投影到当前听写胶囊。
+///
+/// 只在同一个 Processing 会话仍有效时发出，避免旧转写 future 的迟到通知盖住新会话。
+#[cfg(target_os = "windows")]
+pub(super) fn foundry_dictation_fallback_notice_callback(
+    inner: &Arc<Inner>,
+    session_id: SessionId,
+) -> FoundryFallbackNoticeCallback {
+    let inner = Arc::clone(inner);
+    Arc::new(move |notice: FoundryFallbackNotice| {
+        let elapsed_ms = {
+            let state = inner.state.lock();
+            if state.session_id != session_id
+                || state.cancelled
+                || state.phase != SessionPhase::Processing
+            {
+                return;
+            }
+            state.started_at.elapsed().as_millis() as u64
+        };
+        log::info!(
+            "[foundry-asr] fallback_notice context=dictation phase={notice:?} session_id={session_id}"
+        );
+        emit_capsule(
+            &inner,
+            CapsuleState::Transcribing,
+            0.0,
+            elapsed_ms,
+            Some(notice.message().to_string()),
+            None,
+        );
+    })
+}
+
+/// 把 Foundry GPU→CPU 回退的内部通知投影到当前 QA 胶囊。
+#[cfg(target_os = "windows")]
+pub(super) fn foundry_qa_fallback_notice_callback(
+    inner: &Arc<Inner>,
+    session_id: SessionId,
+) -> FoundryFallbackNoticeCallback {
+    let inner = Arc::clone(inner);
+    Arc::new(move |notice: FoundryFallbackNotice| {
+        let active = {
+            let state = inner.qa_state.lock();
+            state.panel_visible
+                && state.session_id == session_id
+                && !state.cancelled
+                && state.phase == QaPhase::Processing
+        };
+        if !active {
+            return;
+        }
+        log::info!(
+            "[foundry-asr] fallback_notice context=qa phase={notice:?} session_id={session_id}"
+        );
+        emit_capsule(
+            &inner,
+            CapsuleState::Transcribing,
+            0.0,
+            0,
+            Some(notice.message().to_string()),
+            None,
+        );
+    })
+}
 
 pub(super) struct SessionResource<T> {
     pub(super) session_id: SessionId,

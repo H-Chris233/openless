@@ -3078,12 +3078,26 @@ fn fail_dictation(
 struct TranscribeFail {
     user_msg: String,
     err: String,
+    retryable: bool,
 }
 
 impl TranscribeFail {
     fn new(user_msg: String, err: String) -> Self {
-        Self { user_msg, err }
+        Self {
+            user_msg,
+            err,
+            retryable: true,
+        }
     }
+
+    fn without_silent_retry(mut self) -> Self {
+        self.retryable = false;
+        self
+    }
+}
+
+fn should_attempt_silent_retry(fail: &TranscribeFail) -> bool {
+    fail.retryable
 }
 
 /// 自动静默重试的最大次数（不含首次转写）。失败/超时多为网络或服务端瞬时抖动，重试几次
@@ -3132,12 +3146,24 @@ fn pcm_duration_ms(pcm_len: usize) -> u64 {
 async fn retranscribe_pcm_via_inner(
     inner: &Arc<Inner>,
     pcm: Vec<u8>,
-) -> (Result<String, String>, Option<AsrCallLabel>) {
+) -> (Result<String, RetranscribeError>, Option<AsrCallLabel>) {
     Coordinator {
         inner: Arc::clone(inner),
     }
     .retranscribe_pcm_until_cancelled(pcm)
     .await
+}
+
+/// 一次重试失败后的处置决策：终态 Foundry 回退错误立即耗尽重试（保留本次尝试的
+/// label 归因），瞬态错误继续下一轮。独立纯函数以便测试覆盖循环短路路径
+/// （PR #945 review P1-1）。
+fn retry_error_outcome(
+    error: &RetranscribeError,
+    last_attempted_label: &Option<AsrCallLabel>,
+) -> Option<SilentRetryOutcome> {
+    error
+        .is_terminal()
+        .then(|| SilentRetryOutcome::Exhausted(last_attempted_label.clone()))
 }
 
 /// 自动静默重试：从刚归档的 wav 读 PCM，用当前 provider 重转最多 SILENT_RETRY_MAX 次（线性
@@ -3203,7 +3229,19 @@ async fn try_silent_retranscribe(inner: &Arc<Inner>, session_id: SessionId) -> S
                 return SilentRetryOutcome::Exhausted(last_attempted_label);
             }
             Err(e) => {
-                log::warn!("[coord] 自动静默重试第 {attempt}/{SILENT_RETRY_MAX} 次失败: {e}");
+                // 终态 Foundry 回退错误：再重试只会重新命中同一 CUDA 路径
+                // （PR #945 review P1-1），立即耗尽重试而不是空转。
+                if let Some(outcome) = retry_error_outcome(&e, &last_attempted_label) {
+                    log::warn!(
+                        "[coord] 自动静默重试第 {attempt}/{SILENT_RETRY_MAX} 次命中终态 Foundry 回退错误，停止重试: {}",
+                        e.into_string()
+                    );
+                    return outcome;
+                }
+                log::warn!(
+                    "[coord] 自动静默重试第 {attempt}/{SILENT_RETRY_MAX} 次失败: {}",
+                    e.into_string()
+                );
             }
         }
     }
@@ -3229,7 +3267,11 @@ pub(super) fn schedule_cancelled_asr_release(
     match asr {
         #[cfg(target_os = "windows")]
         ActiveAsr::FoundryLocalWhisper(_) => {
-            schedule_foundry_local_asr_release(inner, AsrReleaseSession::Dictation(session_id));
+            schedule_foundry_local_asr_release(
+                inner,
+                AsrReleaseSession::Dictation(session_id),
+                None,
+            );
         }
         #[cfg(target_os = "windows")]
         ActiveAsr::SherpaOnnxLocal(_) => {
@@ -3402,6 +3444,12 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
     // `asr` move 进去，命中取消时那个 future 会被 drop（连同它持有的 Arc），我们再用这份
     // clone 显式 cancel，促使流式 WebSocket 立刻关闭、不残留后台 worker。
     let asr_for_cancel = asr.clone();
+    #[cfg(target_os = "windows")]
+    let is_foundry_local = matches!(&asr, ActiveAsr::FoundryLocalWhisper(_));
+    #[cfg(target_os = "windows")]
+    let foundry_primary_recovery = Arc::new(Mutex::new(None));
+    #[cfg(target_os = "windows")]
+    let foundry_primary_recovery_for_transcribe = Arc::clone(&foundry_primary_recovery);
     // 「等待转写结果」实测起点：流式 ASR 量的是收尾延迟，批式量完整转写。写进
     // history.asr_ms 供历史详情页展示（含下方的自动静默重试时间——那也是用户等的时间）。
     let transcribe_started = std::time::Instant::now();
@@ -3671,13 +3719,20 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                         audio_secs,
                         timeout_duration.as_secs()
                     );
-                    match local.transcribe(timeout_duration).await {
-                        Ok(r) => {
-                            schedule_foundry_local_asr_release(
-                                inner,
-                                AsrReleaseSession::Dictation(current_session_id),
+                    let notices =
+                        foundry_dictation_fallback_notice_callback(inner, current_session_id);
+                    match local
+                        .transcribe_with_fallback_notice(timeout_duration, notices)
+                        .await
+                    {
+                        Ok(outcome) => {
+                            debug_assert_eq!(
+                                outcome.used_cpu_fallback,
+                                outcome.primary_recovery.is_some()
                             );
-                            Ok(r)
+                            *foundry_primary_recovery_for_transcribe.lock() =
+                                outcome.primary_recovery;
+                            Ok(outcome.raw)
                         }
                         Err(e) => {
                             // 用户取消现在由外层 select! 统一处理（drop 掉本 future 中断在途转写），
@@ -3686,11 +3741,31 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                             schedule_foundry_local_asr_release(
                                 inner,
                                 AsrReleaseSession::Dictation(current_session_id),
+                                None,
                             );
-                            Err(TranscribeFail::new(
-                                format!("本地识别失败: {e}"),
-                                e.to_string(),
-                            ))
+                            let retryable = !crate::asr::local::foundry_runtime::is_terminal_foundry_fallback_error(&e);
+                            if !retryable {
+                                log::warn!(
+                                    "[coord] Foundry CPU fallback reached a terminal error; skipping silent retry"
+                                );
+                            }
+                            // 终态错误面向用户的消息精简（PR #945 review P2-2）：原始
+                            // GPU/CPU SDK 错误保留在 err 字段（{e:#} 链）与上方日志，
+                            // 不把冗长的引擎错误文本直接展示给用户。
+                            let fail = TranscribeFail::new(
+                                if retryable {
+                                    format!("本地识别失败: {e}")
+                                } else {
+                                    crate::asr::local::foundry_runtime::FOUNDRY_FALLBACK_TERMINAL_USER_MESSAGE
+                                        .to_string()
+                                },
+                                format!("{e:#}"),
+                            );
+                            Err(if retryable {
+                                fail
+                            } else {
+                                fail.without_silent_retry()
+                            })
                         }
                     }
                 }
@@ -3890,6 +3965,18 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
     // 优先级高于 empty 检查 — 用户取消 → 静默丢弃，不写失败历史也不弹错误胶囊。
     if inner.state.lock().cancelled {
         log::info!("[coord] cancel detected after ASR — discarding transcript");
+        // 仅 Foundry 需要转写已结束后补一次 cancel：触发 FoundryLocalWhisperAsr::cancel
+        // 里的临时 CPU lease 清理。非 Foundry 的转写已经结束，重复 cancel 是对 base
+        // 行为的共享路径变更（PR #945 review P1-2），保持 base 行为不动。
+        #[cfg(target_os = "windows")]
+        if is_foundry_local {
+            cancel_active_asr(asr_for_cancel);
+            schedule_foundry_local_asr_release(
+                inner,
+                AsrReleaseSession::Dictation(current_session_id),
+                None,
+            );
+        }
         restore_prepared_windows_ime_session(inner, current_session_id);
         // PR #387 的「cancel 后清 focus_target」契约要在 Processing 路径上也成立。
         // cancel_session 在 Processing 阶段故意跳过 finish_cancel_session_state（让
@@ -3899,11 +3986,31 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         return Ok(());
     }
 
+    #[cfg(target_os = "windows")]
+    if is_foundry_local && transcribe_outcome.is_ok() {
+        schedule_foundry_local_asr_release(
+            inner,
+            AsrReleaseSession::Dictation(current_session_id),
+            foundry_primary_recovery.lock().take(),
+        );
+    }
+
     // ASR 失败/超时：先自动静默重试（从刚归档的音频重转，应对网络/服务端瞬时抖动）。上面的
     // cancel 检查已先行——用户主动取消的会话不会走到这里触发重试。重试拿回文本就当作正常转写
     // 继续走润色/插入；彻底失败才 fail_dictation 保留录音 + 报错（音频仍在，可去历史手动重转）。
     let raw = match transcribe_outcome {
         Ok(raw) => raw,
+        Err(fail) if !should_attempt_silent_retry(&fail) => {
+            return fail_dictation(
+                inner,
+                current_session_id,
+                elapsed,
+                transcribe_started.elapsed().as_millis() as u64,
+                fail.user_msg,
+                fail.err,
+                asr_call_label.as_ref(),
+            );
+        }
         Err(fail) => match try_silent_retranscribe(inner, current_session_id).await {
             SilentRetryOutcome::Transcript {
                 raw,
@@ -5001,11 +5108,13 @@ mod tests {
         append_typed_prefix, batch_asr_chunk_limit_ms, build_transcribe_failed_session,
         default_done_message, drain_streaming_insert_deltas_with, eligible_polish_context_turns,
         finalize_polished_text, flush_streaming_insert_buffer_with, pcm_duration_ms,
-        pcm_from_wav_bytes, should_arm_edit_watch, should_read_cursor_context,
-        insert_delivery_failed, streaming_insert_eligible,
+        pcm_from_wav_bytes, retry_error_outcome, should_arm_edit_watch, should_attempt_silent_retry,
+        should_read_cursor_context, insert_delivery_failed, streaming_insert_eligible,
+        SilentRetryOutcome,
     };
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     use super::{desktop_keyless_dictation_provider, DesktopKeylessDictationProvider};
+    use crate::coordinator::RetranscribeError;
     use crate::types::{
         ChineseScriptPreference, CorrectionRule, DictationSession, InsertStatus, PolishMode,
     };
@@ -5219,6 +5328,47 @@ mod tests {
 
         assert_eq!(accepted.text, "重试成功");
         assert_eq!(label, Some(retry_label));
+    }
+
+    #[test]
+    fn terminal_foundry_fallback_failure_skips_silent_retry() {
+        let retryable = super::TranscribeFail::new(
+            "识别失败".to_string(),
+            "temporary network error".to_string(),
+        );
+        let terminal = super::TranscribeFail::new(
+            "本地识别失败".to_string(),
+            "Foundry CUDA CPU fallback failed".to_string(),
+        )
+        .without_silent_retry();
+
+        assert!(should_attempt_silent_retry(&retryable));
+        assert!(!should_attempt_silent_retry(&terminal));
+    }
+
+    #[test]
+    fn retranscribe_error_terminal_classification() {
+        // try_silent_retranscribe 重试循环依赖 retry_error_outcome 短路终态
+        // Foundry 回退错误（PR #945 review P1-1）：第一次失败是瞬态、重试命中
+        // 终态时，循环立即耗尽重试而不是再空转剩余次数。循环本身依赖 Inner
+        // 全链路难以单测，此处固定分类契约 + 循环决策（Retryable 可再试 /
+        // 终态短路 / 消息还原）。
+        let transient: RetranscribeError = "network blip".to_string().into();
+        let terminal =
+            RetranscribeError::TerminalFoundryFallback("Foundry CUDA CPU fallback failed".into());
+
+        assert!(!transient.is_terminal());
+        assert!(terminal.is_terminal());
+
+        // 循环决策本身：终态 → Some(Exhausted)，瞬态 → None（继续重试）。
+        assert!(retry_error_outcome(&transient, &None).is_none());
+        assert!(matches!(
+            retry_error_outcome(&terminal, &None),
+            Some(SilentRetryOutcome::Exhausted(None))
+        ));
+
+        // 消息还原（消费值放最后）。
+        assert_eq!(terminal.into_string(), "Foundry CUDA CPU fallback failed");
     }
 
     fn correction_rule(pattern: &str, replacement: &str) -> CorrectionRule {

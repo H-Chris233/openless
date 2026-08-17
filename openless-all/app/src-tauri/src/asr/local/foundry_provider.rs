@@ -7,7 +7,6 @@ use std::io::Write;
 #[cfg(target_os = "windows")]
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(target_os = "windows")]
 use std::sync::Arc;
 
 #[cfg(target_os = "windows")]
@@ -22,14 +21,26 @@ use crate::asr::RawTranscript;
 
 #[cfg(target_os = "windows")]
 use super::foundry_runtime::FoundryLocalRuntime;
+#[cfg(target_os = "windows")]
+use super::foundry_runtime::FoundryRouteEpoch;
+use super::foundry_runtime::{FoundryFallbackNoticeCallback, FoundryPrimaryRecoveryToken};
 
 /// Foundry Local Whisper 属于 Whisper 系模型，原生解码窗口约 30s。每次 SDK
 /// 请求保持在窗口内，再由 OpenLess 合并分片文本，避免长听写只返回第一段。
 const FOUNDRY_WHISPER_CHUNK_LIMIT_MS: u64 = 30_000;
 
+#[must_use = "primary_recovery must be passed to Foundry release scheduling"]
+pub(crate) struct FoundryProviderTranscription {
+    pub raw: RawTranscript,
+    pub used_cpu_fallback: bool,
+    pub primary_recovery: Option<FoundryPrimaryRecoveryToken>,
+}
+
 pub struct FoundryLocalWhisperAsr {
     #[cfg(target_os = "windows")]
     runtime: Arc<FoundryLocalRuntime>,
+    #[cfg(target_os = "windows")]
+    route_epoch: FoundryRouteEpoch,
     model_alias: String,
     runtime_source: String,
     language_hint: Option<String>,
@@ -45,8 +56,10 @@ impl FoundryLocalWhisperAsr {
         runtime_source: String,
         language_hint: Option<String>,
     ) -> Self {
+        let route_epoch = runtime.begin_route();
         Self {
             runtime,
+            route_epoch,
             model_alias,
             runtime_source,
             language_hint: normalize_language_hint(language_hint),
@@ -74,23 +87,35 @@ impl FoundryLocalWhisperAsr {
         self.language_hint.as_deref()
     }
 
-    /// 当前缓冲音频时长（毫秒）。Coordinator 在 transcribe() 调用前读取，
+    /// 当前缓冲音频时长（毫秒）。Coordinator 在发起转写前读取，
     /// 用来给 Foundry Local Whisper 计算动态超时。不消费缓冲。
     pub fn buffer_duration_ms(&self) -> u64 {
         pcm_duration_ms(&self.buffer.lock())
     }
 
-    pub async fn transcribe(&self, audio_timeout: std::time::Duration) -> Result<RawTranscript> {
+    /// 转写当前录音，并在 Foundry 的一次性 GPU→CPU 回退期间同步最小 UI 提示。
+    ///
+    /// 返回值包含 primary recovery token；所有调用方都必须把它交给 Coordinator 的释放调度，
+    /// 避免成功重转录只保留文本、却丢失模型生命周期信息。
+    pub(crate) async fn transcribe_with_fallback_notice(
+        &self,
+        audio_timeout: std::time::Duration,
+        notices: FoundryFallbackNoticeCallback,
+    ) -> Result<FoundryProviderTranscription> {
         let cancel_generation = self.cancel_generation.load(Ordering::SeqCst);
         let pcm = self.buffer.lock().clone();
         if pcm.is_empty() {
-            return Ok(RawTranscript {
-                text: String::new(),
-                duration_ms: 0,
+            return Ok(FoundryProviderTranscription {
+                raw: RawTranscript {
+                    text: String::new(),
+                    duration_ms: 0,
+                },
+                used_cpu_fallback: false,
+                primary_recovery: None,
             });
         }
 
-        let result = self.transcribe_inner(&pcm, audio_timeout).await;
+        let result = self.transcribe_inner(&pcm, audio_timeout, notices).await;
         if self.cancel_generation.load(Ordering::SeqCst) != cancel_generation {
             anyhow::bail!("Foundry Local Whisper transcription cancelled");
         }
@@ -104,12 +129,14 @@ impl FoundryLocalWhisperAsr {
         &self,
         pcm: &[u8],
         audio_timeout: std::time::Duration,
-    ) -> Result<RawTranscript> {
+        notices: FoundryFallbackNoticeCallback,
+    ) -> Result<FoundryProviderTranscription> {
         let duration_ms = pcm_duration_ms(pcm);
 
         #[cfg(not(target_os = "windows"))]
         {
             let _ = pcm;
+            let _ = notices;
             anyhow::bail!(
                 "Foundry Local Whisper is only available on Windows: {}",
                 self.model_alias
@@ -122,9 +149,6 @@ impl FoundryLocalWhisperAsr {
                 pcm,
                 Some(FOUNDRY_WHISPER_CHUNK_LIMIT_MS),
             );
-            let deadline = std::time::Instant::now()
-                .checked_add(audio_timeout)
-                .ok_or_else(|| anyhow::anyhow!("Foundry Local Whisper timeout is too large"))?;
             if chunks.len() > 1 {
                 log::info!(
                     "[foundry-asr] splitting {:.2}s audio into {} chunks (limit={}ms)",
@@ -134,42 +158,48 @@ impl FoundryLocalWhisperAsr {
                 );
             }
 
-            let mut texts = Vec::with_capacity(chunks.len());
-            for (index, chunk) in chunks.iter().enumerate() {
-                let wav_file = TempWavFile::create(chunk)?;
-                let remaining_timeout =
-                    remaining_transcribe_timeout(deadline, std::time::Instant::now())
-                        .with_context(|| {
-                            format!(
-                                "Foundry Local Whisper total timeout exhausted before chunk {}/{}",
-                                index + 1,
-                                chunks.len()
-                            )
-                        })?;
-                let text = self
-                    .runtime
-                    .transcribe_audio_file(
-                        &self.model_alias,
-                        &self.runtime_source,
-                        self.language_hint(),
-                        wav_file.path(),
-                        remaining_timeout,
+            // 所有临时 WAV 必须在单次 runtime 调用结束后才释放：GPU 失败时，runtime 才能让
+            // CPU 重试失败分片并继续后续分片，保持整段录音的一致执行路线。
+            let wav_files = chunks
+                .iter()
+                .map(|chunk| TempWavFile::create(chunk))
+                .collect::<Result<Vec<_>>>()?;
+            let audio_paths = wav_files
+                .iter()
+                .map(|wav_file| wav_file.path().to_path_buf())
+                .collect::<Vec<_>>();
+            let outcome = self
+                .runtime
+                .transcribe_audio_files(
+                    self.route_epoch,
+                    &self.model_alias,
+                    &self.runtime_source,
+                    self.language_hint(),
+                    &audio_paths,
+                    audio_timeout,
+                    notices,
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "transcribe Foundry Local Whisper recording ({} chunks) with model {}",
+                        chunks.len(),
+                        self.model_alias
                     )
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "transcribe Foundry Local Whisper chunk {}/{} with model {}",
-                            index + 1,
-                            chunks.len(),
-                            self.model_alias
-                        )
-                    })?;
-                texts.push(trim_transcript_text(&text));
-            }
+                })?;
+            let texts = outcome
+                .texts
+                .iter()
+                .map(|text| trim_transcript_text(text))
+                .collect::<Vec<_>>();
 
-            Ok(RawTranscript {
-                text: crate::asr::whisper::join_transcript_chunks(&texts),
-                duration_ms,
+            Ok(FoundryProviderTranscription {
+                raw: RawTranscript {
+                    text: crate::asr::whisper::join_transcript_chunks(&texts),
+                    duration_ms,
+                },
+                used_cpu_fallback: outcome.used_cpu_fallback,
+                primary_recovery: outcome.primary_recovery,
             })
         }
     }
@@ -177,7 +207,25 @@ impl FoundryLocalWhisperAsr {
     pub fn cancel(&self) {
         self.cancel_generation.fetch_add(1, Ordering::SeqCst);
         #[cfg(target_os = "windows")]
-        self.runtime.request_cancel_prepare();
+        {
+            // 旧 provider 不能取消新 route；runtime 同时返回当前 route 的精确 CPU lease，
+            // 避免跨会话取消共享的 prepare 标志或误卸载新录音的临时模型。
+            if let Some(cancelled_lease) =
+                self.runtime.request_cancel_transcription(self.route_epoch)
+            {
+                let runtime = Arc::clone(&self.runtime);
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error) = runtime
+                        .release_temporary_cpu_fallback(cancelled_lease)
+                        .await
+                    {
+                        log::warn!(
+                            "[foundry-asr] cancel cleanup for temporary CPU fallback failed: {error:#}"
+                        );
+                    }
+                });
+            }
+        }
         self.buffer.lock().clear();
     }
 }
@@ -190,16 +238,6 @@ impl crate::recorder::AudioConsumer for FoundryLocalWhisperAsr {
 
 fn pcm_duration_ms(pcm: &[u8]) -> u64 {
     crate::asr::pcm::pcm_duration_ms(pcm)
-}
-
-fn remaining_transcribe_timeout(
-    deadline: std::time::Instant,
-    now: std::time::Instant,
-) -> Result<std::time::Duration> {
-    deadline
-        .checked_duration_since(now)
-        .filter(|duration| !duration.is_zero())
-        .ok_or_else(|| anyhow::anyhow!("Foundry Local Whisper total timeout exhausted"))
 }
 
 fn pcm_to_wav(pcm: &[u8]) -> Vec<u8> {
@@ -359,22 +397,6 @@ mod tests {
     }
 
     #[test]
-    fn foundry_chunk_timeout_uses_remaining_total_budget() {
-        let started = std::time::Instant::now();
-        let deadline = started + std::time::Duration::from_secs(85);
-
-        assert_eq!(
-            super::remaining_transcribe_timeout(
-                deadline,
-                started + std::time::Duration::from_secs(30),
-            )
-            .unwrap(),
-            std::time::Duration::from_secs(55)
-        );
-        assert!(super::remaining_transcribe_timeout(deadline, deadline).is_err());
-    }
-
-    #[test]
     fn foundry_provider_reports_buffer_duration_without_consuming() {
         #[cfg(target_os = "windows")]
         let (provider, _) = test_provider();
@@ -385,6 +407,45 @@ mod tests {
 
         assert_eq!(provider.buffer_duration_ms(), 1000);
         assert_eq!(provider.buffer.lock().len(), 32_000);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn foundry_provider_binds_a_new_route_when_the_recording_is_created() {
+        let runtime = std::sync::Arc::new(super::FoundryLocalRuntime::new());
+        let first = super::FoundryLocalWhisperAsr::new(
+            std::sync::Arc::clone(&runtime),
+            "whisper-small".into(),
+            "auto".into(),
+            None,
+        );
+        let second = super::FoundryLocalWhisperAsr::new(
+            std::sync::Arc::clone(&runtime),
+            "whisper-medium".into(),
+            "auto".into(),
+            None,
+        );
+
+        assert_ne!(first.route_epoch, second.route_epoch);
+        assert_eq!(runtime.route_epoch_snapshot(), second.route_epoch);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn foundry_provider_route_is_not_rebased_by_a_later_setting_change() {
+        let runtime = std::sync::Arc::new(super::FoundryLocalRuntime::new());
+        let provider = super::FoundryLocalWhisperAsr::new(
+            std::sync::Arc::clone(&runtime),
+            "whisper-small".into(),
+            "auto".into(),
+            None,
+        );
+        let recording_route = provider.route_epoch;
+
+        runtime.invalidate_route();
+
+        assert_ne!(runtime.route_epoch_snapshot(), recording_route);
+        assert_eq!(provider.route_epoch, recording_route);
     }
 
     #[cfg(target_os = "windows")]
