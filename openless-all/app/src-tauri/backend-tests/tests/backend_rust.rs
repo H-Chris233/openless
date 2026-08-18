@@ -31,6 +31,8 @@ mod linux_fcitx {
 
 mod asr {
     pub mod local {
+        pub const WHISPER_MODEL_ID: &str = "whisper-large-v3-turbo";
+
         #[derive(Clone, Copy)]
         pub enum ModelId {
             Small06b,
