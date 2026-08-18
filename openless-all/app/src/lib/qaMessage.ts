@@ -26,30 +26,18 @@ function splitQaUserContent(content: string): { selection: string; question: str
   return { selection: '', question: content };
 }
 
-export function nextQaSelectionWarning(
-  current: string,
-  payload: Pick<QaStatePayload, 'kind' | 'selection_warning'>,
-): string {
-  if (payload.kind === 'idle' || payload.kind === 'recording') {
-    return payload.selection_warning ?? '';
-  }
-  if (payload.kind === 'loading' || payload.kind === 'thinking') {
-    return payload.selection_warning === undefined ? current : (payload.selection_warning ?? '');
-  }
-  return current;
-}
-
 export function acceptQaSessionEvent(
   currentSessionId: string | null,
-  payload: Pick<QaStatePayload, 'kind' | 'session_id' | 'selection_warning'>,
+  payload: Pick<QaStatePayload, 'kind' | 'session_id'>,
 ): { accepted: boolean; sessionId: string | null } {
   if (!payload.session_id) {
     return { accepted: true, sessionId: currentSessionId };
   }
+  // idle 事件也携带新会话 token：打开面板和上一轮收尾都按发送顺序建立边界。
   const startsTurn = payload.kind === 'recording'
     || payload.kind === 'loading'
     || payload.kind === 'thinking'
-    || (payload.kind === 'idle' && payload.selection_warning !== undefined);
+    || payload.kind === 'idle';
   if (currentSessionId && !startsTurn && currentSessionId !== payload.session_id) {
     return { accepted: false, sessionId: currentSessionId };
   }

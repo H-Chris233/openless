@@ -144,7 +144,6 @@ pub(super) async fn finalize_dictation_as_qa_question(inner: &Arc<Inner>) -> Res
     log::info!("[coord] QA finalize from overlay: capturing selection before opening panel");
     let capture = crate::selection::capture_selection_with_status();
     let selection = capture.selection;
-    let selection_warning = capture.warning_code;
     let selection_preview_text = selection.as_ref().map(|s| s.text.clone());
 
     log::info!("[coord] QA finalize from overlay: opening panel and waiting for ASR result");
@@ -173,7 +172,6 @@ pub(super) async fn finalize_dictation_as_qa_question(inner: &Arc<Inner>) -> Res
                     "kind": "loading",
                     "session_id": session_id,
                     "selection_preview": selection_preview_text,
-                    "selection_warning": selection_warning,
                     "messages": state.messages.clone(),
                 }),
             );
@@ -245,7 +243,6 @@ pub(super) async fn submit_qa_text_question(
         .selection
         .as_ref()
         .map(|selection| selection.text.clone());
-    let selection_warning = capture.warning_code;
     {
         let mut state = inner.qa_state.lock();
         if !qa_turn_can_continue(&state, session_id) {
@@ -263,7 +260,6 @@ pub(super) async fn submit_qa_text_question(
                     "kind": "thinking",
                     "session_id": session_id,
                     "selection_preview": selection_preview_text,
-                    "selection_warning": selection_warning,
                     "messages": state.messages.clone(),
                 }),
             );
@@ -931,7 +927,6 @@ pub(super) async fn begin_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
     // 每轮按 Option 都重新抓一次：用户多轮提问中可以重新选别处文字。
     let capture = capture_qa_turn_selection(inner);
     let selection = capture.selection;
-    let selection_warning = capture.warning_code;
     let selection_preview_text = selection.as_ref().map(|s| s.text.clone());
     {
         let mut state = inner.qa_state.lock();
@@ -948,7 +943,6 @@ pub(super) async fn begin_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
                     "kind": "recording",
                     "session_id": session_id,
                     "selection_preview": selection_preview_text,
-                    "selection_warning": selection_warning,
                     "messages": state.messages.clone(),
                 }),
             );
