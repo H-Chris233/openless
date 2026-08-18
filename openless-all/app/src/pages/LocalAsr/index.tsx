@@ -86,6 +86,7 @@ import {
     type SherpaOnnxLanguageHint,
     type SherpaOnnxModelAlias,
     type SherpaPrepareProgress,
+    isLocalAsrModelSupportedOnOs,
 } from "../../lib/localAsr"
 import { useHotkeySettings } from "../../state/HotkeySettingsContext"
 import { detectOS } from "../../components/WindowChrome"
@@ -141,9 +142,10 @@ async function ensureLocalAsrChannel(providerType: string): Promise<void> {
 //
 // Qwen3-ASR 的 MLX 实体只在 Apple Silicon 编译，C/CPU 实体覆盖 macOS / Linux；
 // Qwen3 模型管理 UI 仍按桌面端守严，具体后端由平台能力与渠道选择决定。
-const IS_WINDOWS = detectOS() === "win"
-const IS_MAC = detectOS() === "mac"
-const IS_QWEN_PLATFORM = IS_MAC || detectOS() === "linux"
+const OS = detectOS()
+const IS_WINDOWS = OS === "win"
+const IS_MAC = OS === "mac"
+const IS_QWEN_PLATFORM = OS === "mac" || OS === "linux"
 
 interface LocalAsrProps {
     /// `embedded=true` 表示作为子组件嵌入「高级」设置页（Settings → Advanced）；
@@ -448,10 +450,13 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                 getLocalAsrSettings(),
                 listLocalAsrModels(),
             ])
+            const supportedModels = list.filter((model) =>
+                isLocalAsrModelSupportedOnOs(model.id, OS),
+            )
             setSettings(s)
-            setModels(list)
+            setModels(supportedModels)
             void Promise.all(
-                list.map(async (m) => {
+                supportedModels.map(async (m) => {
                     try {
                         const dir = await getLocalAsrModelDir(m.id)
                         setModelDirs((current) =>
@@ -480,7 +485,7 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
             }
             // 拉远端真实尺寸（每个模型一次，结果留缓存）
             void Promise.all(
-                list.map(async (m) => {
+                supportedModels.map(async (m) => {
                     await ensureRemoteSize(m.id, s.mirror)
                 }),
             )
@@ -1797,8 +1802,8 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
         const entries: SidebarModelEntry[] = []
         // macOS：Qwen3 / Whisper 引擎
         for (const m of models) {
+            if (!isLocalAsrModelSupportedOnOs(m.id, OS)) continue
             const isWhisper = m.id.startsWith("whisper-")
-            if (isWhisper && !IS_MAC) continue
             const isDownloading =
                 Boolean(progress[m.id]) &&
                 (progress[m.id]?.phase === "started" ||

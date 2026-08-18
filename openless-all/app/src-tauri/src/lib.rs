@@ -15,6 +15,8 @@
 //! - commands: Tauri IPC surface
 
 mod android;
+#[cfg(test)]
+mod build_target;
 mod asr;
 mod audio_mute;
 mod cli;

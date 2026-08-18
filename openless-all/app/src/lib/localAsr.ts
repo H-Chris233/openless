@@ -7,6 +7,13 @@
 // `fetchLocalAsrRemoteInfo()` 实时从 HuggingFace tree API 拉取。
 
 import { invokeOrMock } from "./ipc"
+import type { OS } from "../components/WindowChrome"
+
+export function isLocalAsrModelSupportedOnOs(modelId: string, os: OS): boolean {
+    if (modelId.startsWith("whisper-")) return os === "mac"
+    if (modelId.startsWith("qwen3-asr-")) return os === "mac" || os === "linux"
+    return true
+}
 
 export type LocalAsrMirror = "huggingface" | "hf-mirror"
 

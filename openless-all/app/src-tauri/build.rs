@@ -1,20 +1,18 @@
+#[path = "src/build_target.rs"]
+mod build_target;
+
 fn main() {
     #[cfg(target_os = "windows")]
     link_windows_common_controls_v6_manifest_dependency();
 
     // build.rs 的 `#[cfg(target_os)]` 判断的是构建脚本主机，不是 Cargo 的目标平台。
-    // 直接解析 TARGET，明确排除所有 Android triple，避免 Linux 主机交叉编译时
-    // 把 qwen-asr C 后端误编进 Android。
+    // 优先使用 Cargo 的目标 OS；旧工具链缺失该变量时回退解析 TARGET，避免 Linux
+    // 主机交叉编译 armv7 Android 时把 qwen-asr C 后端误编进 APK。
     let target = std::env::var("TARGET").unwrap_or_default();
-    let target_os = if target.ends_with("-android") {
-        "android"
-    } else if target.ends_with("-apple-darwin") {
-        "macos"
-    } else if target.contains("-linux-") {
-        "linux"
-    } else {
-        ""
-    };
+    let target_os = build_target::classify_target_os(
+        &target,
+        std::env::var("CARGO_CFG_TARGET_OS").ok().as_deref(),
+    );
     println!("cargo:warning=OpenLess build target={target}, target_os={target_os}");
     if matches!(target_os, "macos" | "linux") {
         build_qwen_asr(target_os);

@@ -34,14 +34,19 @@ pub fn model_path_for_model(model_id: &str) -> Result<PathBuf> {
     let file_name = id
         .file_name()
         .ok_or_else(|| anyhow::anyhow!("本地 Whisper 模型没有文件名: {model_id}"))?;
+    let path = model_path_in_dir(id, &dir, file_name);
+    Ok(path)
+}
+
+fn model_path_in_dir(id: crate::asr::local::ModelId, dir: &Path, file_name: &str) -> PathBuf {
     let path = dir.join(file_name);
     if id == crate::asr::local::ModelId::WhisperLargeV3Turbo && !path.exists() {
         let quantized = dir.join(QUANTIZED_MODEL_FILE);
         if quantized.exists() {
-            return Ok(quantized);
+            return quantized;
         }
     }
-    Ok(path)
+    path
 }
 
 pub fn model_ready_for_model(model_id: &str) -> bool {
@@ -129,6 +134,47 @@ impl LocalWhisperCache {
             .lock()
             .as_ref()
             .map(|cached| cached.model_id.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::model_path_in_dir;
+    use crate::asr::local::ModelId;
+
+    #[test]
+    fn turbo_path_falls_back_to_q5_but_q5_path_does_not_fall_back() {
+        let dir = std::env::temp_dir().join(format!(
+            "openless-whisper-path-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let turbo = dir.join("ggml-large-v3-turbo.bin");
+        let q5 = dir.join("ggml-large-v3-turbo-q5_0.bin");
+        std::fs::write(&turbo, b"turbo").unwrap();
+
+        assert_eq!(
+            model_path_in_dir(
+                ModelId::WhisperLargeV3TurboQ5,
+                &dir,
+                "ggml-large-v3-turbo-q5_0.bin"
+            ),
+            q5
+        );
+
+        std::fs::remove_file(&turbo).unwrap();
+        std::fs::write(&q5, b"q5").unwrap();
+
+        assert_eq!(
+            model_path_in_dir(
+                ModelId::WhisperLargeV3Turbo,
+                &dir,
+                "ggml-large-v3-turbo.bin"
+            ),
+            q5
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
 

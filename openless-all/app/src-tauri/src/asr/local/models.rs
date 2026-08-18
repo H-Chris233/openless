@@ -111,11 +111,10 @@ impl ModelId {
 }
 
 /// Turbo 全精度与 Q5 量化共用同一目录（见 `model_dir`）：返回共享目录的
-/// "伙伴"文件名（Turbo ↔ Q5 互相认账），非共享目录的模型返回 None。
+/// "伙伴"文件名。完整 Turbo 可回退到 Q5，Q5 不反向认完整 Turbo。
 fn shared_dir_peer_file(id: ModelId) -> Option<&'static str> {
     match id {
         ModelId::WhisperLargeV3Turbo => Some("ggml-large-v3-turbo-q5_0.bin"),
-        ModelId::WhisperLargeV3TurboQ5 => Some("ggml-large-v3-turbo.bin"),
         _ => None,
     }
 }
@@ -143,9 +142,12 @@ pub fn is_downloaded(id: ModelId) -> bool {
         Ok(d) => d,
         Err(_) => return false,
     };
+    is_downloaded_in_dir(id, &dir)
+}
+
+fn is_downloaded_in_dir(id: ModelId, dir: &std::path::Path) -> bool {
     if let Some(file_name) = id.file_name() {
-        // Turbo 与 Q5 共用目录：任一目标文件存在即视为已下载，与后端
-        // `model_path_for_model` 的 q5 回退保持一致，避免 UI 显示"未下载"。
+        // 完整 Turbo 可使用同目录下的 Q5 回退；Q5 只能认自己的文件。
         return dir.join(file_name).is_file()
             || shared_dir_peer_file(id)
                 .map(|peer| dir.join(peer).is_file())
@@ -160,12 +162,16 @@ pub fn downloaded_bytes(id: ModelId) -> u64 {
         Ok(d) => d,
         Err(_) => return 0,
     };
+    downloaded_bytes_in_dir(id, &dir)
+}
+
+fn downloaded_bytes_in_dir(id: ModelId, dir: &std::path::Path) -> u64 {
     if let Some(file_name) = id.file_name() {
         let dest = dir.join(file_name);
         if let Ok(meta) = std::fs::metadata(&dest) {
             return meta.len();
         }
-        // Turbo 与 Q5 共用目录：目标文件缺失时按伙伴文件计（同 is_downloaded）。
+        // 完整 Turbo 目标文件缺失时按 Q5 文件计（同 is_downloaded）。
         // 下载进度不跨认账：.partial 只按各自目标文件算。
         if let Some(peer) = shared_dir_peer_file(id) {
             if let Ok(meta) = std::fs::metadata(dir.join(peer)) {
@@ -234,20 +240,17 @@ pub fn list_status() -> Vec<ModelStatus> {
 /// 删除本地模型目录（用户在 UI 主动删）。
 pub fn delete_model(id: ModelId) -> Result<()> {
     let dir = model_dir(id)?;
+    delete_model_files(id, &dir)
+}
+
+fn delete_model_files(id: ModelId, dir: &std::path::Path) -> Result<()> {
     if let Some(file_name) = id.file_name() {
-        // Turbo 与 Q5 共用目录：删除时两个格式的文件一起删（含各自的 partial），
-        // 避免删了 turbo 留着 q5、UI 仍显示另一个模型"已下载"。
-        let mut targets = vec![dir.join(file_name)];
-        if let Some(peer) = shared_dir_peer_file(id) {
-            targets.push(dir.join(peer));
-        }
-        for dest in targets {
-            let _ = std::fs::remove_file(&dest);
-            let _ = std::fs::remove_file(dest.with_extension("partial"));
-            let _ = std::fs::remove_file(dest.with_extension("partial.idx"));
-        }
+        let dest = dir.join(file_name);
+        let _ = std::fs::remove_file(&dest);
+        let _ = std::fs::remove_file(dest.with_extension("partial"));
+        let _ = std::fs::remove_file(dest.with_extension("partial.idx"));
         if dir.exists() && dir.read_dir()?.next().is_none() {
-            let _ = std::fs::remove_dir(&dir);
+            let _ = std::fs::remove_dir(dir);
         }
         return Ok(());
     }
@@ -255,4 +258,58 @@ pub fn delete_model(id: ModelId) -> Result<()> {
         std::fs::remove_dir_all(&dir)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{delete_model_files, downloaded_bytes_in_dir, is_downloaded_in_dir, ModelId};
+
+    #[test]
+    fn deleting_one_shared_whisper_file_keeps_the_other() {
+        let dir = std::env::temp_dir().join(format!(
+            "openless-asr-models-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let turbo = dir.join("ggml-large-v3-turbo.bin");
+        let q5 = dir.join("ggml-large-v3-turbo-q5_0.bin");
+        std::fs::write(&turbo, b"turbo").unwrap();
+        std::fs::write(&q5, b"q5").unwrap();
+
+        delete_model_files(ModelId::WhisperLargeV3TurboQ5, &dir).unwrap();
+
+        assert!(turbo.is_file());
+        assert!(!q5.exists());
+
+        std::fs::write(&q5, b"q5").unwrap();
+        delete_model_files(ModelId::WhisperLargeV3Turbo, &dir).unwrap();
+
+        assert!(!turbo.exists());
+        assert!(q5.is_file());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn q5_is_not_marked_downloaded_by_full_precision_turbo() {
+        let dir = std::env::temp_dir().join(format!(
+            "openless-asr-models-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("ggml-large-v3-turbo.bin"), b"turbo").unwrap();
+
+        assert!(is_downloaded_in_dir(ModelId::WhisperLargeV3Turbo, &dir));
+        assert!(!is_downloaded_in_dir(ModelId::WhisperLargeV3TurboQ5, &dir));
+        assert_eq!(
+            downloaded_bytes_in_dir(ModelId::WhisperLargeV3Turbo, &dir),
+            5
+        );
+        assert_eq!(
+            downloaded_bytes_in_dir(ModelId::WhisperLargeV3TurboQ5, &dir),
+            0
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
