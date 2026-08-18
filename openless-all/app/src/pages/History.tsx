@@ -432,7 +432,7 @@ export function History() {
 
         {(!mobile || mobileDetailOpen) && (
         <Card
-          key={item?.id ?? 'history-empty'}
+          key={item ? `history-detail-${item.id}` : 'history-empty'}
           padding={20}
           className="ol-thinscroll"
           style={{ overflow: 'auto' }}
@@ -478,7 +478,7 @@ export function History() {
                 <AudioRecordingPlayer
                   sessionId={item.id}
                   onMissing={() => markAudioMissing(item.id)}
-                  key={item.id}
+                  key={`audio-${item.id}`}
                 />
               )}
               {/* 流水线明细：识别 / 润色 / 插入 三步各占一行 —— 左列步骤名、中列
@@ -568,7 +568,7 @@ export function History() {
               </div>
               {/* 重新润色：拿这条的原文再跑一次 LLM。没有原文就没得润色（转录失败条目），
                   此时整块不渲染；QA 记录的原文是问题而不是待润色文本，同样不渲染。
-                  key={item.id} 让切换记录时结果与状态一起重置，
+                  key={`repolish-${item.id}`} 让切换记录时结果与状态一起重置，
                   避免把上一条的结果留在新条目下面。 */}
               {item.rawTranscript.trim() && item.errorCode !== 'qaSession' && (
                 <RepolishPanel
@@ -576,7 +576,7 @@ export function History() {
                   mobile={mobile}
                   allPacks={allPacks}
                   packsError={packsError}
-                  key={item.id}
+                  key={`repolish-${item.id}`}
                 />
               )}
             </>
