@@ -138,7 +138,7 @@ impl LocalWhisperCache {
 }
 
 #[cfg(test)]
-mod tests {
+mod model_path_tests {
     use super::model_path_in_dir;
     use crate::asr::local::ModelId;
 
