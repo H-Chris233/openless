@@ -464,6 +464,8 @@ public:
                 << "GetSelectionText: clipboard addon not loaded";
             return std::string();
         }
+        // primary() 签名接收 const InputContext*，clipboard 模块实现中未使用该参数
+        // （读的是全局 primary_ 缓存），这里传 nullptr 即可。
         std::string text = clipboard->call<IClipboard::primary>(nullptr);
         FCITX_LOGC(openless, Debug)
             << "GetSelectionText: " << text.size() << " chars";

@@ -206,6 +206,7 @@ pub(super) async fn finalize_dictation_as_qa_question(inner: &Arc<Inner>) -> Res
         raw.duration_ms,
         session_id,
         None,
+        super::CapsuleFeedback::Show,
     )
     .await
 }
@@ -266,7 +267,15 @@ pub(super) async fn submit_qa_text_question(
         }
     }
 
-    answer_qa_question_text(inner, question, 0, session_id, None).await
+    answer_qa_question_text(
+        inner,
+        question,
+        0,
+        session_id,
+        None,
+        super::CapsuleFeedback::Hide,
+    )
+    .await
 }
 
 pub(super) async fn take_current_dictation_transcript_for_qa(
@@ -306,8 +315,15 @@ pub(super) async fn take_current_dictation_transcript_for_qa(
             state.phase = SessionPhase::Idle;
             state.focus_target = None;
         }
-        answer_qa_question_text(inner, String::new(), duration_ms, qa_session_id, Some(wav))
-            .await?;
+        answer_qa_question_text(
+            inner,
+            String::new(),
+            duration_ms,
+            qa_session_id,
+            Some(wav),
+            super::CapsuleFeedback::Show,
+        )
+        .await?;
         return Ok(None);
     }
 
@@ -702,6 +718,10 @@ pub(super) async fn answer_qa_question_text(
     duration_ms: u64,
     session_id: SessionId,
     audio_wav: Option<Vec<u8>>,
+    // QA 面板打字提问传 Hide：回答在面板内流式可见，不应在输入法 auxDown
+    // 闪「✨ 润色中...」（Linux 下 Polishing 会映射到候选词栏）。
+    // 语音/听写路径保持 Show（用户熟悉的小录音条反馈）。
+    capsule_feedback: super::CapsuleFeedback,
 ) -> Result<(), String> {
     {
         let state = inner.qa_state.lock();
@@ -753,7 +773,9 @@ pub(super) async fn answer_qa_question_text(
         }
     }
 
-    emit_capsule(inner, CapsuleState::Polishing, 0.0, 0, None, None);
+    if capsule_feedback == super::CapsuleFeedback::Show {
+        emit_capsule(inner, CapsuleState::Polishing, 0.0, 0, None, None);
+    }
 
     let prefs = inner.prefs.get();
     let working_languages = prefs.working_languages.clone();
@@ -1160,8 +1182,15 @@ pub(super) async fn end_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
         };
         let duration_ms = pcm_consumer.duration_ms();
         let wav = pcm_bytes_to_wav(&pcm_consumer.pcm());
-        return answer_qa_question_text(inner, String::new(), duration_ms, session_id, Some(wav))
-            .await;
+        return answer_qa_question_text(
+            inner,
+            String::new(),
+            duration_ms,
+            session_id,
+            Some(wav),
+            super::CapsuleFeedback::Show,
+        )
+        .await;
     }
 
     let asr = match take_qa_asr_for_session(inner, session_id) {
@@ -1647,7 +1676,15 @@ pub(super) async fn end_qa_session(inner: &Arc<Inner>) -> Result<(), String> {
         return Ok(());
     }
 
-    answer_qa_question_text(inner, question, raw.duration_ms, session_id, None).await
+    answer_qa_question_text(
+        inner,
+        question,
+        raw.duration_ms,
+        session_id,
+        None,
+        super::CapsuleFeedback::Show,
+    )
+    .await
 }
 
 /// 静默收尾：发 idle 事件给前端，phase 复位。**不关浮窗**（v2：浮窗只在用户

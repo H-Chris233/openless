@@ -33,7 +33,8 @@ export function acceptQaSessionEvent(
   if (!payload.session_id) {
     return { accepted: true, sessionId: currentSessionId };
   }
-  // idle 事件也携带新会话 token：打开面板和上一轮收尾都按发送顺序建立边界。
+  // idle 一律视为新会话 token：open_qa_panel 的 idle 总是携带新生成的 session_id，
+  // 且事件按发送顺序到达，complete/turn 收尾的 idle 一定先于下一次 open。
   const startsTurn = payload.kind === 'recording'
     || payload.kind === 'loading'
     || payload.kind === 'thinking'
