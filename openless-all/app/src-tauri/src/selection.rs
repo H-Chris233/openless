@@ -1,22 +1,21 @@
-#![cfg_attr(
-    target_os = "linux",
-    allow(dead_code, unused_imports, unused_variables)
-)]
 //! 跨平台「划词捕获」工具：在用户触发 QA 快捷键时尝试拿到当前前台 app 的选区文本。
 //!
-//! 三级 fallback：
+//! 平台路径：
 //! 1. **macOS** AX：`AXUIElementCopyAttributeValue(focused, kAXSelectedTextAttribute)`
 //!    走辅助功能 API 直读焦点元素的选区，**不**触碰剪贴板。
 //! 2. **macOS / Windows** Cmd+C / Ctrl+C：snapshot 用户原剪贴板 → 模拟复制 → 80ms
 //!    后读出新内容 → 还原原剪贴板。
-//! 3. **Linux**：返回 `None`（AX 模式不统一，留作 best-effort 后续）。
+//! 3. **Linux**：通过 fcitx5 插件的 `GetSelectionText()` DBus 方法读取 PRIMARY
+//!    选区缓存，不触碰用户剪贴板；插件不可用、调用失败或返回空文本均视为无选区。
 //!
 //! 截断策略：超过 4000 字符的选区只保留首 2000 + 尾 2000 + `[…truncated…]` 标记，
 //! 避免给 LLM 灌过长 context。
 //!
-//! 模块依赖：仅 `arboard`（跨平台剪贴板）+ libc + 平台 native 框架；不依赖其它
-//! Rust 模块（与 CLAUDE.md 对齐）。
+//! 模块依赖：`arboard`（跨平台剪贴板）+ libc + 平台 native 框架，Linux 另依赖
+//! `linux_fcitx` 的 DBus 客户端。
 
+// 仅 macOS / Windows 的模拟复制路径用 sleep；Linux 走 fcitx5 DBus 直读，无 sleep。
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::time::Duration;
 
 const SELECTION_MAX_CHARS: usize = 4000;
@@ -97,12 +96,8 @@ impl SelectionInsertionTargetValidation {
     }
 }
 
-#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-const LINUX_SELECTION_TOOLS_MISSING_WARNING: &str = "linux_selection_tools_missing";
-
 pub struct SelectionCaptureOutcome {
     pub selection: Option<SelectionContext>,
-    pub warning_code: Option<&'static str>,
 }
 
 /// Snapshot the insertion target before starting an asynchronous Selection
@@ -142,9 +137,7 @@ pub(crate) fn capture_selection_insertion_target() -> SelectionInsertionTarget {
 ///
 /// 非 Windows/macOS（Linux / mobile）尚未实现等效的前台校验：Linux 依赖
 /// PRIMARY selection 重读做轻量校验，移动端不提供选区润色。
-pub(crate) fn selection_insertion_target_is_captured(
-    target: &SelectionInsertionTarget,
-) -> bool {
+pub(crate) fn selection_insertion_target_is_captured(target: &SelectionInsertionTarget) -> bool {
     #[cfg(target_os = "windows")]
     {
         target.windows.is_some()
@@ -224,7 +217,7 @@ pub(crate) fn validate_selection_insertion_target(
         return SelectionInsertionTargetValidation::Valid;
     }
 
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    #[cfg(target_os = "linux")]
     {
         // Linux：重读 PRIMARY selection 与捕获文本比较——用户改了选区 / 清空
         // PRIMARY 就拒绝粘贴（fcitx CommitText 直接写焦点输入上下文，无需
@@ -240,6 +233,11 @@ pub(crate) fn validate_selection_insertion_target(
             return SelectionInsertionTargetValidation::SelectionChanged;
         }
         SelectionInsertionTargetValidation::Valid
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        SelectionInsertionTargetValidation::TargetUnavailable
     }
 }
 
@@ -320,8 +318,7 @@ fn activate_app_by_pid(pid: i32) {
     }
 }
 
-/// 捕获选区并返回可向用户展示的非阻断平台提醒。
-/// 目前仅 Linux 在 `wl-paste`、`xclip`、`xsel` 均未安装时返回提醒码。
+/// 捕获选区。Linux 只通过 fcitx5 DBus 读取 PRIMARY 选区，失败统一视为无选区。
 pub fn capture_selection_with_status() -> SelectionCaptureOutcome {
     let source_app = current_front_app();
 
@@ -343,7 +340,6 @@ pub fn capture_selection_with_status() -> SelectionCaptureOutcome {
                     text: truncate_selection(trimmed),
                     source_app,
                 }),
-                warning_code: None,
             };
         }
     }
@@ -366,13 +362,12 @@ pub fn capture_selection_with_status() -> SelectionCaptureOutcome {
                     text: truncate_selection(trimmed),
                     source_app,
                 }),
-                warning_code: None,
             };
         }
     }
 
-    // 3. Linux：best-effort 读 PRIMARY selection（wl-paste / xclip / xsel）。
-    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    // 3. Linux：通过 fcitx5 DBus 读取 PRIMARY selection。
+    #[cfg(target_os = "linux")]
     match linux_selection::read_selected_text() {
         linux_selection::LinuxSelectionRead::Text(text) => {
             let trimmed = text.trim();
@@ -389,25 +384,12 @@ pub fn capture_selection_with_status() -> SelectionCaptureOutcome {
                     text: truncate_selection(trimmed),
                     source_app,
                 }),
-                warning_code: None,
-            };
-        }
-        linux_selection::LinuxSelectionRead::ToolsUnavailable => {
-            log::warn!(
-                "[selection] linux primary selection unavailable: install wl-paste, xclip, or xsel"
-            );
-            return SelectionCaptureOutcome {
-                selection: None,
-                warning_code: Some(LINUX_SELECTION_TOOLS_MISSING_WARNING),
             };
         }
         linux_selection::LinuxSelectionRead::NoSelection => {}
     }
 
-    SelectionCaptureOutcome {
-        selection: None,
-        warning_code: None,
-    }
+    SelectionCaptureOutcome { selection: None }
 }
 
 /// 长度截断到首 + 尾 + 标记。
@@ -492,12 +474,7 @@ fn selected_text_for_validation() -> Option<String> {
     (!trimmed.is_empty()).then(|| truncate_selection(trimmed))
 }
 
-#[cfg(any(
-    target_os = "windows",
-    target_os = "macos",
-    target_os = "linux",
-    test
-))]
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux", test))]
 fn selection_text_matches(expected: &str, actual: Option<&str>) -> bool {
     actual.is_some_and(|actual| actual == expected)
 }
@@ -577,107 +554,57 @@ fn post_copy_shortcut() -> bool {
     windows_paste::send_ctrl_c().is_ok()
 }
 
-#[cfg(any(all(not(target_os = "macos"), not(target_os = "windows")), test))]
+#[cfg(target_os = "linux")]
 mod linux_selection {
-    use std::io::ErrorKind;
-    use std::process::Command;
-
-    const PRIMARY_SELECTION_COMMANDS: &[(&str, &[&str])] = &[
-        ("wl-paste", &["--primary", "--no-newline"]),
-        ("xclip", &["-o", "-selection", "primary"]),
-        ("xsel", &["--primary", "--output"]),
-    ];
-
     #[derive(Debug, PartialEq, Eq)]
     pub enum LinuxSelectionRead {
         Text(String),
         NoSelection,
-        ToolsUnavailable,
-    }
-
-    #[derive(Debug, PartialEq, Eq)]
-    enum ReaderAttempt {
-        Text(String),
-        AvailableWithoutText,
-        Unavailable,
     }
 
     pub fn read_selected_text() -> LinuxSelectionRead {
-        read_selected_text_with(run_capture)
+        classify_selection_result(crate::linux_fcitx::get_selection_text())
     }
 
-    fn read_selected_text_with<F>(mut run: F) -> LinuxSelectionRead
-    where
-        F: FnMut(&str, &[&str]) -> ReaderAttempt,
-    {
-        let mut has_available_reader = false;
-        for (bin, args) in PRIMARY_SELECTION_COMMANDS {
-            match run(bin, args) {
-                ReaderAttempt::Text(text) => return LinuxSelectionRead::Text(text),
-                ReaderAttempt::AvailableWithoutText => has_available_reader = true,
-                ReaderAttempt::Unavailable => {}
+    fn classify_selection_result(result: Result<String, String>) -> LinuxSelectionRead {
+        match result {
+            Ok(text) => {
+                let trimmed = text.trim();
+                if trimmed.is_empty() {
+                    LinuxSelectionRead::NoSelection
+                } else {
+                    LinuxSelectionRead::Text(trimmed.to_string())
+                }
+            }
+            Err(error) => {
+                log::debug!("[selection] fcitx5 GetSelectionText unavailable: {error}");
+                LinuxSelectionRead::NoSelection
             }
         }
-        if has_available_reader {
-            LinuxSelectionRead::NoSelection
-        } else {
-            LinuxSelectionRead::ToolsUnavailable
-        }
     }
-
-    fn run_capture(bin: &str, args: &[&str]) -> ReaderAttempt {
-        let output = match Command::new(bin).args(args).output() {
-            Ok(output) => output,
-            Err(error) if error.kind() == ErrorKind::NotFound => return ReaderAttempt::Unavailable,
-            Err(_) => return ReaderAttempt::AvailableWithoutText,
-        };
-        if !output.status.success() {
-            return ReaderAttempt::AvailableWithoutText;
-        }
-        let Ok(text) = String::from_utf8(output.stdout) else {
-            return ReaderAttempt::AvailableWithoutText;
-        };
-        let trimmed = text.trim();
-        if trimmed.is_empty() {
-            return ReaderAttempt::AvailableWithoutText;
-        }
-        ReaderAttempt::Text(trimmed.to_string())
-    }
-
     #[cfg(test)]
     mod tests {
         use super::*;
 
         #[test]
-        fn reports_tools_unavailable_only_when_all_three_are_missing() {
-            let result = read_selected_text_with(|_, _| ReaderAttempt::Unavailable);
-            assert_eq!(result, LinuxSelectionRead::ToolsUnavailable);
-
-            let mut attempts = 0;
-            let result = read_selected_text_with(|_, _| {
-                attempts += 1;
-                if attempts == 2 {
-                    ReaderAttempt::AvailableWithoutText
-                } else {
-                    ReaderAttempt::Unavailable
-                }
-            });
-            assert_eq!(result, LinuxSelectionRead::NoSelection);
-        }
-
-        #[test]
-        fn returns_text_from_first_reader_that_has_a_selection() {
-            let result = read_selected_text_with(|bin, _| {
-                if bin == "xclip" {
-                    ReaderAttempt::Text("selected text".to_string())
-                } else {
-                    ReaderAttempt::Unavailable
-                }
-            });
+        fn maps_dbus_text_to_selection() {
+            let result = classify_selection_result(Ok(" selected text ".to_string()));
             assert_eq!(
                 result,
                 LinuxSelectionRead::Text("selected text".to_string())
             );
+        }
+
+        #[test]
+        fn maps_empty_dbus_text_to_no_selection() {
+            let result = classify_selection_result(Ok(" \n".to_string()));
+            assert_eq!(result, LinuxSelectionRead::NoSelection);
+        }
+
+        #[test]
+        fn maps_dbus_error_to_no_selection() {
+            let result = classify_selection_result(Err("DBus unavailable".to_string()));
+            assert_eq!(result, LinuxSelectionRead::NoSelection);
         }
     }
 }
@@ -1150,10 +1077,7 @@ mod tests {
 
         let mut another_control = captured;
         another_control.focused_window += 100;
-        assert!(!windows_selection_targets_match(
-            captured,
-            another_control
-        ));
+        assert!(!windows_selection_targets_match(captured, another_control));
     }
 
     #[cfg(target_os = "windows")]
