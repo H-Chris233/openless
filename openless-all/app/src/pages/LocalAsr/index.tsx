@@ -584,14 +584,7 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
 
     useEffect(() => {
         void refresh()
-        // 3s 轮询磁盘状态：模型被外部删除 / 下载中断时前端自动跟随（删除后
-        // 看板选中自动回落、下拉回到引擎级入口），不用等重开页面。qwen3 的
-        // list 是本地 fs walk，很轻；远端尺寸有缓存不会重复请求。
-        const pollTimer = window.setInterval(() => {
-            void refresh()
-        }, 3000)
         return () => {
-            window.clearInterval(pollTimer)
             if (scrollGuardCleanup.current) scrollGuardCleanup.current()
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
