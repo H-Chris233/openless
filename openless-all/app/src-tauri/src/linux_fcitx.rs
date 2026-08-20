@@ -579,7 +579,6 @@ fn is_appimage_runtime() -> bool {
 /// 发布后才发现；此处常量让 Rust 侧所有引用（含测试）共享同一来源。
 #[cfg(target_os = "linux")]
 const APPIMAGE_PLUGIN_SUBDIR: &str = "linux-fcitx5-plugin";
-
 #[cfg(target_os = "linux")]
 fn appimage_resource_paths(
     resource_dir: &std::path::Path,

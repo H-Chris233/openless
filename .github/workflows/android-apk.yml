@@ -30,8 +30,13 @@ jobs:
       OPENLESS_RELEASE_CHANNEL: ${{ (endsWith(github.ref_name, '-beta-tauri') || contains(github.ref_name, '-Beta.')) && 'beta' || 'stable' }}
     steps:
       - uses: actions/checkout@v4
-        # vendor/qwen-asr 仅 macOS 上 build.rs 会编译；Android APK 构建完全不需要
-        # 子模块，去掉递归拉取省一次网络 fetch + 失败点。
+        with:
+          # Android 不使用本地 Qwen3/Whisper C 子模块。
+          submodules: false
+
+      - name: Disable macOS-only Qwen3 MLX dependency
+        run: node openless-all/app/scripts/ci-disable-macos-qwen3.mjs
+
 
       - name: Detect build mode
         id: mode

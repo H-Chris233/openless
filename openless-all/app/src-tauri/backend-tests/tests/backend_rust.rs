@@ -31,6 +31,57 @@ mod linux_fcitx {
 
 mod asr {
     pub mod local {
+        pub const WHISPER_MODEL_ID: &str = "whisper-large-v3-turbo";
+
+        #[derive(Clone, Copy)]
+        pub enum ModelId {
+            Small06b,
+            Large17b,
+            WhisperBase,
+            WhisperSmall,
+            WhisperMedium,
+            WhisperLargeV3,
+            WhisperLargeV3Turbo,
+            WhisperLargeV3TurboQ5,
+        }
+
+        impl ModelId {
+            pub fn from_str(value: &str) -> Option<Self> {
+                match value {
+                    "qwen3-asr-0.6b" => Some(Self::Small06b),
+                    "qwen3-asr-1.7b" => Some(Self::Large17b),
+                    "whisper-base" => Some(Self::WhisperBase),
+                    "whisper-small" => Some(Self::WhisperSmall),
+                    "whisper-medium" => Some(Self::WhisperMedium),
+                    "whisper-large-v3" => Some(Self::WhisperLargeV3),
+                    "whisper-large-v3-turbo" => Some(Self::WhisperLargeV3Turbo),
+                    "whisper-large-v3-turbo-q5" => Some(Self::WhisperLargeV3TurboQ5),
+                    _ => None,
+                }
+            }
+
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    Self::Small06b => "qwen3-asr-0.6b",
+                    Self::Large17b => "qwen3-asr-1.7b",
+                    Self::WhisperBase => "whisper-base",
+                    Self::WhisperSmall => "whisper-small",
+                    Self::WhisperMedium => "whisper-medium",
+                    Self::WhisperLargeV3 => "whisper-large-v3",
+                    Self::WhisperLargeV3Turbo => "whisper-large-v3-turbo",
+                    Self::WhisperLargeV3TurboQ5 => "whisper-large-v3-turbo-q5",
+                }
+            }
+
+            pub fn is_qwen(self) -> bool {
+                matches!(self, Self::Small06b | Self::Large17b)
+            }
+
+            pub fn is_whisper(self) -> bool {
+                !self.is_qwen()
+            }
+        }
+
         pub mod foundry {
             pub const DEFAULT_MODEL_ALIAS: &str = "whisper-large-v3-turbo";
             pub const PROVIDER_ID: &str = "foundry-local-whisper";

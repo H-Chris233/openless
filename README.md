@@ -256,9 +256,11 @@ For the full end-user walkthrough, see [USAGE.md](USAGE.md).
 
 ## Build from source (developers)
 
-The active codebase lives in `openless-all/app/` (Tauri 2 + Rust + React/TS). The macOS build links a vendored C ASR engine ([`Open-Less/qwen-asr`](https://github.com/Open-Less/qwen-asr), forked from `antirez/qwen-asr`) pulled in as a git submodule under `src-tauri/vendor/qwen-asr/`, so initialize submodules on first clone.
+The active codebase lives in `openless-all/app/` (Tauri 2 + Rust + React/TS). The macOS build links a vendored C ASR engine ([`Open-Less/qwen-asr`](https://github.com/Open-Less/qwen-asr), forked from `antirez/qwen-asr`) pulled in as a git submodule under `src-tauri/vendor/qwen-asr/`, so initialize submodules on first clone. **Recursive submodule initialization is required on every platform** — the macOS-only `qwen3-asr-rs` path dependency is still parsed by Cargo on Windows/Linux (skipping it fails `cargo check` at resolution time), and Linux builds compile the vendored C engine too.
 
 Rust 1.88 is the minimum supported toolchain for source builds; the latest stable Rust is recommended. CI verifies both Rust 1.88 and stable on macOS, Windows, and Linux.
+
+On Apple Silicon, compiling the optional Qwen3-ASR MLX backend requires Xcode's MetalToolchain component. Install it with `xcodebuild -downloadComponent MetalToolchain` and verify it with `xcrun --find metal`. This is a source-build dependency; packaged OpenLess applications do not require it at runtime.
 
 ```bash
 # First clone only — pull in vendored submodules

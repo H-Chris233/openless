@@ -101,7 +101,7 @@ struct HfTreeEntry {
 
 pub async fn fetch_remote_info(model_id: ModelId, mirror: Mirror) -> Result<RemoteInfo> {
     let client = build_client()?;
-    let files = fetch_file_list(&client, model_id.hf_repo(), mirror).await?;
+    let files = fetch_file_list(&client, model_id, mirror).await?;
     let total_bytes = files.iter().map(|f| f.size).sum();
     Ok(RemoteInfo {
         model_id: model_id.as_str().into(),
@@ -113,37 +113,106 @@ pub async fn fetch_remote_info(model_id: ModelId, mirror: Mirror) -> Result<Remo
 
 async fn fetch_file_list(
     client: &reqwest::Client,
-    repo: &str,
+    model_id: ModelId,
     mirror: Mirror,
 ) -> Result<Vec<RemoteFile>> {
-    let url = format!("{}/api/models/{}/tree/main", mirror.base_url(), repo);
-    let resp = client
-        .get(&url)
-        .send()
-        .await
-        .with_context(|| format!("HF tree API GET 失败: {url}"))?;
-    if !resp.status().is_success() {
-        anyhow::bail!("HF tree API HTTP {}: {url}", resp.status());
+    let repo = model_id.hf_repo();
+    // HF tree API 用 `Link: rel="next"` 游标分页（`offset` 参数会被服务器静默
+    // 忽略）。当前模型仓库（whisper.cpp / Qwen）根目录都远小于单页上限 1000，
+    // 游标翻页仅为防御未来超大仓库，避免静默丢文件导致下载列表缺项。
+    // 游标是服务器自身生成的 base64url 片段，原样回传即可（依赖该字符集）。
+    const PAGE_SIZE: usize = 1000;
+    // 防御上限：服务器异常持续返回 next 时不至于无限循环（正常仓库一页取完）。
+    const MAX_PAGES: usize = 100;
+    let mut cursor: Option<String> = None;
+    let mut files: Vec<RemoteFile> = Vec::new();
+    for _ in 0..MAX_PAGES {
+        let mut url = format!(
+            "{}/api/models/{}/tree/main?limit={PAGE_SIZE}",
+            mirror.base_url(),
+            repo
+        );
+        if let Some(c) = &cursor {
+            url.push_str(&format!("&cursor={c}"));
+        }
+        let resp = client
+            .get(&url)
+            .send()
+            .await
+            .with_context(|| format!("HF tree API GET 失败: {url}"))?;
+        if !resp.status().is_success() {
+            anyhow::bail!("HF tree API HTTP {}: {url}", resp.status());
+        }
+        // json() 会消费 response，先取 Link header（分页游标）。
+        let headers = resp.headers().clone();
+        let entries: Vec<HfTreeEntry> = resp
+            .json()
+            .await
+            .with_context(|| format!("HF tree JSON 解码失败: {url}"))?;
+        files.extend(
+            entries
+                .iter()
+                .filter(|e| e.entry_type == "file" && keep_file(&e.path, model_id))
+                .map(|e| RemoteFile {
+                    path: e.path.clone(),
+                    size: e.size.unwrap_or(0),
+                }),
+        );
+        cursor = next_page_cursor(&headers);
+        if cursor.is_none() {
+            break;
+        }
     }
-    let entries: Vec<HfTreeEntry> = resp
-        .json()
-        .await
-        .with_context(|| format!("HF tree JSON 解码失败: {url}"))?;
-    let files: Vec<RemoteFile> = entries
-        .into_iter()
-        .filter(|e| e.entry_type == "file" && keep_file(&e.path))
-        .map(|e| RemoteFile {
-            path: e.path,
-            size: e.size.unwrap_or(0),
-        })
-        .collect();
+    if cursor.is_some() {
+        // 100 页（10 万条目）仍翻不完只可能是服务器病态（游标循环）：
+        // 显式失败，避免静默返回缺项列表传导到模型加载期。
+        anyhow::bail!("HF tree 分页超过 {MAX_PAGES} 页仍未结束 (repo={repo})");
+    }
     if files.is_empty() {
         anyhow::bail!("HF tree 返回空文件列表 (repo={repo})");
     }
     Ok(files)
 }
 
-fn keep_file(path: &str) -> bool {
+/// 从响应 Link header 提取 `rel="next"` 的游标（RFC 8288 简化解析）。
+/// 服务器可能拆成多个 Link header 行，逐行解析；没有下一页（header 缺失
+/// 或已是最后一页）返回 None。
+fn next_page_cursor(headers: &reqwest::header::HeaderMap) -> Option<String> {
+    headers
+        .get_all(reqwest::header::LINK)
+        .iter()
+        .find_map(|value| {
+            let link = value.to_str().ok()?;
+            link.split(',').find_map(|part| {
+                let (url_part, rel) = part.split(';').fold(
+                    (None::<&str>, None::<&str>),
+                    |(url_part, rel), segment| {
+                        let segment = segment.trim();
+                        if segment.starts_with('<') && segment.ends_with('>') {
+                            (Some(&segment[1..segment.len() - 1]), rel)
+                        } else if let Some(value) = segment.strip_prefix("rel=") {
+                            (url_part, Some(value.trim_matches('"')))
+                        } else {
+                            (url_part, rel)
+                        }
+                    },
+                );
+                if rel != Some("next") {
+                    return None;
+                }
+                url_part?
+                    .split('?')
+                    .nth(1)?
+                    .split('&')
+                    .find_map(|pair| pair.strip_prefix("cursor=").map(|v| v.to_string()))
+            })
+        })
+}
+
+fn keep_file(path: &str, model_id: ModelId) -> bool {
+    if let Some(file_name) = model_id.file_name() {
+        return path == file_name;
+    }
     if path.starts_with('.') {
         return false;
     }
@@ -500,6 +569,10 @@ async fn run_download(
     let dir = model_dir(model_id)?;
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("create model dir failed: {}", dir.display()))?;
+    // 只有本轮所有文件都通过完整性校验后才允许重新生成 ready 哨兵；
+    // 下载失败时不能继续暴露上一次遗留的“已就绪”状态。
+    let sentinel = dir.join(READY_SENTINEL);
+    let _ = std::fs::remove_file(&sentinel);
 
     let client = build_client()?;
     let info = match fetch_remote_info(model_id, mirror).await {
@@ -718,7 +791,6 @@ async fn run_download(
         return Err(e);
     }
 
-    let sentinel = dir.join(READY_SENTINEL);
     std::fs::write(&sentinel, b"")
         .with_context(|| format!("write sentinel failed: {}", sentinel.display()))?;
 
@@ -744,6 +816,7 @@ const CHUNK_SIZE: u64 = 8 * 1024 * 1024;
 const PARALLEL: usize = 8;
 const PER_CHUNK_ATTEMPTS: u32 = 4;
 const PARALLEL_FILES: usize = 3;
+const PARTIAL_INDEX_HEADER: &str = "openless-partial-index:v2";
 
 /// `.partial` 文件的真实已下字节（不是 sparse 逻辑大小）。
 /// 有 `.partial.idx` → chunked 模式，按 idx 里 chunk 数还原；
@@ -783,15 +856,15 @@ pub fn partial_actual_size(partial: &Path) -> u64 {
             return 0;
         }
     };
-    let mut seen: HashSet<usize> = HashSet::new();
+    let Some(seen) = parse_partial_index(&content, total_size) else {
+        eprintln!(
+            "[local-asr] partial_actual_size: untrusted or legacy idx ({}), treating as empty",
+            idx_path.display()
+        );
+        return 0;
+    };
     let mut total: u64 = 0;
-    for line in content.lines() {
-        let Ok(idx) = line.trim().parse::<usize>() else {
-            continue;
-        };
-        if !seen.insert(idx) {
-            continue;
-        }
+    for idx in seen {
         let start = (idx as u64).saturating_mul(CHUNK_SIZE);
         if start >= total_size {
             continue;
@@ -827,6 +900,7 @@ pub(crate) async fn download_one(
             &partial,
             0,
             total_size - 1,
+            total_size,
             &cancel,
             &on_progress,
         )
@@ -835,16 +909,30 @@ pub(crate) async fn download_one(
             anyhow::bail!("cancelled");
         }
         result?;
-        finalize(&partial, dest, &idx_path).await?;
+        finalize(&partial, dest, &idx_path, total_size).await?;
         return Ok(());
     }
 
     // 1. 计算 chunk 计划
     let chunks: Vec<(usize, u64, u64)> = chunk_plan(total_size);
-    let _total_chunks = chunks.len();
+    let total_chunks = chunks.len();
 
     // 2. 读已完成的 chunk 索引
-    let done_set = read_idx(&idx_path);
+    let (mut done_set, idx_trusted) = read_idx(&idx_path, total_size);
+
+    // `.partial` 是预分配的 sparse 文件，旧索引或与其不匹配的文件大小都不能
+    // 证明任何 chunk 已经落盘；清空索引后从对应 chunk 重新下载，避免把零洞
+    // 当作已完成数据。
+    let partial_size = std::fs::metadata(&partial).map(|m| m.len()).unwrap_or(0);
+    if !idx_trusted || partial_size != total_size {
+        done_set.clear();
+        if partial_size != 0 && partial_size != total_size {
+            std::fs::remove_file(&partial)
+                .with_context(|| format!("remove invalid partial failed: {}", partial.display()))?;
+        }
+        write_idx_header(&idx_path)
+            .with_context(|| format!("reset partial.idx failed: {}", idx_path.display()))?;
+    }
 
     // 3. 预先把 .partial 撑到最终大小（sparse 文件，holes = 零字节）
     if !partial.exists() || std::fs::metadata(&partial).map(|m| m.len()).unwrap_or(0) != total_size
@@ -860,7 +948,7 @@ pub(crate) async fn download_one(
     // 模式标记：sparse partial 必须配对 .partial.idx（哪怕空），
     // 否则 walk_files 看到 partial 有但 idx 无，会把 sparse 全长当成已下完。
     if !idx_path.exists() {
-        std::fs::write(&idx_path, b"")
+        write_idx_header(&idx_path)
             .with_context(|| format!("touch partial.idx failed: {}", idx_path.display()))?;
     }
 
@@ -880,7 +968,7 @@ pub(crate) async fn download_one(
         .collect();
 
     if remaining.is_empty() {
-        finalize(&partial, dest, &idx_path).await?;
+        finalize(&partial, dest, &idx_path, total_size).await?;
         return Ok(());
     }
 
@@ -912,15 +1000,15 @@ pub(crate) async fn download_one(
                 &partial_arc,
                 start,
                 end,
+                total_size,
                 &cancel,
                 &bytes_in_file,
                 &on_progress,
             )
             .await;
             if result.is_ok() {
-                if let Err(e) = append_idx(&idx_path_arc, chunk_idx) {
-                    log::warn!("[local-asr] append .partial.idx failed: {e:#}");
-                }
+                append_idx(&idx_path_arc, chunk_idx)
+                    .with_context(|| format!("append .partial.idx chunk {chunk_idx} failed"))?;
             }
             result
         }));
@@ -950,12 +1038,16 @@ pub(crate) async fn download_one(
         return Err(e);
     }
 
-    // 6. 校验 + 落盘
-    let actual = std::fs::metadata(&partial).map(|m| m.len()).unwrap_or(0);
-    if actual != total_size {
-        anyhow::bail!("downloaded size {actual} != expected {total_size}");
+    // 6. 校验索引覆盖全部 chunk、sparse 逻辑长度与目标长度，再落盘。
+    let (done_set, idx_trusted) = read_idx(&idx_path, total_size);
+    if !idx_trusted || done_set.len() != total_chunks {
+        anyhow::bail!(
+            "partial index incomplete or untrusted (done={}, expected={})",
+            done_set.len(),
+            total_chunks
+        );
     }
-    finalize(&partial, dest, &idx_path).await?;
+    finalize(&partial, dest, &idx_path, total_size).await?;
     Ok(())
 }
 
@@ -972,15 +1064,40 @@ fn chunk_plan(total: u64) -> Vec<(usize, u64, u64)> {
     v
 }
 
-fn read_idx(path: &Path) -> HashSet<usize> {
+fn parse_partial_index(content: &str, total_size: u64) -> Option<HashSet<usize>> {
+    let mut lines = content.lines();
+    if lines.next()?.trim() != PARTIAL_INDEX_HEADER {
+        return None;
+    }
+    let chunk_count = chunk_plan(total_size).len();
+    let mut done = HashSet::new();
+    for line in lines {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let idx = line.parse::<usize>().ok()?;
+        if idx >= chunk_count {
+            return None;
+        }
+        done.insert(idx);
+    }
+    Some(done)
+}
+
+fn read_idx(path: &Path, total_size: u64) -> (HashSet<usize>, bool) {
     let content = match std::fs::read_to_string(path) {
         Ok(s) => s,
-        Err(_) => return HashSet::new(),
+        Err(_) => return (HashSet::new(), false),
     };
-    content
-        .lines()
-        .filter_map(|l| l.trim().parse::<usize>().ok())
-        .collect()
+    match parse_partial_index(&content, total_size) {
+        Some(done) => (done, true),
+        None => (HashSet::new(), false),
+    }
+}
+
+fn write_idx_header(path: &Path) -> std::io::Result<()> {
+    std::fs::write(path, format!("{PARTIAL_INDEX_HEADER}\n"))
 }
 
 fn append_idx(path: &Path, idx: usize) -> std::io::Result<()> {
@@ -992,12 +1109,139 @@ fn append_idx(path: &Path, idx: usize) -> std::io::Result<()> {
     writeln!(f, "{idx}")
 }
 
-async fn finalize(partial: &Path, dest: &Path, idx_path: &Path) -> Result<()> {
+async fn finalize(partial: &Path, dest: &Path, idx_path: &Path, expected_size: u64) -> Result<()> {
+    if expected_size > 0 {
+        let actual = tokio::fs::metadata(partial)
+            .await
+            .with_context(|| format!("stat partial before finalize failed: {}", partial.display()))?
+            .len();
+        if actual != expected_size {
+            anyhow::bail!("partial size {actual} != expected {expected_size}; refusing finalize");
+        }
+    }
     tokio::fs::rename(partial, dest)
         .await
         .with_context(|| format!("rename partial → final failed: {}", dest.display()))?;
+    if expected_size > 0 {
+        let actual = tokio::fs::metadata(dest)
+            .await
+            .with_context(|| format!("stat finalized file failed: {}", dest.display()))?
+            .len();
+        if actual != expected_size {
+            anyhow::bail!(
+                "finalized size {actual} != expected {expected_size}; refusing ready state"
+            );
+        }
+    }
     let _ = std::fs::remove_file(idx_path);
     Ok(())
+}
+
+fn parse_content_range(value: &str) -> Option<(u64, u64, u64)> {
+    let (unit, range) = value.trim().split_once(' ')?;
+    if unit != "bytes" {
+        return None;
+    }
+    let (bounds, total) = range.split_once('/')?;
+    let (start, end) = bounds.split_once('-')?;
+    let start = start.parse().ok()?;
+    let end = end.parse().ok()?;
+    let total = total.parse().ok()?;
+    (start <= end && end < total).then_some((start, end, total))
+}
+
+fn validate_range_metadata(
+    status: u16,
+    content_range: Option<&str>,
+    content_length: Option<u64>,
+    range_start: u64,
+    range_end: u64,
+    total_size: u64,
+    allow_full_response: bool,
+) -> Result<u64> {
+    let expected_len = range_end
+        .checked_sub(range_start)
+        .and_then(|len| len.checked_add(1))
+        .ok_or_else(|| anyhow::anyhow!("invalid requested byte range {range_start}-{range_end}"))?;
+    match status {
+        206 => {
+            let header = content_range
+                .ok_or_else(|| anyhow::anyhow!("HTTP 206 missing valid Content-Range"))?;
+            let (actual_start, actual_end, actual_total) = parse_content_range(header)
+                .ok_or_else(|| anyhow::anyhow!("invalid Content-Range: {header}"))?;
+            if (actual_start, actual_end, actual_total) != (range_start, range_end, total_size) {
+                anyhow::bail!(
+                    "Content-Range {header} does not match expected bytes {range_start}-{range_end}/{total_size}"
+                );
+            }
+        }
+        200 if allow_full_response && range_start == 0 => {}
+        status => anyhow::bail!("expected HTTP 206 Partial Content for ranged GET, got {status}"),
+    }
+    if let Some(content_length) = content_length {
+        if content_length != expected_len {
+            anyhow::bail!(
+                "Content-Length {content_length} does not match expected range length {expected_len}"
+            );
+        }
+    }
+    Ok(expected_len)
+}
+
+fn validate_ranged_response(
+    response: &reqwest::Response,
+    range_start: u64,
+    range_end: u64,
+    total_size: u64,
+    allow_full_response: bool,
+) -> Result<u64> {
+    let content_range = response
+        .headers()
+        .get(reqwest::header::CONTENT_RANGE)
+        .and_then(|value| value.to_str().ok());
+    validate_range_metadata(
+        response.status().as_u16(),
+        content_range,
+        response.content_length(),
+        range_start,
+        range_end,
+        total_size,
+        allow_full_response,
+    )
+}
+
+async fn read_response_body_exact(
+    response: reqwest::Response,
+    expected_len: u64,
+    cancel: &AtomicBool,
+) -> Result<Vec<u8>> {
+    let capacity = usize::try_from(expected_len)
+        .map_err(|_| anyhow::anyhow!("response body is too large to buffer: {expected_len}"))?;
+    let mut body = Vec::with_capacity(capacity);
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        if cancel.load(Ordering::SeqCst) {
+            anyhow::bail!("cancelled");
+        }
+        let bytes = chunk.context("read stream chunk failed")?;
+        let next_len = body
+            .len()
+            .checked_add(bytes.len())
+            .ok_or_else(|| anyhow::anyhow!("response body length overflow"))?;
+        if next_len > capacity {
+            anyhow::bail!(
+                "response body over-read: got at least {next_len} bytes, expected {expected_len}"
+            );
+        }
+        body.extend_from_slice(&bytes);
+    }
+    if body.len() != capacity {
+        anyhow::bail!(
+            "response body short-read: got {} bytes, expected {expected_len}",
+            body.len()
+        );
+    }
+    Ok(body)
 }
 
 /// 单 chunk + per-chunk retry。append 模式（一次性写到底，给小文件路径）。
@@ -1007,6 +1251,7 @@ async fn chunk_with_retry(
     partial: &Path,
     range_start: u64,
     range_end: u64,
+    total_size: u64,
     cancel: &AtomicBool,
     on_progress: &Arc<dyn Fn(u64) + Send + Sync>,
 ) -> Result<()> {
@@ -1021,6 +1266,7 @@ async fn chunk_with_retry(
             partial,
             range_start,
             range_end,
+            total_size,
             cancel,
             on_progress,
         )
@@ -1031,7 +1277,7 @@ async fn chunk_with_retry(
                 let msg = format!("{e:#}");
                 last_err = Some(e);
                 if attempt < PER_CHUNK_ATTEMPTS && !cancel.load(Ordering::SeqCst) {
-                    let backoff = std::time::Duration::from_secs(1u64 << (2 * (attempt - 1)));
+                    let backoff = chunk_retry_backoff(attempt);
                     log::warn!(
                         "[local-asr] small-file chunk attempt {attempt}/{PER_CHUNK_ATTEMPTS} failed: {msg}; sleep {:?}",
                         backoff
@@ -1045,12 +1291,17 @@ async fn chunk_with_retry(
         .unwrap_or_else(|| anyhow::anyhow!("chunk failed after {PER_CHUNK_ATTEMPTS} attempts")))
 }
 
+fn chunk_retry_backoff(attempt: u32) -> std::time::Duration {
+    std::time::Duration::from_secs(1u64 << (2 * attempt.saturating_sub(1)))
+}
+
 async fn try_download_range_append(
     client: &reqwest::Client,
     url: &str,
     partial: &Path,
     range_start: u64,
     range_end: u64,
+    total_size: u64,
     cancel: &AtomicBool,
     on_progress: &Arc<dyn Fn(u64) + Send + Sync>,
 ) -> Result<()> {
@@ -1060,46 +1311,25 @@ async fn try_download_range_append(
         .send()
         .await
         .with_context(|| format!("HTTP GET {url} failed"))?;
-    let status = resp.status();
-    if status.as_u16() != 200 && status.as_u16() != 206 {
-        anyhow::bail!("HTTP {status} for {url}");
+    let expected_len = validate_ranged_response(&resp, range_start, range_end, total_size, true)?;
+    // 先把整个响应读入内存，确认 Content-Length 和实际 body 长度后才写 partial。
+    // 这样短读/超读/错误范围都不会留下可被误认作完成的 chunk 数据。
+    let body = read_response_body_exact(resp, expected_len, cancel).await?;
+    if cancel.load(Ordering::SeqCst) {
+        anyhow::bail!("cancelled");
     }
-    let effective_start = if status.as_u16() == 200 {
-        0
-    } else {
-        range_start
-    };
-
-    // 截断 partial 到本次 attempt 的起点，再 seek 写入。
-    // 老 append 实现的 bug：若上一次 attempt 已写了部分字节后失败，retry 拿到的还是
-    // 完整 chunk → append → 文件比应有大小多 N 字节 → 永久损坏。
-    // 小文件路径每个 chunk 是整个文件（≤ 32MB），用 truncate 重写最直白。
     let mut file = tokio::fs::OpenOptions::new()
         .create(true)
         .write(true)
+        .truncate(true)
         .open(partial)
         .await
         .with_context(|| format!("open partial failed: {}", partial.display()))?;
-    file.set_len(effective_start)
+    file.write_all(&body)
         .await
-        .with_context(|| format!("truncate partial failed: {}", partial.display()))?;
-    file.seek(std::io::SeekFrom::Start(effective_start))
-        .await
-        .with_context(|| format!("seek partial failed: {}", partial.display()))?;
-
-    let mut stream = resp.bytes_stream();
-    let mut written: u64 = 0;
-    while let Some(chunk) = stream.next().await {
-        if cancel.load(Ordering::SeqCst) {
-            file.flush().await.ok();
-            anyhow::bail!("cancelled");
-        }
-        let bytes = chunk.context("read stream chunk failed")?;
-        file.write_all(&bytes).await.context("write chunk failed")?;
-        written += bytes.len() as u64;
-        on_progress(effective_start + written);
-    }
-    file.flush().await.ok();
+        .context("write validated chunk failed")?;
+    file.flush().await.context("flush validated chunk failed")?;
+    on_progress(expected_len);
     Ok(())
 }
 
@@ -1111,6 +1341,7 @@ async fn chunk_with_retry_seek(
     partial: &Path,
     range_start: u64,
     range_end: u64,
+    total_size: u64,
     cancel: &AtomicBool,
     bytes_in_file: &Arc<AtomicU64>,
     on_progress: &Arc<dyn Fn(u64) + Send + Sync>,
@@ -1126,6 +1357,7 @@ async fn chunk_with_retry_seek(
             partial,
             range_start,
             range_end,
+            total_size,
             cancel,
             bytes_in_file,
             on_progress,
@@ -1137,7 +1369,7 @@ async fn chunk_with_retry_seek(
                 let msg = format!("{e:#}");
                 last_err = Some(e);
                 if attempt < PER_CHUNK_ATTEMPTS && !cancel.load(Ordering::SeqCst) {
-                    let backoff = std::time::Duration::from_secs(1u64 << (2 * (attempt - 1)));
+                    let backoff = chunk_retry_backoff(attempt);
                     log::warn!(
                         "[local-asr] chunk [{range_start}-{range_end}] attempt {attempt}/{PER_CHUNK_ATTEMPTS} failed: {msg}; sleep {:?}",
                         backoff
@@ -1160,6 +1392,7 @@ async fn try_download_range_seek(
     partial: &Path,
     range_start: u64,
     range_end: u64,
+    total_size: u64,
     cancel: &AtomicBool,
     bytes_in_file: &Arc<AtomicU64>,
     on_progress: &Arc<dyn Fn(u64) + Send + Sync>,
@@ -1170,13 +1403,11 @@ async fn try_download_range_seek(
         .send()
         .await
         .with_context(|| format!("HTTP GET {url} failed"))?;
-
-    let status = resp.status();
-    // 并发 seek 模式严格要求 206。服务端忽略 Range 返回 200 + 全文件会
-    // 把整个文件写到 range_start 偏移导致灾难性后果，此时直接 fail，
-    // 让外层 retry 再试一次。
-    if status.as_u16() != 206 {
-        anyhow::bail!("expected HTTP 206 Partial Content for ranged GET, got {status}");
+    let expected_len = validate_ranged_response(&resp, range_start, range_end, total_size, false)?;
+    // 先完整校验 body，再 seek 写 sparse 文件；失败的 chunk 不会进入 idx。
+    let body = read_response_body_exact(resp, expected_len, cancel).await?;
+    if cancel.load(Ordering::SeqCst) {
+        anyhow::bail!("cancelled");
     }
 
     let mut file = tokio::fs::OpenOptions::new()
@@ -1188,20 +1419,12 @@ async fn try_download_range_seek(
     file.seek(std::io::SeekFrom::Start(range_start))
         .await
         .with_context(|| format!("seek to {range_start} failed"))?;
-
-    let mut stream = resp.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        if cancel.load(Ordering::SeqCst) {
-            file.flush().await.ok();
-            anyhow::bail!("cancelled");
-        }
-        let bytes = chunk.context("read stream chunk failed")?;
-        file.write_all(&bytes).await.context("write chunk failed")?;
-        let new_total =
-            bytes_in_file.fetch_add(bytes.len() as u64, Ordering::Relaxed) + bytes.len() as u64;
-        on_progress(new_total);
-    }
-    file.flush().await.ok();
+    file.write_all(&body)
+        .await
+        .context("write validated chunk failed")?;
+    file.flush().await.context("flush validated chunk failed")?;
+    let new_total = bytes_in_file.fetch_add(expected_len, Ordering::Relaxed) + expected_len;
+    on_progress(new_total);
     Ok(())
 }
 
@@ -1275,10 +1498,257 @@ fn emit_cancelled(
 #[cfg(test)]
 mod tests {
     use super::{
-        existing_file_is_complete, first_readme_paragraph, is_link_only_line,
-        remove_partial_artifacts, strip_markdown_inline, truncate_description,
-        HF_CARD_DESC_MAX_CHARS,
+        chunk_retry_backoff, existing_file_is_complete, finalize, first_readme_paragraph,
+        is_link_only_line, next_page_cursor, parse_content_range, parse_partial_index,
+        read_response_body_exact, remove_partial_artifacts, strip_markdown_inline,
+        truncate_description, validate_range_metadata, HF_CARD_DESC_MAX_CHARS,
+        PARTIAL_INDEX_HEADER,
     };
+    use std::sync::atomic::AtomicBool;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn headers_with_link(link: &str) -> reqwest::header::HeaderMap {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::LINK,
+            link.parse().expect("valid link header"),
+        );
+        headers
+    }
+
+    fn http_response(status: &str, headers: &[(&str, &str)], body: &[u8]) -> Vec<u8> {
+        let mut response = format!("HTTP/1.1 {status}\r\n").into_bytes();
+        for (name, value) in headers {
+            response.extend_from_slice(format!("{name}: {value}\r\n").as_bytes());
+        }
+        response.extend_from_slice(b"Connection: close\r\n\r\n");
+        response.extend_from_slice(body);
+        response
+    }
+
+    async fn start_response_server(
+        responses: Vec<Vec<u8>>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind test HTTP server");
+        let address = listener.local_addr().expect("test HTTP server address");
+        let task = tokio::spawn(async move {
+            for response in responses {
+                let (mut stream, _) = listener.accept().await.expect("accept test HTTP request");
+                let mut request = [0u8; 1024];
+                let _ = stream.read(&mut request).await;
+                stream
+                    .write_all(&response)
+                    .await
+                    .expect("write test HTTP response");
+            }
+        });
+        (format!("http://{address}"), task)
+    }
+
+    async fn response_with_body(body: &[u8]) -> reqwest::Response {
+        let response = http_response(
+            "200 OK",
+            &[("Content-Length", &body.len().to_string())],
+            body,
+        );
+        let (url, server) = start_response_server(vec![response]).await;
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("build test client");
+        let result = client.get(url).send().await.expect("send test request");
+        server.await.expect("test HTTP server");
+        result
+    }
+
+    #[test]
+    fn cursor_parses_real_hf_next_link() {
+        // 实测自 HF tree API 的 Link header（cursor 为 base64）。
+        let link = "<https://huggingface.co/api/models/ggerganov/whisper.cpp/tree/main?expand=false&limit=3&cursor=ZXlKbWFXeGxYMjVoYldVaU9pSm5aMjFzTFdKaGMyVXRaVzVqYjJSbGNpNXRiRzF2WkdWc1l5NTZhWEFpTENKMGNtVmxYMjlwWkNJNklqTmpNRGhqTURjM05qVXdOR1l5WWpkaFpXTmlPRE5tT0RsbFlUZGpPV0l5WVdReU9EQmxaamdpZlE9PToz>; rel=\"next\"";
+        let headers = headers_with_link(link);
+        assert_eq!(
+            next_page_cursor(&headers).as_deref(),
+            Some("ZXlKbWFXeGxYMjVoYldVaU9pSm5aMjFzTFdKaGMyVXRaVzVqYjJSbGNpNXRiRzF2WkdWc1l5NTZhWEFpTENKMGNtVmxYMjlwWkNJNklqTmpNRGhqTURjM05qVXdOR1l5WWpkaFpXTmlPRE5tT0RsbFlUZGpPV0l5WVdReU9EQmxaamdpZlE9PToz")
+        );
+    }
+
+    #[test]
+    fn cursor_none_without_link_header() {
+        assert_eq!(next_page_cursor(&reqwest::header::HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn cursor_ignores_non_next_links() {
+        let link = "<https://huggingface.co/api/models/x/tree/main?limit=3>; rel=\"last\"";
+        assert_eq!(next_page_cursor(&headers_with_link(link)), None);
+    }
+
+    #[test]
+    fn cursor_picks_next_among_multiple_links() {
+        let link = "<https://huggingface.co/api/models/x/tree/main?limit=3>; rel=\"prev\", <https://huggingface.co/api/models/x/tree/main?limit=3&cursor=abc123>; rel=\"next\"";
+        assert_eq!(
+            next_page_cursor(&headers_with_link(link)).as_deref(),
+            Some("abc123")
+        );
+    }
+
+    #[test]
+    fn cursor_reads_next_from_second_link_header_line() {
+        // 服务器把 prev / next 拆成两个独立 Link header 行时也能取到 next。
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.append(
+            reqwest::header::LINK,
+            "<https://huggingface.co/api/models/x/tree/main?limit=3>; rel=\"prev\""
+                .parse()
+                .expect("valid link header"),
+        );
+        headers.append(
+            reqwest::header::LINK,
+            "<https://huggingface.co/api/models/x/tree/main?limit=3&cursor=def456>; rel=\"next\""
+                .parse()
+                .expect("valid link header"),
+        );
+        assert_eq!(next_page_cursor(&headers).as_deref(), Some("def456"));
+    }
+
+    #[test]
+    fn content_range_parser_rejects_invalid_ranges() {
+        assert_eq!(parse_content_range("bytes 8-11/16"), Some((8, 11, 16)));
+        assert_eq!(parse_content_range("bytes 8-16/16"), None);
+        assert_eq!(parse_content_range("bytes 11-8/16"), None);
+        assert_eq!(parse_content_range("items 8-11/16"), None);
+    }
+
+    #[test]
+    fn ranged_response_metadata_requires_matching_range_and_length() {
+        assert_eq!(
+            validate_range_metadata(206, Some("bytes 8-11/16"), Some(4), 8, 11, 16, false,)
+                .unwrap(),
+            4
+        );
+        assert!(
+            validate_range_metadata(206, Some("bytes 9-11/16"), Some(3), 8, 10, 16, false,)
+                .is_err()
+        );
+        assert!(
+            validate_range_metadata(206, Some("bytes 8-11/15"), Some(4), 8, 11, 16, false,)
+                .is_err()
+        );
+        assert!(
+            validate_range_metadata(206, Some("bytes 8-11/16"), Some(3), 8, 11, 16, false,)
+                .is_err()
+        );
+        assert!(validate_range_metadata(206, None, Some(4), 8, 11, 16, false).is_err());
+        assert_eq!(
+            validate_range_metadata(200, None, Some(4), 0, 3, 4, true).unwrap(),
+            4
+        );
+        assert!(validate_range_metadata(200, None, Some(4), 8, 11, 16, true).is_err());
+    }
+
+    #[tokio::test]
+    async fn response_body_must_be_exactly_the_requested_length() {
+        let cancel = AtomicBool::new(false);
+        let exact = read_response_body_exact(response_with_body(b"abcd").await, 4, &cancel)
+            .await
+            .expect("exact response body");
+        assert_eq!(exact, b"abcd");
+
+        let short = read_response_body_exact(response_with_body(b"abc").await, 4, &cancel).await;
+        assert!(short.is_err(), "short response must fail");
+
+        let over = read_response_body_exact(response_with_body(b"abcde").await, 4, &cancel).await;
+        assert!(over.is_err(), "over-read response must fail");
+    }
+
+    #[tokio::test]
+    async fn invalid_range_is_retried_before_chunk_is_finalized() {
+        let body = b"abcd";
+        let responses = vec![
+            http_response(
+                "206 Partial Content",
+                &[("Content-Range", "bytes 1-4/4"), ("Content-Length", "4")],
+                body,
+            ),
+            http_response(
+                "206 Partial Content",
+                &[("Content-Range", "bytes 0-3/4"), ("Content-Length", "4")],
+                body,
+            ),
+        ];
+        let (url, server) = start_response_server(responses).await;
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("build test client");
+        let dir = std::env::temp_dir().join(format!("ol-asr-dl-retry-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create retry test dir");
+        let dest = dir.join("model.bin");
+        let result = super::download_one(
+            &client,
+            &url,
+            &dest,
+            body.len() as u64,
+            std::sync::Arc::new(AtomicBool::new(false)),
+            std::sync::Arc::new(|_| {}),
+        )
+        .await;
+        server.await.expect("test HTTP server");
+
+        assert!(result.is_ok(), "retry should recover: {result:?}");
+        assert_eq!(std::fs::read(&dest).expect("read finalized chunk"), body);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn retry_backoff_matches_expected_schedule() {
+        assert_eq!(chunk_retry_backoff(1), std::time::Duration::from_secs(1));
+        assert_eq!(chunk_retry_backoff(2), std::time::Duration::from_secs(4));
+        assert_eq!(chunk_retry_backoff(3), std::time::Duration::from_secs(16));
+    }
+
+    #[test]
+    fn legacy_partial_index_is_untrusted() {
+        let total_size = super::CHUNK_SIZE * 2 + 1;
+        assert!(parse_partial_index("0\n1\n", total_size).is_none());
+        let valid = format!("{PARTIAL_INDEX_HEADER}\n0\n1\n2\n");
+        assert_eq!(
+            parse_partial_index(&valid, total_size)
+                .expect("versioned partial index")
+                .len(),
+            3
+        );
+    }
+
+    #[tokio::test]
+    async fn finalize_refuses_wrong_size_and_removes_index_only_after_success() {
+        let dir =
+            std::env::temp_dir().join(format!("ol-asr-dl-finalize-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create finalize test dir");
+        let partial = dir.join("model.partial");
+        let dest = dir.join("model.bin");
+        let idx = dir.join("model.partial.idx");
+
+        std::fs::write(&partial, b"abc").expect("write short partial");
+        std::fs::write(&idx, format!("{PARTIAL_INDEX_HEADER}\n0\n")).expect("write index");
+        assert!(finalize(&partial, &dest, &idx, 4).await.is_err());
+        assert!(!dest.exists(), "short partial must not be finalized");
+        assert!(idx.exists(), "failed finalize must retain the resume index");
+
+        std::fs::write(&partial, b"abcd").expect("write complete partial");
+        finalize(&partial, &dest, &idx, 4)
+            .await
+            .expect("finalize complete partial");
+        assert_eq!(std::fs::read(&dest).expect("read finalized file"), b"abcd");
+        assert!(
+            !idx.exists(),
+            "successful finalize removes the resume index"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn complete_when_size_matches() {

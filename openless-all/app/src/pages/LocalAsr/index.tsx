@@ -86,9 +86,11 @@ import {
     type SherpaOnnxLanguageHint,
     type SherpaOnnxModelAlias,
     type SherpaPrepareProgress,
+    isLocalAsrModelSupportedOnOs,
 } from "../../lib/localAsr"
 import { useHotkeySettings } from "../../state/HotkeySettingsContext"
 import { detectOS } from "../../components/WindowChrome"
+import { getPlatformCapabilities } from "../../lib/platform"
 import { SelectLite } from "../../components/ui/SelectLite"
 import { Btn, Card, Collapsible, PageHeader, Pill } from "../_atoms"
 import {
@@ -137,12 +139,12 @@ async function ensureLocalAsrChannel(providerType: string): Promise<void> {
 // 非 Windows 平台 runtime 是 stub 永远 unavailable。前端这一页对应的卡片、状态拉取、
 // 事件订阅都必须按 OS 隔离，避免 macOS / Linux 用户看到 Windows 专属的 UI。
 //
-// 同理 Qwen3-ASR 后端只在 macOS 编译实体（qwen_engine / cache / local_provider 全是
-// `#[cfg(target_os = "macos")]`），Qwen3 模型管理 UI 也按 IS_MAC 守严——之前用
-// `!IS_WINDOWS` 会让假设的 Linux 渲染路径暴露死 UI（pr_agent #403 'Linux regression'
-// 修法）。
-const IS_WINDOWS = detectOS() === "win"
-const IS_MAC = detectOS() === "mac"
+// Qwen3-ASR 的 MLX 实体只在 Apple Silicon 编译，C/CPU 实体覆盖 macOS / Linux；
+// Qwen3 模型管理 UI 仍按桌面端守严，具体后端由平台能力与渠道选择决定。
+const OS = detectOS()
+const IS_WINDOWS = OS === "win"
+const IS_MAC = OS === "mac"
+const IS_QWEN_PLATFORM = OS === "mac" || OS === "linux"
 
 interface LocalAsrProps {
     /// `embedded=true` 表示作为子组件嵌入「高级」设置页（Settings → Advanced）；
@@ -159,6 +161,8 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
     const { t } = useTranslation()
     const { prefs, updatePrefs } = useHotkeySettings()
     const [settings, setSettings] = useState<LocalAsrSettings | null>(null)
+    // 等待 native capability 查询完成，避免 Intel Mac 先闪现 MLX 渠道。
+    const [supportsQwen3Mlx, setSupportsQwen3Mlx] = useState(false)
     const [models, setModels] = useState<LocalAsrModelStatus[]>([])
     // 两栏看板：右侧当前选中的模型（默认选第一个已下载的）。
     const [selectedModelId, setSelectedModelId] = useState<string | null>(null)
@@ -246,6 +250,12 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
     )
     const scrollGuardTimer = useRef<number | null>(null)
     const scrollGuardCleanup = useRef<(() => void) | null>(null)
+
+    useEffect(() => {
+        void getPlatformCapabilities().then(caps =>
+            setSupportsQwen3Mlx(caps.supportsLocalQwen3Mlx),
+        )
+    }, [])
 
     const setDownloadDialog = (open: boolean) => {
         if (downloadDialogOpenRef.current !== open) {
@@ -478,10 +488,13 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                 listLocalAsrModels(),
             ])
             if (!isCurrent()) return
+            const supportedModels = list.filter((model) =>
+                isLocalAsrModelSupportedOnOs(model.id, OS),
+            )
             setSettings(s)
-            setModels(list)
+            setModels(supportedModels)
             void Promise.all(
-                list.map(async (m) => {
+                supportedModels.map(async (m) => {
                     try {
                         const dir = await getLocalAsrModelDir(m.id)
                         if (!isCurrent()) return
@@ -511,7 +524,7 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
             }
             // 拉远端真实尺寸（每个模型一次，结果留缓存）
             void Promise.all(
-                list.map(async (m) => {
+                supportedModels.map(async (m) => {
                     await ensureRemoteSize(m.id, s.mirror)
                 }),
             )
@@ -1543,22 +1556,33 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
         }
     }
 
-    // 「加载并测试」（qwen3）：先设为当前模型（含把 active provider 切到本地
-    // —— 与 ProvidersSection 的本地模型下拉一致），再跑内置音频测试。不再单独
-    // 提供「设为默认」按钮：激活 = 在 ASR 语音转写里选择本地模型供应商。
-    const handleTest = async (modelId: string) => {
+    // 先设为当前模型（含把 active provider 切到对应的本地引擎），再跑内置音频
+    // 测试。这样 Qwen3 与 Whisper 可以在同一页切换并比较加载/转写耗时。
+    const handleTest = async (
+        modelId: string,
+        provider: "local-qwen3-mlx" | "local-qwen3-c" | "local-whisper" =
+            prefs?.activeAsrProvider === "local-qwen3-c"
+                ? "local-qwen3-c"
+                : supportsQwen3Mlx
+                  ? "local-qwen3-mlx"
+                  : "local-qwen3-c",
+    ) => {
         try {
             await setLocalAsrActiveModel(modelId)
-            await ensureLocalAsrChannel("local-qwen3")
-            await setActiveAsrProvider("local-qwen3")
+            await ensureLocalAsrChannel(provider)
+            await setActiveAsrProvider(provider)
             await updatePrefs((current) =>
-                current.activeAsrProvider === "local-qwen3" &&
-                current.localAsrActiveModel === modelId
+                current.activeAsrProvider === provider &&
+                (provider === "local-whisper"
+                    ? current.localWhisperActiveModel === modelId
+                    : current.localAsrActiveModel === modelId)
                     ? current
                     : {
                           ...current,
-                          activeAsrProvider: "local-qwen3",
-                          localAsrActiveModel: modelId,
+                          activeAsrProvider: provider,
+                          ...(provider === "local-whisper"
+                              ? { localWhisperActiveModel: modelId }
+                              : { localAsrActiveModel: modelId }),
                       },
             )
             await refresh()
@@ -1820,8 +1844,10 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
     // 「＋ 下载新模型」弹窗获取）。
     const allSidebarEntries = useMemo<SidebarModelEntry[]>(() => {
         const entries: SidebarModelEntry[] = []
-        // macOS：Qwen3 引擎
+        // macOS：Qwen3 / Whisper 引擎
         for (const m of models) {
+            if (!isLocalAsrModelSupportedOnOs(m.id, OS)) continue
+            const isWhisper = m.id.startsWith("whisper-")
             const isDownloading =
                 Boolean(progress[m.id]) &&
                 (progress[m.id]?.phase === "started" ||
@@ -1843,8 +1869,14 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                     : null,
                 isActive:
                     settings?.activeModel === m.id &&
-                    prefs?.activeAsrProvider === "local-qwen3",
-                engine: "qwen3",
+                    (isWhisper
+                        ? prefs?.activeAsrProvider === "local-whisper"
+                        : [
+                              "local-qwen3",
+                              "local-qwen3-mlx",
+                              "local-qwen3-c",
+                          ].includes(prefs?.activeAsrProvider ?? "")),
+                engine: isWhisper ? "whisper" : "qwen3",
             })
         }
         // Windows：sherpa-onnx + foundry
@@ -1962,6 +1994,10 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
             if (action === "download") void handleDownload(entry.id)
             else if (action === "delete") void handleDelete(entry.id)
             else if (action === "reveal") void handleRevealModelDir(entry.id)
+        } else if (entry.engine === "whisper") {
+            if (action === "download") void handleDownload(entry.id)
+            else if (action === "delete") void handleDelete(entry.id)
+            else if (action === "reveal") void handleRevealModelDir(entry.id)
         } else if (entry.engine === "sherpa") {
             const alias = entry.id as SherpaOnnxModelAlias
             if (action === "download") {
@@ -2001,12 +2037,14 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
     const selectedEntryRemote = selectedEntry
         ? selectedEntry.engine === "qwen3"
             ? remoteSizes[selectedEntry.id]
-            : selectedEntry.engine === "sherpa"
-              ? sherpaRemoteSizes[selectedEntry.id]
+            : selectedEntry.engine === "whisper" || selectedEntry.engine === "sherpa"
+              ? selectedEntry.engine === "whisper"
+                  ? remoteSizes[selectedEntry.id]
+                  : sherpaRemoteSizes[selectedEntry.id]
               : null
         : null
     const selectedEntryProgress =
-        selectedEntry?.engine === "qwen3"
+        selectedEntry?.engine === "qwen3" || selectedEntry?.engine === "whisper"
             ? progress[selectedEntry.id]
             : selectedEntry?.engine === "sherpa"
               ? sherpaDownloadProgress[selectedEntry.id]
@@ -2099,7 +2137,8 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                             entry={selectedEntry}
                             fileCount={selectedEntryRemote?.fileCount ?? null}
                             mirrorLabel={
-                                selectedEntry?.engine === "qwen3"
+                                selectedEntry?.engine === "qwen3" ||
+                                selectedEntry?.engine === "whisper"
                                     ? settings?.mirror === "hf-mirror"
                                         ? "hf-mirror"
                                         : "huggingface"
@@ -2115,7 +2154,10 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                             }
                             onCancel={() => {
                                 if (!selectedEntry) return
-                                if (selectedEntry.engine === "qwen3")
+                                if (
+                                    selectedEntry.engine === "qwen3" ||
+                                    selectedEntry.engine === "whisper"
+                                )
                                     void handleCancel(selectedEntry.id)
                                 else if (selectedEntry.engine === "sherpa")
                                     void handleCancelSherpaDownload()
@@ -2126,18 +2168,33 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                             onReveal={() =>
                                 selectedEntry && dispatchEntryAction(selectedEntry, "reveal")
                             }
-                            onTest={() =>
-                                selectedEntry?.engine === "qwen3" &&
-                                void handleTest(selectedEntry.id)
+                            onTest={() => {
+                                if (
+                                    selectedEntry?.engine === "qwen3" ||
+                                    selectedEntry?.engine === "whisper"
+                                ) {
+                                    void handleTest(
+                                        selectedEntry.id,
+                                        selectedEntry.engine === "whisper"
+                                            ? "local-whisper"
+                                            : supportsQwen3Mlx
+                                              ? "local-qwen3-mlx"
+                                              : "local-qwen3-c",
+                                    )
+                                }
+                            }}
+                            showTest={
+                                selectedEntry?.engine === "qwen3" ||
+                                selectedEntry?.engine === "whisper"
                             }
-                            showTest={selectedEntry?.engine === "qwen3"}
                             testResult={
                                 selectedEntry
                                     ? (testResults[selectedEntry.id] ?? null)
                                     : null
                             }
                             testing={
-                                selectedEntry?.engine === "qwen3" &&
+                                (selectedEntry?.engine === "qwen3" ||
+                                    selectedEntry?.engine === "whisper") &&
                                 testingModelId === selectedEntry.id
                             }
                         />
@@ -2152,7 +2209,7 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                     title={t("localAsr.downloadSettingsTitle")}
                     desc={t("localAsr.downloadSettingsDesc")}
                 >
-                    {IS_MAC && (
+                    {IS_QWEN_PLATFORM && (
                         <>
                         <Card style={{ marginBottom: 16 }}>
                             <div
@@ -2466,7 +2523,7 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                         const entry = allSidebarEntries.find((e) => e.id === id)
                         if (!entry) return null
                         const remote =
-                            entry.engine === "qwen3"
+                            entry.engine === "qwen3" || entry.engine === "whisper"
                                 ? remoteSizes[id]
                                 : entry.engine === "sherpa"
                                   ? sherpaRemoteSizes[id]
@@ -3313,7 +3370,7 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
           Windows / Linux 看见镜像源 / 下载 / 模型列表都是 dead UI。Foundry 块自身已经
           被上方 IS_WINDOWS 守卫，错误 Card（共享 setError，被 Foundry handler 也写）
           保持无条件露出。 */}
-            {IS_MAC && !engineAvailable && (
+            {IS_QWEN_PLATFORM && !engineAvailable && (
                 <Card
                     style={{
                         marginBottom: 16,

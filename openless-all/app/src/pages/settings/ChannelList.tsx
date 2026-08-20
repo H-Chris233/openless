@@ -31,6 +31,7 @@ import {
 import { emitSaved } from '../../lib/savedEvent';
 import { useMobileLayout } from '../../lib/useMobileLayout';
 import { useHotkeySettings } from '../../state/HotkeySettingsContext';
+import { getPlatformCapabilities } from '../../lib/platform';
 import { Card } from '../_atoms';
 import {
   ChannelCredentialFields,
@@ -49,20 +50,35 @@ interface PresetOption {
 
 /** 「添加渠道」下拉里的供应商清单。本地引擎与 Codex OAuth 也在其中 —— 它们不是预置的
  *  固定卡片，而是和云端厂商一样由用户添加，只是编辑时没有 key / 地址字段。 */
-export function presetsFor(kind: ChannelKind, os: OS): PresetOption[] {
+export function presetsFor(
+  kind: ChannelKind,
+  os: OS,
+  supportsQwen3Mlx = true,
+  currentProviderId?: string,
+): PresetOption[] {
   if (kind === 'llm') {
     return LLM_PRESETS.map(p => ({ id: p.id, nameKey: p.nameKey }));
   }
-  return ASR_PRESETS.filter(p => {
+  const visible = ASR_PRESETS.filter(p => {
     // 本地引擎严格按其实际支持的平台暴露；Linux / Android 不展示桌面专有实现。
-    if (p.id === 'local-qwen3' || p.id === 'apple-speech') return os === 'mac';
+    if (p.id === 'local-qwen3-mlx') return os === 'mac' && supportsQwen3Mlx;
+    if (p.id === 'local-whisper' || p.id === 'apple-speech') return os === 'mac';
+    if (p.id === 'local-qwen3-c') return os === 'mac' || os === 'linux';
+    if (p.id === 'local-qwen3') return false;
     if (p.id === 'foundry-local-whisper' || p.id === 'sherpa-onnx-local') {
       return os === 'win';
     }
     // 百炼的两个旧 id 是历史别名，统一入口是 `bailian`，不再让新卡片选到。
     if (p.id === 'bailian-qwen3-realtime' || p.id === 'bailian-fun-asr-flash') return false;
     return true;
-  }).map(p => ({ id: p.id, nameKey: p.nameKey }));
+  });
+  // 新建渠道继续隐藏历史别名；编辑已有渠道时把当前值补回，避免 Select value
+  // 找不到对应 option 而显示为空。只接受注册表里已知的 preset，不放行任意字符串。
+  if (currentProviderId && !visible.some(preset => preset.id === currentProviderId)) {
+    const current = ASR_PRESETS.find(preset => preset.id === currentProviderId);
+    if (current) visible.push(current);
+  }
+  return visible.map(p => ({ id: p.id, nameKey: p.nameKey }));
 }
 
 /** 只有从未发生用户交互的新建草稿才允许走空白回收。 */
@@ -139,7 +155,11 @@ export function ChannelList({
   const { t } = useTranslation();
   const mobile = useMobileLayout();
   const os = detectOS();
-  const presets = presetsFor(kind, os);
+  // 初值 false：getPlatformCapabilities() 的权威值是架构感知的（Apple Silicon /
+  // Intel），以 os === 'mac' 起步会让 Intel Mac 打开下拉时闪现一次 MLX 预设，
+  // 再由异步纠正消失。Apple Silicon 上 MLX 选项晚一帧出现，可接受。
+  const [supportsQwen3Mlx, setSupportsQwen3Mlx] = useState(false);
+  const presets = presetsFor(kind, os, supportsQwen3Mlx);
   const [channels, setChannels] = useState<Channel[]>([]);
   const [models, setModels] = useState<Record<string, string>>({});
   const [loaded, setLoaded] = useState(false);
@@ -151,6 +171,10 @@ export function ChannelList({
   const [creatingBusy, setCreatingBusy] = useState(false);
   // 只自动弹一次：用户取消掉之后不该再被弹窗追着跑。
   const autoOpenedRef = useRef(false);
+
+  useEffect(() => {
+    void getPlatformCapabilities().then(caps => setSupportsQwen3Mlx(caps.supportsLocalQwen3Mlx));
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
@@ -509,7 +533,7 @@ export function ChannelList({
         <ChannelModal
           kind={kind}
           channel={editingChannel}
-          presets={presets}
+          presets={presetsFor(kind, os, supportsQwen3Mlx, editingChannel.providerType)}
           isDraft={isDraft}
           mobile={mobile}
           onClose={() => void closeModal()}

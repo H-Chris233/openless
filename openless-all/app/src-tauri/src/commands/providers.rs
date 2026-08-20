@@ -379,6 +379,31 @@ async fn validate_omni_provider() -> Result<(), String> {
 
 async fn validate_asr_provider(scope: &ProviderScope) -> Result<(), String> {
     let active_asr = scope.provider_type();
+    if crate::asr::local::is_local_whisper(&active_asr) {
+        #[cfg(not(target_os = "macos"))]
+        {
+            return Err("本地 Whisper 当前仅支持 macOS".to_string());
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let model_id = crate::persistence::PreferencesStore::new()
+                .ok()
+                .map(|store| store.get().local_whisper_active_model)
+                .filter(|id| {
+                    crate::asr::local::ModelId::from_str(id)
+                        .map(|model| model.is_whisper())
+                        .unwrap_or(false)
+                })
+                .unwrap_or_else(|| crate::asr::local::WHISPER_MODEL_ID.to_string());
+            let path = crate::asr::local::whisper_model_path_for_model(&model_id)
+                .map_err(|e| e.to_string())?;
+            return if path.is_file() {
+                Ok(())
+            } else {
+                Err(format!("本地 Whisper 模型不存在: {}", path.display()))
+            };
+        }
+    }
     if active_asr_is_keyless_for_validation(&active_asr) {
         return Ok(());
     }
@@ -875,7 +900,8 @@ pub(crate) fn active_asr_is_keyless_for_validation(provider: &str) -> bool {
     if cfg!(mobile) {
         return false;
     }
-    provider == crate::asr::local::PROVIDER_ID
+    crate::asr::local::qwen_backend_for_provider(provider).is_some()
+        || (cfg!(target_os = "macos") && crate::asr::local::is_local_whisper(provider))
         || active_apple_speech_asr_is_supported(provider)
         || active_foundry_asr_is_supported(provider)
         || active_sherpa_asr_is_supported(provider)

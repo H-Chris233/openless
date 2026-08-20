@@ -1,44 +1,39 @@
 //! 本地 Qwen3-ASR 在 dictation 路径上的适配器。
 //!
 //! 与 `WhisperBatchASR` 形状对齐：实现 `AudioConsumer` 缓冲 PCM，stop 时
-//! 调 `transcribe_stream`，期间每个稳定 token 通过 Tauri 事件
-//! `local-asr-token` 推到前端胶囊做实时显示。
+//! MLX 后端整段 batch 解码；C 后端保持流式解码，并通过 `local-asr-token`
+//! 向前端发送稳定 token。
 //!
 //! engine 现在由 `LocalAsrCache` 提供——Coordinator 在 build_local_qwen3 里
 //! 取已缓存的引擎再传进来，避免每次会话都重加载 1.2GB+ 模型。
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::sync::Arc;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use super::LocalQwenEngine;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use crate::asr::RawTranscript;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use anyhow::{Context, Result};
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use parking_lot::Mutex;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use tauri::{AppHandle, Emitter};
 
-#[cfg(target_os = "macos")]
-use super::QwenAsrEngine;
-#[cfg(target_os = "macos")]
-use crate::asr::RawTranscript;
-
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub struct LocalQwenAsr {
-    engine: Arc<QwenAsrEngine>,
-    /// `spawn_blocking` 已经启动后不能被 JoinHandle 强制终止；取消先关闭
-    /// 当前会话的 token 门控，确保 native worker 返回前不会向新 UI 会话泄漏旧 token。
+    engine: Arc<LocalQwenEngine>,
     cancelled: Arc<AtomicBool>,
-    /// 16-bit LE PCM 字节缓冲（recorder 推什么我们存什么），在 transcribe 时再
-    /// 转 f32 喂给 C 端。一次会话最多几 MB，clone 一次成本可接受。
     buffer: Mutex<Vec<u8>>,
     app: AppHandle,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 impl LocalQwenAsr {
-    pub fn new(app: AppHandle, engine: Arc<QwenAsrEngine>) -> Self {
+    pub fn new(app: AppHandle, engine: Arc<LocalQwenEngine>) -> Self {
         Self {
             engine,
             cancelled: Arc::new(AtomicBool::new(false)),
@@ -51,11 +46,10 @@ impl LocalQwenAsr {
     /// 用来给本地 Qwen ASR 计算动态超时（max(15, ceil(audio_s × 0.6) + 10)）。
     /// 不消费缓冲。
     pub fn buffer_duration_ms(&self) -> u64 {
-        (self.buffer.lock().len() as u64 / 2) * 1000 / 16_000
+        pcm_duration_ms(self.buffer.lock().len())
     }
 
-    /// stop 时调用：把 buffer 的 i16 PCM 转 f32，跑流式转写，token 实时
-    /// 通过事件吐到前端胶囊；最终文本一起返回供 polish/insert。
+    /// stop 时调用：MLX 整段 batch；C 保持历史流式 token 与尾部静音收尾行为。
     pub async fn transcribe(self: Arc<Self>) -> Result<RawTranscript> {
         self.cancelled.store(false, Ordering::Release);
         let pcm_bytes = std::mem::take(&mut *self.buffer.lock());
@@ -65,39 +59,24 @@ impl LocalQwenAsr {
                 duration_ms: 0,
             });
         }
-        let duration_ms = (pcm_bytes.len() as u64 / 2) * 1000 / 16_000;
-        let mut samples_f32 = i16_le_bytes_to_f32(&pcm_bytes);
-        // `transcribe_stream` 内部按 2s chunk 切片；末 chunk < 2s 且缓冲没有
-        // 静默尾巴时，C 引擎不会把它当作"语音已结束"，该 chunk 的转写结果
-        // 会被丢弃，导致末段内容消失。这里追加 0.5s 静默（@16kHz = 8000 个
-        // f32 零值）作为收尾信号。`duration_ms` 仍按原始缓冲长度计算（上面
-        // 一行），padding 不计入。
-        samples_f32.extend(std::iter::repeat(0.0f32).take(8_000));
-
-        // 注册 token 回调：每个稳定 token 抛 `local-asr-token` 事件。
-        // capsule 前端按 sessionId 累积显示。回调安装、native 调用和解绑
-        // 在 QwenAsrEngine 的同一把 context 锁内完成。
+        let duration_ms = pcm_duration_ms(pcm_bytes.len());
+        let samples_f32 = i16_le_bytes_to_f32(&pcm_bytes);
+        let engine = Arc::clone(&self.engine);
         let app = self.app.clone();
         let cancelled = Arc::clone(&self.cancelled);
-
-        // qwen_transcribe_stream 是阻塞调用；用 spawn_blocking 防止占住 tokio runtime。
-        // 用 tauri::async_runtime::spawn_blocking 而非 tokio 的 —— 同 download.rs 注释，
-        // 走 Tauri 持有的 runtime handle，不依赖调用方上下文（虽然这里目前都在 async 路径上调，
-        // 但保持一致更稳）。
-        let engine = Arc::clone(&self.engine);
         let text = tauri::async_runtime::spawn_blocking(move || {
-            engine.transcribe_stream_with_handler(&samples_f32, move |piece: &str| {
-                if cancelled.load(Ordering::Acquire) {
+            engine.transcribe_dictation_with_handler(samples_f32, move |piece: &str| {
+                if !token_emission_enabled(&cancelled) {
                     return;
                 }
-                if let Err(e) = app.emit("local-asr-token", piece.to_string()) {
-                    log::warn!("[local-asr] emit token failed: {e}");
+                if let Err(error) = app.emit("local-asr-token", piece.to_string()) {
+                    log::warn!("[local-asr] emit token failed: {error}");
                 }
             })
         })
         .await
         .context("transcribe spawn_blocking join 失败")?
-        .context("qwen_transcribe_stream 失败")?;
+        .context("本地 Qwen3-ASR 解码失败")?;
 
         Ok(RawTranscript { text, duration_ms })
     }
@@ -108,14 +87,14 @@ impl LocalQwenAsr {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 impl crate::recorder::AudioConsumer for LocalQwenAsr {
     fn consume_pcm_chunk(&self, pcm: &[u8]) {
         self.buffer.lock().extend_from_slice(pcm);
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn i16_le_bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
     bytes
         .chunks_exact(2)
@@ -124,4 +103,34 @@ fn i16_le_bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
             v as f32 / 32768.0
         })
         .collect()
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn pcm_duration_ms(byte_len: usize) -> u64 {
+    (byte_len as u64 / 2) * 1000 / 16_000
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn token_emission_enabled(cancelled: &AtomicBool) -> bool {
+    !cancelled.load(Ordering::Acquire)
+}
+
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duration_uses_only_original_pcm_bytes() {
+        assert_eq!(pcm_duration_ms(32_000), 1_000);
+    }
+
+    #[test]
+    fn cancellation_closes_the_token_emission_gate() {
+        let cancelled = AtomicBool::new(false);
+        assert!(token_emission_enabled(&cancelled));
+
+        cancelled.store(true, Ordering::Release);
+
+        assert!(!token_emission_enabled(&cancelled));
+    }
 }

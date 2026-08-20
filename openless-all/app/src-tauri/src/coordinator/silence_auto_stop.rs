@@ -145,7 +145,10 @@ mod tests {
         let mut detector = SilenceAutoStop::new(Duration::from_secs(3), base);
         let decision = feed_frames(
             &mut detector,
-            [(0.0, Duration::from_secs(10)), (0.0, Duration::from_secs(11))],
+            [
+                (0.0, Duration::from_secs(10)),
+                (0.0, Duration::from_secs(11)),
+            ],
             base,
         );
         assert_eq!(decision, Some(SilenceDecision::Cancel));

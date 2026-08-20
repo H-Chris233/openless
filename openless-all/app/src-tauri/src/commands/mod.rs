@@ -57,13 +57,11 @@ pub(crate) use crate::recorder::{AudioConsumer, Recorder};
 pub(crate) use crate::types::WindowsImeStatus;
 pub(crate) use crate::types::{
     builtin_style_pack_id, default_active_style_pack_id, ActivityDay,
-    AndroidAccessibilityStatus,
-    AndroidAccessibilityRecoveryOutcome,
-    AndroidAccessibilityRecoveryResult,
-    AndroidOverlayStatus, AndroidShizukuStatus, ChineseScriptPreference, ComboBinding, CorrectionRule, CredentialsStatus,
-    DictationSession, DictionaryEntry, HotkeyCapability, HotkeyStatus, OutputLanguagePreference,
-    PolishMode, ShortcutBinding, StylePack, StylePackHotkey, StylePackKind,
-    StylePackRuntimeDiagnostics,
+    AndroidAccessibilityRecoveryOutcome, AndroidAccessibilityRecoveryResult,
+    AndroidAccessibilityStatus, AndroidOverlayStatus, AndroidShizukuStatus,
+    ChineseScriptPreference, ComboBinding, CorrectionRule, CredentialsStatus, DictationSession,
+    DictionaryEntry, HotkeyCapability, HotkeyStatus, OutputLanguagePreference, PolishMode,
+    ShortcutBinding, StylePack, StylePackHotkey, StylePackKind, StylePackRuntimeDiagnostics,
     StyleSystemPrompts, UpdateChannel, UserPreferences, VocabPresetStore,
 };
 
@@ -85,13 +83,13 @@ mod providers;
 mod qa;
 #[cfg(not(mobile))]
 mod remote_input;
-mod settings;
-#[cfg(not(mobile))]
-mod sherpa_asr;
 #[cfg(all(not(mobile), debug_assertions))]
 mod selection_polish;
 #[cfg(not(mobile))]
 mod selection_polish_preview;
+mod settings;
+#[cfg(not(mobile))]
+mod sherpa_asr;
 mod style_packs;
 
 pub use channels::*;
@@ -116,13 +114,13 @@ pub use settings::*;
 // sherpa_onnx_asr_* 命令整组 `#[cfg(target_os = "windows")]`（见 lib.rs 的
 // generate_handler! 清单）。非 Windows 平台这组 glob 重导出无人引用，会触发
 // unused_imports；这是平台 cfg 的正常结果，不是真正的死代码。
-#[cfg(not(mobile))]
-#[allow(unused_imports)]
-pub use sherpa_asr::*;
 #[cfg(all(not(mobile), debug_assertions))]
 pub use selection_polish::*;
 #[cfg(not(mobile))]
 pub use selection_polish_preview::*;
+#[cfg(not(mobile))]
+#[allow(unused_imports)]
+pub use sherpa_asr::*;
 pub use style_packs::*;
 
 pub(crate) type CoordinatorState<'a> = State<'a, Arc<Coordinator>>;
@@ -304,7 +302,10 @@ mod tests {
             volcengine_resource_id: Some("resource".into()),
             ..snapshot()
         };
-        assert!(!asr_configured_for_provider("volcengine", &volcengine_no_access));
+        assert!(!asr_configured_for_provider(
+            "volcengine",
+            &volcengine_no_access
+        ));
 
         // ApiKey 模式：只需独立 api_key 槽 + resource_id，无需 app_key。
         let volcengine_api_key = CredentialsSnapshot {
@@ -313,7 +314,10 @@ mod tests {
             volcengine_auth_mode: Some("api_key".into()),
             ..snapshot()
         };
-        assert!(asr_configured_for_provider("volcengine", &volcengine_api_key));
+        assert!(asr_configured_for_provider(
+            "volcengine",
+            &volcengine_api_key
+        ));
         // ApiKey 模式缺 api_key（旧 access_key 槽有值也不满足）→ 未配置。
         let volcengine_api_key_missing = CredentialsSnapshot {
             volcengine_access_key: Some("old-access-token".into()),
@@ -321,7 +325,10 @@ mod tests {
             volcengine_auth_mode: Some("api_key".into()),
             ..snapshot()
         };
-        assert!(!asr_configured_for_provider("volcengine", &volcengine_api_key_missing));
+        assert!(!asr_configured_for_provider(
+            "volcengine",
+            &volcengine_api_key_missing
+        ));
 
         let whisper_key_only = CredentialsSnapshot {
             asr_api_key: Some("key".into()),
@@ -347,8 +354,25 @@ mod tests {
             &whisper_keyless_ready
         ));
 
-        assert!(asr_configured_for_provider(
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            assert!(asr_configured_for_provider(
+                crate::asr::local::PROVIDER_ID,
+                &snapshot()
+            ));
+            assert!(asr_configured_for_provider(
+                crate::asr::local::LOCAL_QWEN3_C_PROVIDER_ID,
+                &snapshot()
+            ));
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        assert!(!asr_configured_for_provider(
             crate::asr::local::PROVIDER_ID,
+            &snapshot()
+        ));
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        assert!(asr_configured_for_provider(
+            crate::asr::local::LOCAL_QWEN3_MLX_PROVIDER_ID,
             &snapshot()
         ));
         #[cfg(target_os = "windows")]
@@ -393,8 +417,29 @@ mod tests {
 
     #[test]
     fn local_asr_providers_skip_external_validation() {
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         assert!(active_asr_is_keyless_for_validation(
             crate::asr::local::PROVIDER_ID
+        ));
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        assert!(!active_asr_is_keyless_for_validation(
+            crate::asr::local::PROVIDER_ID
+        ));
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        assert!(active_asr_is_keyless_for_validation(
+            crate::asr::local::LOCAL_QWEN3_C_PROVIDER_ID
+        ));
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        assert!(active_asr_is_keyless_for_validation(
+            crate::asr::local::LOCAL_QWEN3_MLX_PROVIDER_ID
+        ));
+        #[cfg(target_os = "macos")]
+        assert!(active_asr_is_keyless_for_validation(
+            crate::asr::local::LOCAL_WHISPER_PROVIDER_ID
+        ));
+        #[cfg(not(target_os = "macos"))]
+        assert!(!active_asr_is_keyless_for_validation(
+            crate::asr::local::LOCAL_WHISPER_PROVIDER_ID
         ));
         #[cfg(target_os = "windows")]
         assert!(active_asr_is_keyless_for_validation(
@@ -420,21 +465,37 @@ mod tests {
     fn provider_switch_release_plan_covers_inactive_local_runtimes() {
         let qwen = local_asr_release_plan_for_provider(crate::asr::local::PROVIDER_ID);
         assert!(!qwen.qwen);
+        assert!(qwen.whisper);
         assert!(qwen.foundry);
         assert!(qwen.sherpa);
 
+        let qwen_c =
+            local_asr_release_plan_for_provider(crate::asr::local::LOCAL_QWEN3_C_PROVIDER_ID);
+        assert!(!qwen_c.qwen);
+        assert!(qwen_c.whisper);
+
+        let whisper =
+            local_asr_release_plan_for_provider(crate::asr::local::LOCAL_WHISPER_PROVIDER_ID);
+        assert!(whisper.qwen);
+        assert!(!whisper.whisper);
+        assert!(whisper.foundry);
+        assert!(whisper.sherpa);
+
         let foundry = local_asr_release_plan_for_provider(crate::asr::local::foundry::PROVIDER_ID);
         assert!(foundry.qwen);
+        assert!(foundry.whisper);
         assert!(!foundry.foundry);
         assert!(foundry.sherpa);
 
         let sherpa = local_asr_release_plan_for_provider(crate::asr::local::sherpa::PROVIDER_ID);
         assert!(sherpa.qwen);
+        assert!(sherpa.whisper);
         assert!(sherpa.foundry);
         assert!(!sherpa.sherpa);
 
         let cloud = local_asr_release_plan_for_provider("volcengine");
         assert!(cloud.qwen);
+        assert!(cloud.whisper);
         assert!(cloud.foundry);
         assert!(cloud.sherpa);
     }

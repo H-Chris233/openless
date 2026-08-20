@@ -12,7 +12,7 @@ import {
     type LocalAsrModelStatus,
     type LocalAsrTestResult,
 } from "../../lib/localAsr"
-import { Btn, Card, Pill } from "../_atoms"
+import { Btn, Card, Collapsible, Pill } from "../_atoms"
 import { Icon } from "../../components/Icon"
 import { formatBytes } from "./helpers"
 import type { RemoteSize } from "./types"
@@ -558,7 +558,7 @@ export function TestResultBlock({
 // 纯展示组件；数据与动作由 LocalAsr/index.tsx 组装后传入。
 // ─────────────────────────────────────────────────────────────────────
 
-/** 侧栏统一条目：三套本地引擎（Qwen3 / sherpa-onnx / foundry）归一化。 */
+/** 侧栏统一条目：本地引擎（Qwen3 / Whisper / sherpa-onnx / foundry）归一化。 */
 export interface SidebarModelEntry {
     id: string
     /** 展示名（如 qwen3-asr-0.6b / whisper-small）。 */
@@ -576,7 +576,7 @@ export interface SidebarModelEntry {
     /** 当前激活（设为默认的本地模型）。 */
     isActive: boolean
     /** 引擎标识，决定右侧动作按钮分派。 */
-    engine: "qwen3" | "sherpa" | "foundry"
+    engine: "qwen3" | "whisper" | "sherpa" | "foundry"
 }
 
 /** 左侧模型选择栏：竖排条目，选中高亮；底部预留「下载新模型」按钮位。 */

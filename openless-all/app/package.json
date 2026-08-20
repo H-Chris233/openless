@@ -10,6 +10,7 @@
     "prebuild": "node scripts/android-ipc-import-boundary.test.mjs",
     "build": "tsc && vite build",
     "preview": "vite preview",
+    "check:macos-metal-toolchain": "node scripts/verify-macos-metal-toolchain.mjs",
     "tauri": "tauri",
     "tauri:android:init": "tauri android init",
     "tauri:android:dev": "tauri android dev",

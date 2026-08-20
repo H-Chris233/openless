@@ -52,18 +52,47 @@ fn volcengine_configured(snap: &CredentialsSnapshot) -> bool {
 }
 
 pub(crate) fn asr_configured_for_provider(provider: &str, snap: &CredentialsSnapshot) -> bool {
+    if crate::asr::local::is_local_whisper(provider) {
+        #[cfg(target_os = "macos")]
+        {
+            let model_id = crate::persistence::PreferencesStore::new()
+                .ok()
+                .map(|store| store.get().local_whisper_active_model)
+                .filter(|id| {
+                    crate::asr::local::ModelId::from_str(id)
+                        .map(|model| model.is_whisper())
+                        .unwrap_or(false)
+                })
+                .unwrap_or_else(|| crate::asr::local::WHISPER_MODEL_ID.to_string());
+            return crate::asr::local::whisper_model_ready_for_model(&model_id);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            return false;
+        }
+    }
     // 本地 / 无凭据引擎不属于云端分类枚举（ActiveAsrProviderKind），由平台 cfg 门
     // 在此单独判定；移动端上这些引擎不可用直接判未配置。
     if cfg!(mobile)
-        && (provider == crate::asr::local::PROVIDER_ID
+        && (crate::asr::local::is_local_qwen3(provider)
+            || crate::asr::local::is_local_whisper(provider)
             || provider == crate::asr::local::sherpa::PROVIDER_ID
             || provider == crate::asr::local::foundry::PROVIDER_ID
             || provider == crate::asr::local::APPLE_SPEECH_PROVIDER_ID)
     {
         return false;
     }
-    if provider == crate::asr::local::PROVIDER_ID
-        || active_apple_speech_asr_is_supported(provider)
+    if crate::asr::local::is_local_qwen3(provider) {
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            return crate::asr::local::qwen_backend_for_provider(provider).is_some();
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            return false;
+        }
+    }
+    if active_apple_speech_asr_is_supported(provider)
         || active_foundry_asr_is_supported(provider)
         || active_sherpa_asr_is_supported(provider)
     {
@@ -160,6 +189,7 @@ pub(crate) fn omni_configured_for_active_provider(snap: &CredentialsSnapshot) ->
 #[cfg(not(mobile))]
 pub(crate) struct LocalAsrReleasePlan {
     pub(crate) qwen: bool,
+    pub(crate) whisper: bool,
     pub(crate) foundry: bool,
     pub(crate) sherpa: bool,
 }
@@ -167,7 +197,8 @@ pub(crate) struct LocalAsrReleasePlan {
 #[cfg(not(mobile))]
 pub(crate) fn local_asr_release_plan_for_provider(provider: &str) -> LocalAsrReleasePlan {
     LocalAsrReleasePlan {
-        qwen: provider != crate::asr::local::PROVIDER_ID,
+        qwen: !crate::asr::local::is_local_qwen3(provider),
+        whisper: !crate::asr::local::is_local_whisper(provider),
         foundry: provider != FOUNDRY_LOCAL_PROVIDER_ID,
         sherpa: provider != crate::asr::local::sherpa::PROVIDER_ID,
     }
@@ -263,7 +294,8 @@ pub async fn set_active_asr_provider(
     _coord: CoordinatorState<'_>,
     provider: String,
 ) -> Result<(), String> {
-    if provider == crate::asr::local::PROVIDER_ID
+    if crate::asr::local::is_local_qwen3(&provider)
+        || crate::asr::local::is_local_whisper(&provider)
         || provider == crate::asr::local::sherpa::PROVIDER_ID
         || provider == crate::asr::local::foundry::PROVIDER_ID
         || provider == crate::asr::local::APPLE_SPEECH_PROVIDER_ID
@@ -284,6 +316,14 @@ pub async fn set_active_asr_provider(
     sherpa_runtime: State<'_, Arc<SherpaOnnxRuntime>>,
     provider: String,
 ) -> Result<(), String> {
+    if crate::asr::local::is_local_qwen3(&provider)
+        && crate::asr::local::qwen_backend_for_provider(&provider).is_none()
+    {
+        return Err("所选本地 Qwen3-ASR 后端不支持当前系统".to_string());
+    }
+    if crate::asr::local::is_local_whisper(&provider) && !cfg!(target_os = "macos") {
+        return Err("本地 Whisper 当前仅支持 macOS".to_string());
+    }
     if provider == FOUNDRY_LOCAL_PROVIDER_ID && !active_foundry_asr_is_supported(&provider) {
         return Err("Foundry Local Whisper is only available on Windows".to_string());
     }
@@ -302,18 +342,16 @@ pub async fn set_active_asr_provider(
     }
     CredentialsVault::set_active_asr_provider(&provider).map_err(|e| e.to_string())?;
     let release_plan = local_asr_release_plan_for_provider(&provider);
-    if provider == crate::asr::local::PROVIDER_ID {
-        // 切到本地 ASR → 后台预加载模型，下次按 hotkey 时不必等数秒。
-        coord.preload_local_asr_in_background();
-    }
-    if release_plan.qwen {
-        // 切回云端 → 用户已不需要本地引擎，立刻释放 1.2GB+ RAM；不释放的话只会等到
-        // schedule_local_asr_release 的下一次 dictation 才触发，而切回云端后根本不会
-        // 再走 local 路径，引擎会驻留到进程退出。
-        coord.release_local_asr_engine();
-    }
+    coord.release_inactive_local_asr_engines(release_plan.qwen, release_plan.whisper);
     release_foundry_runtime_if_inactive(runtime.inner(), release_plan.foundry).await;
     release_sherpa_runtime_if_inactive(sherpa_runtime.inner(), release_plan.sherpa).await;
+    coord.emit_local_asr_engine_status();
+    if crate::asr::local::is_local_qwen3(&provider)
+        || crate::asr::local::is_local_whisper(&provider)
+    {
+        // 所有非目标本地 runtime 已释放后再预加载，避免切换时两个大模型同时驻留。
+        coord.preload_local_asr_in_background();
+    }
     Ok(())
 }
 

@@ -24,6 +24,15 @@ else
   echo "▶ 检测到 Apple 签名环境，交给 Tauri 做 Developer ID 签名 / 公证"
 fi
 
+echo "▶ 检查 Apple Silicon MLX 构建依赖"
+npm run check:macos-metal-toolchain
+
+# Homebrew rustc 在 macOS 上对 `strip=symbols` 生成的 proc-macro dylib
+# 可能报 "mis-aligned LINKEDIT string pool"。仅官方 macOS 发布脚本降级
+# 为 debuginfo；Cargo.toml 的全局 profile 仍让 Linux/Windows/Android 使用 symbols。
+export CARGO_PROFILE_RELEASE_STRIP=debuginfo
+echo "▶ Cargo release strip: ${CARGO_PROFILE_RELEASE_STRIP} (macOS only)"
+
 echo "▶ tauri build"
 TAURI_BUILD_ARGS=(build)
 if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ] || [ -n "${TAURI_SIGNING_PRIVATE_KEY_PATH:-}" ]; then

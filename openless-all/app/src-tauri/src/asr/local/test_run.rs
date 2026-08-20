@@ -5,26 +5,26 @@
 //!   1. 用 antirez 项目自带的 `samples/test_speech.wav` 作输入（编进二进制）
 //!   2. WAV 解析（16kHz mono 16-bit PCM，但 fmt 后面可能有 LIST/INFO 等
 //!      非 data chunk，必须按 RIFF 标准走 chunk 链找 "data"，不能 +44 硬偏移）
-//!   3. 加载模型，跑 transcribe_audio，分别记录 load_ms / transcribe_ms
+//!   3. 加载模型，跑 batch transcribe，分别记录 load_ms / transcribe_ms
 //!   4. 给前端用：用户点击「加载并测试」按钮立即知道模型是否能跑、有多快、识别什么
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::path::Path;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::sync::Arc;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::time::Instant;
 
 use anyhow::Result;
 use serde::Serialize;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use super::models::model_dir;
 use super::models::ModelId;
 
 /// 内嵌测试音频。原始文件 `vendor/qwen-asr/samples/test_speech.wav`
 /// 内容："Hello. This is a test of the Voxtrail speech-to-text system."
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 const TEST_WAV: &[u8] = include_bytes!("../../../vendor/qwen-asr/samples/test_speech.wav");
 
 /// 测试结果给前端展示。
@@ -40,17 +40,28 @@ pub struct TestResult {
     pub transcribe_ms: u64,
 }
 
-#[cfg(target_os = "macos")]
-pub async fn run_test(model_id: ModelId) -> Result<TestResult> {
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub async fn run_test(
+    model_id: ModelId,
+    backend: Option<super::QwenBackend>,
+) -> Result<TestResult> {
+    if model_id.is_whisper() {
+        #[cfg(target_os = "macos")]
+        return run_whisper_test(model_id).await;
+        #[cfg(target_os = "linux")]
+        anyhow::bail!("本地 Whisper 测试仅支持 macOS");
+    }
+    let backend =
+        backend.ok_or_else(|| anyhow::anyhow!("当前系统不支持所选的本地 Qwen3-ASR 后端"))?;
     let dir = model_dir(model_id)?;
     if !dir.exists() {
         anyhow::bail!("模型目录不存在：{}（请先下载）", dir.display());
     }
 
     // ── 模型文件完整性检查 ────────────────────────────────────────────
-    // 在调 C FFI 之前先检查关键文件是否齐全、尺寸是否合理，避免因下载不完整
-    // 或文件损坏导致 C 端 qwen_load / qwen_transcribe_audio segfault 杀死进程。
-    // 需要的文件清单见 QwenAsrEngine::load() 注释。
+    // 在调 native 引擎之前先检查关键文件是否齐全、尺寸是否合理，避免因下载不完整
+    // 或文件损坏导致模型加载失败。tokenizer.json 会在 MLX 引擎首次加载时从
+    // vocab.json / merges.txt 本地生成。
     let required_files = ["config.json", "vocab.json", "merges.txt"];
     for fname in &required_files {
         let path = dir.join(fname);
@@ -90,25 +101,30 @@ pub async fn run_test(model_id: ModelId) -> Result<TestResult> {
     let samples = decode_wav_16k_mono(TEST_WAV)?;
     let audio_ms = (samples.len() as u64) * 1000 / 16_000;
 
-    // qwen_load 是同步阻塞调用且较慢（数秒）；扔到 spawn_blocking 不阻塞 tokio runtime。
+    // 本地模型加载是同步阻塞调用且较慢（数秒）；扔到 spawn_blocking 不阻塞 tokio runtime。
     let load_start = Instant::now();
     let dir_for_blocking = dir.clone();
-    let engine = tauri::async_runtime::spawn_blocking(move || load_engine(&dir_for_blocking))
-        .await
-        .map_err(|e| anyhow::anyhow!("spawn_blocking join failed: {e:#}"))??;
-    let load_ms = load_start.elapsed().as_millis() as u64;
-
-    // transcribe_audio 也是阻塞 + 重活，同样扔到 blocking pool。
-    let trans_start = Instant::now();
-    let engine_clone = Arc::clone(&engine);
-    let text =
-        tauri::async_runtime::spawn_blocking(move || engine_clone.transcribe_audio(&samples))
+    let engine =
+        tauri::async_runtime::spawn_blocking(move || load_engine(backend, &dir_for_blocking))
             .await
             .map_err(|e| anyhow::anyhow!("spawn_blocking join failed: {e:#}"))??;
+    let load_ms = load_start.elapsed().as_millis() as u64;
+
+    // batch transcribe 也是阻塞 + 重活，同样扔到 blocking pool。
+    let trans_start = Instant::now();
+    let engine_clone = Arc::clone(&engine);
+    let text = tauri::async_runtime::spawn_blocking(move || engine_clone.transcribe_pcm(&samples))
+        .await
+        .map_err(|e| anyhow::anyhow!("spawn_blocking join failed: {e:#}"))??;
     let transcribe_ms = trans_start.elapsed().as_millis() as u64;
 
     Ok(TestResult {
-        backend: "Apple Accelerate (AMX/NEON, CPU)".into(),
+        backend: match backend {
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            super::QwenBackend::Mlx => "MLX Metal (Apple Silicon)",
+            super::QwenBackend::C => "C CPU",
+        }
+        .into(),
         model_id: model_id.as_str().into(),
         expected_text: "Hello. This is a test of the Voxtrail speech-to-text system.".into(),
         transcribed_text: text,
@@ -118,14 +134,57 @@ pub async fn run_test(model_id: ModelId) -> Result<TestResult> {
     })
 }
 
-#[cfg(not(target_os = "macos"))]
-pub async fn run_test(_model_id: ModelId) -> Result<TestResult> {
-    anyhow::bail!("本地 ASR 引擎本期仅 macOS 可用（见 issue #256）")
+#[cfg(target_os = "macos")]
+async fn run_whisper_test(model_id: ModelId) -> Result<TestResult> {
+    use super::whisper_provider::{LocalWhisperCache, WhisperEngine};
+
+    let path = super::whisper_provider::model_path_for_model(model_id.as_str())?;
+    if !path.is_file() {
+        anyhow::bail!("模型文件不存在：{}（请先下载）", path.display());
+    }
+    let samples = decode_wav_16k_mono(TEST_WAV)?;
+    let audio_ms = samples.len() as u64 * 1000 / 16_000;
+    let cache = LocalWhisperCache::new();
+    let load_start = Instant::now();
+    let path_for_blocking = path.clone();
+    let model_name = model_id.as_str().to_string();
+    let engine = tauri::async_runtime::spawn_blocking(move || {
+        cache.get_or_load(&model_name, &path_for_blocking)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("spawn_blocking join failed: {e:#}"))??;
+    let load_ms = load_start.elapsed().as_millis() as u64;
+
+    let trans_start = Instant::now();
+    let text = tauri::async_runtime::spawn_blocking(move || {
+        WhisperEngine::transcribe(&engine, &samples, "en")
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("spawn_blocking join failed: {e:#}"))??;
+    let transcribe_ms = trans_start.elapsed().as_millis() as u64;
+
+    Ok(TestResult {
+        backend: "whisper.cpp (Metal/CPU)".into(),
+        model_id: model_id.as_str().into(),
+        expected_text: "Hello. This is a test of the Voxtrail speech-to-text system.".into(),
+        transcribed_text: text,
+        audio_ms,
+        load_ms,
+        transcribe_ms,
+    })
 }
 
-#[cfg(target_os = "macos")]
-fn load_engine(dir: &Path) -> Result<Arc<super::QwenAsrEngine>> {
-    let engine = super::QwenAsrEngine::load(dir)?;
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub async fn run_test(
+    _model_id: ModelId,
+    _backend: Option<super::QwenBackend>,
+) -> Result<TestResult> {
+    anyhow::bail!("本地 Qwen3-ASR C 后端目前仅支持 macOS/Linux；MLX 后端仅支持 macOS")
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn load_engine(backend: super::QwenBackend, dir: &Path) -> Result<Arc<super::LocalQwenEngine>> {
+    let engine = super::LocalQwenEngine::load(backend, dir)?;
     Ok(Arc::new(engine))
 }
 

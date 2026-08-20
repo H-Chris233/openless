@@ -252,10 +252,14 @@ export const ASR_PRESETS = [
   // 两字段（asr/xfyun.rs）；音频 16k/16bit/mono，与 recorder 输出一致。
   { id: 'iflytek',      nameKey: 'asrIflytek',      baseUrl: '',                                              model: ''                              },
   { id: 'foundry-local-whisper', nameKey: 'asrFoundryLocalWhisper', baseUrl: '',                              model: ''                              },
+  { id: 'local-whisper', nameKey: 'asrLocalWhisper', baseUrl: '',                                         model: ''                              },
   // 本地引擎（Foundry / sherpa-onnx / Qwen3）：无 baseUrl/model 配置，
   // 模型在「高级 → 本地模型」里下载与切换。
   { id: 'sherpa-onnx-local',     nameKey: 'asrSherpaOnnxLocal',     baseUrl: '',                              model: ''                              },
-  { id: 'local-qwen3',  nameKey: 'asrLocalQwen3',   baseUrl: '',                                              model: ''                              },
+  { id: 'local-qwen3-mlx', nameKey: 'asrLocalQwen3Mlx', baseUrl: '',                                          model: ''                              },
+  { id: 'local-qwen3-c',   nameKey: 'asrLocalQwen3C', baseUrl: '',                                            model: ''                              },
+  // 历史配置兼容：不在新建下拉显示，但编辑旧渠道时仍按本地引擎处理。
+  { id: 'local-qwen3', nameKey: 'asrLocalQwen3', baseUrl: '',                                                 model: ''                              },
   // Apple 系统语音识别（macOS）：无 baseUrl/model、无下载、无凭据。
   { id: 'apple-speech', nameKey: 'asrAppleSpeech',  baseUrl: '',                                              model: ''                              },
 ] as const;

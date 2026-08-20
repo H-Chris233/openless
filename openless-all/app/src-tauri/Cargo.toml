@@ -117,6 +117,8 @@ minisign-verify = "0.2"
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.5"
 core-foundation = "0.10"
+tokenizers = "0.21"
+whisper-rs = { version = "0.14", features = ["metal"] }
 core-graphics = "0.24"
 # issue #470：托盘麦克风设备变更改用 CoreAudio AudioObjectAddPropertyListener 原生通知
 # （替代 10s 轮询，空闲零唤醒）。符号本就在依赖树（cpal → coreaudio-sys 0.2），提升为
@@ -125,6 +127,13 @@ coreaudio-sys = "0.2"
 objc2 = { version = "0.5", features = ["exception"] }
 objc2-foundation = "0.2"
 objc2-app-kit = "0.2"
+
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+# 注意：path 依赖的 manifest 会被 Cargo 解析器跨所有 target 读取（与 cfg gating
+# 无关），所以**所有平台**源码构建都必须先 `git submodule update --init --recursive`，
+# 否则 cargo check 会在解析阶段硬失败。CI 里非 macOS 任务依赖
+# scripts/ci-disable-macos-qwen3.mjs 删掉本行来规避。
+qwen3-asr-rs = { path = "vendor/qwen3-asr-rs", default-features = false, features = ["mlx"] }
 # 把胶囊窗口转成「非激活 NSPanel」，使其能叠在别的 app 的全屏 Space 之上。
 # 普通 NSWindow 即便设了 collectionBehavior 也做不到（tauri#9556 / #11488）—— 必须是
 # NSPanel。该插件做窗口 NSWindow→NSPanel subclass 转换；仅 macOS。

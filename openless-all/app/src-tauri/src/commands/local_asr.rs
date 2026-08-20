@@ -13,24 +13,30 @@ pub struct LocalAsrSettings {
     pub mirror: String,
     pub models_base_dir: Option<String>,
     pub models_root_dir: String,
-    /// macOS 才编入引擎；Windows 端 UI 需要据此把"开始下载"按钮灰掉。
+    /// macOS/Linux 编入本地 Qwen3-ASR C 引擎；MLX 仅在 macOS 可用。
     pub engine_available: bool,
 }
 
 #[tauri::command]
 pub fn local_asr_get_settings(coord: CoordinatorState<'_>) -> LocalAsrSettings {
     let prefs = coord.prefs().get();
+    let active_provider = CredentialsVault::get_active_asr();
     let models_base_dir = non_empty_string(prefs.local_asr_models_base_dir.clone());
     let models_root_dir = crate::persistence::models_root_for_base_dir(models_base_dir.as_deref())
         .map(|path| path.display().to_string())
         .unwrap_or_default();
+    let active_model = if crate::asr::local::is_local_whisper(&active_provider) {
+        prefs.local_whisper_active_model
+    } else {
+        prefs.local_asr_active_model
+    };
     LocalAsrSettings {
         provider_id: LOCAL_PROVIDER_ID.into(),
-        active_model: prefs.local_asr_active_model,
+        active_model,
         mirror: prefs.local_asr_mirror,
         models_base_dir,
         models_root_dir,
-        engine_available: cfg!(target_os = "macos"),
+        engine_available: cfg!(any(target_os = "macos", target_os = "linux")),
     }
 }
 
@@ -168,11 +174,17 @@ pub fn local_asr_set_active_model(
     coord: CoordinatorState<'_>,
     model_id: String,
 ) -> Result<(), String> {
-    if ModelId::from_str(&model_id).is_none() {
+    let model =
+        ModelId::from_str(&model_id).ok_or_else(|| format!("unknown model id: {model_id}"))?;
+    if !model.is_qwen() && !model.is_whisper() {
         return Err(format!("unknown model id: {model_id}"));
     }
     let mut prefs = coord.prefs().get();
-    prefs.local_asr_active_model = model_id;
+    if model.is_whisper() {
+        prefs.local_whisper_active_model = model_id;
+    } else {
+        prefs.local_asr_active_model = model_id;
+    }
     coord.prefs().set(prefs).map_err(|e| e.to_string())
 }
 
@@ -240,7 +252,12 @@ pub fn local_asr_delete_model(coord: CoordinatorState<'_>, model_id: String) -> 
     // 如果内存里加载的就是要删的这个模型，先释放：否则 mmap 残留指向已 unlink 的文件，
     // 且 RAM 直到下次切模型 / 用户手动按"释放"才回收。
     if coord.local_asr_loaded_model().as_deref() == Some(id.as_str()) {
-        coord.release_local_asr_engine();
+        if id.is_whisper() {
+            coord.release_local_whisper_engine();
+        } else {
+            coord.release_local_qwen_engine();
+        }
+        coord.emit_local_asr_engine_status();
     }
     crate::asr::local::models::delete_model(id).map_err(|e| e.to_string())
 }
@@ -272,10 +289,13 @@ pub fn local_asr_reveal_models_root(coord: CoordinatorState<'_>) -> Result<(), S
 
 #[tauri::command]
 pub async fn local_asr_test_model(
+    coord: CoordinatorState<'_>,
     model_id: String,
 ) -> Result<crate::asr::local::test_run::TestResult, String> {
     let id = ModelId::from_str(&model_id).ok_or_else(|| format!("unknown model id: {model_id}"))?;
-    crate::asr::local::test_run::run_test(id)
+    let backend =
+        crate::asr::local::qwen_backend_for_provider(&coord.prefs().get().active_asr_provider);
+    crate::asr::local::test_run::run_test(id, backend)
         .await
         .map_err(|e| format!("{e:#}"))
 }
@@ -291,9 +311,10 @@ pub struct LocalAsrEngineStatus {
 #[tauri::command]
 pub fn local_asr_engine_status(coord: CoordinatorState<'_>) -> LocalAsrEngineStatus {
     let prefs = coord.prefs().get();
+    let model_id = coord.local_asr_loaded_model();
     LocalAsrEngineStatus {
-        loaded: coord.local_asr_loaded_model().is_some(),
-        model_id: coord.local_asr_loaded_model(),
+        loaded: model_id.is_some(),
+        model_id,
         keep_loaded_secs: prefs.local_asr_keep_loaded_secs,
     }
 }

@@ -43,7 +43,9 @@ import {
 
 // 本地模型供应商：在主下拉里标注「本地」后缀，与云端供应商区分开。
 const LOCAL_ASR_PRESET_IDS: ReadonlySet<string> = new Set([
-  'local-qwen3',
+  'local-qwen3-mlx',
+  'local-qwen3-c',
+  'local-whisper',
   'foundry-local-whisper',
   'sherpa-onnx-local',
 ]);
@@ -234,6 +236,9 @@ const ASR_DEFAULT_RESOURCE_ID = 'volc.seedasr.sauc.duration';
 /// 无 key / 无地址的本地引擎：卡片编辑里没有凭据字段，模型下载仍在「高级 → 本地模型」。
 export const LOCAL_ASR_PROVIDER_IDS: string[] = [
   'local-qwen3',
+  'local-qwen3-mlx',
+  'local-qwen3-c',
+  'local-whisper',
   'sherpa-onnx-local',
   'foundry-local-whisper',
   'apple-speech',

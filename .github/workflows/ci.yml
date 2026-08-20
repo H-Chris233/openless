@@ -27,8 +27,15 @@ jobs:
         working-directory: openless-all/app
     steps:
       - uses: actions/checkout@v4
-        # vendor/qwen-asr 仅 macOS 上 build.rs 会编译（build.rs:49 build_qwen_asr_macos）；
-        # Android/Linux 的 cargo check 不需要，去掉递归拉取省一次网络 fetch + 失败点。
+        with:
+          # Android 不使用任何桌面本地 ASR 子模块；macOS MLX 依赖不进入此任务。
+          submodules: false
+
+        # Android 不编译任何本地 ASR C 代码：build.rs 按 TARGET 解析排除
+        # Android triple（不调 build_qwen_asr）。qwen3-asr-rs 是 path 依赖，
+        # Cargo 解析器跨所有 target 都要读它的 manifest——所以由下方的
+        # ci-disable-macos-qwen3.mjs 删掉该依赖行，否则 cargo check 硬失败。
+        # 去掉递归拉取省一次网络 fetch + 失败点。
       - name: Setup Android SDK + NDK
         uses: android-actions/setup-android@v3
         with:
@@ -95,6 +102,9 @@ jobs:
 
       - name: Check Android updater pubkey matches tauri.conf.json
         run: npm run check:android-updater-pubkey
+
+      - name: Disable macOS-only Qwen3 MLX dependency
+        run: node scripts/ci-disable-macos-qwen3.mjs
 
       - name: Check Tauri backend (Android target)
         run: cargo check --manifest-path src-tauri/Cargo.toml --target aarch64-linux-android
@@ -178,10 +188,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # vendor/qwen-asr 仅 macOS 上 build.rs 会编译（build.rs:49 build_qwen_asr_macos）。
-          # Windows/Linux 的 cargo check 不需要子模块；用矩阵条件避免非 macOS job
-          # 多拉一次 git submodule（省网络 fetch + 去掉一个失败点）。
+          # 只在 macOS 初始化 MLX 子模块；Linux 的 C 后端单独初始化 qwen-asr。
           submodules: ${{ matrix.os == 'macos-latest' && 'recursive' || 'false' }}
+
+      - name: Initialize Linux C ASR submodule
+        if: runner.os == 'Linux'
+        shell: bash
+        run: git submodule update --init src-tauri/vendor/qwen-asr
+      - name: Disable macOS-only Qwen3 MLX dependency
+        if: runner.os != 'macOS'
+        run: node scripts/ci-disable-macos-qwen3.mjs
 
       - uses: actions/setup-node@v4
         with:
