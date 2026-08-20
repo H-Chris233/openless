@@ -50,25 +50,6 @@
 </p>
 
 <p align="center">
-  <a href="https://jiangmuran.com/" target="_blank" rel="noopener">
-    <img src="assets/people/jiangmuran.png" width="120" height="120" alt="jiangmuran" />
-  </a>
-</p>
-
-<p align="center">
-  <a href="https://jiangmuran.com/" target="_blank" rel="noopener"><strong>jiangmuran</strong></a><br/>
-  <sub>⭐ Featured Sponsor · jiangmuran.com</sub>
-</p>
-
-<p align="center">
-  Special thanks to <strong>jiangmuran</strong> for the sustained support that keeps OpenLess moving forward.
-</p>
-
-<p align="center">
-  <sub>— with thanks to —</sub>
-</p>
-
-<p align="center">
   <a href="https://www.knin.net" target="_blank" rel="noopener">
     <img alt="悠雾云数据 (Youwu Cloud Data)" src="https://www.knin.net/upload/logo.png" height="52" />
   </a>
