@@ -101,6 +101,16 @@
       </a><br/>
       <sub>github.com/Cooper-X-Oak</sub>
     </td>
+    <td align="center" width="170">
+      <img
+        src="https://image.bigsong.site/file/1787214963742_b40cd86b033a60bcc8562f7f053c4900.jpg"
+        width="80"
+        height="80"
+        alt="bigsong"
+      /><br/>
+      <strong>bigsong</strong><br/>
+      <sub>贡献者</sub>
+    </td>
   </tr>
 </table>
 
