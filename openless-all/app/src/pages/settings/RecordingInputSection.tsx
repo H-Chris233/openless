@@ -424,32 +424,34 @@ export function RecordingInputSection() {
         <SettingRow label={t('settings.recording.muteDuringRecordingLabel')} desc={t('settings.recording.muteDuringRecordingDesc')}>
           <Toggle on={prefs.muteDuringRecording} onToggle={onMuteDuringRecordingChange} />
         </SettingRow>
-        <SettingRow
-          label={t('settings.recording.audioCueLabel')}
-          desc={t('settings.recording.audioCueDesc')}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <Toggle on={prefs.audioCueOnRecord} onToggle={onAudioCueChange} />
-            <button
-              type="button"
-              onClick={() => playRecordStartCue()}
-              style={{
-                padding: '5px 12px',
-                fontSize: 12,
-                fontWeight: 500,
-                fontFamily: 'inherit',
-                border: '0.5px solid var(--ol-line-strong)',
-                borderRadius: 8,
-                background: 'var(--ol-surface-2)',
-                color: 'var(--ol-ink-2)',
-                cursor: 'default',
-                transition: 'background 0.16s var(--ol-motion-quick)',
-              }}
-            >
-              {t('settings.recording.audioCuePreview')}
-            </button>
-          </div>
-        </SettingRow>
+        {os !== 'linux' && (
+          <SettingRow
+            label={t('settings.recording.audioCueLabel')}
+            desc={t('settings.recording.audioCueDesc')}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <Toggle on={prefs.audioCueOnRecord} onToggle={onAudioCueChange} />
+              <button
+                type="button"
+                onClick={() => playRecordStartCue()}
+                style={{
+                  padding: '5px 12px',
+                  fontSize: 12,
+                  fontWeight: 500,
+                  fontFamily: 'inherit',
+                  border: '0.5px solid var(--ol-line-strong)',
+                  borderRadius: 8,
+                  background: 'var(--ol-surface-2)',
+                  color: 'var(--ol-ink-2)',
+                  cursor: 'default',
+                  transition: 'background 0.16s var(--ol-motion-quick)',
+                }}
+              >
+                {t('settings.recording.audioCuePreview')}
+              </button>
+            </div>
+          </SettingRow>
+        )}
         {os === 'linux' && (
         <SettingRow label={t('settings.advanced.streamingInsertLabel')}>
           <Toggle

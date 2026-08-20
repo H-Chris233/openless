@@ -335,26 +335,40 @@ mod platform {
 
     /// Windows 的麦克风权限走系统设置 → 隐私 → 麦克风；
     /// 这里用 cpal 建立一次短生命周期输入流，避免只查设备格式时误报已授权。
+    /// Linux 没有对应的应用级权限状态，只检查设备是否存在，避免 PipeWire
+    /// 因权限探测建立临时输入流而触发桌面音量 OSD（issue #968）。
     pub fn check_microphone() -> PermissionStatus {
-        if windows_microphone_registry_denied() {
-            log::warn!("[mic] Windows microphone privacy registry is denied");
-            return PermissionStatus::Denied;
+        #[cfg(target_os = "linux")]
+        {
+            return if has_microphone_input_device() {
+                PermissionStatus::Granted
+            } else {
+                PermissionStatus::NoDevice
+            };
         }
 
-        let host = cpal::default_host();
-        let Some(device) = host.default_input_device() else {
-            log::warn!("[mic] no default input device");
-            return PermissionStatus::NoDevice;
-        };
-        let supported = match device.default_input_config() {
-            Ok(config) => config,
-            Err(err) => return classify_audio_probe_error(err.to_string()),
-        };
-        let sample_format = supported.sample_format();
-        let config: StreamConfig = supported.config();
-        match probe_input_stream(&device, &config, sample_format) {
-            Ok(()) => PermissionStatus::Granted,
-            Err(message) => classify_audio_probe_error(message),
+        #[cfg(not(target_os = "linux"))]
+        {
+            if windows_microphone_registry_denied() {
+                log::warn!("[mic] Windows microphone privacy registry is denied");
+                return PermissionStatus::Denied;
+            }
+
+            let host = cpal::default_host();
+            let Some(device) = host.default_input_device() else {
+                log::warn!("[mic] no default input device");
+                return PermissionStatus::NoDevice;
+            };
+            let supported = match device.default_input_config() {
+                Ok(config) => config,
+                Err(err) => return classify_audio_probe_error(err.to_string()),
+            };
+            let sample_format = supported.sample_format();
+            let config: StreamConfig = supported.config();
+            match probe_input_stream(&device, &config, sample_format) {
+                Ok(()) => PermissionStatus::Granted,
+                Err(message) => classify_audio_probe_error(message),
+            }
         }
     }
 
