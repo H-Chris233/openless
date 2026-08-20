@@ -137,7 +137,7 @@ use tauri::{
 use tauri::{WebviewUrl, WebviewWindowBuilder};
 
 #[cfg(not(mobile))]
-use crate::types::StylePack;
+use crate::types::{PolishMode, StylePack, StylePackKind};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -860,6 +860,132 @@ struct TrayMenu {
     microphone_items: Vec<commands::TrayMicrophoneMenuItem>,
 }
 
+#[derive(Debug, Clone, Copy)]
+#[cfg(not(mobile))]
+struct TrayLabels {
+    toggle: &'static str,
+    style: &'static str,
+    microphone: &'static str,
+    default_microphone: &'static str,
+    no_microphones: &'static str,
+    default_device_suffix: &'static str,
+    quit: &'static str,
+    raw: &'static str,
+    light: &'static str,
+    structured: &'static str,
+    formal: &'static str,
+}
+
+#[cfg(not(mobile))]
+impl TrayLabels {
+    fn for_locale(locale: &str) -> Self {
+        match locale {
+            "en" => Self {
+                toggle: "Show main window",
+                style: "Output style",
+                microphone: "Select microphone",
+                default_microphone: "System default microphone",
+                no_microphones: "No microphones found",
+                default_device_suffix: " (System default)",
+                quit: "Quit OpenLess",
+                raw: "Raw",
+                light: "Light polish",
+                structured: "Structured",
+                formal: "Formal",
+            },
+            "zh-TW" => Self {
+                toggle: "顯示主視窗",
+                style: "輸出風格",
+                microphone: "選擇麥克風",
+                default_microphone: "系統預設麥克風",
+                no_microphones: "找不到麥克風",
+                default_device_suffix: "（系統預設）",
+                quit: "退出 OpenLess",
+                raw: "原文",
+                light: "輕度潤色",
+                structured: "清晰結構",
+                formal: "正式表達",
+            },
+            "ja" => Self {
+                toggle: "メインウィンドウを表示",
+                style: "出力スタイル",
+                microphone: "マイクを選択",
+                default_microphone: "システムのデフォルトマイク",
+                no_microphones: "マイクが見つかりません",
+                default_device_suffix: "（システムのデフォルト）",
+                quit: "OpenLessを終了",
+                raw: "原文",
+                light: "軽い整文",
+                structured: "明確な構造",
+                formal: "正式な表現",
+            },
+            "ko" => Self {
+                toggle: "메인 창 표시",
+                style: "출력 스타일",
+                microphone: "마이크 선택",
+                default_microphone: "시스템 기본 마이크",
+                no_microphones: "마이크를 찾을 수 없음",
+                default_device_suffix: "（시스템 기본）",
+                quit: "OpenLess 종료",
+                raw: "원문",
+                light: "가벼운 정리",
+                structured: "명확한 구조",
+                formal: "정식 표현",
+            },
+            _ => Self {
+                toggle: "显示主窗口",
+                style: "输出风格",
+                microphone: "选择麦克风",
+                default_microphone: "系统默认麦克风",
+                no_microphones: "未发现麦克风",
+                default_device_suffix: "（系统默认）",
+                quit: "退出 OpenLess",
+                raw: "原文",
+                light: "轻度润色",
+                structured: "清晰结构",
+                formal: "正式表达",
+            },
+        }
+    }
+
+    fn style_pack_name(self, mode: PolishMode) -> &'static str {
+        match mode {
+            PolishMode::Raw => self.raw,
+            PolishMode::Light => self.light,
+            PolishMode::Structured => self.structured,
+            PolishMode::Formal => self.formal,
+        }
+    }
+
+    fn style_pack_label(self, pack: &StylePack) -> String {
+        if pack.kind == StylePackKind::Builtin
+            && (pack.name.trim().is_empty()
+                || pack.name.trim() == builtin_style_pack_default_name(pack.base_mode))
+        {
+            return self.style_pack_name(pack.base_mode).to_string();
+        }
+        if pack.name.trim().is_empty() {
+            pack.id.clone()
+        } else {
+            pack.name.clone()
+        }
+    }
+
+    fn default_device_label(self, device_name: &str) -> String {
+        format!("{device_name}{}", self.default_device_suffix)
+    }
+}
+
+#[cfg(not(mobile))]
+fn builtin_style_pack_default_name(mode: PolishMode) -> &'static str {
+    match mode {
+        PolishMode::Raw => "原文",
+        PolishMode::Light => "轻度润色",
+        PolishMode::Structured => "清晰结构",
+        PolishMode::Formal => "正式表达",
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg(not(mobile))]
 struct TrayStylePackMenuEntry {
@@ -894,6 +1020,7 @@ fn parse_tray_style_pack_menu_id(id: &str) -> Option<&str> {
 fn tray_style_pack_menu_entries(
     packs: &[StylePack],
     active_style_pack_id: &str,
+    labels: TrayLabels,
 ) -> Vec<TrayStylePackMenuEntry> {
     packs
         .iter()
@@ -901,11 +1028,7 @@ fn tray_style_pack_menu_entries(
         .map(|pack| TrayStylePackMenuEntry {
             id: tray_style_pack_menu_id(&pack.id),
             pack_id: pack.id.clone(),
-            label: if pack.name.trim().is_empty() {
-                pack.id.clone()
-            } else {
-                pack.name.clone()
-            },
+            label: labels.style_pack_label(pack),
             checked: pack.id == active_style_pack_id,
         })
         .collect()
@@ -925,12 +1048,13 @@ fn build_tray_menu<M: Manager<tauri::Wry>>(
     app: &M,
     coordinator: &Arc<coordinator::Coordinator>,
 ) -> tauri::Result<TrayMenu> {
-    let toggle = MenuItemBuilder::with_id("toggle", "显示主窗口").build(app)?;
-    let microphone_menu = build_microphone_tray_menu(app, coordinator)?;
-    let quit = MenuItemBuilder::with_id("quit", "退出 OpenLess").build(app)?;
+    let labels = TrayLabels::for_locale(&coordinator.remote_locale());
+    let toggle = MenuItemBuilder::with_id("toggle", labels.toggle).build(app)?;
+    let microphone_menu = build_microphone_tray_menu(app, coordinator, labels)?;
+    let quit = MenuItemBuilder::with_id("quit", labels.quit).build(app)?;
     let mut builder = MenuBuilder::new(app);
     let style_menu = if tray_style_menu_enabled() {
-        Some(build_style_tray_menu(app, coordinator)?)
+        Some(build_style_tray_menu(app, coordinator, labels)?)
     } else {
         None
     };
@@ -950,14 +1074,15 @@ fn build_tray_menu<M: Manager<tauri::Wry>>(
 fn build_style_tray_menu<M: Manager<tauri::Wry>>(
     app: &M,
     coordinator: &Arc<coordinator::Coordinator>,
+    labels: TrayLabels,
 ) -> tauri::Result<StyleTrayMenu> {
     let prefs = coordinator.prefs().get();
     let packs = coordinator.style_packs().list().unwrap_or_else(|err| {
         log::warn!("[tray] list style packs for tray menu failed: {err}");
         Vec::new()
     });
-    let mut submenu = SubmenuBuilder::with_id(app, "style", "输出风格");
-    for entry in tray_style_pack_menu_entries(&packs, &prefs.active_style_pack_id) {
+    let mut submenu = SubmenuBuilder::with_id(app, "style", labels.style);
+    for entry in tray_style_pack_menu_entries(&packs, &prefs.active_style_pack_id, labels) {
         let item = CheckMenuItemBuilder::with_id(&entry.id, entry.label)
             .checked(entry.checked)
             .build(app)?;
@@ -972,10 +1097,11 @@ fn build_style_tray_menu<M: Manager<tauri::Wry>>(
 fn build_microphone_tray_menu<M: Manager<tauri::Wry>>(
     app: &M,
     coordinator: &Arc<coordinator::Coordinator>,
+    labels: TrayLabels,
 ) -> tauri::Result<MicrophoneTrayMenu> {
     let selected = coordinator.prefs().get().microphone_device_name;
     let mut items = Vec::new();
-    let mut submenu = SubmenuBuilder::with_id(app, "microphone", "选择麦克风");
+    let mut submenu = SubmenuBuilder::with_id(app, "microphone", labels.microphone);
     // CoreAudio device enumeration can block inside AudioUnitSetProperty while AppKit is
     // finishing launch. Tray menus must be built on the main thread, so only consume the
     // cache here; the watcher below owns every potentially blocking enumeration.
@@ -983,7 +1109,7 @@ fn build_microphone_tray_menu<M: Manager<tauri::Wry>>(
     let selected_available =
         selected.trim().is_empty() || devices.iter().any(|device| device.name == selected);
 
-    let default_item = CheckMenuItemBuilder::with_id("mic-default", "系统默认麦克风")
+    let default_item = CheckMenuItemBuilder::with_id("mic-default", labels.default_microphone)
         .checked(selected.trim().is_empty() || !selected_available)
         .build(app)?;
     submenu = submenu.item(&default_item);
@@ -994,7 +1120,7 @@ fn build_microphone_tray_menu<M: Manager<tauri::Wry>>(
     });
 
     if devices.is_empty() {
-        let empty = MenuItemBuilder::with_id("mic-empty", "未发现麦克风")
+        let empty = MenuItemBuilder::with_id("mic-empty", labels.no_microphones)
             .enabled(false)
             .build(app)?;
         submenu = submenu.item(&empty);
@@ -1002,7 +1128,7 @@ fn build_microphone_tray_menu<M: Manager<tauri::Wry>>(
         for (index, device) in devices.into_iter().enumerate() {
             let id = format!("mic-device-{index}");
             let label = if device.is_default {
-                format!("{}（系统默认）", device.name)
+                labels.default_device_label(&device.name)
             } else {
                 device.name.clone()
             };
@@ -2955,7 +3081,7 @@ mod tests {
         capsule_visual_height, capsule_window_bounds, clamp_to_monitor, frame_contains_point,
         frame_distance_to_point_squared, logical_monitor_frame, parse_tray_style_pack_menu_id,
         resolve_tray_style_pack_id, rotate_log_if_too_large, tray_style_menu_enabled,
-        tray_style_pack_menu_entries, tray_style_pack_menu_id, LogicalMonitorFrame,
+        tray_style_pack_menu_entries, tray_style_pack_menu_id, LogicalMonitorFrame, TrayLabels,
         LOG_ROTATE_LIMIT_BYTES,
     };
     use crate::types::{builtin_style_pack_for_mode, PolishMode, StylePack, StylePackKind};
@@ -3004,7 +3130,11 @@ mod tests {
             duplicate_base_mode,
             disabled,
         ];
-        let entries = tray_style_pack_menu_entries(&packs, "imported.meeting");
+        let entries = tray_style_pack_menu_entries(
+            &packs,
+            "imported.meeting",
+            TrayLabels::for_locale("zh-CN"),
+        );
 
         assert_eq!(
             entries
@@ -3029,6 +3159,54 @@ mod tests {
             vec!["imported.meeting"]
         );
         assert_eq!(entries[0].id, tray_style_pack_menu_id("builtin.raw"));
+    }
+
+    #[test]
+    fn tray_labels_follow_locale_and_localize_builtin_styles() {
+        let english = TrayLabels::for_locale("en");
+        assert_eq!(english.toggle, "Show main window");
+        assert_eq!(english.style, "Output style");
+        assert_eq!(english.microphone, "Select microphone");
+        assert_eq!(english.default_microphone, "System default microphone");
+        assert_eq!(english.quit, "Quit OpenLess");
+        assert_eq!(english.style_pack_name(PolishMode::Light), "Light polish");
+        assert_eq!(
+            english.default_device_label("USB microphone"),
+            "USB microphone (System default)"
+        );
+
+        let chinese = TrayLabels::for_locale("zh-CN");
+        assert_eq!(chinese.style_pack_name(PolishMode::Structured), "清晰结构");
+        assert_eq!(TrayLabels::for_locale("unknown").toggle, "显示主窗口");
+    }
+
+    #[test]
+    fn tray_style_menu_localizes_builtins_and_preserves_custom_names() {
+        let packs = vec![
+            builtin_style_pack_for_mode(PolishMode::Raw),
+            builtin_style_pack_for_mode(PolishMode::Light),
+            StylePack {
+                id: "imported.meeting".into(),
+                name: "会议纪要".into(),
+                kind: StylePackKind::Imported,
+                base_mode: PolishMode::Structured,
+                ..StylePack::default()
+            },
+        ];
+        let entries = tray_style_pack_menu_entries(&packs, "", TrayLabels::for_locale("en"));
+
+        assert_eq!(entries[0].label, "Raw");
+        assert_eq!(entries[1].label, "Light polish");
+        assert_eq!(entries[2].label, "会议纪要");
+    }
+
+    #[test]
+    fn tray_style_menu_preserves_renamed_builtin_names() {
+        let mut renamed = builtin_style_pack_for_mode(PolishMode::Raw);
+        renamed.name = "My own raw style".into();
+        let entries = tray_style_pack_menu_entries(&[renamed], "", TrayLabels::for_locale("en"));
+
+        assert_eq!(entries[0].label, "My own raw style");
     }
 
     #[test]
