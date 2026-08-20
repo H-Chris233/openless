@@ -17,4 +17,16 @@ if (!/if \(downloadDialogOpen\) return[\s\S]{0,200}window\.setInterval\(\(\) => 
   throw new Error('LocalAsr refresh polling must stop while the download dialog is open');
 }
 
+for (const contract of [
+  'const downloadDialogOpenRef = useRef(downloadDialogOpen)',
+  'const refreshGenerationRef = useRef(0)',
+  'const makeRefreshGuard = (): RefreshGuard =>',
+  'refreshGenerationRef.current += 1',
+  'if (!isCurrent()) return',
+]) {
+  if (!source.includes(contract)) {
+    throw new Error(`LocalAsr refresh guard contract is missing: ${contract}`);
+  }
+}
+
 console.log('LocalAsr keeps one refresh poller and pauses it for the download dialog');

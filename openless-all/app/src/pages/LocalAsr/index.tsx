@@ -153,6 +153,8 @@ interface LocalAsrProps {
     embedded?: boolean
 }
 
+type RefreshGuard = () => boolean
+
 export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
     const { t } = useTranslation()
     const { prefs, updatePrefs } = useHotkeySettings()
@@ -228,6 +230,8 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
     >({})
     const [engineStatus, setEngineStatus] =
         useState<LocalAsrEngineStatus | null>(null)
+    const downloadDialogOpenRef = useRef(downloadDialogOpen)
+    const refreshGenerationRef = useRef(0)
     const refreshTimer = useRef<number | null>(null)
     const foundryRefreshTimer = useRef<number | null>(null)
     const sherpaRefreshTimer = useRef<number | null>(null)
@@ -242,6 +246,22 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
     )
     const scrollGuardTimer = useRef<number | null>(null)
     const scrollGuardCleanup = useRef<(() => void) | null>(null)
+
+    const setDownloadDialog = (open: boolean) => {
+        if (downloadDialogOpenRef.current !== open) {
+            downloadDialogOpenRef.current = open
+            refreshGenerationRef.current += 1
+        }
+        setDownloadDialogOpen(open)
+    }
+
+    // 清理 interval 只能阻止下一次 tick；generation 还要丢弃已经在途的异步结果。
+    const makeRefreshGuard = (): RefreshGuard => {
+        const generation = refreshGenerationRef.current
+        return () =>
+            generation === refreshGenerationRef.current &&
+            !downloadDialogOpenRef.current
+    }
 
     const restoreScrollGuard = () => {
         const guard = scrollGuard.current
@@ -318,8 +338,10 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
     }
 
     const refreshEngineStatus = async () => {
+        const isCurrent = makeRefreshGuard()
         try {
             const status = await getLocalAsrEngineStatus()
+            if (!isCurrent()) return
             setEngineStatus(status)
         } catch (err) {
             console.warn("[localAsr] engine status query failed", err)
@@ -327,8 +349,10 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
     }
 
     const refreshFoundryStatus = async () => {
+        const isCurrent = makeRefreshGuard()
         try {
             const status = await getFoundryLocalAsrStatus()
+            if (!isCurrent()) return
             setFoundryStatus(status)
             if (
                 !foundrySelectionDirty.current &&
@@ -338,6 +362,7 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                 void refreshFoundryModelDir(status.activeModel)
             }
         } catch (err) {
+            if (!isCurrent()) return
             const message = err instanceof Error ? err.message : String(err)
             setFoundryStatus({
                 providerId: "foundry-local-whisper",
@@ -353,8 +378,10 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
     }
 
     const refreshFoundryCatalog = async () => {
+        const isCurrent = makeRefreshGuard()
         try {
             const catalog = await getFoundryLocalAsrCatalog()
+            if (!isCurrent()) return
             setFoundryCatalog(catalog)
         } catch (err) {
             console.warn("[localAsr] Foundry catalog query failed", err)
@@ -364,8 +391,10 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
     const refreshFoundryModelDir = async (
         modelAlias: FoundryLocalAsrModelAlias,
     ) => {
+        const isCurrent = makeRefreshGuard()
         try {
             const dir = await getFoundryLocalAsrModelDir(modelAlias)
+            if (!isCurrent()) return
             setFoundryModelDir((current) => {
                 if (selectedFoundryAliasRef.current !== modelAlias) {
                     return current
@@ -379,6 +408,7 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                 }
             })
         } catch (err) {
+            if (!isCurrent()) return
             console.warn("[localAsr] Foundry model dir query failed", err)
             setFoundryModelDir((current) =>
                 selectedFoundryAliasRef.current === modelAlias &&
@@ -390,8 +420,10 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
     }
 
     const refreshSherpaStatus = async () => {
+        const isCurrent = makeRefreshGuard()
         try {
             const status = await getSherpaOnnxAsrStatus()
+            if (!isCurrent()) return
             setSherpaStatus(status)
             if (
                 !sherpaSelectionDirty.current &&
@@ -401,6 +433,7 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                 void refreshSherpaModelDir(status.activeModel)
             }
         } catch (err) {
+            if (!isCurrent()) return
             const message = err instanceof Error ? err.message : String(err)
             setSherpaStatus({
                 providerId: "sherpa-onnx-local",
@@ -414,8 +447,10 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
     }
 
     const refreshSherpaCatalog = async () => {
+        const isCurrent = makeRefreshGuard()
         try {
             const catalog = await getSherpaOnnxAsrCatalog()
+            if (!isCurrent()) return
             setSherpaCatalog(catalog)
         } catch (err) {
             console.warn("[localAsr] Sherpa catalog query failed", err)
@@ -423,8 +458,10 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
     }
 
     const refreshSherpaModelDir = async (modelAlias: string) => {
+        const isCurrent = makeRefreshGuard()
         try {
             const dir = await getSherpaOnnxAsrModelDir(modelAlias)
+            if (!isCurrent()) return
             setSherpaModelDir((current) => (current === dir ? current : dir))
         } catch (err) {
             console.warn("[localAsr] Sherpa model dir query failed", err)
@@ -432,18 +469,22 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
     }
 
     const refresh = async () => {
+        const isCurrent = makeRefreshGuard()
         try {
+            if (!isCurrent()) return
             setError(null)
             const [s, list] = await Promise.all([
                 getLocalAsrSettings(),
                 listLocalAsrModels(),
             ])
+            if (!isCurrent()) return
             setSettings(s)
             setModels(list)
             void Promise.all(
                 list.map(async (m) => {
                     try {
                         const dir = await getLocalAsrModelDir(m.id)
+                        if (!isCurrent()) return
                         setModelDirs((current) =>
                             current[m.id] === dir
                                 ? current
@@ -475,11 +516,14 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                 }),
             )
         } catch (e) {
+            if (!isCurrent()) return
             setError(e instanceof Error ? e.message : String(e))
         }
     }
 
     const ensureRemoteSize = async (modelId: string, mirror: string) => {
+        const isCurrent = makeRefreshGuard()
+        if (!isCurrent()) return
         setRemoteSizes((prev) => {
             if (prev[modelId] && !prev[modelId].error) return prev
             return {
@@ -494,6 +538,7 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
         })
         try {
             const info = await fetchLocalAsrRemoteInfo(modelId, mirror)
+            if (!isCurrent()) return
             setRemoteSizes((prev) => ({
                 ...prev,
                 [modelId]: {
@@ -504,6 +549,7 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                 },
             }))
         } catch (e) {
+            if (!isCurrent()) return
             setRemoteSizes((prev) => ({
                 ...prev,
                 [modelId]: {
@@ -546,6 +592,8 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
         modelAlias: string,
         mirror: string,
     ) => {
+        const isCurrent = makeRefreshGuard()
+        if (!isCurrent()) return
         setSherpaRemoteSizes((prev) => {
             if (prev[modelAlias] && !prev[modelAlias].error) return prev
             return {
@@ -560,6 +608,7 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
         })
         try {
             const info = await fetchSherpaOnnxAsrRemoteInfo(modelAlias, mirror)
+            if (!isCurrent()) return
             setSherpaRemoteSizes((prev) => ({
                 ...prev,
                 [modelAlias]: {
@@ -570,6 +619,7 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                 },
             }))
         } catch (e) {
+            if (!isCurrent()) return
             setSherpaRemoteSizes((prev) => ({
                 ...prev,
                 [modelAlias]: {
@@ -598,7 +648,10 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
         const pollTimer = window.setInterval(() => {
             void refresh()
         }, 3000)
-        return () => window.clearInterval(pollTimer)
+        return () => {
+            refreshGenerationRef.current += 1
+            window.clearInterval(pollTimer)
+        }
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [downloadDialogOpen])
 
@@ -1942,7 +1995,7 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
             null
         if (!dialogEntry || dialogEntry.isDownloaded) return
         dispatchEntryAction(dialogEntry, "download")
-        setDownloadDialogOpen(false)
+        setDownloadDialog(false)
     }
 
     const selectedEntryRemote = selectedEntry
@@ -2029,7 +2082,7 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                             // 立刻反映到列表与详情，不等 3s 轮询。
                             void refresh()
                         }}
-                        onOpenDownload={() => setDownloadDialogOpen(true)}
+                        onOpenDownload={() => setDownloadDialog(true)}
                         downloadDisabled={
                             busyModelId !== null ||
                             sherpaBusy !== null ||
@@ -2435,7 +2488,7 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                         return { status: "ok" as const, card: state }
                     }}
                     onStart={startDownloadFromDialog}
-                    onClose={() => setDownloadDialogOpen(false)}
+                    onClose={() => setDownloadDialog(false)}
                 />
             )}
 
