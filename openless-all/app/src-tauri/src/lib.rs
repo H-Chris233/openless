@@ -956,7 +956,10 @@ impl TrayLabels {
     }
 
     fn style_pack_label(self, pack: &StylePack) -> String {
-        if pack.kind == StylePackKind::Builtin {
+        if pack.kind == StylePackKind::Builtin
+            && (pack.name.trim().is_empty()
+                || pack.name.trim() == builtin_style_pack_default_name(pack.base_mode))
+        {
             return self.style_pack_name(pack.base_mode).to_string();
         }
         if pack.name.trim().is_empty() {
@@ -968,6 +971,16 @@ impl TrayLabels {
 
     fn default_device_label(self, device_name: &str) -> String {
         format!("{device_name}{}", self.default_device_suffix)
+    }
+}
+
+#[cfg(not(mobile))]
+fn builtin_style_pack_default_name(mode: PolishMode) -> &'static str {
+    match mode {
+        PolishMode::Raw => "原文",
+        PolishMode::Light => "轻度润色",
+        PolishMode::Structured => "清晰结构",
+        PolishMode::Formal => "正式表达",
     }
 }
 
@@ -3183,6 +3196,15 @@ mod tests {
         assert_eq!(entries[0].label, "Raw");
         assert_eq!(entries[1].label, "Light polish");
         assert_eq!(entries[2].label, "会议纪要");
+    }
+
+    #[test]
+    fn tray_style_menu_preserves_renamed_builtin_names() {
+        let mut renamed = builtin_style_pack_for_mode(PolishMode::Raw);
+        renamed.name = "My own raw style".into();
+        let entries = tray_style_pack_menu_entries(&[renamed], "", TrayLabels::for_locale("en"));
+
+        assert_eq!(entries[0].label, "My own raw style");
     }
 
     #[test]
