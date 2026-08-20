@@ -29,6 +29,14 @@ pub fn regenerate_remote_pin(coord: CoordinatorState<'_>) -> Result<String, Stri
 
 /// 同步 PC 端界面语言到远程输入服务，H5 录音页据此显示对应语言。
 #[tauri::command]
-pub fn set_remote_locale(coord: CoordinatorState<'_>, locale: String) {
+pub fn set_remote_locale(app: AppHandle, coord: CoordinatorState<'_>, locale: String) {
     coord.set_remote_locale(locale);
+    let refresh_app = app.clone();
+    if let Err(err) = app.run_on_main_thread(move || {
+        if let Err(err) = crate::refresh_tray_microphone_menu(&refresh_app) {
+            log::warn!("[tray] refresh menu after locale change failed: {err}");
+        }
+    }) {
+        log::warn!("[tray] dispatch locale refresh failed: {err}");
+    }
 }
