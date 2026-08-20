@@ -98,7 +98,7 @@
         alt="bigsong"
       /><br/>
       <strong><a href="https://bigsong.site" target="_blank" rel="noopener">bigsong</a></strong><br/>
-      <sub>贡献者</sub>
+      <sub>贡献者/测试</sub>
     </td>
   </tr>
   <tr>

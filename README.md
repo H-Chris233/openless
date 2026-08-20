@@ -93,7 +93,7 @@
     <td align="center" width="170">
       <img src="https://image.bigsong.site/file/1787214963742_b40cd86b033a60bcc8562f7f053c4900.jpg" width="80" height="80" alt="bigsong" /><br/>
       <strong><a href="https://bigsong.site" target="_blank" rel="noopener">bigsong</a></strong><br/>
-      <sub>Contributor</sub>
+      <sub>Contributor / Tester</sub>
     </td>
   </tr>
   <tr>
