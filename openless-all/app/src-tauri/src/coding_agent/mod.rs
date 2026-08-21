@@ -1,6 +1,6 @@
 //! 无头 coding agent 调用子系统（「快速 Agent」/ Less Computer 后端）。
 //!
-//! 三个后端各有一个同形的适配器，共用 [`args::CodingAgentRequest`] /
+//! 四个后端各有一个同形的适配器，共用 [`args::CodingAgentRequest`] /
 //! [`stream::CodingAgentEvent`] / [`CodingAgentError`]：
 //!
 //! | 后端 | 适配器 | prompt 入口 | 护栏 |
@@ -8,8 +8,9 @@
 //! | Claude Code | 本模块顶层 + [`args`] / [`stream`] | stdin | `--settings` 逐命令 deny 清单 |
 //! | OpenCode | [`opencode`] | argv（`--` 之后） | `OPENCODE_CONFIG_CONTENT` deny 清单 |
 //! | Codex | [`codex`] | stdin（`-`） | 自带 seatbelt 沙箱 `-s` |
+//! | dsh | [`dsh`] | patch 文件（不进 argv） | `DSH_PERMISSION_MODE` 沙箱 |
 //!
-//! Codex **给不了逐命令 deny 清单**，护栏落在它自己的沙箱档位上；对应地，
+//! 后两家**给不了逐命令 deny 清单**，护栏落在各自的沙箱档位上；对应地，
 //! 「撞了 deny → 弹审批卡 → 放行重跑」这条链路对它们不生效，撞墙时如实报错。
 //!
 //! - [`args`]：`claude -p` 参数构造。
@@ -24,6 +25,7 @@ pub mod args;
 pub mod codex;
 pub mod commands;
 pub mod detect;
+pub mod dsh;
 pub mod guard;
 pub mod opencode;
 pub mod stream;
@@ -43,6 +45,7 @@ pub use args::{
 };
 pub use codex::run_codex_agent;
 pub use detect::McpServerStatus;
+pub use dsh::run_dsh_agent;
 pub use opencode::run_opencode_agent;
 pub use stream::{parse_stream_json_line, CodingAgentEvent};
 
@@ -275,14 +278,47 @@ pub fn create_git_snapshot(cwd: &Path) -> Option<String> {
     }
 }
 
-/// 探测 `claude` 版本（`None` 表示未安装或无法运行）。
-pub async fn detect_claude(exe: &str) -> Option<String> {
+/// 一次 `<cli> --version` 探测的结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CliProbe {
+    /// **命令跑通了**（进程起得来且 exit 0）。这才是「装没装」的判据。
+    pub installed: bool,
+    /// 解析出来的版本号，**纯展示用**。解析不出来不影响 [`Self::installed`]。
+    pub version: Option<String>,
+}
+
+/// 探测某个 agent CLI：跑 `<exe> --version`。四个后端共用。
+///
+/// **判据是「命令跑通」，不是「解析出版本号」**——这两件事分开，是踩过一次才分开的。
+/// 早先用 `version.is_some()` 当 installed，于是 dsh 的 `0.1.0-rc.6` 解析不出来（旧解析器
+/// 不认预发布后缀）就被判成「没装」，设置页一直报「未检测到 dsh 命令」，而 dsh 明明装着。
+///
+/// 版本字符串是这些 CLI 里**最容易变**的东西：改排版、加后缀、换前缀，对它们都不算
+/// breaking change，但对「拿版本号当判据」的我们就是。所以：跑通 = 装了；版本号只用来显示，
+/// 解析失败最多让界面少显示一个号码，不会把能用的后端说成没装。
+pub async fn probe_cli(exe: &str) -> CliProbe {
+    let missing = CliProbe {
+        installed: false,
+        version: None,
+    };
+    // 进程起不来（找不到可执行文件 / 没有执行权限）——这才是真的没装。
     let mut cmd = augmented_command(exe).await;
-    let out = cmd.arg("--version").output().await.ok()?;
+    let Ok(out) = cmd.arg("--version").output().await else {
+        return missing;
+    };
     if !out.status.success() {
-        return None;
+        return missing;
     }
-    detect::parse_claude_version(&String::from_utf8_lossy(&out.stdout))
+    let version = detect::parse_cli_version(&String::from_utf8_lossy(&out.stdout));
+    if version.is_none() {
+        // 能跑通但版本号读不出来：多半是上游改了 --version 的排版。不影响可用性，
+        // 但值得留一笔——下次有人问「为什么版本号显示成问号」时这行就是答案。
+        log::info!("[coding-agent] {exe} --version 跑通了但版本号解析不出来，仅影响显示");
+    }
+    CliProbe {
+        installed: true,
+        version,
+    }
 }
 
 /// 列出 Claude Code 已配置的 MCP server（含健康状态）。
@@ -500,6 +536,30 @@ mod tests {
         let parts = path_parts(&merge_path(&current, &[], None));
         assert_eq!(parts.len(), 2, "段数不能变，实际: {parts:?}");
         assert!(!parts.iter().any(|p| p == "C"), "盘符被切开了: {parts:?}");
+    }
+
+    #[tokio::test]
+    async fn missing_executable_is_not_installed() {
+        let probe = probe_cli("openless-definitely-not-a-real-binary-xyz").await;
+        assert!(!probe.installed);
+        assert_eq!(probe.version, None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn runs_but_unparseable_version_still_counts_as_installed() {
+        // 这条是 dsh 那个 bug 的**形状**：命令跑得通，但 `--version` 的输出里没有可解析的
+        // 版本号。旧实现（installed = version.is_some()）会把它判成「没装」，设置页就报
+        // 「未检测到 xxx 命令」——而命令明明在。
+        //
+        // `echo --version` 会原样打印 "--version" 并 exit 0，正好是这个形状，
+        // 而且不依赖装了哪些 agent CLI，任何 unix 机器都能跑。
+        let probe = probe_cli("echo").await;
+        assert!(
+            probe.installed,
+            "命令跑通了就该算装了，哪怕版本号读不出来"
+        );
+        assert_eq!(probe.version, None, "这里本来就不该解析出版本号");
     }
 
     #[test]

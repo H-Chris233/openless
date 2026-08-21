@@ -44,9 +44,19 @@ assert(
   'Less Computer must resolve model defaults per provider',
 );
 assert(
-  settings.includes("const CODEX_PERMISSION_MODES: CodingAgentPermissionMode[] = ['plan', 'acceptEdits']") &&
+  settings.includes("const SANDBOX_PERMISSION_MODES: CodingAgentPermissionMode[] = ['plan', 'acceptEdits']") &&
+    settings.includes("provider === 'codex-cli' || provider === 'dsh-cli'") &&
     settings.includes('normalizePermissionMode'),
-  'Codex settings must expose only read-only/plan and workspace-write permission modes and normalize legacy values',
+  'Codex and dsh settings must expose only read-only/plan and workspace-write permission modes and normalize legacy values',
+);
+const providerChangeStart = settings.indexOf('const nextProvider = v as CodingAgentProviderId');
+const providerChangeEnd = settings.indexOf('options={PROVIDERS}', providerChangeStart);
+const providerChange = settings.slice(providerChangeStart, providerChangeEnd);
+assert(
+  providerChange.includes('codingAgentModel: null') &&
+    providerChange.includes('codingAgentExe: null') &&
+    providerChange.includes('normalizePermissionMode'),
+  'switching coding-agent provider must clear provider-specific model/executable state and normalize permissions',
 );
 
 const microphoneMenuStart = lib.indexOf('fn build_microphone_tray_menu');

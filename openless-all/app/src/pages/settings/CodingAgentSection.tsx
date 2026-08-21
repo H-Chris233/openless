@@ -1,10 +1,11 @@
-// 高级 → Less Computer 配置：启用开关、后端（Claude / OpenCode / Codex）、
+// 高级 → Less Computer 配置：启用开关、后端（Claude / OpenCode / Codex / dsh）、
 // 模型 / 权限模式 / 工作目录。
 //
 // 四个后端的能力不一样，这一页要如实反映差异，别让用户以为选项都通用：
 // - 模型：Claude 用别名下拉，OpenCode 拉账号可用列表，Codex 收裸模型名（自由文本），
+//   dsh 压根没有模型开关 —— 那一行直接不显示。
 // - 护栏：Claude / OpenCode 是逐命令 deny 清单（撞了能弹审批卡放行单条）；
-//   Codex 只有粗粒度沙箱档位，审批卡对它不生效，这里挂一条说明。
+//   Codex / dsh 只有粗粒度沙箱档位，审批卡对它们不生效，这里挂一条说明。
 // 「按住说话键」在 通用 → 快捷键 里配置（见 ShortcutsSection），这里不再重复。
 // 配置经 UserPreferences 持久化；启用后 coordinator 才注册热键。
 
@@ -30,17 +31,23 @@ const PERMISSION_MODES: CodingAgentPermissionMode[] = [
   'default',
   'bypassPermissions',
 ]
-const CODEX_PERMISSION_MODES: CodingAgentPermissionMode[] = ['plan', 'acceptEdits']
+const SANDBOX_PERMISSION_MODES: CodingAgentPermissionMode[] = ['plan', 'acceptEdits']
+
+function isSandboxPermissionProvider(provider: CodingAgentProviderId) {
+  return provider === 'codex-cli' || provider === 'dsh-cli'
+}
 
 function permissionModesForProvider(provider: CodingAgentProviderId) {
-  return provider === 'codex-cli' ? CODEX_PERMISSION_MODES : PERMISSION_MODES
+  return isSandboxPermissionProvider(provider) ? SANDBOX_PERMISSION_MODES : PERMISSION_MODES
 }
 
 function normalizePermissionMode(
   provider: CodingAgentProviderId,
   mode: CodingAgentPermissionMode,
 ): CodingAgentPermissionMode {
-  return provider === 'codex-cli' && (mode === 'default' || mode === 'bypassPermissions') ? 'plan' : mode
+  return isSandboxPermissionProvider(provider) && (mode === 'default' || mode === 'bypassPermissions')
+    ? 'plan'
+    : mode
 }
 
 type OpenCodeModelsStatus = 'idle' | 'loading' | 'loaded' | 'error'
@@ -50,6 +57,7 @@ const PROVIDERS: { value: CodingAgentProviderId; label: string }[] = [
   { value: 'claude-code-cli', label: 'Claude Code' },
   { value: 'opencode-cli', label: 'OpenCode' },
   { value: 'codex-cli', label: 'Codex' },
+  { value: 'dsh-cli', label: 'dsh' },
 ]
 
 /** 各后端默认的可执行文件名，用作「自定义路径」输入框的 placeholder。 */
@@ -57,6 +65,7 @@ const DEFAULT_EXE: Record<CodingAgentProviderId, string> = {
   'claude-code-cli': 'claude',
   'opencode-cli': 'opencode',
   'codex-cli': 'codex',
+  'dsh-cli': 'dsh',
 }
 
 export function CodingAgentSection() {
@@ -73,10 +82,11 @@ export function CodingAgentSection() {
   const provider: CodingAgentProviderId = prefs?.codingAgentProvider ?? 'claude-code-cli'
   const useOpencode = prefs?.codingAgentEnabled && provider === 'opencode-cli'
   const useCodex = prefs?.codingAgentEnabled && provider === 'codex-cli'
+  const useDsh = prefs?.codingAgentEnabled && provider === 'dsh-cli'
   // 只有沙箱档位、没有逐命令 deny 清单的后端：审批卡对它们不生效。
-  const sandboxOnly = Boolean(useCodex)
+  const sandboxOnly = Boolean(useCodex || useDsh)
 
-  // Codex 的安装检测（走通用检测命令，后续接别的后端时可以复用）。
+  // Codex / dsh 的安装检测（两家共用同一个通用检测命令）。
   const [cliDetection, setCliDetection] = useState<OpenCodeDetection | null>(null)
   useEffect(() => {
     if (!sandboxOnly) {
@@ -140,7 +150,7 @@ export function CodingAgentSection() {
   useEffect(() => {
     if (
       !prefs ||
-      provider !== 'codex-cli' ||
+      !isSandboxPermissionProvider(provider) ||
       (prefs.codingAgentPermissionMode !== 'default' && prefs.codingAgentPermissionMode !== 'bypassPermissions')
     ) {
       return
@@ -199,6 +209,7 @@ export function CodingAgentSection() {
                   ...prefs,
                   codingAgentProvider: nextProvider,
                   codingAgentModel: null,
+                  codingAgentExe: null,
                   codingAgentPermissionMode: normalizePermissionMode(
                     nextProvider,
                     prefs.codingAgentPermissionMode,
@@ -227,7 +238,7 @@ export function CodingAgentSection() {
             </div>
           )}
 
-          {/* Codex：装没装 + 版本。没装时按警示色提示。 */}
+          {/* Codex / dsh：装没装 + 版本。没装时按警示色提示。 */}
           {sandboxOnly && cliDetection && (
             <div
               style={{
@@ -280,7 +291,7 @@ export function CodingAgentSection() {
               options={permissionModesForProvider(provider).map(m => ({
                 value: m,
                 label: t(
-                  provider === 'codex-cli'
+                  isSandboxPermissionProvider(provider)
                     ? `settings.codingAgent.codexMode.${m === 'acceptEdits' ? 'workspaceWrite' : 'plan'}`
                     : `settings.codingConsole.mode.${m}`,
                 ),
@@ -290,6 +301,21 @@ export function CodingAgentSection() {
             />
           </SettingRow>
 
+          {/* dsh 的 headless profile 没有 --model：模型由 profile 决定，这里不给假开关。 */}
+          {useDsh && (
+            <div
+              style={{
+                fontSize: 12,
+                lineHeight: 1.6,
+                color: 'var(--ol-ink-4)',
+                margin: '-4px 0 8px',
+              }}
+            >
+              {t('settings.codingAgent.dshModelHint')}
+            </div>
+          )}
+
+          {!useDsh && (
           <SettingRow
             label={t('settings.codingAgent.model')}
             desc={t(
@@ -371,6 +397,7 @@ export function CodingAgentSection() {
               )}
             </div>
           </SettingRow>
+          )}
 
           {useOpencode && opencode?.installed && opencodeModelsStatus !== 'idle' && (
             <div
