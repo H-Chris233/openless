@@ -38,6 +38,9 @@ pub enum HotkeyEvent {
     TranslationModifierPressed,
     QaShortcutPressed,
     SelectionPolishShortcutPressed,
+    /// 录制态按下 Fn（浏览器不向网页层下发 Fn 的 keydown，无法通过 recorder 捕获；
+    /// 由 CGEventTap 在录制态检测后上报，供前端 ShortcutRecorder 提交 Fn 绑定）。
+    FnRecordingPressed,
 }
 
 #[cfg(test)]
@@ -58,6 +61,8 @@ mod tests {
             translation_trigger: RwLock::new(None),
             translation_trigger_held: AtomicBool::new(true),
             translation_modifier_held: AtomicBool::new(true),
+            recording_active: AtomicBool::new(false),
+            recording_fn_held: AtomicBool::new(false),
         }
     }
 
@@ -134,6 +139,9 @@ pub trait HotkeyAdapter: Send + Sync {
         translation_trigger: Option<HotkeyTrigger>,
     );
     fn reset_held_state(&self);
+    /// 快捷键录制态开关。激活期间监听器上报 Fn 按下边沿（`FnRecordingPressed`），
+    /// 供前端 recorder 提交 Fn 绑定（浏览器不向网页层下发 Fn keydown）。
+    fn set_recording_active(&self, _active: bool) {}
     /// 本次按住期间，监听器是否已经看到触发键被叠加了普通键。上层的「仲裁窗口」
     /// 按下后先等一小会儿再读它，命中就整条按下作废（麦克风都不用开）。
     /// 没有键盘监听器的平台（Linux/fcitx5）恒为 false。
@@ -161,6 +169,11 @@ struct Shared {
     /// Shift（翻译修饰键）当前是否按住。用于在 FLAGS_CHANGED 上识别 down 边沿
     /// （只在 false → true 时往上层发 TranslationModifierPressed）。详见 issue #4。
     translation_modifier_held: AtomicBool,
+    /// 快捷键录制是否激活（ShortcutRecorder 处于录入态）。激活期间 CGEventTap 上报
+    /// Fn 按下边沿（`FnRecordingPressed`），供前端 recorder 提交 Fn 绑定。
+    recording_active: AtomicBool,
+    /// 录制态 Fn 是否已按住，用于在 FLAGS_CHANGED 上识别 down 边沿（去重）。
+    recording_fn_held: AtomicBool,
 }
 
 pub struct HotkeyMonitor {
@@ -211,6 +224,10 @@ impl HotkeyMonitor {
 
     pub fn reset_held_state(&self) {
         self.adapter.reset_held_state();
+    }
+
+    pub fn set_recording_active(&self, active: bool) {
+        self.adapter.set_recording_active(active);
     }
 
     pub fn trigger_combined_since_press(&self, press_id: u64) -> bool {
@@ -312,6 +329,8 @@ where
         translation_trigger: RwLock::new(None),
         translation_trigger_held: AtomicBool::new(false),
         translation_modifier_held: AtomicBool::new(false),
+        recording_active: AtomicBool::new(false),
+        recording_fn_held: AtomicBool::new(false),
     });
 
     let thread_shared = Arc::clone(&shared);
@@ -480,6 +499,12 @@ mod platform {
 
         fn reset_held_state(&self) {
             reset_shared_held_state(&self.shared);
+        }
+        fn set_recording_active(&self, active: bool) {
+            self.shared.recording_active.store(active, Ordering::SeqCst);
+            if !active {
+                self.shared.recording_fn_held.store(false, Ordering::SeqCst);
+            }
         }
 
         fn trigger_combined_since_press(&self, press_id: u64) -> bool {
@@ -703,6 +728,23 @@ mod platform {
     fn handle_flags_changed(ctx: &CallbackContext, event: CgEventRef) {
         let flags = unsafe { CGEventGetFlags(event) };
 
+        // 录制态：浏览器不向网页层下发 Fn keydown（系统修饰键被隐藏），无法通过
+        // ShortcutRecorder 捕获。这里用 CGEventTap 检测 Fn 按下边沿（keycode 63 +
+        // kCGEventFlagMaskSecondaryFn），上报 `FnRecordingPressed`，供上层转给前端
+        // recorder 提交 Fn 绑定。
+        if ctx.shared.recording_active.load(Ordering::SeqCst) {
+            let fn_active = (flags & FLAG_MASK_SECONDARY_FN) != 0;
+            let fn_was_held = ctx.shared.recording_fn_held.load(Ordering::SeqCst);
+            if fn_active && !fn_was_held {
+                ctx.shared.recording_fn_held.store(true, Ordering::SeqCst);
+                log::info!("[hotkey] 录制态检测到 Fn↓ → 上报 FnRecordingPressed");
+                send_or_log(&ctx.tx, HotkeyEvent::FnRecordingPressed);
+            } else if !fn_active && fn_was_held {
+                ctx.shared.recording_fn_held.store(false, Ordering::SeqCst);
+                log::info!("[hotkey] 录制态 Fn↑（松开）");
+            }
+        }
+
         // Shift 是翻译模式修饰键 — 与触发键的 keycode 检查独立，任何时刻按 Shift 都生效。
         let shift_active = (flags & FLAG_MASK_SHIFT) != 0;
         let shift_was_held = ctx.shared.translation_modifier_held.load(Ordering::SeqCst);
@@ -893,6 +935,8 @@ mod platform {
                 translation_trigger: RwLock::new(None),
                 translation_trigger_held: AtomicBool::new(false),
                 translation_modifier_held: AtomicBool::new(false),
+                recording_active: AtomicBool::new(false),
+                recording_fn_held: AtomicBool::new(false),
             })
         }
 
@@ -1465,6 +1509,8 @@ mod platform {
                 translation_trigger: RwLock::new(None),
                 translation_trigger_held: AtomicBool::new(false),
                 translation_modifier_held: AtomicBool::new(false),
+                recording_active: AtomicBool::new(false),
+                recording_fn_held: AtomicBool::new(false),
             })
         }
 

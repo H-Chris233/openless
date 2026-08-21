@@ -588,6 +588,8 @@ pub(super) fn less_computer_modifier_bridge_loop(
             HotkeyEvent::TranslationModifierPressed | HotkeyEvent::QaShortcutPressed => {}
             #[cfg(not(mobile))]
             HotkeyEvent::SelectionPolishShortcutPressed => {}
+            #[cfg(not(mobile))]
+            HotkeyEvent::FnRecordingPressed => {}
         }
     }
 }
@@ -1562,6 +1564,13 @@ pub(super) fn arm_translation_if_effective(inner: &Arc<Inner>) -> bool {
 pub(super) fn hotkey_bridge_loop(inner: Arc<Inner>, rx: mpsc::Receiver<HotkeyEvent>) {
     while let Ok(evt) = rx.recv() {
         if inner.shortcut_recording_active.load(Ordering::SeqCst) {
+            // 录制态：仅上报「录制 Fn」事件给前端（recorder 在录入态检测到 Fn 按下，
+            // 浏览器不向网页层下发 Fn keydown，由 CGEventTap 上报），其余热键事件
+            // 一律跳过，避免录制期间误触发听写。
+            #[cfg(not(mobile))]
+            if matches!(evt, HotkeyEvent::FnRecordingPressed) {
+                emit_fn_recording_pressed(&inner);
+            }
             continue;
         }
         let inner_cloned = Arc::clone(&inner);
@@ -1617,7 +1626,20 @@ pub(super) fn hotkey_bridge_loop(inner: Arc<Inner>, rx: mpsc::Receiver<HotkeyEve
                     }
                 });
             }
+            // 非录制态不会出现（CGEventTap 仅在 recording_active 时上报）；防御性忽略。
+            #[cfg(not(mobile))]
+            HotkeyEvent::FnRecordingPressed => {}
         }
+    }
+}
+
+/// 录制态检测到 Fn 按下 → 发事件给前端，让 ShortcutRecorder 提交 Fn 绑定。
+#[cfg(not(mobile))]
+fn emit_fn_recording_pressed(inner: &Arc<Inner>) {
+    let app = inner.app.lock().clone();
+    log::info!("[hotkey] 录制 Fn 按下 → emit fn-shortcut-pressed (app_ready={})", app.is_some());
+    if let Some(app) = app {
+        let _ = app.emit("fn-shortcut-pressed", ());
     }
 }
 

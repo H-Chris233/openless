@@ -2718,10 +2718,22 @@ impl Coordinator {
         self.inner
             .shortcut_recording_active
             .store(active, Ordering::SeqCst);
+        // 同步给热键监听器：录制态激活时 CGEventTap 上报 Fn 按下边沿，
+        // 供前端 ShortcutRecorder 提交 Fn 绑定（浏览器不向网页层下发 Fn keydown）。
+        #[cfg(not(mobile))]
+        let sync_ok = self.inner.hotkey.lock().as_ref().map(|m| {
+            m.set_recording_active(active);
+            true
+        });
+        #[cfg(mobile)]
+        let sync_ok = None;
         if active {
             reset_shortcut_held_state(&self.inner);
         }
-        log::info!("[coord] shortcut recording active={active}");
+        log::info!(
+            "[coord] shortcut recording active={active} (synced_to_hotkey={})",
+            sync_ok.unwrap_or(false)
+        );
     }
 
     pub async fn handle_window_hotkey_event(

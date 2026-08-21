@@ -91,15 +91,7 @@ export function ShortcutRecorder({
 
   useEffect(() => () => {
     resetRecordingState();
-    void setShortcutRecordingActive(false);
   }, []);
-
-  useEffect(() => {
-    void setShortcutRecordingActive(recording);
-    return () => {
-      if (recording) void setShortcutRecordingActive(false);
-    };
-  }, [recording]);
 
   useEffect(() => {
     if (!disabled || !recording) return;
@@ -118,6 +110,43 @@ export function ShortcutRecorder({
       setError(t('settings.recording.comboConflict'));
     }
   };
+
+  // 浏览器不下发 Fn keydown：先监听 Rust CGEventTap 转发的事件，再激活后端录制态，
+  // 避免用户刚进入录制就按 Fn 时事件早于监听器注册。用 ref 拿最新 finish，避免 effect
+  // 因 finish 引用变化反复注册。
+  const finishRef = useRef(finish);
+  finishRef.current = finish;
+  useEffect(() => {
+    if (!recording) return;
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const { listen } = await import('@tauri-apps/api/event');
+        const handle = await listen('fn-shortcut-pressed', () => {
+          if (cancelled) return;
+          setMenuOpen(false);
+          void finishRef.current({ primary: 'Fn', modifiers: [] });
+        });
+        if (cancelled) handle();
+        else unlisten = handle;
+      } catch (error) {
+        console.warn('[shortcut] fn-shortcut-pressed listener failed', error);
+      }
+      if (cancelled) return;
+      try {
+        await setShortcutRecordingActive(true);
+        if (cancelled) await setShortcutRecordingActive(false);
+      } catch (error) {
+        console.warn('[shortcut] recording state sync failed', error);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      unlisten?.();
+      void setShortcutRecordingActive(false);
+    };
+  }, [recording]);
 
   /** 开始录入：同时收起菜单——「录制快捷键」按下后，重置/停用两个按钮随之消失。 */
   const startRecording = () => {
