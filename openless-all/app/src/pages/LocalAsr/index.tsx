@@ -155,6 +155,48 @@ interface LocalAsrProps {
     embedded?: boolean
 }
 
+interface LocalAsrContentWrapperProps {
+    embedded: boolean
+    children: ReactNode
+}
+
+// 必须保持为模块级组件：如果在 LocalAsr 渲染函数内定义，3 秒刷新引发的任意
+// setState 都会创建新的组件类型，React 会重挂整棵子树并清空 Collapsible /
+// SelectLite 等子组件的交互状态。
+function LocalAsrContentWrapper({
+    embedded,
+    children,
+}: LocalAsrContentWrapperProps) {
+    if (embedded) return <>{children}</>
+    return (
+        <div
+            style={{
+                padding: "20px 28px 32px",
+                overflowY: "auto",
+                height: "100%",
+            }}
+        >
+            {children}
+        </div>
+    )
+}
+
+function LocalAsrGroupTitle({ children }: { children: ReactNode }) {
+    return (
+        <div
+            style={{
+                fontSize: 12.5,
+                fontWeight: 600,
+                color: "var(--ol-ink-3)",
+                letterSpacing: "0.02em",
+                margin: "18px 0 8px",
+            }}
+        >
+            {children}
+        </div>
+    )
+}
+
 type RefreshGuard = () => boolean
 
 export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
@@ -1805,38 +1847,6 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
               ? t("localAsr.foundryRetryPrepare")
               : t("localAsr.sherpaPrepare")
 
-    // embedded=true 嵌入「高级」设置：跳过外层 page padding/height、PageHeader，
-    // 与独立警告 Card——AdvancedSection 自己负责标题与短警告 + 启用时的浮层 popup，
-    // LocalAsr 只输出实际功能 Cards（Foundry / Qwen3 模型状态 / 模型列表）。
-    const Wrapper = embedded
-        ? (props: { children: ReactNode }) => <>{props.children}</>
-        : (props: { children: ReactNode }) => (
-              <div
-                  style={{
-                      padding: "20px 28px 32px",
-                      overflowY: "auto",
-                      height: "100%",
-                  }}
-              >
-                  {props.children}
-              </div>
-          )
-
-    // 本地模型页分组标题：模型选择 / 下载与管理 / 其他。
-    const GroupTitle = ({ children }: { children: ReactNode }) => (
-        <div
-            style={{
-                fontSize: 12.5,
-                fontWeight: 600,
-                color: "var(--ol-ink-3)",
-                letterSpacing: "0.02em",
-                margin: "18px 0 8px",
-            }}
-        >
-            {children}
-        </div>
-    )
-
     // ─── 两栏看板的统一模型条目（Qwen3 / sherpa-onnx / foundry 归一化） ───
     // allSidebarEntries = 全目录（下载弹窗用，未下载/下载中/已下载全列出，
     // 让「下载新模型」弹窗能选到所有可获取的模型）；
@@ -2057,7 +2067,7 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
             : null
 
     return (
-        <Wrapper>
+        <LocalAsrContentWrapper embedded={embedded}>
             {!embedded && (
                 <PageHeader
                     kicker={t("localAsr.kicker")}
@@ -2550,7 +2560,9 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
             )}
 
             {/* ─── 分组：下载与管理（各引擎的模型获取/准备/下载） ─── */}
-            <GroupTitle>{t("localAsr.groupDownload")}</GroupTitle>
+            <LocalAsrGroupTitle>
+                {t("localAsr.groupDownload")}
+            </LocalAsrGroupTitle>
 
 
             {IS_WINDOWS && (
@@ -3400,7 +3412,7 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                     </div>
                 </Card>
             )}
-        </Wrapper>
+        </LocalAsrContentWrapper>
     )
 }
 
