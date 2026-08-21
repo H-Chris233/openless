@@ -193,7 +193,7 @@ OpenLess does one thing: it **turns speech into usable written text — AI promp
 
 Every item below is one more layer sedimented into a default — a capability you authorize once and then never manage again. This is the infrastructure you stand on after launch:
 
-- Tauri 2 backend in Rust with a React/TypeScript frontend. macOS 12+, Windows 10+.
+- Tauri 2 backend in Rust with a React/TypeScript frontend. macOS 14+, Windows 10+.
 - 🎨 **Style Pack Marketplace** — browse, install, and like community **style packs** from the in-app Marketplace, and publish your own (custom system prompt per pack, switchable by hotkey). Backed by a moderated marketplace backend; uploads are reviewed before they go public.
 - ⚡ **Streaming insertion** — polished text is written to the cursor character by character to reduce perceived latency, with an automatic one-shot-paste fallback. Toggle in Settings → Recording.
 - **Toggle and push-to-talk** recording modes, plus a **MediaPlayPause trigger** so wired-earbud inline controls can start and stop recording. `Esc` cancels at any phase, including polish and insertion.

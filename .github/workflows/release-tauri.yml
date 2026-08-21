@@ -505,7 +505,14 @@ jobs:
             echo "::error::AppImage bundle was not produced"
             exit 1
           fi
-          APPIMAGE_CONTENTS=$(unsquashfs -l "$APPIMAGE_PATH")
+          # Type-2 AppImage has an ELF launcher before the embedded SquashFS.
+          # Resolve the filesystem offset before asking unsquashfs to inspect it.
+          APPIMAGE_OFFSET=$("$APPIMAGE_PATH" --appimage-offset)
+          if ! [[ "$APPIMAGE_OFFSET" =~ ^[0-9]+$ ]]; then
+            echo "::error::Could not resolve the AppImage SquashFS offset"
+            exit 1
+          fi
+          APPIMAGE_CONTENTS=$(unsquashfs -offset "$APPIMAGE_OFFSET" -l "$APPIMAGE_PATH")
           if ! grep -Eq '(^|/)usr/lib/OpenLess/linux-fcitx5-plugin/libopenless\.so$' <<< "$APPIMAGE_CONTENTS"; then
             echo "::error::AppImage is missing usr/lib/OpenLess/linux-fcitx5-plugin/libopenless.so"
             exit 1
