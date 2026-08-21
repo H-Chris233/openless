@@ -33,6 +33,18 @@ pub(crate) struct ProviderScope {
     channel: Option<String>,
 }
 
+fn derive_scoped_bailian_endpoint(
+    provider_type: &str,
+    endpoint: &str,
+    protocol: crate::coordinator::BailianEndpointProtocol,
+) -> Result<String, String> {
+    if provider_type == crate::asr::bailian::PROVIDER_ID {
+        crate::coordinator::derive_bailian_endpoint(endpoint, protocol)
+    } else {
+        Ok(endpoint.to_string())
+    }
+}
+
 impl ProviderScope {
     fn new(kind: &str, channel: Option<String>) -> Result<Self, String> {
         let kind = ProviderKind::parse(kind)?;
@@ -705,7 +717,8 @@ async fn validate_dashscope_multimodal_asr_provider(scope: &ProviderScope) -> Re
     crate::coordinator::validate_dashscope_multimodal_model(&model)?;
     let protocol = crate::asr::dashscope_multimodal::protocol_for_model(&model)
         .unwrap_or(crate::asr::dashscope_multimodal::DashScopeBatchProtocol::Multimodal);
-    let (api_key, base_url) = if crate::coordinator::unified_bailian_is_active() {
+    let provider_type = scope.provider_type();
+    let (api_key, base_url) = if provider_type == crate::asr::bailian::PROVIDER_ID {
         let api_key = scope
             .get(CredentialAccount::AsrApiKey)
             .map_err(|e| e.to_string())?
@@ -723,7 +736,8 @@ async fn validate_dashscope_multimodal_asr_provider(scope: &ProviderScope) -> Re
                 crate::coordinator::BailianEndpointProtocol::AsyncTranscription
             }
         };
-        let endpoint = crate::coordinator::derive_bailian_endpoint(&endpoint, endpoint_protocol)?;
+        let endpoint =
+            derive_scoped_bailian_endpoint(&provider_type, &endpoint, endpoint_protocol)?;
         (api_key, endpoint)
     } else {
         let config = read_openai_provider_config(scope)?;
@@ -796,14 +810,11 @@ async fn validate_bailian_asr_provider(scope: &ProviderScope) -> Result<(), Stri
         .map_err(|e| e.to_string())?
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| crate::asr::bailian::DEFAULT_ENDPOINT.to_string());
-    let endpoint = if crate::coordinator::unified_bailian_is_active() {
-        crate::coordinator::derive_bailian_endpoint(
-            &stored_endpoint,
-            crate::coordinator::BailianEndpointProtocol::ClassicRealtime,
-        )?
-    } else {
-        stored_endpoint
-    };
+    let endpoint = derive_scoped_bailian_endpoint(
+        &scope.provider_type(),
+        &stored_endpoint,
+        crate::coordinator::BailianEndpointProtocol::ClassicRealtime,
+    )?;
     // 协议头先行校验：填成 https://（百炼兼容模式 / 专属域名地址）时，WebSocket
     // 握手报的 "URL scheme not supported" 会被前端兜底成笼统的「操作失败」，
     // 用户无从定位。这里拦下并返回专用错误码，前端映射成可操作的提示。
@@ -851,22 +862,16 @@ async fn validate_qwen3_realtime_asr_provider(scope: &ProviderScope) -> Result<(
         return Err("API Key 为空".to_string());
     }
     // 统一百炼保留配置中的区域/工作空间主机，并切换到 Qwen Realtime 路径。
-    let endpoint = if crate::coordinator::unified_bailian_is_active() {
-        let endpoint = scope
-            .get(CredentialAccount::AsrEndpoint)
-            .map_err(|e| e.to_string())?
-            .unwrap_or_default();
-        crate::coordinator::derive_bailian_endpoint(
-            &endpoint,
-            crate::coordinator::BailianEndpointProtocol::QwenRealtime,
-        )?
-    } else {
-        scope
-            .get(CredentialAccount::AsrEndpoint)
-            .map_err(|e| e.to_string())?
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| crate::asr::qwen_realtime::DEFAULT_ENDPOINT.to_string())
-    };
+    let endpoint = scope
+        .get(CredentialAccount::AsrEndpoint)
+        .map_err(|e| e.to_string())?
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| crate::asr::qwen_realtime::DEFAULT_ENDPOINT.to_string());
+    let endpoint = derive_scoped_bailian_endpoint(
+        &scope.provider_type(),
+        &endpoint,
+        crate::coordinator::BailianEndpointProtocol::QwenRealtime,
+    )?;
     if !crate::asr::qwen_realtime::endpoint_scheme_is_secure_websocket(&endpoint) {
         return Err("qwen3EndpointSchemeInvalid".to_string());
     }
@@ -1287,10 +1292,11 @@ mod tests {
     // LLM 路径的 SSRF 校验。read_openai_provider_config 依赖凭据库无法纯单测，这里直接对它调用
     // 的校验器锁定 ASR 形态 endpoint 的拒绝/放行契约。
     use super::{
-        asr_error_is_no_speech_rejection, fetch_provider_models, models_url,
-        provider_llm_error_message, provider_log_context, provider_request_error_message,
-        sanitized_provider_destination, send_dashscope_multimodal_validation,
-        volcengine_missing_credential_error, ProviderConfig, ProviderScope,
+        asr_error_is_no_speech_rejection, derive_scoped_bailian_endpoint, fetch_provider_models,
+        models_url, provider_llm_error_message, provider_log_context,
+        provider_request_error_message, sanitized_provider_destination,
+        send_dashscope_multimodal_validation, volcengine_missing_credential_error, ProviderConfig,
+        ProviderScope,
     };
     use crate::endpoint_security::validate_http_endpoint;
 
@@ -1322,6 +1328,19 @@ mod tests {
                 .expect("channel provider kind must remain supported");
             assert_eq!(scope.channel.as_deref(), Some("channel-1"));
         }
+    }
+
+    #[test]
+    fn non_active_unified_bailian_channel_derives_the_selected_model_endpoint() {
+        assert_eq!(
+            derive_scoped_bailian_endpoint(
+                crate::asr::bailian::PROVIDER_ID,
+                "wss://dashscope.aliyuncs.com/api-ws/v1/inference",
+                crate::coordinator::BailianEndpointProtocol::Multimodal,
+            )
+            .unwrap(),
+            crate::asr::dashscope_multimodal::DEFAULT_ENDPOINT
+        );
     }
 
     #[test]
