@@ -18,11 +18,47 @@ fn main() {
         build_qwen_asr(target_os);
     }
 
+    if target_os == "macos" {
+        link_macos_compiler_runtime();
+    }
+
     if target_os == "android" {
         link_android_cpp_runtime();
     }
 
     tauri_build::build();
+}
+
+/// MLX uses `__builtin_available` for newer Metal APIs. Rust links with
+/// `-nodefaultlibs`, so the availability helper from Apple compiler-rt must be
+/// added explicitly or Apple Silicon release links fail on macOS 14 targets.
+fn link_macos_compiler_runtime() {
+    let compiler = cc::Build::new().get_compiler();
+    let output = std::process::Command::new(compiler.path())
+        .arg("-print-resource-dir")
+        .output()
+        .expect("failed to query the macOS compiler resource directory");
+    if !output.status.success() {
+        panic!(
+            "macOS compiler did not return its resource directory (status {})",
+            output.status
+        );
+    }
+
+    let resource_dir = String::from_utf8(output.stdout)
+        .expect("macOS compiler resource directory was not UTF-8")
+        .trim()
+        .to_owned();
+    let runtime_dir = std::path::PathBuf::from(resource_dir).join("lib").join("darwin");
+    if !runtime_dir.join("libclang_rt.osx.a").exists() {
+        panic!(
+            "macOS compiler runtime not found at {}",
+            runtime_dir.display()
+        );
+    }
+
+    println!("cargo:rustc-link-search=native={}", runtime_dir.display());
+    println!("cargo:rustc-link-lib=static=clang_rt.osx");
 }
 
 /// cpal → oboe → oboe-sys 会编译 C++；最终 cdylib 需显式链接 NDK libc++。
