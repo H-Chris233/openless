@@ -2100,10 +2100,9 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                 </Card>
             )}
 
-            {/* ─── 模型管理看板：左侧模型选择（竖排，已下载打绿勾），右侧详情
-                 （HF 实时抓取的尺寸/文件数）+ 操作。全平台归一化（Qwen3 /
-                 sherpa-onnx / foundry），作为设置里的单独板块而非独立窗口。 ─── */}
-            <Card style={{ marginBottom: 16 }}>
+            {/* Windows 已由下方 Foundry / sherpa 卡片完成模型管理；
+                 macOS / Linux 仍需要该看板管理 Qwen3 / Whisper 模型。 */}
+            {!IS_WINDOWS && <Card style={{ marginBottom: 16 }}>
                 <div
                     style={{
                         fontSize: 14,
@@ -2210,7 +2209,7 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                         />
                     </div>
                 </div>
-            </Card>
+            </Card>}
 
             {/* ─── 收纳：下载与存储设置（镜像源 · 模型存储位置 · 内存引擎）——默认收起，
                  需要手动点开。日常的下载 / 管理 / 测试不依赖这些低频配置。 ─── */}
