@@ -9,6 +9,7 @@ import { useTranslation } from 'react-i18next';
 import { Card, PageHeader } from './_atoms';
 import { SavedToast } from '../components/SavedToast';
 import { SelectLite } from '../components/ui/SelectLite';
+import { listStylePacks } from '../lib/ipc';
 import { SUPPORTED_LANGUAGES } from '../lib/types';
 import { isTranslationEnabled, isTranslationTargetRedundant } from '../lib/translationTarget';
 import { useHotkeySettings } from '../state/HotkeySettingsContext';
@@ -22,11 +23,35 @@ export function Translation() {
   const { prefs, loading, error, refresh, updatePrefs: savePrefs } = useHotkeySettings();
   const [saveState, setSaveState] = useState<SaveState>('idle');
   const [saveMessage, setSaveMessage] = useState('');
+  const [activeStylePackName, setActiveStylePackName] = useState<string | null>(null);
+  const [stylePackLoadFailed, setStylePackLoadFailed] = useState(false);
   const statusTimer = useRef<number | null>(null);
 
   useEffect(() => () => {
     if (statusTimer.current !== null) window.clearTimeout(statusTimer.current);
   }, []);
+
+  useEffect(() => {
+    const activeStylePackId = prefs?.activeStylePackId;
+    let cancelled = false;
+    setActiveStylePackName(null);
+    setStylePackLoadFailed(false);
+    void listStylePacks()
+      .then(packs => {
+        if (cancelled) return;
+        const activePack =
+          packs.find(pack => pack.active && pack.enabled) ??
+          packs.find(pack => pack.id === activeStylePackId && pack.enabled);
+        setActiveStylePackName(activePack?.name ?? null);
+        setStylePackLoadFailed(!activePack);
+      })
+      .catch(loadError => {
+        console.warn('[translation] failed to load active style pack', loadError);
+        if (!cancelled) setStylePackLoadFailed(true);
+      });
+
+    return () => { cancelled = true; };
+  }, [prefs?.activeStylePackId]);
 
   const showSaveStatus = (state: SaveState, message: string, temporary = false) => {
     if (statusTimer.current !== null) {
@@ -237,6 +262,46 @@ export function Translation() {
             ariaLabel={t('translation.target.title')}
             style={{ width: '100%', maxWidth: 360, fontSize: 13 }}
           />
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 12,
+              marginTop: 12,
+              paddingTop: 12,
+              borderTop: '0.5px solid var(--ol-line)',
+            }}
+          >
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink-2)' }}>
+                {t('translation.style.title')}
+              </div>
+              <div style={{ marginTop: 2, fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.5 }}>
+                {t('translation.style.desc')}
+              </div>
+            </div>
+            <span
+              role="status"
+              style={{
+                flex: '0 0 auto',
+                maxWidth: 180,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+                padding: '3px 9px',
+                borderRadius: 999,
+                background: 'rgba(37,99,235,0.08)',
+                color: 'var(--ol-blue)',
+                fontSize: 11,
+                fontWeight: 600,
+              }}
+            >
+              {stylePackLoadFailed
+                ? t('translation.style.unavailable')
+                : activeStylePackName ?? t('common.loading')}
+            </span>
+          </div>
           {redundantTarget && (
             <div
               role="status"

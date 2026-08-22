@@ -2155,28 +2155,53 @@ pub mod prompts {
     /// 此 prompt 之上还有 working_languages_premise 拼出的"# 上下文"前提。
     ///
     /// target_language == "English"（含 "美式英文" / "英文" / "english" 等别名）时整段切到
-    /// EN_TRANSLATE_SYSTEM_PROMPT —— 不再走通用 base，避免通用规则与 EN 专属的「ASR 纠错优先
+    /// EN_TRANSLATE_SYSTEM_RULES —— 不再走通用 base，避免通用规则与 EN 专属的「ASR 纠错优先
     /// + 中→英技术词规范化」相互稀释。来源：社区「重写为英文」prompt，精简整合后整体注入。
     pub fn translate_system_prompt(target_language: &str) -> String {
         // issue #609 F-02：翻译路径与 polish 路径对齐——在系统提示末尾追加对抗式注入防御措辞。
         // 本函数是所有翻译路径（OpenAI 兼容 / Gemini 的 compose_translate_prompts、Codex
-        // translate_to、润色+翻译合一的 build_polish_translate_system_prompt）写给模型的唯一
-        // base，把防御嵌在这里令每个调用方自动覆盖，杜绝调用点遗漏。LLM 不是安全边界，纵深防御。
+        // translate_to）写给模型的唯一 base，把防御嵌在这里令每个调用方自动覆盖，杜绝调用点遗漏。
+        // LLM 不是安全边界，纵深防御。
         let base = translate_system_prompt_base(target_language);
         format!("{}\n\n{}", base, polish_injection_defense())
     }
 
+    /// 可嵌入其它工作流的翻译规则，不包含单段翻译的输出格式约束。
+    ///
+    /// 润色+翻译流程需要同时输出原语言风格化源文和目标语言译文；复用
+    /// translate_system_prompt 会把“只输出译文 / 不得输出中文”等单段输出规则一并带入，
+    /// 与两段格式冲突。因此这里只复用 ASR 纠错、术语和忠实翻译规则。
+    pub fn translate_system_prompt_rules(target_language: &str) -> String {
+        translate_system_prompt_rules_base(target_language)
+    }
+
     fn translate_system_prompt_base(target_language: &str) -> String {
+        let rules = translate_system_prompt_rules_base(target_language);
         if is_english_target(target_language) {
-            return EN_TRANSLATE_SYSTEM_PROMPT.to_string();
+            return format!(
+                "{rules}\n\n{output}",
+                output = EN_TRANSLATE_OUTPUT_INSTRUCTIONS
+            );
         }
         format!(
             "# 任务（翻译输出）\n\
              把下面收到的一段语音转写翻译成 \u{300C}{lang}\u{300D}。\n\
              这是用户对着语音输入工具说的话——他正在某个 app 的输入框前，\
-             转译结果会直接被插入到光标位置。\n\
-             \n\
-             # 翻译规则\n\
+             转译结果会直接被插入到光标位置。\n\n\
+             {rules}\n\n\
+             {output}",
+            lang = target_language,
+            rules = rules,
+            output = COMMON_TRANSLATE_OUTPUT_INSTRUCTIONS,
+        )
+    }
+
+    fn translate_system_prompt_rules_base(target_language: &str) -> String {
+        if is_english_target(target_language) {
+            return EN_TRANSLATE_SYSTEM_RULES.to_string();
+        }
+        format!(
+            "# 翻译规则\n\
              ## 必须保留原文（不要翻译）\n\
              - 人名、地名、品牌名（OpenAI、Tauri、字节跳动、张三 等）。\n\
              - 代码标识符、技术术语（useState、async/await、HTTP、Rust crate 名 等）。\n\
@@ -2196,14 +2221,14 @@ pub mod prompts {
              ## 边界 case\n\
              - 转写非常短（一两个字）也照译，\u{4E0D}因为短就硬补内容。\n\
              - 转写是命令式（\"加个空格 / 删除最后一行\"）时，照原意翻译，\u{4E0D}改成陈述句。\n\
-             - 转写全是 fillers（\"嗯嗯啊那个\"）时，输出空字符串。\n\
-             \n\
-             # 输出\n\
-             只输出翻译后的正文，\u{4E0D}带 \u{300C}翻译：\u{300D}\u{300C}译文：\u{300D}\u{300C}Translation:\u{300D}之类前缀，\
-             \u{4E0D}加引号、\u{4E0D}加 markdown 围栏。",
-            lang = target_language
+             - 转写全是 fillers（\"嗯嗯啊那个\"）时，输出空字符串。",
+            lang = target_language,
         )
     }
+
+    const COMMON_TRANSLATE_OUTPUT_INSTRUCTIONS: &str = "# 输出\n\
+        只输出翻译后的正文，\u{4E0D}带 \u{300C}翻译：\u{300D}\u{300C}译文：\u{300D}\u{300C}Translation:\u{300D}之类前缀，\
+        \u{4E0D}加引号、\u{4E0D}加 markdown 围栏。";
 
     /// target_language 是否指向英语 —— 容忍用户在偏好里写 "English" / "english" / "美式英文" /
     /// "英文" / "British English" 等几种写法。匹配松一点没坏处：误命中只会让模型走 EN 专属
@@ -2227,7 +2252,7 @@ pub mod prompts {
     /// - 比通用翻译 prompt 更窄、更强：ASR 纠错优先于逐字翻译；英文要求自然 idiomatic，
     ///   不接受 Chinglish 直译。
     /// - 来源：社区「重写为英文」prompt（imported.573e86a1bcf44dbb...），整合精简后注入。
-    const EN_TRANSLATE_SYSTEM_PROMPT: &str = "# 任务（中文转写 → 英文翻译）\n\
+    const EN_TRANSLATE_SYSTEM_RULES: &str = "# 任务（中文转写 → 英文翻译）\n\
         你是一名中译英助手，专门处理语音识别（ASR）后的中文技术文本。\n\
         用户的转写不是可靠原文：可能有错别字、同音字、近音字、断句缺失、术语误识别、\
         英文术语被中文音译。**你的任务不是逐字翻译，而是先理解用户真实意图，纠正显然的识别错误，\
@@ -2240,7 +2265,6 @@ pub mod prompts {
         3. 把中文音译还原为标准英文技术术语。\n\
         4. 整理混乱、口语化或重复的表达。\n\
         5. 在不改变用户真实意图的前提下，翻译成自然、专业的英文。\n\
-        6. **只输出最终英文译文**。\n\
         \n\
         # ASR 纠错（按置信度分级）\n\
         - 高置信度（错误明显、正确写法唯一）→ 直接替换，不保留原词、不加说明。\n\
@@ -2287,13 +2311,13 @@ pub mod prompts {
         \n\
         # 禁止\n\
         1. \u{4E0D}得逐字翻译明显错误的 ASR 文本。\n\
-        2. \u{4E0D}得输出中文（不要给出中文润色稿、对比表、原文回显）。\n\
-        3. \u{4E0D}得输出解释、修改说明、change log、思路过程。\n\
-        4. \u{4E0D}得为了流畅而删减重要信息，也\u{4E0D}得添加用户未表达过的新事实、链接、路径、字段、步骤。\n\
-        5. \u{4E0D}得改变用户真实意图。\n\
-        \n\
-        # 输出\n\
-        只输出最终英文译文。\u{4E0D}带 \u{300C}翻译：\u{300D}\u{300C}译文：\u{300D}\u{300C}Translation:\u{300D}\
+        2. \u{4E0D}得输出解释、修改说明、change log、思路过程。\n\
+        3. \u{4E0D}得为了流畅而删减重要信息，也\u{4E0D}得添加用户未表达过的新事实、链接、路径、字段、步骤。\n\
+        4. \u{4E0D}得改变用户真实意图。";
+
+    const EN_TRANSLATE_OUTPUT_INSTRUCTIONS: &str = "# 输出\n\
+        只输出最终英文译文。\u{4E0D}得输出中文（不要给出中文润色稿、对比表、原文回显）。\
+        \u{4E0D}带 \u{300C}翻译：\u{300D}\u{300C}译文：\u{300D}\u{300C}Translation:\u{300D}\
         \u{4E4B}\u{7C7B}前缀，\u{4E0D}加引号、\u{4E0D}加 markdown 围栏、\u{4E0D}加代码 fence。";
 }
 
@@ -3843,7 +3867,7 @@ mod tests {
     #[test]
     fn injection_defense_present_in_translate_system_prompt() {
         // issue #609 F-02：翻译路径（EN 专用 / 通用 base）必须与 polish 路径一样带对抗式注入防御。
-        // 覆盖英文目标（走 EN_TRANSLATE_SYSTEM_PROMPT）与非英文目标（走通用 base）两条分支。
+        // 覆盖英文目标（走 EN_TRANSLATE_SYSTEM_RULES）与非英文目标（走通用 base）两条分支。
         for target in ["English", "繁体中文", "日本語"] {
             let p = prompts::translate_system_prompt(target);
             assert!(
@@ -3932,7 +3956,7 @@ mod tests {
 
     #[test]
     fn translate_prompt_swaps_to_en_dedicated_when_target_is_english() {
-        // 英文目标：整段切到 EN_TRANSLATE_SYSTEM_PROMPT，不再带通用 base 的 \"# 任务（翻译输出）\" 标题。
+        // 英文目标：整段切到 EN_TRANSLATE_SYSTEM_RULES，不再带通用 base 的 \"# 任务（翻译输出）\" 标题。
         let en = prompts::translate_system_prompt("English");
         assert!(
             en.contains("# 任务（中文转写 → 英文翻译）"),

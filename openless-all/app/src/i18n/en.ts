@@ -629,6 +629,11 @@ export const en: typeof zhCN = {
       disabled: 'Disabled (Shift does nothing)',
       sameAsWorking: 'The target matches your only working language, so translation cannot take effect — Shift will just run a normal polish. Pick a different target, or add another working language above.',
     },
+    style: {
+      title: 'Translation style',
+      desc: 'Automatically inherits the active style pack from the Style page.',
+      unavailable: 'Unavailable',
+    },
     save: {
       workingFailed: 'Failed to save working languages. Please try again.',
       targetFailed: 'Failed to save translation target. Please try again.',

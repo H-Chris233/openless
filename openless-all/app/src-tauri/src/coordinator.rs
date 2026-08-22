@@ -4158,11 +4158,35 @@ mod tests {
     }
 
     #[test]
-    fn build_polish_translate_prompt_contains_markers_and_target() {
-        let p = build_polish_translate_system_prompt("日本語");
-        assert!(p.contains(POLISH_TRANSLATE_SRC_MARKER));
-        assert!(p.contains(POLISH_TRANSLATE_TGT_MARKER));
-        assert!(p.contains("日本語"));
+    fn translation_prompt_inherits_active_style_and_preserves_structure() {
+        let style_prompt = "# STYLE_PACK_976\n按主题整理为编号列表。\n\n{{HOTWORDS}}";
+        let combined = build_polish_translate_system_prompt(style_prompt, "English");
+        let (system_prompt, _) = crate::polish::compose_polish_prompts(
+            "原始转写",
+            PolishMode::Structured,
+            &["OpenLess".to_string()],
+            &combined,
+            &["简体中文".to_string(), "English".to_string()],
+            ChineseScriptPreference::Auto,
+            crate::types::OutputLanguagePreference::Auto,
+            Some("GitHub"),
+            Some("已有上下文<|OPENLESS_CURSOR|>"),
+            true,
+        );
+
+        assert!(system_prompt.contains("STYLE_PACK_976"));
+        assert!(system_prompt.contains("OpenLess"));
+        assert!(!system_prompt.contains("{{HOTWORDS}}"));
+        assert!(system_prompt.contains("English"));
+        assert!(system_prompt.contains(POLISH_TRANSLATE_SRC_MARKER));
+        assert!(system_prompt.contains(POLISH_TRANSLATE_TGT_MARKER));
+        assert!(system_prompt.contains("# ASR 纠错"));
+        assert!(system_prompt.contains("Token"));
+        assert!(!system_prompt.contains("只输出最终英文译文"));
+        assert!(!system_prompt.contains("不得输出中文"));
+        assert!(system_prompt.contains("列表、编号、段落和 Markdown 结构"));
+        assert!(system_prompt.contains("<cursor_context>"));
+        assert!(system_prompt.contains("# 多轮上下文使用规则"));
     }
 
     #[tokio::test]
