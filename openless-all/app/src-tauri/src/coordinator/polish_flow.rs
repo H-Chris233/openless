@@ -338,7 +338,7 @@ pub(super) fn build_polish_translate_system_prompt(
     style_system_prompt: &str,
     target_language: &str,
 ) -> String {
-    let translation_rules = crate::polish::prompts::translate_system_prompt(target_language);
+    let translation_rules = crate::polish::prompts::translate_system_prompt_rules(target_language);
     format!(
         "# 任务（按当前风格润色并翻译）\n\
          先完整执行下方的当前风格包规则，把原始 ASR 转写整理为同语言的风格化源文；\

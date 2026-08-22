@@ -4180,6 +4180,10 @@ mod tests {
         assert!(system_prompt.contains("English"));
         assert!(system_prompt.contains(POLISH_TRANSLATE_SRC_MARKER));
         assert!(system_prompt.contains(POLISH_TRANSLATE_TGT_MARKER));
+        assert!(system_prompt.contains("# ASR 纠错"));
+        assert!(system_prompt.contains("Token"));
+        assert!(!system_prompt.contains("只输出最终英文译文"));
+        assert!(!system_prompt.contains("不得输出中文"));
         assert!(system_prompt.contains("列表、编号、段落和 Markdown 结构"));
         assert!(system_prompt.contains("<cursor_context>"));
         assert!(system_prompt.contains("# 多轮上下文使用规则"));

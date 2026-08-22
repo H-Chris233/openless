@@ -33,19 +33,15 @@ export function Translation() {
 
   useEffect(() => {
     const activeStylePackId = prefs?.activeStylePackId;
-    if (!activeStylePackId) {
-      setActiveStylePackName(null);
-      setStylePackLoadFailed(false);
-      return;
-    }
-
     let cancelled = false;
     setActiveStylePackName(null);
     setStylePackLoadFailed(false);
     void listStylePacks()
       .then(packs => {
         if (cancelled) return;
-        const activePack = packs.find(pack => pack.id === activeStylePackId);
+        const activePack =
+          packs.find(pack => pack.active && pack.enabled) ??
+          packs.find(pack => pack.id === activeStylePackId && pack.enabled);
         setActiveStylePackName(activePack?.name ?? null);
         setStylePackLoadFailed(!activePack);
       })
