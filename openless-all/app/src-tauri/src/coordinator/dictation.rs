@@ -4546,6 +4546,7 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
             &translation_target,
             mode,
             &hotword_strs,
+            &style_system_prompt,
             &working_languages,
             chinese_script_preference,
             output_language_preference,

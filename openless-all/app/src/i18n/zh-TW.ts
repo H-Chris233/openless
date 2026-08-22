@@ -629,6 +629,11 @@ export const zhTW: typeof zhCN = {
       disabled: '不啓用（Shift 按下不觸發翻譯）',
       sameAsWorking: '目標語言與你唯一的工作語言相同，翻譯不會生效：按 Shift 仍按普通潤色處理。換一個目標語言，或在上方多勾選一個工作語言。',
     },
+    style: {
+      title: '翻譯風格',
+      desc: '自動沿用「風格」頁目前啓用的風格包。',
+      unavailable: '暫時無法取得',
+    },
     save: {
       workingFailed: '工作語言保存失敗，請重試。',
       targetFailed: '翻譯目標語言保存失敗，請重試。',

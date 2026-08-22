@@ -631,6 +631,11 @@ export const ko: typeof zhCN = {
       disabled: '비활성화 (Shift 로 번역 발동 안 함)',
       sameAsWorking: '대상 언어가 유일한 작업 언어와 같아 번역이 실행되지 않습니다. Shift 를 눌러도 일반 정리로 처리됩니다. 다른 대상 언어를 고르거나 위에서 작업 언어를 추가하세요.',
     },
+    style: {
+      title: '번역 스타일',
+      desc: '「스타일」 페이지에서 현재 활성화된 스타일 팩을 자동으로 사용합니다.',
+      unavailable: '사용할 수 없음',
+    },
     save: {
       workingFailed: '작업 언어 저장에 실패했습니다. 다시 시도하세요.',
       targetFailed: '번역 대상 언어 저장에 실패했습니다. 다시 시도하세요.',

@@ -627,6 +627,11 @@ export const zhCN = {
       disabled: '不启用（Shift 按下不触发翻译）',
       sameAsWorking: '目标语言与你唯一的工作语言相同，翻译不会生效：按 Shift 仍按普通润色处理。换一个目标语言，或在上方多勾选一个工作语言。',
     },
+    style: {
+      title: '翻译风格',
+      desc: '自动继承「风格」页当前激活的风格包。',
+      unavailable: '暂不可用',
+    },
     save: {
       workingFailed: '工作语言保存失败，请重试。',
       targetFailed: '翻译目标语言保存失败，请重试。',

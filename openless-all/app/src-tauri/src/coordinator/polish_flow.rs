@@ -331,23 +331,34 @@ pub(super) async fn translate_text(
 pub(super) const POLISH_TRANSLATE_SRC_MARKER: &str = "[[OPENLESS_POLISHED_SOURCE]]";
 pub(super) const POLISH_TRANSLATE_TGT_MARKER: &str = "[[OPENLESS_TRANSLATION]]";
 
-/// 合成"先润色源文、再翻译"的系统提示词：在原翻译 prompt 之上追加"额外输出润色后源文"
-/// 与严格两段格式（覆盖原 prompt 末尾的"只输出译文"）。译文仍是要插入用户光标的主产物，
-/// 故完整保留原翻译规则；润色后的源文只作对话上下文用，轻量清理即可。
-pub(super) fn build_polish_translate_system_prompt(target_language: &str) -> String {
-    let base = crate::polish::prompts::translate_system_prompt(target_language);
+/// 合成"按当前风格润色源文、再翻译"的系统提示词。当前风格包决定源文的结构与语气，
+/// 翻译规则负责把该结果忠实转换为目标语言；末尾的严格两段格式覆盖两套 prompt 各自的
+/// "只输出正文"约束。译文用于插入，风格化源文只写入历史供后续上下文复用。
+pub(super) fn build_polish_translate_system_prompt(
+    style_system_prompt: &str,
+    target_language: &str,
+) -> String {
+    let translation_rules = crate::polish::prompts::translate_system_prompt(target_language);
     format!(
-        "{base}\n\n\
-         # 额外输出：润色后的源文（仅用于对话上下文，不展示给用户）\n\
-         在译文之前，先把上面的原始转写**按它本来的语言**润色一遍：去掉口癖（嗯 / 那个 / um）、\
-         补必要标点、纠正明显的识别错误，但**不翻译、不改写风格、不增删意思**。\n\n\
-         # 输出格式（覆盖上面\u{201C}只输出译文\u{201D}的说明，严格遵守）\n\
+        "# 任务（按当前风格润色并翻译）\n\
+         先完整执行下方的当前风格包规则，把原始 ASR 转写整理为同语言的风格化源文；\
+         再把该风格化源文翻译成\u{300C}{lang}\u{300D}。翻译对象是风格化源文，不是原始转写。\n\n\
+         # 当前风格包规则\n\
+         {style}\n\n\
+         # 翻译规则\n\
+         {translation_rules}\n\n\
+         # 两阶段约束\n\
+         - 风格包决定内容的组织方式、语气和信息密度；翻译不得把它还原成普通连续段落。\n\
+         - 译文必须保留风格化源文的列表、编号、段落和 Markdown 结构，并忠实保留原意。\n\
+         - 风格化源文保持原语言；最终译文只使用\u{300C}{lang}\u{300D}表达需要翻译的正文。\n\n\
+         # 输出格式（优先级最高，覆盖上面所有\u{201C}只输出正文\u{201D}的说明）\n\
          严格按下面两段输出，两个标记必须原样出现、各占一行，标记之外不要有任何多余文字：\n\
          {src}\n\
-         （这里放润色后的源文，保持原语言）\n\
+         （这里放按当前风格包完整润色后的源文，保持原语言）\n\
          {tgt}\n\
-         （这里放翻译成\u{300C}{lang}\u{300D}的译文）",
-        base = base,
+         （这里放保留相同风格与结构的\u{300C}{lang}\u{300D}译文）",
+        style = style_system_prompt.trim(),
+        translation_rules = translation_rules,
         src = POLISH_TRANSLATE_SRC_MARKER,
         tgt = POLISH_TRANSLATE_TGT_MARKER,
         lang = target_language,
@@ -386,6 +397,7 @@ pub(super) async fn polish_and_translate_or_passthrough(
     target_language: &str,
     mode: PolishMode,
     hotwords: &[String],
+    style_system_prompt: &str,
     working_languages: &[String],
     chinese_script_preference: ChineseScriptPreference,
     output_language_preference: OutputLanguagePreference,
@@ -397,7 +409,7 @@ pub(super) async fn polish_and_translate_or_passthrough(
     llm_elapsed_ms: &mut Option<u64>,
     multimodal: bool,
 ) -> (String, Option<String>, Option<String>) {
-    let system_prompt = build_polish_translate_system_prompt(target_language);
+    let system_prompt = build_polish_translate_system_prompt(style_system_prompt, target_language);
     match polish_text(
         &raw.text,
         mode,
