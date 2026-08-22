@@ -446,18 +446,21 @@ pub mod android {
         Ok(())
     }
 
-    pub fn can_draw_overlays(env: &mut JNIEnv, context: &JObject) -> Result<bool, String> {
+    pub fn can_draw_overlays<'local>(
+        env: &mut JNIEnv<'local>,
+        context: &JObject<'local>,
+    ) -> Result<bool, String> {
         if android_sdk_int(env)? < 23 {
             return Ok(true);
         }
-        env.call_static_method(
-            "android/provider/Settings",
-            "canDrawOverlays",
+        call_static_bool_with_context_class(
+            env,
+            context,
+            "com.openless.app.OpenLessPermissionBridge",
+            "canDrawOverlaysSafely",
             "(Landroid/content/Context;)Z",
             &[JValue::Object(context)],
         )
-        .and_then(|value| value.z())
-        .map_err(|error| format!("Settings.canDrawOverlays: {error}"))
     }
 
     pub fn check_self_permission(

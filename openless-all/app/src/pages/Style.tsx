@@ -21,6 +21,7 @@ import { Btn, Card, PageHeader, Pill } from './_atoms';
 import { Icon } from '../components/Icon';
 import { SavedToast, type SaveToastState } from '../components/SavedToast';
 import { pickStylePackZipTargetPath, stylePackZipFileName } from '../lib/stylePackZip';
+import { useMobileLayout, useLayoutStack, useConservativeLayout } from '../lib/useMobileLayout';
 
 type BusyAction =
   | 'loading'
@@ -130,6 +131,10 @@ function modeTone(mode: PolishMode): 'default' | 'blue' | 'ok' | 'outline' | 'da
 
 export function Style() {
   const { t } = useTranslation();
+  const mobile = useMobileLayout();
+  const baseLayoutStack = useLayoutStack();
+  const conservative = useConservativeLayout();
+  const stackLayout = conservative || baseLayoutStack;
   const { prefs: marketplacePrefs, updatePrefs: updateMarketplacePrefs } = useHotkeySettings();
   const marketplaceDisplayLogin = (marketplacePrefs?.marketplaceDevLogin ?? '').trim();
   const [marketplaceSignedIn, setMarketplaceSignedIn] = useState(false);
@@ -597,7 +602,15 @@ export function Style() {
         title={t('style.pack.title')}
         desc={t('style.pack.desc')}
         right={(
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end', marginTop: 40 }}>
+          <div className="ol-flex-row ol-flex-push" style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            flexWrap: 'wrap',
+            justifyContent: stackLayout ? 'flex-start' : 'flex-end',
+            marginTop: stackLayout ? 0 : 40,
+            width: stackLayout ? '100%' : undefined,
+          }}>
             {/* 风格市场入口已移到侧栏「风格」展开组（用户拍板）；此处不再放按钮。 */}
             <Btn variant="ghost" icon="refresh" onClick={() => void loadPacks(selectedId)} disabled={busy === 'loading'}>
               {t('common.refresh')}
@@ -614,8 +627,15 @@ export function Style() {
       <SavedToast saveState={saveState} message={saveMessage} />
 
       <Card padding={0} style={{ overflow: 'hidden', flex: '1 1 0', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-          <div style={{ padding: 18, borderBottom: '0.5px solid var(--ol-line)', flexShrink: 0 }}>
-            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+          <div style={{ padding: stackLayout ? 14 : 18, borderBottom: '0.5px solid var(--ol-line)', flexShrink: 0 }}>
+            <div className="ol-flex-row" style={{
+              display: 'flex',
+              alignItems: 'flex-start',
+              justifyContent: 'space-between',
+              gap: 12,
+              flexWrap: 'wrap',
+              flexDirection: stackLayout ? 'column' : 'row',
+            }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', minWidth: 0 }}>
                 <div>
                   <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--ol-ink)' }}>
@@ -655,7 +675,7 @@ export function Style() {
                   </button>
                 )}
               </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <div className="ol-flex-row ol-flex-split" style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', minWidth: 0, width: stackLayout ? '100%' : undefined }}>
                 <div style={{ display: 'inline-flex', padding: 3, borderRadius: 8, background: 'var(--ol-surface-2)', border: '0.5px solid var(--ol-line)' }}>
                   {([
                     ['dictation', t('style.pack.dictationTab')],
@@ -670,7 +690,7 @@ export function Style() {
             </div>
           </div>
           <div className="ol-thinscroll" style={{ padding: 18, overflow: 'auto', flex: '1 1 0', minHeight: 0 }}>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 12 }}>
+            <div className="ol-grid-auto-cards" style={{ display: 'grid', gridTemplateColumns: stackLayout ? '1fr' : 'repeat(auto-fit, minmax(260px, 1fr))', gap: 12 }}>
             <AnimatePresence mode="sync">
             {bodyPacks.map(pack => {
               const isBuiltin = pack.kind === 'builtin';
@@ -680,15 +700,12 @@ export function Style() {
               return (
                 <motion.div
                   key={pack.id}
-                  layout
-                  // 仅当包列表增减时才重算 layout；切换 active（pack.active 变化）
-                  // 不再触发整列卡片的 layout 重测，消除切换风格包时的卡顿。
-                  layoutDependency={bodyPacks.length}
+                  {...(!stackLayout ? { layout: true, layoutDependency: bodyPacks.length } : {})}
                   initial={{ opacity: 0, scale: 0.85 }}
                   animate={{ opacity: 1, scale: 1 }}
                   exit={{ opacity: 0, scale: 0.85 }}
                   transition={{
-                    layout: { type: 'spring', damping: 25, stiffness: 220 },
+                    ...(stackLayout ? {} : { layout: { type: 'spring', damping: 25, stiffness: 220 } }),
                     opacity: { duration: 0.2 },
                     scale: { duration: 0.2 }
                   }}
@@ -823,11 +840,11 @@ export function Style() {
             })}
             <motion.button
               key="add-new-pack-btn"
-              layout
+              {...(!stackLayout ? { layout: true } : {})}
               initial={{ opacity: 0, scale: 0.85 }}
               animate={{ opacity: 1, scale: 1 }}
               transition={{
-                layout: { type: 'spring', damping: 25, stiffness: 220 },
+                ...(stackLayout ? {} : { layout: { type: 'spring', damping: 25, stiffness: 220 } }),
                 opacity: { duration: 0.2 },
                 scale: { duration: 0.2 }
               }}
@@ -876,6 +893,7 @@ export function Style() {
         <>
           <motion.div
             aria-hidden="true"
+            className="ol-modal-backdrop"
             onClick={closeEditor}
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -885,9 +903,11 @@ export function Style() {
               position: 'fixed',
               inset: 0,
               background: 'var(--ol-overlay-bg)',
-              backdropFilter: 'blur(8px) saturate(140%)',
-              WebkitBackdropFilter: 'blur(8px) saturate(140%)',
-              zIndex: 40,
+              ...(mobile ? {} : {
+                backdropFilter: 'blur(8px) saturate(140%)',
+                WebkitBackdropFilter: 'blur(8px) saturate(140%)',
+              }),
+              zIndex: mobile ? 70 : 40,
             }}
           />
           <motion.div
@@ -898,7 +918,12 @@ export function Style() {
             animate={{ x: 0, opacity: 1 }}
             exit={{ x: '100%', opacity: 0 }}
             transition={{ type: 'spring', damping: 26, stiffness: 280 }}
-            style={{
+            style={mobile ? {
+              position: 'fixed',
+              inset: 0,
+              width: '100%',
+              zIndex: 71,
+            } : {
               position: 'fixed',
               top: 16,
               right: 16,
@@ -914,7 +939,8 @@ export function Style() {
                 display: 'grid',
                 gridTemplateRows: 'auto minmax(0, 1fr)',
                 overflow: 'hidden',
-                boxShadow: 'var(--ol-shadow-xl)',
+                boxShadow: mobile ? 'none' : 'var(--ol-shadow-xl)',
+                borderRadius: mobile ? 0 : undefined,
               }}
             >
               <div style={{ padding: 18, borderBottom: '0.5px solid var(--ol-line)' }}>
@@ -997,7 +1023,7 @@ export function Style() {
                     </div>
                   </div>
 
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: stackLayout ? '1fr' : 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
                     <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                       <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink)' }}>{t('style.pack.fieldName')}</span>
                       <input
@@ -1043,7 +1069,7 @@ export function Style() {
                     />
                   </label>
 
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: stackLayout ? '1fr' : 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
                     <label style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                       <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink)' }}>{t('style.pack.fieldModel')}</span>
                       <input
@@ -1148,7 +1174,7 @@ export function Style() {
                       <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--ol-ink)' }}>{t('style.pack.metaTitle')}</div>
                       <Pill tone="default" size="sm">{draft.id}</Pill>
                     </div>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 10 }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: stackLayout ? '1fr' : 'repeat(auto-fit, minmax(160px, 1fr))', gap: 10 }}>
                       <MetaItem label={t('style.pack.metaSource')} value={draft.kind === 'builtin' ? t('style.pack.builtin') : t('style.pack.imported')} />
                       <MetaItem label={t('style.pack.metaBaseMode')} value={t(`style.modes.${draft.baseMode}.name`)} />
                       <MetaItem label={t('style.pack.metaUpdatedAt')} value={draft.updatedAt || '—'} />
@@ -1207,7 +1233,7 @@ export function Style() {
                           </button>
                         </div>
 
-                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 12 }}>
+                        <div style={{ display: 'grid', gridTemplateColumns: stackLayout ? '1fr' : 'repeat(auto-fit, minmax(240px, 1fr))', gap: 12 }}>
                           <div
                             style={{
                               borderRadius: 14,

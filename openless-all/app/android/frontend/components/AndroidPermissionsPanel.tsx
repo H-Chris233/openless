@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { Icon } from '../../../src/components/Icon';
@@ -6,6 +6,7 @@ import { getSettings, setSettings } from '../../../src/lib/ipc/settings';
 import type { UserPreferences } from '../../../src/lib/types';
 import { Btn, Pill } from '../../../src/pages/_atoms';
 import { SettingRow } from '../../../src/pages/settings/shared';
+import { useLayoutStack, useConservativeLayout } from '../../../src/lib/useMobileLayout';
 import {
   getAndroidAccessibilityStatus,
   getAndroidOverlayStatus,
@@ -73,6 +74,9 @@ interface AndroidPermissionsPanelProps {
 
 export function AndroidPermissionsPanel({ mode = 'all' }: AndroidPermissionsPanelProps) {
   const { t } = useTranslation();
+  const baseLayoutStack = useLayoutStack();
+  const conservative = useConservativeLayout();
+  const layoutStack = baseLayoutStack || conservative;
   const [androidOverlay, setAndroidOverlay] = useState<AndroidOverlayStatus | null>(null);
   const [androidAccessibility, setAndroidAccessibility] = useState<AndroidAccessibilityStatus | null>(null);
   const [androidShizuku, setAndroidShizuku] = useState<AndroidShizukuStatus | null>(null);
@@ -261,13 +265,31 @@ export function AndroidPermissionsPanel({ mode = 'all' }: AndroidPermissionsPane
   const showAccessibility = mode === 'all' || mode === 'accessibility';
   const showOverlayConfig = mode === 'all' || mode === 'overlayConfig';
 
+  const rowJustify = layoutStack ? 'flex-start' : 'flex-end';
+  const colAlign = layoutStack ? 'stretch' : 'flex-end';
+  const hintAlign = layoutStack ? 'left' : 'right';
+  const hintMaxWidth = layoutStack ? undefined : 300;
+  const hintMaxWidthSm = layoutStack ? undefined : 220;
+  const selectStyle = layoutStack
+    ? { width: '100%', maxWidth: '100%' as const }
+    : { minWidth: 180, maxWidth: '100%' as const };
+  const actionRowStyle: CSSProperties = {
+    display: 'flex',
+    flexDirection: conservative ? 'column' : 'row',
+    gap: 8,
+    alignItems: conservative ? 'flex-start' : layoutStack ? 'flex-start' : 'center',
+    justifyContent: rowJustify,
+    width: '100%', flexWrap: conservative ? 'nowrap' : 'wrap', minWidth: 0,
+  };
+
+
   return (
     <>
       {showOverlayPermission && (
       <SettingRow label={t('settings.permissions.androidOverlayLabel')}>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'flex-end', width: '100%', flexWrap: 'wrap', minWidth: 0 }}>
+        <div className="ol-flex-row" style={actionRowStyle}>
           {androidOverlay?.message && (
-            <span style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', maxWidth: 220, textAlign: 'right' }}>
+            <span style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', maxWidth: hintMaxWidthSm, textAlign: hintAlign }}>
               {androidOverlay.message}
             </span>
           )}
@@ -282,10 +304,10 @@ export function AndroidPermissionsPanel({ mode = 'all' }: AndroidPermissionsPane
       )}
       {showAccessibility && (
       <SettingRow label={t('settings.permissions.androidAccessibilityLabel')}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-end', width: '100%', minWidth: 0 }}>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'flex-end', width: '100%', flexWrap: 'wrap', minWidth: 0 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: colAlign, width: '100%', minWidth: 0 }}>
+          <div className="ol-flex-row" style={actionRowStyle}>
             {resolveAccessibilityMessage(t, androidAccessibility?.messageKey) && (
-              <span style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', maxWidth: 220, textAlign: 'right' }}>
+              <span style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', maxWidth: hintMaxWidthSm, textAlign: hintAlign }}>
                 {resolveAccessibilityMessage(t, androidAccessibility?.messageKey)}
               </span>
             )}
@@ -296,7 +318,7 @@ export function AndroidPermissionsPanel({ mode = 'all' }: AndroidPermissionsPane
               </Btn>
             )}
           </div>
-          <span style={{ fontSize: 11, color: 'var(--ol-ink-4)', maxWidth: 300, textAlign: 'right' }}>
+          <span style={{ fontSize: 11, color: 'var(--ol-ink-4)', maxWidth: hintMaxWidth, textAlign: hintAlign }}>
             {t('settings.permissions.androidAccessibilityImpact')}
           </span>
         </div>
@@ -304,10 +326,10 @@ export function AndroidPermissionsPanel({ mode = 'all' }: AndroidPermissionsPane
       )}
       {showAccessibility && (
       <SettingRow label={t('settings.permissions.androidShizukuLabel')}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-end', width: '100%', minWidth: 0 }}>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'flex-end', width: '100%', flexWrap: 'wrap', minWidth: 0 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: colAlign, width: '100%', minWidth: 0 }}>
+          <div className="ol-flex-row" style={actionRowStyle}>
             {resolveShizukuMessage(t, shizukuDisplayMessageKey) && (
-              <span style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', maxWidth: 220, textAlign: 'right' }}>
+              <span style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', maxWidth: hintMaxWidthSm, textAlign: hintAlign }}>
                 {resolveShizukuMessage(t, shizukuDisplayMessageKey)}
               </span>
             )}
@@ -366,7 +388,7 @@ export function AndroidPermissionsPanel({ mode = 'all' }: AndroidPermissionsPane
             )}
           </div>
           {androidShizuku?.state === 'authorized' && (
-            <span style={{ fontSize: 11, color: 'var(--ol-ink-4)', maxWidth: 300, textAlign: 'right' }}>
+            <span style={{ fontSize: 11, color: 'var(--ol-ink-4)', maxWidth: hintMaxWidth, textAlign: hintAlign }}>
               {androidShizuku.accessibility.operational
                 ? t('settings.permissions.androidShizukuAccessibilityOperational')
                 : t('settings.permissions.androidShizukuAccessibilityRegistered', {
@@ -379,7 +401,7 @@ export function AndroidPermissionsPanel({ mode = 'all' }: AndroidPermissionsPane
                   })}
             </span>
           )}
-          <span style={{ fontSize: 11, color: 'var(--ol-ink-4)', maxWidth: 300, textAlign: 'right' }}>
+          <span style={{ fontSize: 11, color: 'var(--ol-ink-4)', maxWidth: hintMaxWidth, textAlign: hintAlign }}>
             {t('settings.permissions.androidShizukuHint')}
           </span>
         </div>
@@ -388,87 +410,87 @@ export function AndroidPermissionsPanel({ mode = 'all' }: AndroidPermissionsPane
       {showOverlayConfig && (
       <>
       <SettingRow label={t('settings.permissions.androidInsertStrategyLabel')}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-end', width: '100%' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: colAlign, width: '100%' }}>
           <select
             value={androidPrefs?.androidInsertStrategy ?? 'accessibility'}
             onChange={(event) => { void updateAndroidPref('androidInsertStrategy', event.target.value as AndroidInsertStrategy); }}
-            style={{ minWidth: 180, maxWidth: '100%' }}
+            style={selectStyle}
           >
             <option value="accessibility">{t('settings.permissions.androidInsertStrategy.accessibility')}</option>
             <option value="clipboard">{t('settings.permissions.androidInsertStrategy.clipboard')}</option>
           </select>
-          <span style={{ fontSize: 11, color: 'var(--ol-ink-4)', textAlign: 'right' }}>
+          <span style={{ fontSize: 11, color: 'var(--ol-ink-4)', textAlign: hintAlign }}>
             {t(`settings.permissions.androidInsertStrategyHint.${androidPrefs?.androidInsertStrategy ?? 'accessibility'}`)}
           </span>
         </div>
       </SettingRow>
       <SettingRow label={t('settings.permissions.androidOverlayTriggerLabel')}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-end', width: '100%' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: colAlign, width: '100%' }}>
           <select
             value={androidPrefs?.androidOverlayTrigger ?? 'background'}
             onChange={(event) => { void updateAndroidPref('androidOverlayTrigger', event.target.value as AndroidOverlayTrigger); }}
-            style={{ minWidth: 180, maxWidth: '100%' }}
+            style={selectStyle}
           >
             <option value="background">{t('settings.permissions.androidOverlayTrigger.background')}</option>
             <option value="keyboard" disabled>{t('settings.permissions.androidOverlayTrigger.keyboard')}</option>
             <option value="always">{t('settings.permissions.androidOverlayTrigger.always')}</option>
           </select>
-          <span style={{ fontSize: 11, color: 'var(--ol-ink-4)', textAlign: 'right' }}>
+          <span style={{ fontSize: 11, color: 'var(--ol-ink-4)', textAlign: hintAlign }}>
             {t(`settings.permissions.androidOverlayTriggerHint.${androidPrefs?.androidOverlayTrigger ?? 'background'}`)}
           </span>
-          <span style={{ fontSize: 11, color: 'var(--ol-ink-4)', textAlign: 'right' }}>
+          <span style={{ fontSize: 11, color: 'var(--ol-ink-4)', textAlign: hintAlign }}>
             {t('settings.permissions.androidOverlayTriggerDisabled.keyboard')}
           </span>
         </div>
       </SettingRow>
       <SettingRow label={t('settings.permissions.androidOverlayActivationModeLabel')}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-end', width: '100%' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: colAlign, width: '100%' }}>
           <select
             value={androidPrefs?.androidOverlayActivationMode ?? 'tap'}
             onChange={(event) => { void updateAndroidPref('androidOverlayActivationMode', event.target.value as AndroidOverlayActivationMode); }}
-            style={{ minWidth: 180, maxWidth: '100%' }}
+            style={selectStyle}
           >
             <option value="tap">{t('settings.permissions.androidOverlayActivationMode.tap')}</option>
             <option value="long_press">{t('settings.permissions.androidOverlayActivationMode.long_press')}</option>
           </select>
-          <span style={{ fontSize: 11, color: 'var(--ol-ink-4)', textAlign: 'right' }}>
+          <span style={{ fontSize: 11, color: 'var(--ol-ink-4)', textAlign: hintAlign }}>
             {t(`settings.permissions.androidOverlayActivationModeHint.${androidPrefs?.androidOverlayActivationMode ?? 'tap'}`)}
           </span>
         </div>
       </SettingRow>
       <SettingRow label={t('settings.permissions.androidOverlayLeftSwipeActionLabel')}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-end', width: '100%' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: colAlign, width: '100%' }}>
           <select
             value={androidPrefs?.androidOverlayLeftSwipeAction ?? 'translation'}
             onChange={(event) => { void updateAndroidPref('androidOverlayLeftSwipeAction', event.target.value as AndroidOverlayLeftSwipeAction); }}
-            style={{ minWidth: 180, maxWidth: '100%' }}
+            style={selectStyle}
           >
             <option value="translation">{t('settings.permissions.androidOverlayLeftSwipeAction.translation')}</option>
             <option value="style_pack">{t('settings.permissions.androidOverlayLeftSwipeAction.style_pack')}</option>
           </select>
-          <span style={{ fontSize: 11, color: 'var(--ol-ink-4)', textAlign: 'right' }}>
+          <span style={{ fontSize: 11, color: 'var(--ol-ink-4)', textAlign: hintAlign }}>
             {t(`settings.permissions.androidOverlayLeftSwipeActionHint.${androidPrefs?.androidOverlayLeftSwipeAction ?? 'translation'}`)}
           </span>
         </div>
       </SettingRow>
       <SettingRow label={t('settings.permissions.androidOverlayCancelSwipeDirectionLabel')}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-end', width: '100%' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: colAlign, width: '100%' }}>
           <select
             value={androidPrefs?.androidOverlayCancelSwipeDirection ?? 'up'}
             onChange={(event) => { void updateAndroidPref('androidOverlayCancelSwipeDirection', event.target.value as AndroidOverlayCancelSwipeDirection); }}
-            style={{ minWidth: 180, maxWidth: '100%' }}
+            style={selectStyle}
           >
             <option value="up">{t('settings.permissions.androidOverlayCancelSwipeDirection.up')}</option>
             <option value="down">{t('settings.permissions.androidOverlayCancelSwipeDirection.down')}</option>
           </select>
-          <span style={{ fontSize: 11, color: 'var(--ol-ink-4)', textAlign: 'right' }}>
+          <span style={{ fontSize: 11, color: 'var(--ol-ink-4)', textAlign: hintAlign }}>
             {t(`settings.permissions.androidOverlayCancelSwipeDirectionHint.${androidPrefs?.androidOverlayCancelSwipeDirection ?? 'up'}`)}
           </span>
         </div>
       </SettingRow>
       <SettingRow label={t('settings.permissions.androidOverlaySizeLabel')}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-end', width: '100%' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 180, maxWidth: '100%' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: colAlign, width: '100%' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%', maxWidth: '100%' }}>
             <input
               type="range"
               min={48}
@@ -487,13 +509,13 @@ export function AndroidPermissionsPanel({ mode = 'all' }: AndroidPermissionsPane
               onBlur={(event) => {
                 flushAndroidOverlaySizeSave(Number(event.currentTarget.value));
               }}
-              style={{ width: 132 }}
+              style={{ flex: 1, minWidth: 0 }}
             />
-            <span style={{ fontSize: 12, color: 'var(--ol-ink-3)', minWidth: 42, textAlign: 'right' }}>
+            <span style={{ fontSize: 12, color: 'var(--ol-ink-3)', minWidth: 42, textAlign: hintAlign }}>
               {sizeDraft ?? androidPrefs?.androidOverlaySizeDp ?? 72} dp
             </span>
           </div>
-          <span style={{ fontSize: 11, color: 'var(--ol-ink-4)', textAlign: 'right' }}>
+          <span style={{ fontSize: 11, color: 'var(--ol-ink-4)', textAlign: hintAlign }}>
             {t('settings.permissions.androidOverlaySizeHint')}
           </span>
         </div>

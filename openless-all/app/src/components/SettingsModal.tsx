@@ -14,7 +14,7 @@ import { Icon } from './Icon';
 import { SavedToast } from './SavedToast';
 import { useSavedToastListener } from '../lib/savedEvent';
 import { openExternal } from '../lib/ipc';
-import { useMobileLayout } from '../lib/useMobileLayout';
+import { useMobileLayout, useConservativeLayout } from '../lib/useMobileLayout';
 import type { OS } from './WindowChrome';
 import { AboutTab, GeneralTab, ServicesTab, PrivacyTab, AdvancedTab } from '../pages/settings/tabs';
 import { chipSelectedStyle } from '../pages/settings/shared';
@@ -59,6 +59,7 @@ const LINK_ITEMS: ModalNavItem[] = [
 export function SettingsModal({ os: _os, onClose, initialSettingsSection }: SettingsModalProps) {
   const { t } = useTranslation();
   const mobile = useMobileLayout();
+  const conservative = useConservativeLayout();
   const [section, setSection] = useState<SettingsSectionId>(initialSettingsSection ?? 'general');
   const savedToast = useSavedToastListener();
 
@@ -88,7 +89,7 @@ export function SettingsModal({ os: _os, onClose, initialSettingsSection }: Sett
         alignItems: mobile ? 'stretch' : 'center',
         justifyContent: mobile ? 'stretch' : 'center',
         padding: mobile ? 0 : 28,
-        zIndex: 50,
+        zIndex: mobile ? 70 : 50,
         animation: mobile ? undefined : 'ol-modal-backdrop-in 0.18s var(--ol-motion-soft)',
       }}>
 
@@ -246,7 +247,10 @@ export function SettingsModal({ os: _os, onClose, initialSettingsSection }: Sett
           )}
 
           <div
-            className="ol-thinscroll ol-scroll-fade"
+            className={[
+              'ol-thinscroll ol-scroll-fade',
+              conservative ? 'ol-conservative-scope' : undefined,
+            ].filter(Boolean).join(' ')}
             style={{
               flex: 1,
               minHeight: 0,

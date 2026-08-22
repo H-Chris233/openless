@@ -114,11 +114,7 @@ class OpenLessAccessibilityService : AccessibilityService() {
     }
 
     private fun canDrawOverlays(): Boolean {
-        return if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
-            Settings.canDrawOverlays(this)
-        } else {
-            true
-        }
+        return OpenLessPermissionBridge.canDrawOverlaysSafely(this)
     }
 
     private fun performPasteToFocusedFieldInternal(pasteText: String? = null): AccessibilityPasteResult {

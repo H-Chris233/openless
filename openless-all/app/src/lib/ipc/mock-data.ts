@@ -110,6 +110,8 @@ export let mockSettings: UserPreferences = {
     streamingInsertSaveClipboard: true,
     cursorContextEnabled: false,
     showOverviewActivityHeatmap: true,
+    stackedRowLayout: false,
+    conservativeLayout: false,
     autoUpdateCheck: true,
     historyMaxEntries: null,
     recordAudioForDebug: false,

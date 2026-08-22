@@ -3,7 +3,7 @@
 
 import type { CSSProperties, ReactNode } from "react"
 import { Tooltip } from "../../components/Tooltip"
-import { useMobileLayout } from "../../lib/useMobileLayout"
+import { useMobileLayout, useReadableLayout, useConservativeLayout } from "../../lib/useMobileLayout"
 
 // 带说明的文字统一加虚线下划线 + help 光标，暗示「悬停可看解释」。
 const hintableTextStyle: CSSProperties = {
@@ -68,6 +68,9 @@ export function SettingRow({
     controlWidth,
 }: SettingRowProps) {
     const mobile = useMobileLayout()
+    const readable = useReadableLayout()
+    const conservative = useConservativeLayout()
+    const stackLayout = mobile || readable || conservative
     const labelStyle: CSSProperties = {
         fontSize: 13,
         fontWeight: 500,
@@ -78,9 +81,9 @@ export function SettingRow({
         <div
             style={{
                 display: "grid",
-                gridTemplateColumns: mobile ? "minmax(0, 1fr)" : "minmax(0, 180px) minmax(0, 1fr)",
-                gap: mobile ? 8 : 16,
-                padding: mobile ? "12px 0" : "14px 0",
+                gridTemplateColumns: stackLayout ? "minmax(0, 1fr)" : "minmax(0, 180px) minmax(0, 1fr)",
+                gap: stackLayout ? 8 : 16,
+                padding: stackLayout ? "12px 0" : "14px 0",
                 borderTop: "0.5px solid var(--ol-line-soft)",
                 alignItems: "center",
             }}
@@ -96,14 +99,16 @@ export function SettingRow({
                 )}
             </div>
             <div
+                className="ol-flex-row"
                 style={{
                     display: "flex",
                     alignItems: "center",
+                    justifyContent: "flex-start",
                     minWidth: 0,
-                    width: mobile ? "100%" : controlWidth ?? "auto",
+                    width: stackLayout ? "100%" : controlWidth ?? "auto",
                     maxWidth: "100%",
-                    flexWrap: mobile ? "wrap" : "nowrap",
-                    gap: mobile ? 6 : undefined,
+                    flexWrap: stackLayout ? "wrap" : "nowrap",
+                    gap: stackLayout ? 6 : undefined,
                 }}
             >
                 {children}
@@ -124,7 +129,10 @@ export function Toggle({
             onClick={() => onToggle?.(!on)}
             style={{
                 position: "relative",
+                flex: "0 0 36px",
                 width: 36,
+                minWidth: 36,
+                maxWidth: 36,
                 height: 20,
                 borderRadius: 999,
                 border: 0,

@@ -1299,10 +1299,17 @@ export const ja: typeof zhCN = {
       ko: '한국어 (Beta)',
       restartHint: '一部のネイティブメニュー（トレイ等）は再起動後に反映されます。',
     },
+    layout: {
+      title: 'レイアウト',
+    },
     theme: {
       title: '外観',
       label: 'テーマ',
       activityHeatmapLabel: '概要ページに年間アクティビティを表示',
+      stackedRowLayoutLabel: '読みやすいレイアウト（はみ出し防止）',
+      stackedRowLayoutDesc: '小さい画面や大きな文字サイズでは、1行に収まらないボタンや設定が次の行に折り返され、横方向のはみ出しや文字の潰れを防ぎます。',
+      conservativeLayoutLabel: '保守レイアウト',
+      conservativeLayoutDesc: 'ホーム、上部バー、下部バー以外の設定・機能ページを単列・全幅にし、横方向のはみ出しを最大限防ぎます。',
       system: 'システムに従う',
       light: 'ライト',
       dark: 'ダーク',

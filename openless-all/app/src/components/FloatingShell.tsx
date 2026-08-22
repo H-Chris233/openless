@@ -37,7 +37,10 @@ import { type SettingsSectionId } from './SettingsModal';
 import { MobileMoreSheet } from './MobileMoreSheet';
 import { MobileStyleSheet } from './MobileStyleSheet';
 import { subItemLabelKey } from '../lib/navLabels';
-import { useMobileLayout } from '../lib/useMobileLayout';
+import { applyStackedLayoutFromPrefs } from '../lib/stackedLayout';
+import { applyConservativeLayout } from '../lib/conservativeLayout';
+import { useMobileLayout, useConservativeLayout } from '../lib/useMobileLayout';
+import { useHotkeySettings } from '../state/HotkeySettingsContext';
 import { useAppState, type AppTab } from '../state/useAppState';
 
 const MORE_TAB_IDS: AppTab[] = ['vocab', 'translation', 'selectionAsk'];
@@ -92,6 +95,8 @@ export function FloatingShell({ os: osProp, initialTab = 'overview', initialSett
 function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initialTab: AppTab; initialSettings: boolean }) {
   const { t } = useTranslation();
   const mobile = useMobileLayout();
+  const conservative = useConservativeLayout();
+  const { prefs } = useHotkeySettings();
   const { currentTab, setCurrentTab, settingsOpen, setSettingsOpen } = useAppState(initialTab, initialSettings);
   const [settingsInitialSection, setSettingsInitialSection] = useState<SettingsSectionId | undefined>();
   const [providerPromptOpen, setProviderPromptOpen] = useState(false);
@@ -117,6 +122,11 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
   useEffect(() => {
     applyFontScale(readFontScale());
   }, []);
+
+  useEffect(() => {
+    applyStackedLayoutFromPrefs(prefs?.stackedRowLayout);
+    applyConservativeLayout(prefs?.conservativeLayout === true);
+  }, [prefs?.stackedRowLayout, prefs?.conservativeLayout]);
 
   const Page = PAGE_CMP[displayTab as Exclude<AppTab, 'localAsr'>] ?? Overview;
 
@@ -453,7 +463,12 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
               {displayTab === 'overview' ? (
                 <Overview onOpenHistory={() => setCurrentTab('history')} />
               ) : (
-                <Page />
+                <div
+                  className={conservative ? 'ol-conservative-scope' : undefined}
+                  style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}
+                >
+                  <Page />
+                </div>
               )}
             </div>
           </main>
@@ -462,6 +477,7 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
 
       {mobile && (
         <>
+          {!settingsOpen && !styleOpen && !moreOpen && (
           <MobileBottomNav
             currentTab={currentTab}
             moreOpen={moreOpen}
@@ -483,6 +499,7 @@ function FloatingShellBody({ os, initialTab, initialSettings }: { os: OS; initia
               setMoreOpen(true);
             }}
           />
+          )}
           <MobileStyleSheet
             open={styleOpen}
             currentTab={currentTab}
