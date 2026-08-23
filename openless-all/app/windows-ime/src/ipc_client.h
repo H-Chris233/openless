@@ -14,12 +14,14 @@ class OpenLessPipeServer {
   OpenLessPipeServer& operator=(const OpenLessPipeServer&) = delete;
   ~OpenLessPipeServer();
 
-  void Start(OpenLessTextService* service);
+  HRESULT Start(OpenLessTextService* service);
   void Stop();
 
  private:
-  void Run();
+  void Run() noexcept;
+  void RunLoop();
   bool WaitForClient(HANDLE pipe);
+  void WaitForClientDisconnect(HANDLE pipe);
   bool ReadJsonLine(HANDLE pipe, std::string* line);
   void HandleSubmitLine(HANDLE pipe, const std::string& line);
   bool WriteResult(HANDLE pipe,
@@ -35,6 +37,7 @@ class OpenLessPipeServer {
                      void* buffer,
                      DWORD length,
                      DWORD* bytes);
+  void ResetServerState();
 
   std::atomic<bool> stop_requested_{false};
   std::thread thread_;

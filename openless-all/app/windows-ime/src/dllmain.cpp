@@ -25,11 +25,15 @@ BOOL APIENTRY DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
   return TRUE;
 }
 
-STDAPI DllCanUnloadNow() {
+__control_entrypoint(DllExport)
+STDAPI DllCanUnloadNow(void) {
   return (g_lock_count == 0 && g_object_count == 0) ? S_OK : S_FALSE;
 }
 
-STDAPI DllGetClassObject(REFCLSID clsid, REFIID iid, void** object) {
+_Check_return_
+STDAPI DllGetClassObject(_In_ REFCLSID clsid,
+                         _In_ REFIID iid,
+                         _Outptr_ LPVOID FAR* object) {
   if (object == nullptr) {
     return E_POINTER;
   }

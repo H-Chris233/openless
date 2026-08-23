@@ -1,7 +1,10 @@
 #include "ipc_client.h"
 
 #include <cstdint>
+#include <limits>
+#include <new>
 #include <string>
+#include <system_error>
 
 #include "text_service.h"
 
@@ -204,7 +207,11 @@ bool ParseJsonInteger(const std::string& json, size_t* pos, int* value) {
 
   int parsed = 0;
   while (*pos < json.size() && json[*pos] >= '0' && json[*pos] <= '9') {
-    parsed = parsed * 10 + (json[*pos] - '0');
+    const int digit = json[*pos] - '0';
+    if (parsed > ((std::numeric_limits<int>::max)() - digit) / 10) {
+      return false;
+    }
+    parsed = parsed * 10 + digit;
     ++(*pos);
   }
 
@@ -342,9 +349,12 @@ OpenLessPipeServer::~OpenLessPipeServer() {
   Stop();
 }
 
-void OpenLessPipeServer::Start(OpenLessTextService* service) {
-  if (service == nullptr || thread_.joinable()) {
-    return;
+HRESULT OpenLessPipeServer::Start(OpenLessTextService* service) {
+  if (service == nullptr) {
+    return E_INVALIDARG;
+  }
+  if (thread_.joinable()) {
+    return HRESULT_FROM_WIN32(ERROR_ALREADY_INITIALIZED);
   }
 
   stop_requested_.store(false);
@@ -355,21 +365,29 @@ void OpenLessPipeServer::Start(OpenLessTextService* service) {
   stop_event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
   io_event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
   if (stop_event_ == nullptr || io_event_ == nullptr) {
-    if (stop_event_ != nullptr) {
-      CloseHandle(stop_event_);
-      stop_event_ = nullptr;
-    }
-    if (io_event_ != nullptr) {
-      CloseHandle(io_event_);
-      io_event_ = nullptr;
-    }
-    return;
+    const DWORD error = GetLastError();
+    ResetServerState();
+    return HRESULT_FROM_WIN32(error != ERROR_SUCCESS ? error
+                                                     : ERROR_NOT_ENOUGH_MEMORY);
   }
 
-  pipe_name_ = PipeNameForCurrentThread();
-  service_ = service;
-  service_->AddRef();
-  thread_ = std::thread(&OpenLessPipeServer::Run, this);
+  try {
+    pipe_name_ = PipeNameForCurrentThread();
+    service_ = service;
+    service_->AddRef();
+    thread_ = std::thread(&OpenLessPipeServer::Run, this);
+  } catch (const std::bad_alloc&) {
+    ResetServerState();
+    return E_OUTOFMEMORY;
+  } catch (const std::system_error&) {
+    ResetServerState();
+    return E_FAIL;
+  } catch (...) {
+    ResetServerState();
+    return E_UNEXPECTED;
+  }
+
+  return S_OK;
 }
 
 void OpenLessPipeServer::Stop() {
@@ -378,14 +396,16 @@ void OpenLessPipeServer::Stop() {
     SetEvent(stop_event_);
   }
 
-  // The worker parks in WaitForMultipleObjects on {io_event_, stop_event_}, so
-  // signaling stop_event_ wakes it deterministically. join() then returns at
-  // once instead of blocking the host UI thread on an uncancelable
-  // ConnectNamedPipe wait — the root cause of the explorer.exe AppHang.
+  // Every worker wait includes stop_event_, so joining cannot leave the host UI
+  // thread blocked on a pipe client or a synchronous pipe operation.
   if (thread_.joinable()) {
     thread_.join();
   }
 
+  ResetServerState();
+}
+
+void OpenLessPipeServer::ResetServerState() {
   if (io_event_ != nullptr) {
     CloseHandle(io_event_);
     io_event_ = nullptr;
@@ -399,9 +419,18 @@ void OpenLessPipeServer::Stop() {
     service_->Release();
     service_ = nullptr;
   }
+  pipe_name_.clear();
 }
 
-void OpenLessPipeServer::Run() {
+void OpenLessPipeServer::Run() noexcept {
+  try {
+    RunLoop();
+  } catch (...) {
+    // Never let an allocation or STL exception terminate the host process.
+  }
+}
+
+void OpenLessPipeServer::RunLoop() {
   const std::wstring pipe_name = pipe_name_;
   while (!stop_requested_.load()) {
     HANDLE pipe = CreateNamedPipeW(
@@ -417,9 +446,9 @@ void OpenLessPipeServer::Run() {
       if (ReadJsonLine(pipe, &line)) {
         HandleSubmitLine(pipe, line);
       }
+      WaitForClientDisconnect(pipe);
     }
 
-    FlushFileBuffers(pipe);
     DisconnectNamedPipe(pipe);
     CloseHandle(pipe);
   }
@@ -457,6 +486,18 @@ bool OpenLessPipeServer::WaitForClient(HANDLE pipe) {
   DWORD transferred = 0;
   GetOverlappedResult(pipe, &overlapped, &transferred, TRUE);
   return false;
+}
+
+void OpenLessPipeServer::WaitForClientDisconnect(HANDLE pipe) {
+  char buffer[256] = {};
+  while (!stop_requested_.load()) {
+    DWORD bytes_read = 0;
+    if (!RunOverlapped(pipe, /*is_write=*/false, buffer, sizeof(buffer),
+                       &bytes_read) ||
+        bytes_read == 0) {
+      return;
+    }
+  }
 }
 
 bool OpenLessPipeServer::RunOverlapped(HANDLE pipe,
@@ -539,7 +580,8 @@ void OpenLessPipeServer::HandleSubmitLine(HANDLE pipe, const std::string& line) 
   }
 
   const HRESULT hr =
-      service_->SubmitTextFromPipe(message.session_id, message.text);
+      service_->SubmitTextFromPipe(message.session_id, message.text,
+                                   stop_event_);
   if (SUCCEEDED(hr)) {
     WriteResult(pipe, message.session_id, L"committed", nullptr);
   } else {

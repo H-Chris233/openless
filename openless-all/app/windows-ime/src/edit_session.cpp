@@ -2,6 +2,8 @@
 
 #include <utility>
 
+extern LONG g_object_count;
+
 OpenLessAsyncEditState::OpenLessAsyncEditState()
     : event(CreateEventW(nullptr, TRUE, FALSE, nullptr)) {
   if (event == nullptr) {
@@ -23,10 +25,13 @@ bool OpenLessAsyncEditState::IsValid() const {
 OpenLessEditSession::OpenLessEditSession(
     ITfContext* context,
     std::wstring text,
-    std::shared_ptr<OpenLessAsyncEditState> async_state)
+    std::shared_ptr<OpenLessAsyncEditState> async_state,
+    std::shared_ptr<std::atomic<bool>> cancellation)
     : context_(context),
       text_(std::move(text)),
-      async_state_(std::move(async_state)) {
+      async_state_(std::move(async_state)),
+      cancellation_(std::move(cancellation)) {
+  InterlockedIncrement(&g_object_count);
   if (context_ != nullptr) {
     context_->AddRef();
   }
@@ -37,6 +42,7 @@ OpenLessEditSession::~OpenLessEditSession() {
     context_->Release();
     context_ = nullptr;
   }
+  InterlockedDecrement(&g_object_count);
 }
 
 STDMETHODIMP OpenLessEditSession::QueryInterface(REFIID iid, void** object) {
@@ -67,7 +73,9 @@ STDMETHODIMP_(ULONG) OpenLessEditSession::Release() {
 }
 
 STDMETHODIMP OpenLessEditSession::DoEditSession(TfEditCookie edit_cookie) {
-  const HRESULT hr = InsertText(edit_cookie);
+  const HRESULT hr = cancellation_ && cancellation_->load()
+                         ? HRESULT_FROM_WIN32(ERROR_CANCELLED)
+                         : InsertText(edit_cookie);
   if (async_state_) {
     async_state_->result = hr;
     if (async_state_->event != nullptr) {
@@ -80,6 +88,9 @@ STDMETHODIMP OpenLessEditSession::DoEditSession(TfEditCookie edit_cookie) {
 HRESULT OpenLessEditSession::InsertText(TfEditCookie edit_cookie) {
   if (context_ == nullptr) {
     return E_UNEXPECTED;
+  }
+  if (cancellation_ && cancellation_->load()) {
+    return HRESULT_FROM_WIN32(ERROR_CANCELLED);
   }
 
   ITfInsertAtSelection* insert_at_selection = nullptr;
@@ -97,6 +108,10 @@ HRESULT OpenLessEditSession::InsertText(TfEditCookie edit_cookie) {
   if (query_range != nullptr) {
     query_range->Release();
     query_range = nullptr;
+  }
+
+  if (SUCCEEDED(hr) && cancellation_ && cancellation_->load()) {
+    hr = HRESULT_FROM_WIN32(ERROR_CANCELLED);
   }
 
   if (SUCCEEDED(hr)) {

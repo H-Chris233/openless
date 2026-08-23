@@ -10,7 +10,7 @@ const IME_SUBMIT_TIMEOUT_MARGIN_MS: u64 = 1000;
 const IME_NATIVE_ASYNC_COMMIT_TIMEOUT_MS: u64 =
     IME_OWNER_THREAD_MESSAGE_TIMEOUT_MS + IME_ASYNC_EDIT_SESSION_TIMEOUT_MS;
 
-// Must exceed the IME DLL owner-thread SendMessageTimeoutW wait plus the
+// Must exceed the IME DLL owner-thread posted-request wait plus the
 // async edit session wait, otherwise Rust can fall back while the DLL later
 // commits and duplicates insertion.
 pub const IME_SUBMIT_TIMEOUT: Duration =
