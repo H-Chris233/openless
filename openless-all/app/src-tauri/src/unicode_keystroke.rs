@@ -133,8 +133,8 @@ mod macos_impl {
     pub(super) fn classify_mac_keystroke(ch: char, mode: MacosNewlineMode) -> MacKeystroke {
         match ch {
             '\n' => match mode {
-                // `Auto` normally resolves once before the typer starts. Callers without front-app
-                // context use the chat-safe fallback.
+                // `Auto` 通常会在逐字上屏任务启动前解析；缺少前台应用上下文的调用方
+                // 使用对聊天框安全的 Shift+Return 兜底。
                 MacosNewlineMode::Auto => MacKeystroke::ShiftReturn,
                 MacosNewlineMode::ShiftReturn => MacKeystroke::ShiftReturn,
                 MacosNewlineMode::LineFeed => MacKeystroke::LineFeed,
