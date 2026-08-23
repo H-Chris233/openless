@@ -133,6 +133,9 @@ mod macos_impl {
     pub(super) fn classify_mac_keystroke(ch: char, mode: MacosNewlineMode) -> MacKeystroke {
         match ch {
             '\n' => match mode {
+                // `Auto` normally resolves once before the typer starts. Callers without front-app
+                // context use the chat-safe fallback.
+                MacosNewlineMode::Auto => MacKeystroke::ShiftReturn,
                 MacosNewlineMode::ShiftReturn => MacKeystroke::ShiftReturn,
                 MacosNewlineMode::LineFeed => MacKeystroke::LineFeed,
                 MacosNewlineMode::Return => MacKeystroke::Return,
@@ -679,16 +682,16 @@ mod linux_impl {
 mod tests {
     use super::TypeError;
 
-    /// 默认模式下换行走 Shift+Return —— macOS 把 U+000A 当 Return，聊天框里等于
-    /// 「发送」，一条带空行的两段话会被从中间劈开发出去。
+    /// 没有前台应用上下文时，未解析的 Auto 安全回退到 Shift+Return，避免聊天框里
+    /// U+000A 被当作 Return 后直接发送。
     #[test]
     #[cfg(target_os = "macos")]
-    fn newline_defaults_to_shift_return() {
+    fn unresolved_auto_mode_falls_back_to_shift_return() {
         use super::macos_impl::{classify_mac_keystroke, MacKeystroke};
         use crate::types::MacosNewlineMode;
 
         let mode = MacosNewlineMode::default();
-        assert_eq!(mode, MacosNewlineMode::ShiftReturn, "默认必须是不发送的那个");
+        assert_eq!(mode, MacosNewlineMode::Auto);
         assert_eq!(
             classify_mac_keystroke('\n', mode),
             MacKeystroke::ShiftReturn
@@ -751,6 +754,7 @@ mod tests {
         use crate::types::MacosNewlineMode;
 
         for mode in [
+            MacosNewlineMode::Auto,
             MacosNewlineMode::ShiftReturn,
             MacosNewlineMode::LineFeed,
             MacosNewlineMode::Return,

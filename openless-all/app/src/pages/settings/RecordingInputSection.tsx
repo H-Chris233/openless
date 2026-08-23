@@ -528,9 +528,10 @@ export function RecordingInputSection() {
             desc={t('settings.recording.macosNewlineModeDesc')}
           >
             <SelectLite
-              value={prefs.macosNewlineMode ?? 'shiftReturn'}
+              value={prefs.macosNewlineMode ?? 'auto'}
               onChange={next => onMacosNewlineModeChange(next as MacosNewlineMode)}
               options={[
+                { value: 'auto', label: t('settings.recording.macosNewlineModeAuto') },
                 { value: 'shiftReturn', label: t('settings.recording.macosNewlineModeShiftReturn') },
                 { value: 'lineFeed', label: t('settings.recording.macosNewlineModeLineFeed') },
                 { value: 'return', label: t('settings.recording.macosNewlineModeReturn') },
