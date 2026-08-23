@@ -170,7 +170,7 @@ pub(super) fn ensure_asr_credentials() -> Result<(), String> {
                         Err("请先在设置中填写火山引擎 ASR App Key 和 Access Key".to_string())
                     }
                     VolcengineAuthMode::ApiKey => {
-                        Err("请先在设置中填写火山方舟语音模型 API Key".to_string())
+                        Err("请先在设置中填写豆包语音新版控制台 API Key".to_string())
                     }
                 }
             }
