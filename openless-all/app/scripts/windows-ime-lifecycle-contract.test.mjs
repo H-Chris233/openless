@@ -21,6 +21,16 @@ assert.match(
   "IME replies should wait for client disconnect through cancelable overlapped I/O",
 );
 assert.match(ipcHeader, /HRESULT Start\(/, "IME activation should report pipe server startup failures");
+assert.match(
+  ipcClient,
+  /WaitForSingleObject\(startup_event_/,
+  "IME activation must wait for the worker's first named-pipe creation result",
+);
+assert.match(
+  ipcClient,
+  /CreateNamedPipeW[\s\S]*ReportStartupResult/,
+  "IME worker must report the first CreateNamedPipeW result to activation",
+);
 assert.match(ipcHeader, /void Run\(\) noexcept/, "IME worker exceptions must not terminate the host process");
 
 assert.doesNotMatch(

@@ -19,7 +19,8 @@ class OpenLessPipeServer {
 
  private:
   void Run() noexcept;
-  void RunLoop();
+  void RunLoop(bool* startup_reported);
+  void ReportStartupResult(HRESULT result) noexcept;
   bool WaitForClient(HANDLE pipe);
   void WaitForClientDisconnect(HANDLE pipe);
   bool ReadJsonLine(HANDLE pipe, std::string* line);
@@ -41,8 +42,10 @@ class OpenLessPipeServer {
 
   std::atomic<bool> stop_requested_{false};
   std::thread thread_;
+  HANDLE startup_event_ = nullptr;
   HANDLE stop_event_ = nullptr;
   HANDLE io_event_ = nullptr;
+  HRESULT startup_result_ = E_PENDING;
   std::wstring pipe_name_;
   OpenLessTextService* service_ = nullptr;
 };

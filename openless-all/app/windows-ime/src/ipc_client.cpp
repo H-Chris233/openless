@@ -13,6 +13,7 @@ namespace {
 constexpr wchar_t kPipeNamePrefix[] = L"\\\\.\\pipe\\OpenLessImeSubmit";
 constexpr DWORD kPipeBufferSize = 4096;
 constexpr size_t kMaxJsonLineBytes = 64 * 1024;
+constexpr DWORD kPipeStartupTimeoutMs = 2000;
 
 struct SubmitMessage {
   std::wstring type;
@@ -359,12 +360,15 @@ HRESULT OpenLessPipeServer::Start(OpenLessTextService* service) {
 
   stop_requested_.store(false);
 
-  // Manual-reset events: stop_event_ wakes every overlapped wait the moment
-  // Stop() runs; io_event_ is the completion event reused by each overlapped
-  // operation on the worker thread.
+  // Manual-reset events: startup_event_ returns the first CreateNamedPipeW
+  // result to Activate; stop_event_ wakes every overlapped wait the moment
+  // Stop() runs; io_event_ is reused by worker I/O.
+  startup_result_ = E_PENDING;
+  startup_event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
   stop_event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
   io_event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-  if (stop_event_ == nullptr || io_event_ == nullptr) {
+  if (startup_event_ == nullptr || stop_event_ == nullptr ||
+      io_event_ == nullptr) {
     const DWORD error = GetLastError();
     ResetServerState();
     return HRESULT_FROM_WIN32(error != ERROR_SUCCESS ? error
@@ -387,6 +391,23 @@ HRESULT OpenLessPipeServer::Start(OpenLessTextService* service) {
     return E_UNEXPECTED;
   }
 
+  const DWORD startup_wait =
+      WaitForSingleObject(startup_event_, kPipeStartupTimeoutMs);
+  if (startup_wait != WAIT_OBJECT_0) {
+    const DWORD error = startup_wait == WAIT_TIMEOUT ? ERROR_TIMEOUT
+                                                     : GetLastError();
+    Stop();
+    return HRESULT_FROM_WIN32(error != ERROR_SUCCESS ? error
+                                                     : ERROR_GEN_FAILURE);
+  }
+
+  const HRESULT startup_result = startup_result_;
+  CloseHandle(startup_event_);
+  startup_event_ = nullptr;
+  if (FAILED(startup_result)) {
+    Stop();
+    return startup_result;
+  }
   return S_OK;
 }
 
@@ -406,6 +427,10 @@ void OpenLessPipeServer::Stop() {
 }
 
 void OpenLessPipeServer::ResetServerState() {
+  if (startup_event_ != nullptr) {
+    CloseHandle(startup_event_);
+    startup_event_ = nullptr;
+  }
   if (io_event_ != nullptr) {
     CloseHandle(io_event_);
     io_event_ = nullptr;
@@ -423,14 +448,33 @@ void OpenLessPipeServer::ResetServerState() {
 }
 
 void OpenLessPipeServer::Run() noexcept {
+  bool startup_reported = false;
   try {
-    RunLoop();
+    RunLoop(&startup_reported);
+  } catch (const std::bad_alloc&) {
+    if (!startup_reported) {
+      ReportStartupResult(E_OUTOFMEMORY);
+    }
+  } catch (const std::system_error&) {
+    if (!startup_reported) {
+      ReportStartupResult(E_FAIL);
+    }
   } catch (...) {
     // Never let an allocation or STL exception terminate the host process.
+    if (!startup_reported) {
+      ReportStartupResult(E_UNEXPECTED);
+    }
   }
 }
 
-void OpenLessPipeServer::RunLoop() {
+void OpenLessPipeServer::ReportStartupResult(HRESULT result) noexcept {
+  startup_result_ = result;
+  if (startup_event_ != nullptr) {
+    SetEvent(startup_event_);
+  }
+}
+
+void OpenLessPipeServer::RunLoop(bool* startup_reported) {
   const std::wstring pipe_name = pipe_name_;
   while (!stop_requested_.load()) {
     HANDLE pipe = CreateNamedPipeW(
@@ -438,7 +482,18 @@ void OpenLessPipeServer::RunLoop() {
         PIPE_TYPE_MESSAGE | PIPE_READMODE_BYTE | PIPE_WAIT, 1,
         kPipeBufferSize, kPipeBufferSize, 0, nullptr);
     if (pipe == INVALID_HANDLE_VALUE) {
+      if (!*startup_reported) {
+        const DWORD error = GetLastError();
+        *startup_reported = true;
+        ReportStartupResult(HRESULT_FROM_WIN32(
+            error != ERROR_SUCCESS ? error : ERROR_GEN_FAILURE));
+      }
       return;
+    }
+
+    if (!*startup_reported) {
+      *startup_reported = true;
+      ReportStartupResult(S_OK);
     }
 
     if (WaitForClient(pipe) && !stop_requested_.load()) {
@@ -451,6 +506,11 @@ void OpenLessPipeServer::RunLoop() {
 
     DisconnectNamedPipe(pipe);
     CloseHandle(pipe);
+  }
+
+  if (!*startup_reported) {
+    *startup_reported = true;
+    ReportStartupResult(HRESULT_FROM_WIN32(ERROR_CANCELLED));
   }
 }
 

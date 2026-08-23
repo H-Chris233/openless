@@ -1,6 +1,6 @@
 #![allow(dead_code, unused_imports, unused_variables)]
 use crate::types::InsertStatus;
-use crate::windows_ime_ipc::{ImeSubmitRequest, WindowsImeIpcServer};
+use crate::windows_ime_ipc::{ImeSubmitRequest, WindowsImeIpcError, WindowsImeIpcServer};
 use crate::windows_ime_profile::{
     is_openless_profile_snapshot, restore_decision, ImeProfileSnapshot, ProfileRestoreDecision,
     WindowsImeProfileManager,
@@ -12,12 +12,15 @@ use crate::windows_ime_restore::{run_restore_flow, RESTORE_RETRY_DELAY_MS};
 pub enum WindowsImeSessionError {
     Profile(String),
     Ipc(String),
+    OutcomeUnknown(String),
 }
 
 impl std::fmt::Display for WindowsImeSessionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Profile(message) | Self::Ipc(message) => write!(f, "{message}"),
+            Self::Profile(message) | Self::Ipc(message) | Self::OutcomeUnknown(message) => {
+                write!(f, "{message}")
+            }
         }
     }
 }
@@ -33,6 +36,15 @@ pub fn map_ime_status_to_insert_status(status: ImeSubmitStatus) -> InsertStatus 
 
 pub fn should_fallback_after_ime_result(status: ImeSubmitStatus) -> bool {
     !matches!(status, ImeSubmitStatus::Committed)
+}
+
+fn map_ipc_error(error: WindowsImeIpcError) -> WindowsImeSessionError {
+    match error {
+        WindowsImeIpcError::OutcomeUnknown(message) => {
+            WindowsImeSessionError::OutcomeUnknown(message)
+        }
+        error => WindowsImeSessionError::Ipc(error.to_string()),
+    }
 }
 
 fn describe_snapshot(snapshot: &ImeProfileSnapshot) -> String {
@@ -147,11 +159,7 @@ impl WindowsImeSessionController {
             ));
         }
 
-        let status = self
-            .ipc
-            .submit_text(request)
-            .await
-            .map_err(|error| WindowsImeSessionError::Ipc(error.to_string()))?;
+        let status = self.ipc.submit_text(request).await.map_err(map_ipc_error)?;
         if should_fallback_after_ime_result(status) {
             log::warn!(
                 "[windows-ime] TSF submit returned {status:?}; falling back to non-TSF insertion"
@@ -229,6 +237,17 @@ mod tests {
         assert!(should_fallback_after_ime_result(ImeSubmitStatus::Failed));
         assert!(!should_fallback_after_ime_result(
             ImeSubmitStatus::Committed
+        ));
+    }
+
+    #[test]
+    fn unknown_ipc_outcome_stays_distinct_from_definitive_failure() {
+        assert!(matches!(
+            map_ipc_error(WindowsImeIpcError::OutcomeUnknown(
+                "native commit timed out".to_string()
+            )),
+            WindowsImeSessionError::OutcomeUnknown(message)
+                if message == "native commit timed out"
         ));
     }
 
