@@ -183,19 +183,15 @@ pub struct GateInputs {
 /// AX 里表示「密码输入框」的 role/subrole 值。
 const AX_SECURE_TEXT_FIELD: &str = "axsecuretextfield";
 
-/// 一律不读的 app（bundle id 前缀，小写比较）。
+/// 一律不读的敏感 app（bundle id 前缀，小写比较）。
 ///
 /// 不做 UI —— 黑名单 UI 会给用户「配一下就安全了」的错觉，而真正的防线是默认关闭
 /// 加这里的硬编码。这份清单只覆盖「内容几乎必然敏感」的两类：
 ///
 /// - **密码管理器 / 钥匙串**：正文就是凭据本身。
-/// - **终端**：命令行里混着 token、私钥路径、内网地址，而且很多终端的 AX 会把整个
-///   scrollback 当作一个文本元素返回 —— 一读就是几千行历史命令。
-///
 /// 前缀匹配，所以 `com.1password` 能同时盖住 `com.1password.1password` 和其
 /// helper 进程。
-const BLOCKED_BUNDLE_PREFIXES: &[&str] = &[
-    // 密码管理器 / 钥匙串
+const SENSITIVE_BUNDLE_PREFIXES: &[&str] = &[
     "com.1password",
     "com.agilebits.onepassword",
     "com.apple.keychainaccess",
@@ -207,7 +203,11 @@ const BLOCKED_BUNDLE_PREFIXES: &[&str] = &[
     "in.sinew.enpass",
     "com.sinew.enpass",
     "com.apple.passwords",
-    // 终端
+];
+
+/// 终端 app 的 bundle id 前缀。除了禁止读取 scrollback，也供 macOS 自动换行模式判断：
+/// 已知终端发送 U+000A，其它应用保守发送 Shift+Return。
+const TERMINAL_BUNDLE_PREFIXES: &[&str] = &[
     "com.apple.terminal",
     "com.googlecode.iterm2",
     "dev.warp.warp",
@@ -221,6 +221,15 @@ const BLOCKED_BUNDLE_PREFIXES: &[&str] = &[
     "com.mitchellh.ghostty",
 ];
 
+fn bundle_id_starts_with_any(bundle_id: &str, prefixes: &[&str]) -> bool {
+    let lowered = bundle_id.to_ascii_lowercase();
+    prefixes.iter().any(|prefix| lowered.starts_with(prefix))
+}
+
+pub(crate) fn is_terminal_bundle_id(bundle_id: &str) -> bool {
+    bundle_id_starts_with_any(bundle_id, TERMINAL_BUNDLE_PREFIXES)
+}
+
 /// 闸门判定。返回 `Some(reason)` 表示拦下，`None` 表示放行。
 ///
 /// 判定顺序按「代价从低到高」：Secure Input 和 bundle 前缀不需要 AX，先判；
@@ -230,10 +239,8 @@ pub fn evaluate_gate(inputs: &GateInputs) -> Option<BlockReason> {
         return Some(BlockReason::SecureInput);
     }
     if let Some(bundle) = inputs.bundle_id.as_deref() {
-        let lowered = bundle.to_ascii_lowercase();
-        if BLOCKED_BUNDLE_PREFIXES
-            .iter()
-            .any(|prefix| lowered.starts_with(prefix))
+        if bundle_id_starts_with_any(bundle, SENSITIVE_BUNDLE_PREFIXES)
+            || is_terminal_bundle_id(bundle)
         {
             return Some(BlockReason::BlockedApp);
         }

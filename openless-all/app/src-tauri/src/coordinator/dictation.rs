@@ -512,7 +512,14 @@ async fn run_streaming_polish(
     #[cfg(target_os = "windows")]
     let sendinput_options = windows_sendinput_options_from_prefs(&inner.prefs.get());
     #[cfg(target_os = "macos")]
-    let macos_newline_mode = inner.prefs.get().macos_newline_mode;
+    let macos_newline_mode = {
+        let configured = inner.prefs.get().macos_newline_mode;
+        let resolved = resolve_macos_newline_mode(configured, front_app);
+        log::info!(
+            "[coord] streaming_insert: macOS newline mode configured={configured:?} resolved={resolved:?}"
+        );
+        resolved
+    };
     let typer_handle = tokio::task::spawn_blocking(move || {
         #[cfg(target_os = "windows")]
         {
@@ -696,6 +703,33 @@ async fn run_streaming_polish(
                 (raw.text.clone(), Some(reason), false)
             }
         }
+    }
+}
+
+/// 把 Auto 解析成单次听写实际使用的模式。前台应用在听写开始时已经捕获，整个流式上屏
+/// 过程使用同一结果；未知应用保守使用 Shift+Return，避免聊天框换行时误发送。
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn resolve_macos_newline_mode(
+    configured: crate::types::MacosNewlineMode,
+    front_app: Option<&str>,
+) -> crate::types::MacosNewlineMode {
+    use crate::types::MacosNewlineMode;
+
+    if configured != MacosNewlineMode::Auto {
+        return configured;
+    }
+
+    let bundle_id = front_app.and_then(|label| {
+        let front = crate::types::split_front_app_label(label, true);
+        front.bundle_id.or(front.name)
+    });
+    if bundle_id
+        .as_deref()
+        .is_some_and(crate::host_document::is_terminal_bundle_id)
+    {
+        MacosNewlineMode::LineFeed
+    } else {
+        MacosNewlineMode::ShiftReturn
     }
 }
 
@@ -5363,18 +5397,70 @@ mod tests {
         append_typed_prefix, batch_asr_chunk_limit_ms, build_transcribe_failed_session,
         coding_agent_mode_from_pref, default_done_message, drain_streaming_insert_deltas_with,
         eligible_polish_context_turns, finalize_polished_text, flush_streaming_insert_buffer_with,
-        pcm_duration_ms, pcm_from_wav_bytes, retry_error_outcome, should_arm_edit_watch,
-        should_attempt_silent_retry, should_read_cursor_context, insert_delivery_failed,
-        resolve_less_computer_run_outcome, streaming_insert_eligible,
-        SilentRetryOutcome,
+        insert_delivery_failed, pcm_duration_ms, pcm_from_wav_bytes,
+        resolve_less_computer_run_outcome, resolve_macos_newline_mode, retry_error_outcome,
+        should_arm_edit_watch, should_attempt_silent_retry, should_read_cursor_context,
+        streaming_insert_eligible, SilentRetryOutcome,
     };
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     use super::{desktop_keyless_dictation_provider, DesktopKeylessDictationProvider};
     use crate::coordinator::RetranscribeError;
     use crate::types::{
-        ChineseScriptPreference, CorrectionRule, DictationSession, InsertStatus, PolishMode,
+        ChineseScriptPreference, CorrectionRule, DictationSession, InsertStatus, MacosNewlineMode,
+        PolishMode,
     };
     use uuid::Uuid;
+
+    #[test]
+    fn macos_auto_newline_uses_line_feed_in_known_terminals() {
+        for front_app in [
+            "Terminal (com.apple.Terminal)",
+            "iTerm2 (com.googlecode.iterm2)",
+            "Warp (dev.warp.Warp-Stable)",
+            "WezTerm (com.github.wez.wezterm)",
+            "Alacritty (io.alacritty)",
+            "Alacritty (org.alacritty)",
+            "kitty (net.kovidgoyal.kitty)",
+            "Hyper (co.zeit.hyper)",
+            "Tabby (org.tabby)",
+            "Tabby (com.tabby)",
+            "Ghostty (com.mitchellh.ghostty)",
+        ] {
+            assert_eq!(
+                resolve_macos_newline_mode(MacosNewlineMode::Auto, Some(front_app)),
+                MacosNewlineMode::LineFeed,
+                "{front_app} should use U+000A"
+            );
+        }
+    }
+
+    #[test]
+    fn macos_auto_newline_uses_shift_return_outside_known_terminals() {
+        for front_app in [
+            None,
+            Some("Terminal"),
+            Some("Safari (com.apple.Safari)"),
+            Some("Slack (com.tinyspeck.slackmacgap)"),
+        ] {
+            assert_eq!(
+                resolve_macos_newline_mode(MacosNewlineMode::Auto, front_app),
+                MacosNewlineMode::ShiftReturn,
+                "{front_app:?} should use the chat-safe fallback"
+            );
+        }
+    }
+
+    #[test]
+    fn macos_explicit_newline_modes_override_target_app_detection() {
+        let terminal = Some("Terminal (com.apple.Terminal)");
+        for configured in [
+            MacosNewlineMode::ShiftReturn,
+            MacosNewlineMode::LineFeed,
+            MacosNewlineMode::Return,
+        ] {
+            assert_eq!(resolve_macos_newline_mode(configured, terminal), configured);
+        }
+    }
 
     #[test]
     fn sandbox_providers_legacy_permission_modes_fail_closed_to_read_only() {
