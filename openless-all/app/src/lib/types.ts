@@ -239,9 +239,9 @@ export type WindowsInsertionMode = 'tsf' | 'sendInput' | 'paste';
 /** Windows SendInput 路径的换行模拟方式。 */
 export type WindowsSendInputNewlineMode = 'enter' | 'shiftEnter' | 'crlf';
 
-/** macOS 逐字上屏时换行符怎么发。`return` 在聊天框里等于发送 —— 靠换行拆多条消息的
- *  风格包要的就是这个。 */
-export type MacosNewlineMode = 'shiftReturn' | 'return';
+/** macOS 逐字上屏时换行符怎么发。`lineFeed` 供 Terminal.app / CLI Agent 使用；
+ *  `return` 在聊天框里等于发送 —— 靠换行拆多条消息的风格包要的就是这个。 */
+export type MacosNewlineMode = 'shiftReturn' | 'lineFeed' | 'return';
 
 export type WindowsImeInstallState =
   | 'installed'

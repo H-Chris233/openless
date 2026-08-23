@@ -133,8 +133,10 @@ pub enum WindowsSendInputNewlineMode {
 /// macOS 逐字上屏时换行符怎么发。仅流式插入路径生效。
 ///
 /// 默认 `ShiftReturn`：macOS 把 U+000A 当 Return 键，而聊天框里 Return 就是「发送」——
-/// 一条带空行的两段话会被从中间劈开发出去。Shift+Return 在聊天框是软换行，在编辑器 /
-/// 终端 / 网页输入框里就是普通换行。
+/// 一条带空行的两段话会被从中间劈开发出去。Shift+Return 在聊天框是软换行。
+///
+/// Terminal.app 无法区分 Shift+Return 和 Return，里面的 Codex / Claude Code 等 TUI
+/// 会把它当成「提交」。`LineFeed` 恢复发送 U+000A，让这些 TUI 将其识别为 Ctrl+J 软换行。
 ///
 /// 保留 `Return` 是因为风格市场里有靠换行发多条消息的风格包，那种效果需要真回车。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -143,6 +145,8 @@ pub enum MacosNewlineMode {
     /// Shift+Return：聊天框软换行，不发送。
     #[default]
     ShiftReturn,
+    /// U+000A：Terminal.app / CLI Agent 中作为 Ctrl+J 软换行。
+    LineFeed,
     /// Return：聊天框里等于发送 —— 想要「一段话拆成多条消息」的风格包用这个。
     Return,
 }
@@ -3704,6 +3708,22 @@ mod tests {
         let json = serde_json::to_string(&prefs).unwrap();
         assert!(json.contains(r#""windowsSendInputNewlineMode":"shiftEnter""#));
         assert!(!json.contains("windowsSendinputNewlineMode"));
+    }
+
+    #[test]
+    fn macos_newline_mode_keeps_shift_return_as_the_safe_default() {
+        let prefs: UserPreferences = serde_json::from_str("{}").unwrap();
+        assert_eq!(prefs.macos_newline_mode, MacosNewlineMode::ShiftReturn);
+    }
+
+    #[test]
+    fn macos_newline_mode_round_trips_line_feed() {
+        let prefs: UserPreferences =
+            serde_json::from_str(r#"{"macosNewlineMode":"lineFeed"}"#).unwrap();
+        assert_eq!(prefs.macos_newline_mode, MacosNewlineMode::LineFeed);
+
+        let json = serde_json::to_string(&prefs).unwrap();
+        assert!(json.contains(r#""macosNewlineMode":"lineFeed""#));
     }
 
     #[test]

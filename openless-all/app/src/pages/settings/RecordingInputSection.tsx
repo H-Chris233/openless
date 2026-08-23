@@ -532,6 +532,7 @@ export function RecordingInputSection() {
               onChange={next => onMacosNewlineModeChange(next as MacosNewlineMode)}
               options={[
                 { value: 'shiftReturn', label: t('settings.recording.macosNewlineModeShiftReturn') },
+                { value: 'lineFeed', label: t('settings.recording.macosNewlineModeLineFeed') },
                 { value: 'return', label: t('settings.recording.macosNewlineModeReturn') },
               ]}
               ariaLabel={t('settings.recording.macosNewlineModeLabel')}
