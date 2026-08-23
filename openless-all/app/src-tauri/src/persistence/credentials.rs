@@ -86,13 +86,13 @@ fn android_marketplace_legacy_scrubbed() -> &'static Mutex<bool> {
 /// Process-wide credentials cache.
 ///
 /// Without this cache every `CredentialsVault::get_*` / `snapshot` call hits
-/// `load_credentials()` → `load_keyring_credentials()` which reads the
-/// manifest entry plus every chunk entry from the OS keyring. On macOS each
-/// distinct keychain entry has its own ACL — so an ad-hoc-signed binary (or
-/// any binary whose ACL grants haven't been set up yet) prompts on every read
-/// of every entry. A single dictation cycle reads credentials 5–10 times,
-/// times (1 manifest + N chunks) entries → tens of "OpenLess wants to use
-/// the keychain" prompts per recording.
+/// `load_credentials()` → `load_keyring_credentials()` and reads the OS
+/// credential store again. On macOS each distinct Keychain entry has its own
+/// ACL, so an ad-hoc-signed binary (or any binary whose ACL grants have not
+/// been set up yet) prompts on every entry read. macOS now stores the payload
+/// in one entry; older installs are migrated from the former manifest + chunk
+/// layout after their first successful read. Other platforms retain chunking
+/// for Windows Credential Manager's small per-entry limit.
 ///
 /// With this cache the first read populates `Some(CredsRoot)` and every
 /// subsequent read in the same process is silent. `save_credentials` keeps
@@ -1135,6 +1135,31 @@ fn read_chunk_manifest(json: &str) -> Option<CredsChunkManifest> {
     }
 }
 
+enum KeyringPayload {
+    Direct(CredsRoot),
+    Chunked(CredsChunkManifest),
+}
+
+/// Decode the first Keychain/keyring entry without accidentally accepting a
+/// malformed chunk manifest as an empty `CredsRoot` (all root fields have
+/// serde defaults for backwards compatibility).
+fn decode_keyring_payload(json: &str) -> Result<KeyringPayload> {
+    let value: serde_json::Value =
+        serde_json::from_str(json).context("decode system credential vault payload")?;
+    if value.get("openless_credentials_storage").is_some() {
+        let manifest: CredsChunkManifest =
+            serde_json::from_value(value).context("decode system credential vault manifest")?;
+        if manifest.openless_credentials_storage != "chunked" || manifest.version != 1 {
+            anyhow::bail!("invalid system credential vault manifest");
+        }
+        return Ok(KeyringPayload::Chunked(manifest));
+    }
+
+    serde_json::from_value::<CredsRoot>(value)
+        .map(KeyringPayload::Direct)
+        .context("decode system credential vault payload")
+}
+
 /// Windows Credential Manager (`CredReadW`) can transiently fail right after
 /// login / under contention when we read the manifest entry plus every chunk
 /// entry in quick succession. A single failed read makes the whole credential
@@ -1212,8 +1237,10 @@ fn load_keyring_credentials() -> Result<Option<CredsRoot>> {
         return Ok(None);
     };
 
-    let manifest = read_chunk_manifest(&json_or_manifest)
-        .ok_or_else(|| anyhow!("invalid system credential vault manifest"))?;
+    let manifest = match decode_keyring_payload(&json_or_manifest)? {
+        KeyringPayload::Direct(root) => return Ok(Some(root)),
+        KeyringPayload::Chunked(manifest) => manifest,
+    };
     let mut json = String::new();
     for index in 0..manifest.chunks {
         let account = chunk_account(manifest.generation.as_deref(), index);
@@ -1222,9 +1249,38 @@ fn load_keyring_credentials() -> Result<Option<CredsRoot>> {
         json.push_str(&chunk);
     }
 
-    serde_json::from_str::<CredsRoot>(&json)
-        .map(Some)
-        .context("decode system credential vault payload")
+    let root = serde_json::from_str::<CredsRoot>(&json)
+        .context("decode system credential vault payload")?;
+
+    // macOS Keychain authorizes each generic-password item separately. The old
+    // manifest + one chunk layout therefore produced exactly two authorization
+    // dialogs on every ad-hoc dev rebuild. Once both legacy entries have been
+    // read successfully, collapse them into the single direct payload used by
+    // current macOS builds. Write the self-contained item before deleting any
+    // chunks, so an interrupted migration cannot lose credentials.
+    #[cfg(target_os = "macos")]
+    match keyring_entry().and_then(|entry| {
+        entry
+            .set_password(&json)
+            .context("migrate macOS credential vault to single entry")
+    }) {
+        Ok(()) => {
+            for index in 0..manifest.chunks {
+                delete_keyring_password(&chunk_account(manifest.generation.as_deref(), index));
+            }
+            log::info!(
+                "[vault] migrated macOS credentials from manifest + {} chunk(s) to one Keychain entry",
+                manifest.chunks
+            );
+        }
+        Err(error) => {
+            // Reading succeeded, so keep serving the in-memory root. Migration
+            // is an optimization and will be retried next launch.
+            log::warn!("[vault] macOS single-entry migration failed: {error}");
+        }
+    }
+
+    Ok(Some(root))
 }
 
 #[cfg(not(target_os = "android"))]
@@ -1456,54 +1512,77 @@ fn save_credentials(root: &CredsRoot) -> Result<()> {
             .ok()
             .flatten()
             .and_then(|value| read_chunk_manifest(&value));
-        let chunks = chunk_json_payload(&json);
 
-        // 先写所有 chunks（稳定名），再写 manifest —— 保证 partial-write 不会让
-        // manifest 指向不完整 chunks。stable name 让 macOS Keychain ACL 一次允许后
-        // 长期有效，不再因 UUID 轮换反复弹窗（这是 PR #277 早期 UUID-rotation
-        // 设计的回退）。
-        for (index, chunk) in chunks.iter().enumerate() {
-            let account = chunk_account(None, index);
-            keyring_entry_for(&account)?
-                .set_password(chunk)
-                .with_context(|| format!("write system credential vault chunk {index}"))?;
+        // A macOS Keychain ACL belongs to one item. Keep the entire payload in
+        // that one item so a newly rebuilt ad-hoc development binary needs at
+        // most one authorization, not one for the manifest plus one per chunk.
+        // Keychain does not have Windows Credential Manager's 2560-byte blob
+        // limit, so platform-specific direct storage is safe here.
+        #[cfg(target_os = "macos")]
+        {
+            keyring_entry()?
+                .set_password(&json)
+                .context("write macOS credential vault")?;
+            if let Some(previous) = previous_manifest {
+                for index in 0..previous.chunks {
+                    delete_keyring_password(&chunk_account(previous.generation.as_deref(), index));
+                }
+            }
+            remove_legacy_credentials_file_best_effort();
+            store_credentials_cache(&cleaned);
+            return Ok(());
         }
 
-        let manifest = CredsChunkManifest {
-            openless_credentials_storage: "chunked".to_string(),
-            version: 1,
-            generation: None,
-            chunks: chunks.len(),
-        };
-        let manifest_json =
-            serde_json::to_string(&manifest).context("encode credential manifest failed")?;
-        keyring_entry()?
-            .set_password(&manifest_json)
-            .context("write system credential vault manifest")?;
+        #[cfg(not(target_os = "macos"))]
+        {
+            let chunks = chunk_json_payload(&json);
 
-        // 清理旧 chunks：
-        // 1) 旧 manifest 用 UUID generation → 那一代 chunks 全删（迁移到 stable name）
-        // 2) 旧 manifest 也是 stable name，但 chunks 数量比这次多 → 删多余的 idx
-        if let Some(previous) = previous_manifest {
-            match previous.generation.as_deref() {
-                Some(prev_gen) => {
-                    for index in 0..previous.chunks {
-                        delete_keyring_password(&chunk_account(Some(prev_gen), index));
+            // 先写所有 chunks（稳定名），再写 manifest —— 保证 partial-write 不会让
+            // manifest 指向不完整 chunks。稳定名也避免早期 PR #277 的
+            // UUID rotation 让系统凭据条目不断增长。
+            for (index, chunk) in chunks.iter().enumerate() {
+                let account = chunk_account(None, index);
+                keyring_entry_for(&account)?
+                    .set_password(chunk)
+                    .with_context(|| format!("write system credential vault chunk {index}"))?;
+            }
+
+            let manifest = CredsChunkManifest {
+                openless_credentials_storage: "chunked".to_string(),
+                version: 1,
+                generation: None,
+                chunks: chunks.len(),
+            };
+            let manifest_json =
+                serde_json::to_string(&manifest).context("encode credential manifest failed")?;
+            keyring_entry()?
+                .set_password(&manifest_json)
+                .context("write system credential vault manifest")?;
+
+            // 清理旧 chunks：
+            // 1) 旧 manifest 用 UUID generation → 那一代 chunks 全删（迁移到 stable name）
+            // 2) 旧 manifest 也是 stable name，但 chunks 数量比这次多 → 删多余的 idx
+            if let Some(previous) = previous_manifest {
+                match previous.generation.as_deref() {
+                    Some(prev_gen) => {
+                        for index in 0..previous.chunks {
+                            delete_keyring_password(&chunk_account(Some(prev_gen), index));
+                        }
                     }
-                }
-                None => {
-                    for index in chunks.len()..previous.chunks {
-                        delete_keyring_password(&chunk_account(None, index));
+                    None => {
+                        for index in chunks.len()..previous.chunks {
+                            delete_keyring_password(&chunk_account(None, index));
+                        }
                     }
                 }
             }
-        }
 
-        remove_legacy_credentials_file_best_effort();
-        // 写完成功后立刻刷新 process cache —— 同进程后续读不再回 Keychain。
-        // 见 CREDENTIALS_CACHE 的 doc。
-        store_credentials_cache(&cleaned);
-        Ok(())
+            remove_legacy_credentials_file_best_effort();
+            // 写完成功后立刻刷新 process cache —— 同进程后续读不再回 Keychain。
+            // 见 CREDENTIALS_CACHE 的 doc。
+            store_credentials_cache(&cleaned);
+            Ok(())
+        }
     }
 }
 
@@ -2554,12 +2633,13 @@ mod tests {
     use super::load_android_credentials_from_source_with_crypto;
     use super::{
         android_persistable_credentials, chunk_json_payload, credentials_cache,
-        get_android_marketplace_token_at, load_android_credentials_from_path,
-        load_android_credentials_from_path_with_crypto, load_android_credentials_into_cache_with,
-        lookup_account, lookup_marketplace_github_token, parse_extra_headers_json,
-        parse_llm_temperature, reset_credentials_cache_for_tests, write_account,
-        write_marketplace_github_token, CredentialAccount, CredsAsrEntry, CredsRoot,
-        CredsLlmEntry, MarketplaceGithubToken, KEYRING_CHUNK_MAX_UTF16_UNITS,
+        decode_keyring_payload, get_android_marketplace_token_at,
+        load_android_credentials_from_path, load_android_credentials_from_path_with_crypto,
+        load_android_credentials_into_cache_with, lookup_account, lookup_marketplace_github_token,
+        parse_extra_headers_json, parse_llm_temperature, reset_credentials_cache_for_tests,
+        write_account, write_marketplace_github_token, CredentialAccount, CredsAsrEntry,
+        CredsLlmEntry, CredsRoot, KeyringPayload, MarketplaceGithubToken,
+        KEYRING_CHUNK_MAX_UTF16_UNITS,
     };
     use anyhow::anyhow;
     use parking_lot::Mutex;
@@ -2579,6 +2659,38 @@ mod tests {
         assert!(chunks
             .iter()
             .all(|chunk| chunk.encode_utf16().count() <= KEYRING_CHUNK_MAX_UTF16_UNITS));
+    }
+
+    #[test]
+    fn keyring_payload_accepts_single_entry_credentials() {
+        let json = r#"{"version":1,"active":{"asr":"single-asr","llm":"single-llm"}}"#;
+        let decoded = decode_keyring_payload(json).expect("direct payload should decode");
+        let KeyringPayload::Direct(root) = decoded else {
+            panic!("direct credentials were mistaken for a chunk manifest");
+        };
+        assert_eq!(root.active.asr, "single-asr");
+        assert_eq!(root.active.llm, "single-llm");
+    }
+
+    #[test]
+    fn keyring_payload_keeps_legacy_chunk_manifest_compatible() {
+        let json = r#"{"openless_credentials_storage":"chunked","version":1,"chunks":2}"#;
+        let decoded = decode_keyring_payload(json).expect("chunk manifest should decode");
+        let KeyringPayload::Chunked(manifest) = decoded else {
+            panic!("chunk manifest was mistaken for direct credentials");
+        };
+        assert_eq!(manifest.chunks, 2);
+        assert!(manifest.generation.is_none());
+    }
+
+    #[test]
+    fn keyring_payload_rejects_unknown_manifest_versions() {
+        let json = r#"{"openless_credentials_storage":"chunked","version":99,"chunks":1}"#;
+        let error = decode_keyring_payload(json)
+            .err()
+            .expect("unknown manifest version must not become empty credentials")
+            .to_string();
+        assert!(error.contains("invalid system credential vault manifest"));
     }
 
     #[test]
