@@ -74,6 +74,8 @@ mod polish_flow;
 mod qa;
 mod qa_session;
 mod resources;
+#[cfg(all(not(mobile), target_os = "windows"))]
+pub(crate) mod selection_voice_session;
 #[cfg(not(mobile))]
 pub(crate) mod selection_polish;
 mod silence_auto_stop;
@@ -1130,6 +1132,14 @@ struct Inner {
     /// 预览确认模式暂存的结果和原选区目标；仅在用户确认时才允许插入。
     #[cfg(not(mobile))]
     selection_polish_preview: Mutex<Option<selection_polish::PendingSelectionPolishPreview>>,
+    /// 选区语音编辑会话状态（issue #987 桌面 MVP）。
+    #[cfg(all(not(mobile), target_os = "windows"))]
+    selection_voice_state: Mutex<selection_voice_session::SelectionVoiceSessionState>,
+    #[cfg(all(not(mobile), target_os = "windows"))]
+    selection_voice_preview: Mutex<Option<selection_voice_session::PendingSelectionVoicePreview>>,
+    #[cfg(all(not(mobile), target_os = "windows"))]
+    selection_voice_intent_prompt:
+        Mutex<Option<selection_voice_session::PendingSelectionVoiceIntentPrompt>>,
     /// 「本次会话真的要翻译」。每次 begin_session 重置为 false；hotkey 监听器在
     /// Listening / Starting 阶段看到 Shift down 边沿（或安卓浮层请求）时，经
     /// `arm_translation_if_effective` 判定翻译确实会生效（设了目标语言、且不等于唯一工作语言）
@@ -1441,6 +1451,14 @@ impl Coordinator {
                     selection_polish_hotkey: Mutex::new(None),
                     #[cfg(not(mobile))]
                     selection_polish_preview: Mutex::new(None),
+                    #[cfg(all(not(mobile), target_os = "windows"))]
+                    selection_voice_state: Mutex::new(
+                        selection_voice_session::SelectionVoiceSessionState::default(),
+                    ),
+                    #[cfg(all(not(mobile), target_os = "windows"))]
+                    selection_voice_preview: Mutex::new(None),
+                    #[cfg(all(not(mobile), target_os = "windows"))]
+                    selection_voice_intent_prompt: Mutex::new(None),
                     translation_active: AtomicBool::new(false),
                     qa_hotkey: Mutex::new(None),
                     coding_agent_modifier_hotkey: Mutex::new(None),
@@ -1573,6 +1591,14 @@ impl Coordinator {
                 selection_polish_hotkey: Mutex::new(None),
                 #[cfg(not(mobile))]
                 selection_polish_preview: Mutex::new(None),
+                #[cfg(all(not(mobile), target_os = "windows"))]
+                selection_voice_state: Mutex::new(
+                    selection_voice_session::SelectionVoiceSessionState::default(),
+                ),
+                #[cfg(all(not(mobile), target_os = "windows"))]
+                selection_voice_preview: Mutex::new(None),
+                #[cfg(all(not(mobile), target_os = "windows"))]
+                selection_voice_intent_prompt: Mutex::new(None),
                 translation_active: AtomicBool::new(false),
                 qa_hotkey: Mutex::new(None),
                 coding_agent_modifier_hotkey: Mutex::new(None),
@@ -2714,6 +2740,39 @@ impl Coordinator {
 
     pub async fn qa_submit_text(&self, text: String) -> Result<(), String> {
         submit_qa_text_question(&self.inner, text).await
+    }
+
+    pub fn qa_set_edit_instruction_mode(&self, enabled: bool) {
+        let mut qa = self.inner.qa_state.lock();
+        if !qa.panel_visible {
+            return;
+        }
+        qa.edit_instruction_mode = enabled;
+        let session_id = qa.session_id;
+        let messages = qa.messages.clone();
+        let edit_apply = {
+            #[cfg(all(not(mobile), target_os = "windows"))]
+            {
+                self.inner.selection_voice_preview.lock().is_some()
+            }
+            #[cfg(not(all(not(mobile), target_os = "windows")))]
+            {
+                false
+            }
+        };
+        if let Some(app) = self.inner.app.lock().clone() {
+            let _ = app.emit_to(
+                qa_event_target(),
+                "qa:state",
+                serde_json::json!({
+                    "kind": "answer",
+                    "session_id": session_id,
+                    "messages": messages,
+                    "edit_instruction_mode": enabled,
+                    "edit_apply_available": edit_apply,
+                }),
+            );
+        }
     }
 
     pub fn set_shortcut_recording_active(&self, active: bool) {
