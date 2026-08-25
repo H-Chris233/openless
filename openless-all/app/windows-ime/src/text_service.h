@@ -1,6 +1,7 @@
 #pragma once
 
 #include <msctf.h>
+#include <atomic>
 #include <memory>
 #include <string>
 #include <windows.h>
@@ -27,7 +28,8 @@ class OpenLessTextService final : public ITfTextInputProcessorEx {
                           DWORD flags) override;
 
   HRESULT SubmitTextFromPipe(const std::wstring& session_id,
-                             const std::wstring& text);
+                             const std::wstring& text,
+                             HANDLE cancellation_event = nullptr);
 
  private:
   HRESULT StartIpcServer();
@@ -38,7 +40,8 @@ class OpenLessTextService final : public ITfTextInputProcessorEx {
       const std::wstring& session_id,
       const std::wstring& text,
       std::shared_ptr<OpenLessAsyncEditState>* async_completion,
-      bool* wait_for_async_completion);
+      bool* wait_for_async_completion,
+      const std::shared_ptr<std::atomic<bool>>& cancellation);
 
   static LRESULT CALLBACK MessageWindowProc(HWND window,
                                             UINT message,

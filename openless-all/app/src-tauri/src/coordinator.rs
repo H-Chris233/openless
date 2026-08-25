@@ -62,7 +62,9 @@ use crate::types::{
 #[cfg(target_os = "windows")]
 use crate::windows_ime_ipc::ImeSubmitTarget;
 #[cfg(target_os = "windows")]
-use crate::windows_ime_session::{PreparedWindowsImeSession, WindowsImeSessionController};
+use crate::windows_ime_session::{
+    PreparedWindowsImeSession, WindowsImeSessionController, WindowsImeSessionError,
+};
 
 mod asr_wiring;
 mod capsule_focus;
@@ -3235,6 +3237,7 @@ async fn insert_with_windows_ime_first(
         if should_try_non_tsf_insertion_fallback(
             allow_non_tsf_insertion_fallback,
             InsertStatus::Failed,
+            true,
         ) {
             return insert_via_non_tsf_fallback(inner, polished, restore_clipboard, paste_shortcut);
         }
@@ -3249,21 +3252,37 @@ async fn insert_with_windows_ime_first(
         target: ime_target,
     };
 
-    let ime_status = match inner.windows_ime.submit_prepared(&prepared, request).await {
-        Ok(status) => status,
+    let (ime_status, outcome_known) = match inner
+        .windows_ime
+        .submit_prepared(&prepared, request)
+        .await
+    {
+        Ok(status) => (status, true),
+        Err(WindowsImeSessionError::OutcomeUnknown(error)) => {
+            log::warn!(
+                "[windows-ime] TSF submit outcome is unknown; suppressing automatic fallback: {error}"
+            );
+            (InsertStatus::Failed, false)
+        }
         Err(error) => {
             log::warn!("[windows-ime] TSF submit failed: {error}");
-            InsertStatus::Failed
+            (InsertStatus::Failed, true)
         }
     };
     inner.windows_ime.restore_session(prepared);
 
     if ime_status == InsertStatus::Inserted {
         ime_status
-    } else if should_try_non_tsf_insertion_fallback(allow_non_tsf_insertion_fallback, ime_status) {
+    } else if should_try_non_tsf_insertion_fallback(
+        allow_non_tsf_insertion_fallback,
+        ime_status,
+        outcome_known,
+    ) {
         insert_via_non_tsf_fallback(inner, polished, restore_clipboard, paste_shortcut)
     } else {
-        log::warn!("[windows-ime] TSF did not insert; non-TSF insertion fallback is disabled");
+        if outcome_known {
+            log::warn!("[windows-ime] TSF did not insert; non-TSF insertion fallback is disabled");
+        }
         InsertStatus::Failed
     }
 }
@@ -3272,8 +3291,9 @@ async fn insert_with_windows_ime_first(
 fn should_try_non_tsf_insertion_fallback(
     allow_non_tsf_insertion_fallback: bool,
     ime_status: InsertStatus,
+    outcome_known: bool,
 ) -> bool {
-    allow_non_tsf_insertion_fallback && ime_status != InsertStatus::Inserted
+    allow_non_tsf_insertion_fallback && outcome_known && ime_status != InsertStatus::Inserted
 }
 
 #[cfg(target_os = "windows")]
@@ -5613,23 +5633,33 @@ mod tests {
     fn non_tsf_insertion_fallback_gate_blocks_only_when_disabled() {
         assert!(should_try_non_tsf_insertion_fallback(
             true,
-            InsertStatus::CopiedFallback
+            InsertStatus::CopiedFallback,
+            true
         ));
         assert!(should_try_non_tsf_insertion_fallback(
             true,
-            InsertStatus::Failed
+            InsertStatus::Failed,
+            true
         ));
         assert!(!should_try_non_tsf_insertion_fallback(
             true,
-            InsertStatus::Inserted
+            InsertStatus::Inserted,
+            true
         ));
         assert!(!should_try_non_tsf_insertion_fallback(
             false,
-            InsertStatus::CopiedFallback
+            InsertStatus::CopiedFallback,
+            true
         ));
         assert!(!should_try_non_tsf_insertion_fallback(
             false,
-            InsertStatus::Failed
+            InsertStatus::Failed,
+            true
+        ));
+        assert!(!should_try_non_tsf_insertion_fallback(
+            true,
+            InsertStatus::Failed,
+            false
         ));
     }
 

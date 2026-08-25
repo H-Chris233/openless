@@ -1,6 +1,7 @@
 #pragma once
 
 #include <msctf.h>
+#include <atomic>
 #include <memory>
 #include <string>
 #include <windows.h>
@@ -23,7 +24,8 @@ class OpenLessEditSession final : public ITfEditSession {
   OpenLessEditSession(
       ITfContext* context,
       std::wstring text,
-      std::shared_ptr<OpenLessAsyncEditState> async_state = nullptr);
+      std::shared_ptr<OpenLessAsyncEditState> async_state = nullptr,
+      std::shared_ptr<std::atomic<bool>> cancellation = nullptr);
   OpenLessEditSession(const OpenLessEditSession&) = delete;
   OpenLessEditSession& operator=(const OpenLessEditSession&) = delete;
   ~OpenLessEditSession();
@@ -40,4 +42,5 @@ class OpenLessEditSession final : public ITfEditSession {
   ITfContext* context_ = nullptr;
   std::wstring text_;
   std::shared_ptr<OpenLessAsyncEditState> async_state_;
+  std::shared_ptr<std::atomic<bool>> cancellation_;
 };
