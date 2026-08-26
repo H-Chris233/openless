@@ -924,11 +924,40 @@ impl OpenAICompatibleLLMProvider {
         }
         let request = request.json(&body);
 
-        let response = send_with_transient_retry(request).await?;
+        // 服务端只 accept 不响应时，SSE 循环里的检查点根本够不着。`biased` 让取消分支
+        // 先于网络分支被 poll。
+        let response = tokio::select! {
+            biased;
+            _ = wait_until_cancelled(&should_cancel) => {
+                log::info!("[llm] polish stream cancelled by caller before response arrived");
+                // status 0 = 一个 HTTP 响应字节都没收到；编个 200 会让日志读起来像
+                // 「服务端回了 200 空 body」。
+                return Err(LLMError::InvalidResponse {
+                    status: 0,
+                    body: "polish stream cancelled before response arrived".to_string(),
+                });
+            }
+            result = send_with_transient_retry(request) => result?,
+        };
 
         let status = response.status();
         if !status.is_success() {
-            let body_text = response.text().await.map_err(llm_error_from_reqwest)?;
+            // 错误 body 也要能被取消打断：服务端回了非 2xx 头之后挂住时，这里会一路等到
+            // client 硬顶（POLISH_CLIENT_HARD_CAP_SECS，900s），期间取消完全不生效。
+            let body_text = tokio::select! {
+                biased;
+                _ = wait_until_cancelled(&should_cancel) => {
+                    log::info!(
+                        "[llm] polish stream cancelled by caller while reading HTTP {} error body",
+                        status.as_u16()
+                    );
+                    return Err(LLMError::InvalidResponse {
+                        status: status.as_u16(),
+                        body: "cancelled while reading error body".to_string(),
+                    });
+                }
+                text = response.text() => text.map_err(llm_error_from_reqwest)?,
+            };
             let preview_end = BODY_PREVIEW_LIMIT.min(body_text.len());
             let preview = safe_str_slice(&body_text, preview_end);
             log::error!("[llm] streaming HTTP {} body={}", status.as_u16(), preview);
@@ -947,15 +976,6 @@ impl OpenAICompatibleLLMProvider {
         let stream_started = std::time::Instant::now();
         let mut first_content_at: Option<Duration> = None;
         loop {
-            if should_cancel() {
-                log::info!(
-                    "[llm] polish stream cancelled by caller after {} deltas ({} chars); breaking SSE loop",
-                    delta_count,
-                    full_text.chars().count()
-                );
-                cancelled = true;
-                break;
-            }
             // 首字之前用「还剩多少首字预算」，首字之后用「两个 chunk 之间能空多久」。
             // 注意首字预算是从请求发出起算的**总量**，不随 chunk 到达而重置——推理模型
             // 思考期的 reasoning_content 是一串正常 chunk，若让它续命，用户干等就没有上限。
@@ -965,27 +985,43 @@ impl OpenAICompatibleLLMProvider {
                     .saturating_sub(stream_started.elapsed()),
                 Some(_) => timeouts.idle,
             };
-            let chunk_opt = match tokio::time::timeout(budget, response.chunk()).await {
-                Ok(result) => result.map_err(llm_error_from_reqwest)?,
-                Err(_) => {
-                    // 已经交给 on_delta 的字此刻就在用户屏幕上；上层 dictation 的 Failed
-                    // 分支拿 typed_text 当 final_text，屏幕 / history / 剪贴板保持一致。
-                    match first_content_at {
-                        None => log::error!(
-                            "[llm] polish stream timed out waiting for first content delta (budget {:?}); \
-                             模型可能仍在思考——加长首字预算或换非推理模型",
-                            timeouts.first_token
-                        ),
-                        Some(first) => log::error!(
-                            "[llm] polish stream stalled {:?} after {} chars (first delta at {:?}); \
-                             已落屏的字保留",
-                            timeouts.idle,
-                            full_text.chars().count(),
-                            first
-                        ),
-                    }
-                    return Err(LLMError::Timeout);
+            // 取消检查不再只在循环顶部查一次：卡在单次 chunk() 等待里时，旧写法要等这次
+            // await 自然到点（budget 最长数十秒）才会看到取消旗；现在跟取消轮询赛跑，最多
+            // ~75ms 就能放弃这次响应体的等待（Response 被 drop 即取消该请求；HTTP/2 与
+            // 连接池下未必关闭整条 TCP，但这一次请求确定不再占着调用方）。
+            let chunk_opt = tokio::select! {
+                biased;
+                _ = wait_until_cancelled(&should_cancel) => {
+                    log::info!(
+                        "[llm] polish stream cancelled by caller after {} deltas ({} chars); breaking SSE loop",
+                        delta_count,
+                        full_text.chars().count()
+                    );
+                    cancelled = true;
+                    break;
                 }
+                timed = tokio::time::timeout(budget, response.chunk()) => match timed {
+                    Ok(result) => result.map_err(llm_error_from_reqwest)?,
+                    Err(_) => {
+                        // 已经交给 on_delta 的字此刻就在用户屏幕上；上层 dictation 的 Failed
+                        // 分支拿 typed_text 当 final_text，屏幕 / history / 剪贴板保持一致。
+                        match first_content_at {
+                            None => log::error!(
+                                "[llm] polish stream timed out waiting for first content delta (budget {:?}); \
+                                 模型可能仍在思考——加长首字预算或换非推理模型",
+                                timeouts.first_token
+                            ),
+                            Some(first) => log::error!(
+                                "[llm] polish stream stalled {:?} after {} chars (first delta at {:?}); \
+                                 已落屏的字保留",
+                                timeouts.idle,
+                                full_text.chars().count(),
+                                first
+                            ),
+                        }
+                        return Err(LLMError::Timeout);
+                    }
+                },
             };
             let Some(chunk) = chunk_opt else { break };
             append_utf8_sse_chunk(&mut buffer, &mut utf8_pending, &chunk)?;
@@ -1500,6 +1536,18 @@ pub(crate) fn http_client_builder(base_url: &str, timeout_secs: u64) -> reqwest:
         builder.no_proxy()
     } else {
         builder
+    }
+}
+
+/// 轮询 `should_cancel`，跟网络 I/O 的 future 用 `tokio::select!` 赛跑。75ms 间隔与
+/// `coordinator::dictation::wait_for_processing_cancel`（PR #798）一致：对用户不可感知，
+/// 又不依赖唤醒信号，没有「取消边沿早于 waiter 注册就被漏掉」的竞态。
+async fn wait_until_cancelled<C: Fn() -> bool>(should_cancel: &C) {
+    loop {
+        if should_cancel() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(75)).await;
     }
 }
 
@@ -2390,7 +2438,7 @@ mod tests {
             "https://user:pass@example.com/v1/chat/completions?token=query-secret#client-fragment"
         );
     }
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Mutex as StdMutex;
     use std::thread;
 
@@ -2944,6 +2992,159 @@ mod tests {
             *seen.lock().unwrap(),
             "开头",
             "卡死之前已经流出去的字必须留在屏幕上"
+        );
+        drop(server);
+    }
+
+    /// 覆盖**建连阶段**的取消：服务端连状态行都不回，`send_with_transient_retry` 一直不
+    /// resolve。锁的是 `send` 之前那个 `select!`。
+    #[tokio::test]
+    async fn cancellation_before_response_arrives_does_not_wait_out_the_budget() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            read_http_request(&mut stream);
+            // 故意什么都不回——连接保持打开，模拟服务端只 accept 不响应。
+            thread::sleep(std::time::Duration::from_secs(5));
+            let _ = stream;
+        });
+
+        let cancelled = std::sync::Arc::new(AtomicBool::new(false));
+        let cancelled_setter = cancelled.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            cancelled_setter.store(true, Ordering::SeqCst);
+        });
+
+        let timeouts = StreamingTimeouts {
+            first_token: std::time::Duration::from_secs(30),
+            idle: std::time::Duration::from_secs(30),
+        };
+        let started = std::time::Instant::now();
+        let err = streaming_test_provider(addr)
+            .chat_completion_messages_streaming(
+                test_messages(),
+                timeouts,
+                |_| {},
+                move || cancelled.load(Ordering::SeqCst),
+            )
+            .await
+            .expect_err("取消之后必须尽快返回错误，不能悬挂到 budget 结束");
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "取消应在一个轮询周期内生效，而不是等 30s 的首字预算，实际耗时 {elapsed:?}"
+        );
+        assert!(
+            matches!(err, LLMError::InvalidResponse { status: 0, .. }),
+            "got {err:?}"
+        );
+        drop(server);
+    }
+
+    /// 覆盖 **SSE 循环内**的取消——issue #1000 日志里 `after 0 deltas ... breaking SSE loop`
+    /// 那条真实路径：200 头已到达、卡住的是 `response.chunk()`。把循环里的 `select!` 还原成
+    /// 「只在循环顶部查一次」，本用例会等满 30s 首字预算才返回 `Timeout` 而失败。
+    #[tokio::test]
+    async fn cancellation_mid_stream_does_not_wait_out_the_budget() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            read_http_request(&mut stream);
+            // header 立刻回，body 迟迟不来：模拟「连接活着、模型一个字都不吐」。
+            let never = content_event("永远来不了");
+            write_chunked_sse_response_with_delays(
+                &mut stream,
+                &[(never.as_slice(), std::time::Duration::from_secs(5))],
+            );
+        });
+
+        let cancelled = std::sync::Arc::new(AtomicBool::new(false));
+        let cancelled_setter = cancelled.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            cancelled_setter.store(true, Ordering::SeqCst);
+        });
+
+        let timeouts = StreamingTimeouts {
+            first_token: std::time::Duration::from_secs(30),
+            idle: std::time::Duration::from_secs(30),
+        };
+        let started = std::time::Instant::now();
+        let err = streaming_test_provider(addr)
+            .chat_completion_messages_streaming(
+                test_messages(),
+                timeouts,
+                |_| {},
+                move || cancelled.load(Ordering::SeqCst),
+            )
+            .await
+            .expect_err("一个 delta 都没收到就取消，最终应落到空流错误");
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "SSE 循环内的取消应在一个轮询周期内生效，而不是等满首字预算，实际耗时 {elapsed:?}"
+        );
+        // 走的是「break 出循环 → full_text 为空」这条既有路径，status 200 是真实收到的。
+        assert!(
+            matches!(err, LLMError::InvalidResponse { status: 200, .. }),
+            "got {err:?}"
+        );
+        drop(server);
+    }
+
+    /// 覆盖**非 2xx 错误 body 的读取**：服务端回了 500 头就不再发 body，`response.text()`
+    /// 会一路等到 client 硬顶（`POLISH_CLIENT_HARD_CAP_SECS`，900s）。这条路径在两个 SSE
+    /// 相关的 `select!` 之外，必须单独跟取消赛跑。
+    #[tokio::test]
+    async fn cancellation_while_reading_error_body_does_not_hang() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            read_http_request(&mut stream);
+            // 声明了 1KB body 却一个字节都不发，读 body 因此永远等不到头。
+            stream
+                .write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 1024\r\n\r\n")
+                .unwrap();
+            stream.flush().unwrap();
+            thread::sleep(std::time::Duration::from_secs(5));
+        });
+
+        let cancelled = std::sync::Arc::new(AtomicBool::new(false));
+        let cancelled_setter = cancelled.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            cancelled_setter.store(true, Ordering::SeqCst);
+        });
+
+        let timeouts = StreamingTimeouts {
+            first_token: std::time::Duration::from_secs(30),
+            idle: std::time::Duration::from_secs(30),
+        };
+        let started = std::time::Instant::now();
+        let err = streaming_test_provider(addr)
+            .chat_completion_messages_streaming(
+                test_messages(),
+                timeouts,
+                |_| {},
+                move || cancelled.load(Ordering::SeqCst),
+            )
+            .await
+            .expect_err("非 2xx 必然返回错误");
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "读错误 body 时的取消应在一个轮询周期内生效，实际耗时 {elapsed:?}"
+        );
+        assert!(
+            matches!(err, LLMError::InvalidResponse { status: 500, .. }),
+            "got {err:?}"
         );
         drop(server);
     }
