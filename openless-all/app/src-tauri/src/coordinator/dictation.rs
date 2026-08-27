@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use crate::coordinator_state::{
@@ -2114,12 +2114,17 @@ pub(super) fn request_stop_during_starting(inner: &Arc<Inner>, reason: &str) {
 }
 
 pub(super) async fn begin_session(inner: &Arc<Inner>) -> Result<(), String> {
-    begin_session_as(inner, false).await
+    begin_session_as(inner, false, false).await
 }
 
 /// begin_session 的带参版本，voice_agent=true 时在 Starting 阶段就标记好，
 /// 防止 finish_starting_session 处理 pending_stop 时丢失标志。
-pub(super) async fn begin_session_as(inner: &Arc<Inner>, voice_agent: bool) -> Result<(), String> {
+/// `remote=true` 时用手机推来的 PCM，不打开电脑麦克风。
+pub(super) async fn begin_session_as(
+    inner: &Arc<Inner>,
+    voice_agent: bool,
+    remote: bool,
+) -> Result<(), String> {
     #[cfg(all(not(mobile), target_os = "windows"))]
     if super::selection_voice_session::selection_voice_blocks_other_recording(inner) {
         log::info!("[coord] dictation blocked: selection voice session active");
@@ -2140,6 +2145,13 @@ pub(super) async fn begin_session_as(inner: &Arc<Inner>, voice_agent: bool) -> R
         }
         session_id
     };
+    #[cfg(not(mobile))]
+    if remote {
+        let bridge = Arc::new(super::DeferredAsrBridge::new());
+        *inner.remote_pcm_bridge.lock() = Some(Arc::clone(&bridge));
+        *inner.remote_audio_sink.lock() = Some(bridge);
+        log::info!("[coord] remote mic sink armed (phone PCM, local mic skipped)");
+    }
     // 新一次听写开始 → 上一次的手改监听作废。用户已经不在改上一段了，继续盯着只会
     // 把新的输入误判成对旧文本的修改。这是「必须保证解除」的四条规则之一。
     //
@@ -2192,25 +2204,32 @@ pub(super) async fn begin_session_as(inner: &Arc<Inner>, voice_agent: bool) -> R
             );
             restore_prepared_windows_ime_session(inner, current_session_id);
             inner.state.lock().phase = SessionPhase::Idle;
+            #[cfg(not(mobile))]
+            super::clear_remote_mic_path(inner, current_session_id);
             return Err(message);
         }
-        if let Err(message) = ensure_microphone_permission(inner) {
-            log::warn!("[coord] omni microphone permission gate failed: {message}");
-            emit_capsule(
-                inner,
-                CapsuleState::Error,
-                0.0,
-                0,
-                Some(message.clone()),
-                None,
-            );
-            restore_prepared_windows_ime_session(inner, current_session_id);
-            inner.state.lock().phase = SessionPhase::Idle;
-            return Err(message);
+        if !remote {
+            if let Err(message) = ensure_microphone_permission(inner) {
+                log::warn!("[coord] omni microphone permission gate failed: {message}");
+                emit_capsule(
+                    inner,
+                    CapsuleState::Error,
+                    0.0,
+                    0,
+                    Some(message.clone()),
+                    None,
+                );
+                restore_prepared_windows_ime_session(inner, current_session_id);
+                inner.state.lock().phase = SessionPhase::Idle;
+                #[cfg(not(mobile))]
+                super::clear_remote_mic_path(inner, current_session_id);
+                return Err(message);
+            }
         }
         let consumer = PcmBufferConsumer::new();
         store_omni_pcm_for_session(inner, current_session_id, Arc::clone(&consumer));
-        start_recorder_and_enter_listening(inner, current_session_id, "omni", consumer).await?;
+        start_recorder_and_enter_listening(inner, current_session_id, "omni", consumer, remote)
+            .await?;
         return Ok(());
     }
 
@@ -2226,6 +2245,8 @@ pub(super) async fn begin_session_as(inner: &Arc<Inner>, voice_agent: bool) -> R
         );
         restore_prepared_windows_ime_session(inner, current_session_id);
         inner.state.lock().phase = SessionPhase::Idle;
+        #[cfg(not(mobile))]
+        super::clear_remote_mic_path(inner, current_session_id);
         return Err(message);
     }
 
@@ -2249,24 +2270,28 @@ pub(super) async fn begin_session_as(inner: &Arc<Inner>, voice_agent: bool) -> R
             restore_prepared_windows_ime_session(inner, current_session_id);
             inner.state.lock().phase = SessionPhase::Idle;
             schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
+            #[cfg(not(mobile))]
+            super::clear_remote_mic_path(inner, current_session_id);
             return Err(message);
         }
     };
 
-    if let Err(message) = ensure_microphone_permission(inner) {
-        log::warn!("[coord] microphone permission gate failed: {message}");
-        emit_capsule(
-            inner,
-            CapsuleState::Error,
-            0.0,
-            0,
-            Some(message.clone()),
-            None,
-        );
-        restore_prepared_windows_ime_session(inner, current_session_id);
-        inner.state.lock().phase = SessionPhase::Idle;
-        schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-        return Err(message);
+    if !remote {
+        if let Err(message) = ensure_microphone_permission(inner) {
+            log::warn!("[coord] microphone permission gate failed: {message}");
+            emit_capsule(
+                inner,
+                CapsuleState::Error,
+                0.0,
+                0,
+                Some(message.clone()),
+                None,
+            );
+            restore_prepared_windows_ime_session(inner, current_session_id);
+            inner.state.lock().phase = SessionPhase::Idle;
+            schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
+            return Err(message);
+        }
     }
 
     // 不在这里 emit Recording capsule —— 让 start_recorder_for_starting 在
@@ -2300,7 +2325,7 @@ pub(super) async fn begin_session_as(inner: &Arc<Inner>, voice_agent: bool) -> R
             AsrCallLabel::new(foundry::PROVIDER_ID, Some(model_alias)),
         );
         let consumer: Arc<dyn crate::recorder::AudioConsumer> = local;
-        start_recorder_and_enter_listening(inner, current_session_id, &active_asr, consumer)
+        start_recorder_and_enter_listening(inner, current_session_id, &active_asr, consumer, remote)
             .await?;
         return Ok(());
     }
@@ -2352,6 +2377,8 @@ pub(super) async fn begin_session_as(inner: &Arc<Inner>, voice_agent: bool) -> R
                 restore_prepared_windows_ime_session(inner, current_session_id);
                 inner.state.lock().phase = SessionPhase::Idle;
                 schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
+                #[cfg(not(mobile))]
+                super::clear_remote_mic_path(inner, current_session_id);
                 return Err(format!("sherpa-onnx init failed: {e}"));
             }
         };
@@ -2362,7 +2389,7 @@ pub(super) async fn begin_session_as(inner: &Arc<Inner>, voice_agent: bool) -> R
             AsrCallLabel::new(sherpa::PROVIDER_ID, Some(model_alias)),
         );
         let consumer: Arc<dyn crate::recorder::AudioConsumer> = local;
-        start_recorder_and_enter_listening(inner, current_session_id, &active_asr, consumer)
+        start_recorder_and_enter_listening(inner, current_session_id, &active_asr, consumer, remote)
             .await?;
         return Ok(());
     }
@@ -2386,6 +2413,8 @@ pub(super) async fn begin_session_as(inner: &Arc<Inner>, voice_agent: bool) -> R
                         restore_prepared_windows_ime_session(inner, current_session_id);
                         inner.state.lock().phase = SessionPhase::Idle;
                         schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
+                        #[cfg(not(mobile))]
+                        super::clear_remote_mic_path(inner, current_session_id);
                         return Err(format!("local ASR init failed: {e}"));
                     }
                 };
@@ -2401,6 +2430,7 @@ pub(super) async fn begin_session_as(inner: &Arc<Inner>, voice_agent: bool) -> R
                     current_session_id,
                     &active_asr,
                     consumer,
+                    remote,
                 )
                 .await?;
             }
@@ -2420,6 +2450,7 @@ pub(super) async fn begin_session_as(inner: &Arc<Inner>, voice_agent: bool) -> R
                     current_session_id,
                     &active_asr,
                     consumer,
+                    remote,
                 )
                 .await?;
             }
@@ -2440,6 +2471,8 @@ pub(super) async fn begin_session_as(inner: &Arc<Inner>, voice_agent: bool) -> R
                         restore_prepared_windows_ime_session(inner, current_session_id);
                         inner.state.lock().phase = SessionPhase::Idle;
                         schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
+                        #[cfg(not(mobile))]
+                        super::clear_remote_mic_path(inner, current_session_id);
                         return Err(format!("local Whisper init failed: {error}"));
                     }
                 };
@@ -2455,6 +2488,7 @@ pub(super) async fn begin_session_as(inner: &Arc<Inner>, voice_agent: bool) -> R
                     current_session_id,
                     &active_asr,
                     consumer,
+                    remote,
                 )
                 .await?;
             }
@@ -2493,7 +2527,8 @@ pub(super) async fn begin_session_as(inner: &Arc<Inner>, voice_agent: bool) -> R
             ActiveAsr::Bailian(Arc::clone(&asr)),
             asr_call_label,
         );
-        start_recorder_for_starting(inner, current_session_id, &active_asr, consumer).await?;
+        start_recorder_for_starting(inner, current_session_id, &active_asr, consumer, remote)
+            .await?;
 
         if let Err(e) = asr.open_session().await {
             log::error!("[coord] open Bailian ASR session failed: {e}");
@@ -2569,7 +2604,8 @@ pub(super) async fn begin_session_as(inner: &Arc<Inner>, voice_agent: bool) -> R
             ActiveAsr::Qwen3Realtime(Arc::clone(&asr)),
             asr_call_label,
         );
-        start_recorder_for_starting(inner, current_session_id, &active_asr, consumer).await?;
+        start_recorder_for_starting(inner, current_session_id, &active_asr, consumer, remote)
+            .await?;
 
         if let Err(e) = asr.open_session().await {
             log::error!("[coord] open Qwen3 realtime ASR session failed: {e}");
@@ -2651,7 +2687,8 @@ pub(super) async fn begin_session_as(inner: &Arc<Inner>, voice_agent: bool) -> R
             ActiveAsr::StepfunRealtime(Arc::clone(&asr)),
             asr_call_label,
         );
-        start_recorder_for_starting(inner, current_session_id, &active_asr, consumer).await?;
+        start_recorder_for_starting(inner, current_session_id, &active_asr, consumer, remote)
+            .await?;
 
         if let Err(e) = asr.open_session().await {
             log::error!("[coord] open StepFun realtime ASR session failed: {e}");
@@ -2729,7 +2766,7 @@ pub(super) async fn begin_session_as(inner: &Arc<Inner>, voice_agent: bool) -> R
             asr_call_label,
         );
         let consumer: Arc<dyn crate::recorder::AudioConsumer> = mimo;
-        start_recorder_and_enter_listening(inner, current_session_id, &active_asr, consumer)
+        start_recorder_and_enter_listening(inner, current_session_id, &active_asr, consumer, remote)
             .await?;
     } else if is_dashscope_multimodal_provider(&effective_asr) {
         let (api_key, base_url, model) = read_dashscope_multimodal_credentials();
@@ -2742,7 +2779,7 @@ pub(super) async fn begin_session_as(inner: &Arc<Inner>, voice_agent: bool) -> R
             asr_call_label,
         );
         let consumer: Arc<dyn crate::recorder::AudioConsumer> = asr;
-        start_recorder_and_enter_listening(inner, current_session_id, &active_asr, consumer)
+        start_recorder_and_enter_listening(inner, current_session_id, &active_asr, consumer, remote)
             .await?;
     } else if is_elevenlabs_provider(&effective_asr) {
         let (api_key, base_url, model) = read_elevenlabs_credentials();
@@ -2755,7 +2792,7 @@ pub(super) async fn begin_session_as(inner: &Arc<Inner>, voice_agent: bool) -> R
             asr_call_label,
         );
         let consumer: Arc<dyn crate::recorder::AudioConsumer> = asr;
-        start_recorder_and_enter_listening(inner, current_session_id, &active_asr, consumer)
+        start_recorder_and_enter_listening(inner, current_session_id, &active_asr, consumer, remote)
             .await?;
     } else if is_whisper_compatible_provider(&effective_asr) {
         let (api_key, base_url, model) = read_whisper_credentials();
@@ -2790,7 +2827,7 @@ pub(super) async fn begin_session_as(inner: &Arc<Inner>, voice_agent: bool) -> R
             asr_call_label,
         );
         let consumer: Arc<dyn crate::recorder::AudioConsumer> = whisper;
-        start_recorder_and_enter_listening(inner, current_session_id, &active_asr, consumer)
+        start_recorder_and_enter_listening(inner, current_session_id, &active_asr, consumer, remote)
             .await?;
     } else if is_xfyun_provider(&effective_asr) {
         // 讯飞 RTASR 实时流式：与 Bailian / 火山同构（open_session → 录音 → end → final）。
@@ -2805,7 +2842,8 @@ pub(super) async fn begin_session_as(inner: &Arc<Inner>, voice_agent: bool) -> R
             ActiveAsr::Xfyun(Arc::clone(&asr)),
             asr_call_label,
         );
-        start_recorder_for_starting(inner, current_session_id, &active_asr, consumer).await?;
+        start_recorder_for_starting(inner, current_session_id, &active_asr, consumer, remote)
+            .await?;
 
         if let Err(e) = asr.open_session().await {
             log::error!("[coord] open iFlytek ASR session failed: {e}");
@@ -2886,7 +2924,8 @@ pub(super) async fn begin_session_as(inner: &Arc<Inner>, voice_agent: bool) -> R
             ActiveAsr::Volcengine(Arc::clone(&asr)),
             asr_call_label,
         );
-        start_recorder_for_starting(inner, current_session_id, &active_asr, consumer).await?;
+        start_recorder_for_starting(inner, current_session_id, &active_asr, consumer, remote)
+            .await?;
 
         if let Err(e) = asr.open_session().await {
             log::error!("[coord] open ASR session failed: {e}");
@@ -2955,12 +2994,99 @@ pub(super) async fn begin_session_as(inner: &Arc<Inner>, voice_agent: bool) -> R
     Ok(())
 }
 
+#[cfg(not(mobile))]
+fn arm_remote_microphone(
+    inner: &Arc<Inner>,
+    session_id: SessionId,
+    active_asr: &str,
+    consumer: Arc<dyn crate::recorder::AudioConsumer>,
+    level_handler: Arc<dyn Fn(f32) + Send + Sync>,
+) -> Result<(), String> {
+    inner
+        .audio_archive_active
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    let fanout = Arc::new(RemoteMicFanout {
+        consumer,
+        level_handler,
+        frames: AtomicUsize::new(0),
+        peak_rms_milli: AtomicUsize::new(0),
+    });
+    if let Some(bridge) = inner.remote_pcm_bridge.lock().clone() {
+        let flushed = bridge.attach(fanout);
+        log::info!(
+            "[coord] remote mic attached (asr={active_asr}, session={session_id}, flushed={flushed} bytes)"
+        );
+    } else {
+        *inner.remote_audio_sink.lock() = Some(fanout);
+        log::info!("[coord] remote mic sink set (asr={active_asr}, session={session_id})");
+    }
+    stop_recorder_if_pending_start_stop(inner);
+    Ok(())
+}
+
+struct RemoteMicFanout {
+    consumer: Arc<dyn crate::recorder::AudioConsumer>,
+    level_handler: Arc<dyn Fn(f32) + Send + Sync>,
+    frames: AtomicUsize,
+    peak_rms_milli: AtomicUsize,
+}
+
+fn pcm_i16_le_rms(pcm: &[u8]) -> f32 {
+    let mut sum = 0.0f32;
+    let mut n = 0u32;
+    for chunk in pcm.chunks_exact(2) {
+        let sample = i16::from_le_bytes([chunk[0], chunk[1]]) as f32 / 32768.0;
+        sum += sample * sample;
+        n += 1;
+    }
+    if n == 0 {
+        return 0.0;
+    }
+    (sum / n as f32).sqrt()
+}
+
+impl RemoteMicFanout {
+    fn consume(&self, pcm: &[u8]) {
+        let rms = pcm_i16_le_rms(pcm);
+        let level = (rms * 4.0).clamp(0.0, 1.0);
+        self.consumer.consume_pcm_chunk(pcm);
+        (self.level_handler)(level);
+        let count = self.frames.fetch_add(1, Ordering::Relaxed) + 1;
+        let milli = (rms * 1000.0) as usize;
+        self.peak_rms_milli.fetch_max(milli, Ordering::Relaxed);
+        if count == 1 || count % 50 == 0 {
+            let peak = self.peak_rms_milli.load(Ordering::Relaxed) as f32 / 1000.0;
+            log::info!(
+                "[coord] remote mic cb#{count} bytes={} rms={:.5} peak={:.5}",
+                pcm.len(),
+                rms,
+                peak
+            );
+        }
+    }
+}
+
+impl crate::recorder::AudioConsumer for RemoteMicFanout {
+    fn consume_pcm_chunk(&self, pcm: &[u8]) {
+        self.consume(pcm);
+    }
+}
+
+impl crate::asr::AudioConsumer for RemoteMicFanout {
+    fn consume_pcm_chunk(&self, pcm: &[u8]) {
+        self.consume(pcm);
+    }
+}
+
 pub(super) async fn start_recorder_for_starting(
     inner: &Arc<Inner>,
     session_id: SessionId,
     active_asr: &str,
     consumer: Arc<dyn crate::recorder::AudioConsumer>,
+    remote: bool,
 ) -> Result<(), String> {
+    #[cfg(mobile)]
+    let _ = remote;
     let inner_for_level = Arc::clone(inner);
     // ── Toggle 模式「说完自动停止」（issue #860）──────────────────────────
     // 仅在开关开启且当前热键模式为 Toggle 时启用；默认关闭，行为与旧版一致。
@@ -3066,6 +3192,11 @@ pub(super) async fn start_recorder_for_starting(
             None,
         );
     });
+
+    #[cfg(not(mobile))]
+    if remote {
+        return arm_remote_microphone(inner, session_id, active_asr, consumer, level_handler);
+    }
 
     let microphone_device_name = selected_microphone_device_name(inner);
     stop_microphone_preview_monitor(inner, "dictation recorder");
@@ -3201,8 +3332,9 @@ pub(super) async fn start_recorder_and_enter_listening(
     session_id: SessionId,
     active_asr: &str,
     consumer: Arc<dyn crate::recorder::AudioConsumer>,
+    remote: bool,
 ) -> Result<(), String> {
-    start_recorder_for_starting(inner, session_id, active_asr, consumer).await?;
+    start_recorder_for_starting(inner, session_id, active_asr, consumer, remote).await?;
     finish_starting_session(inner, session_id).await;
     Ok(())
 }
@@ -3694,6 +3826,8 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         rec.stop();
         release_recording_mute(inner, "dictation");
     }
+    #[cfg(not(mobile))]
+    super::clear_remote_mic_path(inner, current_session_id);
 
     // 多模态（Omni）模式：不走 ASR 转写 + LLM 润色，录音 PCM 直接编码 WAV，
     // 一次调用出最终文本（issue #902）。两套配置隔离，缺 omni 配置时明确报错。
@@ -5339,6 +5473,8 @@ pub(super) fn cancel_session(inner: &Arc<Inner>) -> bool {
 
     stop_recorder_for_session(inner, decision.session_id);
     cancel_asr_for_session(inner, decision.session_id);
+    #[cfg(not(mobile))]
+    super::clear_remote_mic_path(inner, decision.session_id);
     restore_prepared_windows_ime_session(inner, decision.session_id);
     true
 }
@@ -5400,7 +5536,7 @@ mod tests {
         append_typed_prefix, batch_asr_chunk_limit_ms, build_transcribe_failed_session,
         coding_agent_mode_from_pref, default_done_message, drain_streaming_insert_deltas_with,
         eligible_polish_context_turns, finalize_polished_text, flush_streaming_insert_buffer_with,
-        insert_delivery_failed, pcm_duration_ms, pcm_from_wav_bytes,
+        insert_delivery_failed, pcm_duration_ms, pcm_from_wav_bytes, pcm_i16_le_rms,
         resolve_less_computer_run_outcome, resolve_macos_newline_mode, retry_error_outcome,
         should_arm_edit_watch, should_attempt_silent_retry, should_read_cursor_context,
         streaming_insert_eligible, SilentRetryOutcome,
@@ -6272,5 +6408,13 @@ mod tests {
     #[cfg(target_os = "android")]
     fn platform_type_error() -> crate::unicode_keystroke::TypeError {
         crate::unicode_keystroke::TypeError::Unavailable
+    }
+
+    #[test]
+    fn pcm_i16_le_rms_silence_is_zero_and_speech_is_not() {
+        assert_eq!(pcm_i16_le_rms(&[]), 0.0);
+        assert_eq!(pcm_i16_le_rms(&[0, 0, 0, 0]), 0.0);
+        let loud = i16::MAX.to_le_bytes();
+        assert!(pcm_i16_le_rms(&loud) > 0.9);
     }
 }

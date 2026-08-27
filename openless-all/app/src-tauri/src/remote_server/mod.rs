@@ -30,6 +30,8 @@ use tokio_rustls::TlsAcceptor;
 
 use crate::coordinator::Coordinator;
 
+mod lan_addresses;
+
 mod assets {
     pub const INDEX_HTML: &str = include_str!("assets/index.html");
     pub const APP_JS: &str = include_str!("assets/app.js");
@@ -84,6 +86,8 @@ pub struct RemoteServerHandle {
     pub bound_port: u16,
     #[allow(dead_code)]
     pub pin: String,
+    pub urls: Vec<String>,
+    pub urls_stale: bool,
 }
 
 impl RemoteServerHandle {
@@ -101,9 +105,11 @@ impl RemoteServerHandle {
 #[serde(rename_all = "camelCase")]
 pub struct RemoteInputStatus {
     pub running: bool,
+    pub starting: bool,
     pub port: u16,
     pub pin: String,
     pub urls: Vec<String>,
+    pub urls_stale: bool,
 }
 
 // ───────────────────────── 工具函数 ─────────────────────────
@@ -124,11 +130,20 @@ pub fn generate_pin() -> String {
     }
 }
 
+fn app_config_dir(app: &AppHandle) -> Option<std::path::PathBuf> {
+    // Windows 上 Tauri 的 path API 从 async runtime 调会和主线程互相等，卡住
+    // 远程输入启动。标识符固定为 com.openless.app，直接拼 APPDATA 即可。
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            return Some(std::path::PathBuf::from(appdata).join("com.openless.app"));
+        }
+    }
+    app.path().app_config_dir().ok()
+}
+
 fn pin_path(app: &AppHandle) -> Option<std::path::PathBuf> {
-    app.path()
-        .app_config_dir()
-        .ok()
-        .map(|d| d.join("remote-input-pin.txt"))
+    app_config_dir(app).map(|d| d.join("remote-input-pin.txt"))
 }
 
 mod pin_persistence;
@@ -155,36 +170,13 @@ pub fn save_pin(app: &AppHandle, pin: &str) -> std::io::Result<()> {
     pin_persistence::persist_pin_atomically(&path, pin)
 }
 
-fn is_private_lan(ip: &Ipv4Addr) -> bool {
-    let o = ip.octets();
-    !ip.is_loopback()
-        && !ip.is_link_local()
-        && ((o[0] == 192 && o[1] == 168)
-            || o[0] == 10
-            || (o[0] == 172 && (16..=31).contains(&o[1])))
+pub(crate) fn discover_lan_addresses(app: &AppHandle) -> lan_addresses::LanAddressSnapshot {
+    lan_addresses::discover_lan_addresses(app_config_dir(app).as_deref())
 }
 
-/// 本机所有局域网 IPv4（过滤回环 / link-local / 虚拟网卡的非私网段）。
-pub fn local_lan_ipv4s() -> Vec<Ipv4Addr> {
-    let mut out: Vec<Ipv4Addr> = Vec::new();
-    if let Ok(ifaces) = local_ip_address::list_afinet_netifas() {
-        for (_name, ip) in ifaces {
-            if let IpAddr::V4(v4) = ip {
-                if is_private_lan(&v4) {
-                    out.push(v4);
-                }
-            }
-        }
-    }
-    out.sort();
-    out.dedup();
-    out
-}
-
-/// 给前端展示的访问网址列表。
-pub fn access_urls(port: u16) -> Vec<String> {
-    local_lan_ipv4s()
-        .iter()
+/// 给前端展示的访问网址列表。地址必须来自已经完成的快照，避免状态查询再次探测网卡。
+pub fn access_urls(ips: &[Ipv4Addr], port: u16) -> Vec<String> {
+    ips.iter()
         .map(|ip| format!("https://{ip}:{port}"))
         .collect()
 }
@@ -433,13 +425,25 @@ async fn mobileconfig_handler(State(state): State<Arc<WsState>>) -> impl IntoRes
 
 pub async fn start(cfg: RemoteServerConfig) -> Result<RemoteServerHandle, String> {
     let _ = HEADER_HTML; // index 用 axum Html() 自带 content-type
-    let mut sans = vec!["localhost".to_string(), "127.0.0.1".to_string()];
-    for ip in local_lan_ipv4s() {
-        sans.push(ip.to_string());
-    }
-    // 证书目录用 app 配置目录（跨重启稳定）；拿不到则退回内存生成（不持久化）。
-    let cert_dir = cfg.app.path().app_config_dir().ok();
-    let (cert_der, key_der) = load_or_generate_cert(cert_dir.as_deref(), &sans)?;
+    log::info!("[remote-input] starting server on port {}", cfg.port);
+    let app_for_cert = cfg.app.clone();
+    let (cert_der, key_der, lan_snapshot) = tauri::async_runtime::spawn_blocking(move || {
+        let mut sans = vec!["localhost".to_string(), "127.0.0.1".to_string()];
+        let lan_snapshot = discover_lan_addresses(&app_for_cert);
+        log::info!(
+            "[remote-input] lan ips for cert SAN: {:?} (stale={})",
+            lan_snapshot.ips,
+            lan_snapshot.stale
+        );
+        for ip in &lan_snapshot.ips {
+            sans.push(ip.to_string());
+        }
+        let cert_dir = app_config_dir(&app_for_cert);
+        load_or_generate_cert(cert_dir.as_deref(), &sans)
+            .map(|(cert, key)| (cert, key, lan_snapshot))
+    })
+    .await
+    .map_err(|e| format!("cert worker failed: {e}"))??;
     let rustls_config = build_server_config(cert_der.clone(), key_der)?;
     let acceptor = TlsAcceptor::from(rustls_config);
 
@@ -452,6 +456,7 @@ pub async fn start(cfg: RemoteServerConfig) -> Result<RemoteServerHandle, String
         }
     })?;
     let bound_port = listener.local_addr().map(|a| a.port()).unwrap_or(cfg.port);
+    let urls = access_urls(&lan_snapshot.ips, bound_port);
 
     let (conn_shutdown_tx, conn_shutdown_rx) = tokio::sync::watch::channel(false);
     let state = Arc::new(WsState {
@@ -512,6 +517,8 @@ pub async fn start(cfg: RemoteServerConfig) -> Result<RemoteServerHandle, String
         join,
         bound_port,
         pin: cfg.pin,
+        urls,
+        urls_stale: lan_snapshot.stale,
     })
 }
 
