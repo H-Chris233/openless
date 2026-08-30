@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process"
 import { readFileSync, writeFileSync } from "node:fs"
 import { dirname, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -14,16 +15,23 @@ if (!dependency.test(cargo)) {
 
 writeFileSync(cargoPath, cargo.replace(dependency, ""))
 const lock = readFileSync(lockPath, "utf8")
-const openlessStart = lock.indexOf('name = "openless"')
-const nextPackage = lock.indexOf("\n[[package]]", openlessStart + 1)
-if (openlessStart < 0 || nextPackage < 0) {
-    throw new Error(`未找到 openless Cargo.lock package block：${lockPath}`)
-}
-const openlessBlock = lock.slice(openlessStart, nextPackage)
-const lockDependency = /^([ \t]*)"qwen3-asr-rs",\r?\n/m
-if (!lockDependency.test(openlessBlock)) {
+if (!lock.includes('name = "qwen3-asr-rs"')) {
     throw new Error(`openless Cargo.lock package 未包含 qwen3-asr-rs：${lockPath}`)
 }
-const updatedBlock = openlessBlock.replace(lockDependency, "")
-writeFileSync(lockPath, lock.slice(0, openlessStart) + updatedBlock + lock.slice(nextPackage))
+
+const cargoResult = spawnSync("cargo", ["generate-lockfile", "--manifest-path", cargoPath], {
+    cwd: appRoot,
+    stdio: "inherit",
+})
+if (cargoResult.error) {
+    throw cargoResult.error
+}
+if (cargoResult.status !== 0) {
+    throw new Error(`cargo generate-lockfile 失败，退出码：${cargoResult.status}`)
+}
+
+const regeneratedLock = readFileSync(lockPath, "utf8")
+if (regeneratedLock.includes('name = "qwen3-asr-rs"')) {
+    throw new Error(`cargo generate-lockfile 后仍包含 qwen3-asr-rs：${lockPath}`)
+}
 console.log("[ci] disabled macOS-only qwen3-asr-rs dependency for this target")

@@ -195,6 +195,7 @@ jobs:
             libwayland-dev \
             libx11-dev \
             libxkbcommon-dev \
+            ripgrep \
             pkg-config
 
       - name: Test and lint shared backend
