@@ -31,6 +31,8 @@ use anyhow::{Context, Result};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
+pub use openless_core::{ChannelKind, ChannelSummary, ChannelTestSummary};
+
 // `anyhow!` is only invoked from the keyring (non-Android) code paths; gating the
 // import keeps the Android build free of an unused-import warning.
 #[cfg(not(target_os = "android"))]
@@ -86,13 +88,13 @@ fn android_marketplace_legacy_scrubbed() -> &'static Mutex<bool> {
 /// Process-wide credentials cache.
 ///
 /// Without this cache every `CredentialsVault::get_*` / `snapshot` call hits
-/// `load_credentials()` → `load_keyring_credentials()` and reads the OS
-/// credential store again. On macOS each distinct Keychain entry has its own
-/// ACL, so an ad-hoc-signed binary (or any binary whose ACL grants have not
-/// been set up yet) prompts on every entry read. macOS now stores the payload
-/// in one entry; older installs are migrated from the former manifest + chunk
-/// layout after their first successful read. Other platforms retain chunking
-/// for Windows Credential Manager's small per-entry limit.
+/// `load_credentials()` → `load_keyring_credentials()` which reads the
+/// manifest entry plus every chunk entry from the OS keyring. On macOS each
+/// distinct keychain entry has its own ACL — so an ad-hoc-signed binary (or
+/// any binary whose ACL grants haven't been set up yet) prompts on every read
+/// of every entry. A single dictation cycle reads credentials 5–10 times,
+/// times (1 manifest + N chunks) entries → tens of "OpenLess wants to use
+/// the keychain" prompts per recording.
 ///
 /// With this cache the first read populates `Some(CredsRoot)` and every
 /// subsequent read in the same process is silent. `save_credentials` keeps
@@ -617,12 +619,16 @@ fn active_llm_extra_headers(root: &CredsRoot) -> HashMap<String, String> {
         .unwrap_or_default()
 }
 
-fn active_omni_extra_headers(root: &CredsRoot) -> HashMap<String, String> {
+fn omni_extra_headers(root: &CredsRoot, provider_id: &str) -> HashMap<String, String> {
     root.omni
         .providers
-        .get(&root.omni.active)
+        .get(provider_id)
         .and_then(|entry| entry.extraHeaders.clone())
         .unwrap_or_default()
+}
+
+fn active_omni_extra_headers(root: &CredsRoot) -> HashMap<String, String> {
+    omni_extra_headers(root, &root.omni.active)
 }
 
 fn is_valid_llm_temperature(temperature: f64) -> bool {
@@ -645,6 +651,30 @@ fn active_llm_temperature_string(root: &CredsRoot) -> Option<String> {
     active_llm_temperature_value(root).map(|temperature| temperature.to_string())
 }
 
+fn set_llm_temperature_for_provider_in_root(
+    root: &mut CredsRoot,
+    provider_id: &str,
+    temperature: Option<f64>,
+) {
+    root.providers
+        .llm
+        .entry(provider_id.to_string())
+        .or_default()
+        .temperature = temperature;
+}
+
+fn set_llm_extra_headers_for_provider_in_root(
+    root: &mut CredsRoot,
+    provider_id: &str,
+    headers: HashMap<String, String>,
+) {
+    root.providers
+        .llm
+        .entry(provider_id.to_string())
+        .or_default()
+        .extraHeaders = (!headers.is_empty()).then_some(headers);
+}
+
 fn active_llm_extra_headers_json(root: &CredsRoot) -> Result<Option<String>> {
     let headers = active_llm_extra_headers(root);
     if headers.is_empty() {
@@ -656,8 +686,8 @@ fn active_llm_extra_headers_json(root: &CredsRoot) -> Result<Option<String>> {
         .context("encode LLM extra headers")
 }
 
-fn active_omni_extra_headers_json(root: &CredsRoot) -> Result<Option<String>> {
-    let headers = active_omni_extra_headers(root);
+fn omni_extra_headers_json(root: &CredsRoot, provider_id: &str) -> Result<Option<String>> {
+    let headers = omni_extra_headers(root, provider_id);
     if headers.is_empty() {
         return Ok(None);
     }
@@ -667,12 +697,20 @@ fn active_omni_extra_headers_json(root: &CredsRoot) -> Result<Option<String>> {
         .context("encode omni extra headers")
 }
 
-fn active_omni_temperature_value(root: &CredsRoot) -> Option<f64> {
+fn active_omni_extra_headers_json(root: &CredsRoot) -> Result<Option<String>> {
+    omni_extra_headers_json(root, &root.omni.active)
+}
+
+fn omni_temperature_value(root: &CredsRoot, provider_id: &str) -> Option<f64> {
     root.omni
         .providers
-        .get(&root.omni.active)
+        .get(provider_id)
         .and_then(|entry| entry.temperature)
         .filter(|temperature| is_valid_llm_temperature(*temperature))
+}
+
+fn active_omni_temperature_value(root: &CredsRoot) -> Option<f64> {
+    omni_temperature_value(root, &root.omni.active)
 }
 
 fn active_omni_temperature(root: &CredsRoot) -> Option<f32> {
@@ -681,6 +719,10 @@ fn active_omni_temperature(root: &CredsRoot) -> Option<f32> {
 
 fn active_omni_temperature_string(root: &CredsRoot) -> Option<String> {
     active_omni_temperature_value(root).map(|temperature| temperature.to_string())
+}
+
+fn omni_temperature_string(root: &CredsRoot, provider_id: &str) -> Option<String> {
+    omni_temperature_value(root, provider_id).map(|temperature| temperature.to_string())
 }
 
 fn parse_extra_headers_json(value: &str) -> Result<HashMap<String, String>> {
@@ -1135,31 +1177,6 @@ fn read_chunk_manifest(json: &str) -> Option<CredsChunkManifest> {
     }
 }
 
-enum KeyringPayload {
-    Direct(CredsRoot),
-    Chunked(CredsChunkManifest),
-}
-
-/// Decode the first Keychain/keyring entry without accidentally accepting a
-/// malformed chunk manifest as an empty `CredsRoot` (all root fields have
-/// serde defaults for backwards compatibility).
-fn decode_keyring_payload(json: &str) -> Result<KeyringPayload> {
-    let value: serde_json::Value =
-        serde_json::from_str(json).context("decode system credential vault payload")?;
-    if value.get("openless_credentials_storage").is_some() {
-        let manifest: CredsChunkManifest =
-            serde_json::from_value(value).context("decode system credential vault manifest")?;
-        if manifest.openless_credentials_storage != "chunked" || manifest.version != 1 {
-            anyhow::bail!("invalid system credential vault manifest");
-        }
-        return Ok(KeyringPayload::Chunked(manifest));
-    }
-
-    serde_json::from_value::<CredsRoot>(value)
-        .map(KeyringPayload::Direct)
-        .context("decode system credential vault payload")
-}
-
 /// Windows Credential Manager (`CredReadW`) can transiently fail right after
 /// login / under contention when we read the manifest entry plus every chunk
 /// entry in quick succession. A single failed read makes the whole credential
@@ -1237,10 +1254,8 @@ fn load_keyring_credentials() -> Result<Option<CredsRoot>> {
         return Ok(None);
     };
 
-    let manifest = match decode_keyring_payload(&json_or_manifest)? {
-        KeyringPayload::Direct(root) => return Ok(Some(root)),
-        KeyringPayload::Chunked(manifest) => manifest,
-    };
+    let manifest = read_chunk_manifest(&json_or_manifest)
+        .ok_or_else(|| anyhow!("invalid system credential vault manifest"))?;
     let mut json = String::new();
     for index in 0..manifest.chunks {
         let account = chunk_account(manifest.generation.as_deref(), index);
@@ -1249,38 +1264,9 @@ fn load_keyring_credentials() -> Result<Option<CredsRoot>> {
         json.push_str(&chunk);
     }
 
-    let root = serde_json::from_str::<CredsRoot>(&json)
-        .context("decode system credential vault payload")?;
-
-    // macOS Keychain authorizes each generic-password item separately. The old
-    // manifest + one chunk layout therefore produced exactly two authorization
-    // dialogs on every ad-hoc dev rebuild. Once both legacy entries have been
-    // read successfully, collapse them into the single direct payload used by
-    // current macOS builds. Write the self-contained item before deleting any
-    // chunks, so an interrupted migration cannot lose credentials.
-    #[cfg(target_os = "macos")]
-    match keyring_entry().and_then(|entry| {
-        entry
-            .set_password(&json)
-            .context("migrate macOS credential vault to single entry")
-    }) {
-        Ok(()) => {
-            for index in 0..manifest.chunks {
-                delete_keyring_password(&chunk_account(manifest.generation.as_deref(), index));
-            }
-            log::info!(
-                "[vault] migrated macOS credentials from manifest + {} chunk(s) to one Keychain entry",
-                manifest.chunks
-            );
-        }
-        Err(error) => {
-            // Reading succeeded, so keep serving the in-memory root. Migration
-            // is an optimization and will be retried next launch.
-            log::warn!("[vault] macOS single-entry migration failed: {error}");
-        }
-    }
-
-    Ok(Some(root))
+    serde_json::from_str::<CredsRoot>(&json)
+        .map(Some)
+        .context("decode system credential vault payload")
 }
 
 #[cfg(not(target_os = "android"))]
@@ -1512,77 +1498,54 @@ fn save_credentials(root: &CredsRoot) -> Result<()> {
             .ok()
             .flatten()
             .and_then(|value| read_chunk_manifest(&value));
+        let chunks = chunk_json_payload(&json);
 
-        // A macOS Keychain ACL belongs to one item. Keep the entire payload in
-        // that one item so a newly rebuilt ad-hoc development binary needs at
-        // most one authorization, not one for the manifest plus one per chunk.
-        // Keychain does not have Windows Credential Manager's 2560-byte blob
-        // limit, so platform-specific direct storage is safe here.
-        #[cfg(target_os = "macos")]
-        {
-            keyring_entry()?
-                .set_password(&json)
-                .context("write macOS credential vault")?;
-            if let Some(previous) = previous_manifest {
-                for index in 0..previous.chunks {
-                    delete_keyring_password(&chunk_account(previous.generation.as_deref(), index));
-                }
-            }
-            remove_legacy_credentials_file_best_effort();
-            store_credentials_cache(&cleaned);
-            return Ok(());
+        // 先写所有 chunks（稳定名），再写 manifest —— 保证 partial-write 不会让
+        // manifest 指向不完整 chunks。stable name 让 macOS Keychain ACL 一次允许后
+        // 长期有效，不再因 UUID 轮换反复弹窗（这是 PR #277 早期 UUID-rotation
+        // 设计的回退）。
+        for (index, chunk) in chunks.iter().enumerate() {
+            let account = chunk_account(None, index);
+            keyring_entry_for(&account)?
+                .set_password(chunk)
+                .with_context(|| format!("write system credential vault chunk {index}"))?;
         }
 
-        #[cfg(not(target_os = "macos"))]
-        {
-            let chunks = chunk_json_payload(&json);
+        let manifest = CredsChunkManifest {
+            openless_credentials_storage: "chunked".to_string(),
+            version: 1,
+            generation: None,
+            chunks: chunks.len(),
+        };
+        let manifest_json =
+            serde_json::to_string(&manifest).context("encode credential manifest failed")?;
+        keyring_entry()?
+            .set_password(&manifest_json)
+            .context("write system credential vault manifest")?;
 
-            // 先写所有 chunks（稳定名），再写 manifest —— 保证 partial-write 不会让
-            // manifest 指向不完整 chunks。稳定名也避免早期 PR #277 的
-            // UUID rotation 让系统凭据条目不断增长。
-            for (index, chunk) in chunks.iter().enumerate() {
-                let account = chunk_account(None, index);
-                keyring_entry_for(&account)?
-                    .set_password(chunk)
-                    .with_context(|| format!("write system credential vault chunk {index}"))?;
-            }
-
-            let manifest = CredsChunkManifest {
-                openless_credentials_storage: "chunked".to_string(),
-                version: 1,
-                generation: None,
-                chunks: chunks.len(),
-            };
-            let manifest_json =
-                serde_json::to_string(&manifest).context("encode credential manifest failed")?;
-            keyring_entry()?
-                .set_password(&manifest_json)
-                .context("write system credential vault manifest")?;
-
-            // 清理旧 chunks：
-            // 1) 旧 manifest 用 UUID generation → 那一代 chunks 全删（迁移到 stable name）
-            // 2) 旧 manifest 也是 stable name，但 chunks 数量比这次多 → 删多余的 idx
-            if let Some(previous) = previous_manifest {
-                match previous.generation.as_deref() {
-                    Some(prev_gen) => {
-                        for index in 0..previous.chunks {
-                            delete_keyring_password(&chunk_account(Some(prev_gen), index));
-                        }
+        // 清理旧 chunks：
+        // 1) 旧 manifest 用 UUID generation → 那一代 chunks 全删（迁移到 stable name）
+        // 2) 旧 manifest 也是 stable name，但 chunks 数量比这次多 → 删多余的 idx
+        if let Some(previous) = previous_manifest {
+            match previous.generation.as_deref() {
+                Some(prev_gen) => {
+                    for index in 0..previous.chunks {
+                        delete_keyring_password(&chunk_account(Some(prev_gen), index));
                     }
-                    None => {
-                        for index in chunks.len()..previous.chunks {
-                            delete_keyring_password(&chunk_account(None, index));
-                        }
+                }
+                None => {
+                    for index in chunks.len()..previous.chunks {
+                        delete_keyring_password(&chunk_account(None, index));
                     }
                 }
             }
-
-            remove_legacy_credentials_file_best_effort();
-            // 写完成功后立刻刷新 process cache —— 同进程后续读不再回 Keychain。
-            // 见 CREDENTIALS_CACHE 的 doc。
-            store_credentials_cache(&cleaned);
-            Ok(())
         }
+
+        remove_legacy_credentials_file_best_effort();
+        // 写完成功后立刻刷新 process cache —— 同进程后续读不再回 Keychain。
+        // 见 CREDENTIALS_CACHE 的 doc。
+        store_credentials_cache(&cleaned);
+        Ok(())
     }
 }
 
@@ -1613,6 +1576,39 @@ fn lookup_account(root: &CredsRoot, account: CredentialAccount) -> Option<String
         CredentialAccount::OmniEndpoint => omni.and_then(|e| pick(&e.baseURL)),
         CredentialAccount::OmniModel => omni.and_then(|e| pick(&e.model)),
     }
+}
+
+fn lookup_omni_account(
+    root: &CredsRoot,
+    provider_id: &str,
+    account: CredentialAccount,
+) -> Result<Option<String>> {
+    let entry = root.omni.providers.get(provider_id);
+    let pick = |value: &Option<String>| value.as_ref().filter(|v| !v.is_empty()).cloned();
+    let value = match account {
+        CredentialAccount::OmniApiKey => entry.and_then(|entry| pick(&entry.apiKey)),
+        CredentialAccount::OmniEndpoint => entry.and_then(|entry| pick(&entry.baseURL)),
+        CredentialAccount::OmniModel => entry.and_then(|entry| pick(&entry.model)),
+        _ => anyhow::bail!("credential account is not Omni-scoped"),
+    };
+    Ok(value)
+}
+
+fn write_omni_account(
+    root: &mut CredsRoot,
+    provider_id: &str,
+    account: CredentialAccount,
+    value: Option<String>,
+) -> Result<()> {
+    let entry = root.omni.providers.entry(provider_id.to_string()).or_default();
+    let normalized = value.and_then(|value| (!value.is_empty()).then_some(value));
+    match account {
+        CredentialAccount::OmniApiKey => entry.apiKey = normalized,
+        CredentialAccount::OmniEndpoint => entry.baseURL = normalized,
+        CredentialAccount::OmniModel => entry.model = normalized,
+        _ => anyhow::bail!("credential account is not Omni-scoped"),
+    }
+    Ok(())
 }
 
 fn write_account(root: &mut CredsRoot, account: CredentialAccount, value: Option<String>) {
@@ -1800,46 +1796,6 @@ pub struct CredentialsSnapshot {
     pub omni_api_key: Option<String>,
     pub omni_endpoint: Option<String>,
     pub omni_model: Option<String>,
-}
-
-/// 渠道所属的功能面。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ChannelKind {
-    Asr,
-    Llm,
-}
-
-impl ChannelKind {
-    pub fn parse(value: &str) -> Result<Self> {
-        match value {
-            "asr" => Ok(ChannelKind::Asr),
-            "llm" => Ok(ChannelKind::Llm),
-            other => anyhow::bail!("unknown channel kind: {other}"),
-        }
-    }
-}
-
-/// 一张渠道卡片对前端的投影。凭据本身不在这里 —— 前端按 id 走
-/// `read_credential(account, provider = id)` 单独取，避免密钥随列表批量出栈。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ChannelSummary {
-    pub id: String,
-    /// 用户取的名字；空字符串表示未命名，由前端回落到 preset 显示名。
-    pub name: String,
-    pub provider_type: String,
-    pub enabled: bool,
-    pub order: u32,
-    pub last_test: Option<ChannelTestSummary>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ChannelTestSummary {
-    pub ok: bool,
-    pub latency_ms: Option<u32>,
-    pub at: i64,
-    pub error: Option<String>,
 }
 
 impl From<&ChannelTest> for ChannelTestSummary {
@@ -2502,6 +2458,30 @@ impl CredentialsVault {
         save_credentials(&root)
     }
 
+    pub fn get_for_omni_provider(
+        id: &str,
+        account: CredentialAccount,
+    ) -> Result<Option<String>> {
+        let _guard = credentials_lock().lock();
+        lookup_omni_account(&load_credentials(), id, account)
+    }
+
+    pub fn set_for_omni_provider(
+        id: &str,
+        account: CredentialAccount,
+        value: &str,
+    ) -> Result<()> {
+        let _guard = credentials_lock().lock();
+        let mut root = load_credentials_for_update()?;
+        write_omni_account(
+            &mut root,
+            id,
+            account,
+            (!value.is_empty()).then(|| value.to_string()),
+        )?;
+        save_credentials(&root)
+    }
+
     pub fn get_active_omni_extra_headers() -> HashMap<String, String> {
         let _guard = credentials_lock().lock();
         active_omni_extra_headers(&load_credentials())
@@ -2510,6 +2490,11 @@ impl CredentialsVault {
     pub fn get_active_omni_extra_headers_json() -> Result<Option<String>> {
         let _guard = credentials_lock().lock();
         active_omni_extra_headers_json(&load_credentials())
+    }
+
+    pub fn get_omni_extra_headers_json_for_provider(id: &str) -> Result<Option<String>> {
+        let _guard = credentials_lock().lock();
+        omni_extra_headers_json(&load_credentials(), id)
     }
 
     pub fn get_active_omni_temperature() -> Option<f32> {
@@ -2522,6 +2507,11 @@ impl CredentialsVault {
         active_omni_temperature_string(&load_credentials())
     }
 
+    pub fn get_omni_temperature_string_for_provider(id: &str) -> Option<String> {
+        let _guard = credentials_lock().lock();
+        omni_temperature_string(&load_credentials(), id)
+    }
+
     pub fn set_active_omni_temperature(value: &str) -> Result<()> {
         let _guard = credentials_lock().lock();
         let temperature = parse_llm_temperature(value)?;
@@ -2532,6 +2522,18 @@ impl CredentialsVault {
             .entry(root.omni.active.clone())
             .or_default();
         entry.temperature = temperature;
+        save_credentials(&root)
+    }
+
+    pub fn set_omni_temperature_for_provider(id: &str, value: &str) -> Result<()> {
+        let _guard = credentials_lock().lock();
+        let temperature = parse_llm_temperature(value)?;
+        let mut root = load_credentials_for_update()?;
+        root.omni
+            .providers
+            .entry(id.to_string())
+            .or_default()
+            .temperature = temperature;
         save_credentials(&root)
     }
 
@@ -2549,6 +2551,18 @@ impl CredentialsVault {
         } else {
             Some(headers)
         };
+        save_credentials(&root)
+    }
+
+    pub fn set_omni_extra_headers_json_for_provider(id: &str, value: &str) -> Result<()> {
+        let _guard = credentials_lock().lock();
+        let headers = parse_extra_headers_json(value)?;
+        let mut root = load_credentials_for_update()?;
+        root.omni
+            .providers
+            .entry(id.to_string())
+            .or_default()
+            .extraHeaders = (!headers.is_empty()).then_some(headers);
         save_credentials(&root)
     }
 
@@ -2585,6 +2599,15 @@ impl CredentialsVault {
         save_credentials(&root)
     }
 
+    /// 写入指定 LLM 渠道的采样温度，不改变 active 渠道。
+    pub fn set_llm_temperature_for_provider(id: &str, value: &str) -> Result<()> {
+        let _guard = credentials_lock().lock();
+        let temperature = parse_llm_temperature(value)?;
+        let mut root = load_credentials_for_update()?;
+        set_llm_temperature_for_provider_in_root(&mut root, id, temperature);
+        save_credentials(&root)
+    }
+
     pub fn set_active_llm_extra_headers_json(value: &str) -> Result<()> {
         let _guard = credentials_lock().lock();
         let headers = parse_extra_headers_json(value)?;
@@ -2599,6 +2622,15 @@ impl CredentialsVault {
         } else {
             Some(headers)
         };
+        save_credentials(&root)
+    }
+
+    /// 写入指定 LLM 渠道的额外请求头，不改变 active 渠道。
+    pub fn set_llm_extra_headers_json_for_provider(id: &str, value: &str) -> Result<()> {
+        let _guard = credentials_lock().lock();
+        let headers = parse_extra_headers_json(value)?;
+        let mut root = load_credentials_for_update()?;
+        set_llm_extra_headers_for_provider_in_root(&mut root, id, headers);
         save_credentials(&root)
     }
 
@@ -2633,13 +2665,15 @@ mod tests {
     use super::load_android_credentials_from_source_with_crypto;
     use super::{
         android_persistable_credentials, chunk_json_payload, credentials_cache,
-        decode_keyring_payload, get_android_marketplace_token_at,
-        load_android_credentials_from_path, load_android_credentials_from_path_with_crypto,
-        load_android_credentials_into_cache_with, lookup_account, lookup_marketplace_github_token,
-        parse_extra_headers_json, parse_llm_temperature, reset_credentials_cache_for_tests,
-        write_account, write_marketplace_github_token, CredentialAccount, CredsAsrEntry,
-        CredsLlmEntry, CredsRoot, KeyringPayload, MarketplaceGithubToken,
-        KEYRING_CHUNK_MAX_UTF16_UNITS,
+        get_android_marketplace_token_at, load_android_credentials_from_path,
+        load_android_credentials_from_path_with_crypto, load_android_credentials_into_cache_with,
+        lookup_account, lookup_marketplace_github_token, lookup_omni_account,
+        omni_extra_headers_json, omni_temperature_string, parse_extra_headers_json,
+        parse_llm_temperature, reset_credentials_cache_for_tests,
+        set_llm_extra_headers_for_provider_in_root, set_llm_temperature_for_provider_in_root,
+        write_account,
+        write_marketplace_github_token, write_omni_account, CredentialAccount, CredsAsrEntry,
+        CredsLlmEntry, CredsRoot, MarketplaceGithubToken, KEYRING_CHUNK_MAX_UTF16_UNITS,
     };
     use anyhow::anyhow;
     use parking_lot::Mutex;
@@ -2659,38 +2693,6 @@ mod tests {
         assert!(chunks
             .iter()
             .all(|chunk| chunk.encode_utf16().count() <= KEYRING_CHUNK_MAX_UTF16_UNITS));
-    }
-
-    #[test]
-    fn keyring_payload_accepts_single_entry_credentials() {
-        let json = r#"{"version":1,"active":{"asr":"single-asr","llm":"single-llm"}}"#;
-        let decoded = decode_keyring_payload(json).expect("direct payload should decode");
-        let KeyringPayload::Direct(root) = decoded else {
-            panic!("direct credentials were mistaken for a chunk manifest");
-        };
-        assert_eq!(root.active.asr, "single-asr");
-        assert_eq!(root.active.llm, "single-llm");
-    }
-
-    #[test]
-    fn keyring_payload_keeps_legacy_chunk_manifest_compatible() {
-        let json = r#"{"openless_credentials_storage":"chunked","version":1,"chunks":2}"#;
-        let decoded = decode_keyring_payload(json).expect("chunk manifest should decode");
-        let KeyringPayload::Chunked(manifest) = decoded else {
-            panic!("chunk manifest was mistaken for direct credentials");
-        };
-        assert_eq!(manifest.chunks, 2);
-        assert!(manifest.generation.is_none());
-    }
-
-    #[test]
-    fn keyring_payload_rejects_unknown_manifest_versions() {
-        let json = r#"{"openless_credentials_storage":"chunked","version":99,"chunks":1}"#;
-        let error = decode_keyring_payload(json)
-            .err()
-            .expect("unknown manifest version must not become empty credentials")
-            .to_string();
-        assert!(error.contains("invalid system credential vault manifest"));
     }
 
     #[test]
@@ -2734,6 +2736,59 @@ mod tests {
         assert_eq!(
             lookup_account(&root, CredentialAccount::OmniModel).as_deref(),
             Some("gpt-4o-audio-preview")
+        );
+
+        // 显式 provider id 的运行时读取不得依赖或改写 active provider。
+        write_omni_account(
+            &mut root,
+            "custom",
+            CredentialAccount::OmniApiKey,
+            Some("custom-key".into()),
+        )
+        .unwrap();
+        write_omni_account(
+            &mut root,
+            "custom",
+            CredentialAccount::OmniEndpoint,
+            Some("https://custom.example.com/v1".into()),
+        )
+        .unwrap();
+        write_omni_account(
+            &mut root,
+            "custom",
+            CredentialAccount::OmniModel,
+            Some("custom-model".into()),
+        )
+        .unwrap();
+        let custom = root.omni.providers.get_mut("custom").unwrap();
+        custom.temperature = Some(0.4);
+        custom.extraHeaders = Some(HashMap::from([("x-tenant".into(), "custom".into())]));
+
+        assert_eq!(root.omni.active, "openai");
+        assert_eq!(
+            lookup_omni_account(&root, "custom", CredentialAccount::OmniApiKey)
+                .unwrap()
+                .as_deref(),
+            Some("custom-key")
+        );
+        assert_eq!(
+            lookup_omni_account(&root, "custom", CredentialAccount::OmniEndpoint)
+                .unwrap()
+                .as_deref(),
+            Some("https://custom.example.com/v1")
+        );
+        assert_eq!(
+            lookup_omni_account(&root, "custom", CredentialAccount::OmniModel)
+                .unwrap()
+                .as_deref(),
+            Some("custom-model")
+        );
+        assert_eq!(omni_temperature_string(&root, "custom").as_deref(), Some("0.4"));
+        assert_eq!(
+            omni_extra_headers_json(&root, "custom")
+                .unwrap()
+                .as_deref(),
+            Some(r#"{"x-tenant":"custom"}"#)
         );
     }
 
@@ -3072,6 +3127,33 @@ mod tests {
     }
 
     #[test]
+    fn llm_extra_headers_and_temperature_writes_stay_on_the_explicit_channel() {
+        let mut root = CredsRoot::default();
+        root.active.llm = "channel-a".to_string();
+        root.providers
+            .llm
+            .insert("channel-a".to_string(), CredsLlmEntry::default());
+        set_llm_temperature_for_provider_in_root(&mut root, "channel-b", Some(0.7));
+        set_llm_extra_headers_for_provider_in_root(
+            &mut root,
+            "channel-b",
+            HashMap::from([(String::from("x-tenant"), String::from("b"))]),
+        );
+
+        assert_eq!(root.active.llm, "channel-a");
+        assert_eq!(
+            root.providers.llm["channel-b"].temperature,
+            Some(0.7)
+        );
+        assert_eq!(
+            root.providers.llm["channel-b"].extraHeaders,
+            Some(HashMap::from([(String::from("x-tenant"), String::from("b"))]))
+        );
+        assert!(root.providers.llm["channel-a"].temperature.is_none());
+        assert!(root.providers.llm["channel-a"].extraHeaders.is_none());
+    }
+
+    #[test]
     fn active_llm_temperature_ignores_invalid_persisted_values() {
         for temperature in [-0.1, 2.5] {
             let mut root = CredsRoot::default();
@@ -3261,11 +3343,21 @@ mod tests {
 
         // 迁移只写 providerType / order，凭据一个字节都不动。
         assert_eq!(
-            root.providers.asr.get("volcengine").unwrap().appKey.as_deref(),
+            root.providers
+                .asr
+                .get("volcengine")
+                .unwrap()
+                .appKey
+                .as_deref(),
             Some("vk")
         );
         assert_eq!(
-            root.providers.asr.get("volcengine").unwrap().accessKey.as_deref(),
+            root.providers
+                .asr
+                .get("volcengine")
+                .unwrap()
+                .accessKey
+                .as_deref(),
             Some("ak")
         );
         assert_eq!(

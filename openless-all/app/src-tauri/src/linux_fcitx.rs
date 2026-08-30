@@ -25,9 +25,15 @@ pub fn commit_text(text: &str) -> Result<(), String> {
     let msg = dbus::Message::new_method_call(DEST, PATH, IFACE, "CommitText")
         .map_err(|e| format!("build msg: {e}"))?
         .append1(text);
-    conn.send_with_reply_and_block(msg, TIMEOUT)
+    let reply = conn
+        .send_with_reply_and_block(msg, TIMEOUT)
         .map_err(|e| format!("CommitText: {e}"))?;
-    Ok(())
+    let committed = reply
+        .read1::<bool>()
+        .map_err(|e| format!("CommitText reply: {e}"))?;
+    committed
+        .then_some(())
+        .ok_or_else(|| "CommitText: no focused input context".to_string())
 }
 
 /// 通过 fcitx5 插件设置听写触发快捷键。
@@ -584,8 +590,12 @@ fn appimage_resource_paths(
     resource_dir: &std::path::Path,
 ) -> (std::path::PathBuf, std::path::PathBuf) {
     (
-        resource_dir.join(APPIMAGE_PLUGIN_SUBDIR).join("libopenless.so"),
-        resource_dir.join(APPIMAGE_PLUGIN_SUBDIR).join("openless.conf"),
+        resource_dir
+            .join(APPIMAGE_PLUGIN_SUBDIR)
+            .join("libopenless.so"),
+        resource_dir
+            .join(APPIMAGE_PLUGIN_SUBDIR)
+            .join("openless.conf"),
     )
 }
 

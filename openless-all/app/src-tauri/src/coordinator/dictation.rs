@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use crate::coordinator_state::{
@@ -58,317 +58,46 @@ fn desktop_keyless_dictation_provider(active_asr: &str) -> Option<DesktopKeyless
     None
 }
 
-/// Less Computer 浮窗的 Tauri 事件名（前端 LessComputerPanel 订阅）。
-const LESS_COMPUTER_EVENT: &str = "less-computer:event";
-
-/// Less Computer 内联审批：等待用户决断的 token → oneshot sender 注册表。
-///
-/// 无头 `claude -p` 没有 mid-run 的 `--permission-prompt-tool` 通道（v2.1.165 不支持），
-/// 所以护栏拦截发生在「整轮跑完、护栏 deny 生效」之后。这个注册表是审批 UI 的实回路：
-/// 后端发 `approval` 事件后把一个 oneshot 接收端挂在这里，等前端 `less_computer_approve`
-/// 命令按 token 解析出用户决断（true=Approve / false=Deny）。
-static LESS_COMPUTER_APPROVALS: std::sync::OnceLock<
-    std::sync::Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<bool>>>,
-> = std::sync::OnceLock::new();
-
-fn less_computer_approvals(
-) -> &'static std::sync::Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<bool>>>
-{
-    LESS_COMPUTER_APPROVALS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+/// 由 Core 事件总线提供的 Less Computer replay，用于 Tauri 冷启动同步和实时流去重。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LessComputerEventReplay {
+    pub(crate) events: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) oldest_sequence: Option<u64>,
+    pub(crate) latest_sequence: u64,
+    pub(crate) truncated: bool,
 }
 
-/// 前端 `less_computer_approve` 命令调到这里：按 token 解析等待中的审批。
-/// token 不存在（已超时 / 已解析）时静默忽略。
-pub(super) fn resolve_less_computer_approval(token: &str, approved: bool) {
-    let sender = less_computer_approvals()
-        .lock()
-        .ok()
-        .and_then(|mut m| m.remove(token));
-    if let Some(tx) = sender {
-        let _ = tx.send(approved);
-        log::info!("[less-computer] 审批已解析 approved={approved}");
-    } else {
-        log::info!("[less-computer] 审批请求已失效（超时/重复）");
-    }
-}
-
-/// Less Computer 事件缓冲：浮窗首次创建时 webview 冷加载需要数百毫秒，此时后端
-/// emit 的事件（尤其第一条 `user` —— 用户说出的那句话）会先于前端 listener 注册
-/// 被丢弃，表现为「AI 在干活、但面板上没有我说的话」。这里按单调 seq 缓存当前
-/// 会话的全部事件，前端 mount 后调 `less_computer_sync` 全量重放，实时流按 seq
-/// 去重衔接。fresh=true 的 user 事件 = 新会话，清空重来（seq 不回卷，去重不混淆）。
-/// 容量上限防极端长会话无界增长（超限丢最旧 —— 重放的意义在冷启动窗口，尾部足够）。
-const LESS_COMPUTER_EVENT_LOG_CAP: usize = 2048;
-/// dsh 没有原生会话恢复，只回放最近的少量已收尾轮次，避免 prompt 随浮窗会话无界增长。
-const MAX_DSH_CONTINUATION_TURNS: usize = 2;
-
-struct LessComputerEventLog {
-    next_seq: u64,
-    events: std::collections::VecDeque<serde_json::Value>,
-}
-
-static LESS_COMPUTER_EVENT_LOG: std::sync::OnceLock<std::sync::Mutex<LessComputerEventLog>> =
-    std::sync::OnceLock::new();
-
-fn less_computer_event_log() -> &'static std::sync::Mutex<LessComputerEventLog> {
-    LESS_COMPUTER_EVENT_LOG.get_or_init(|| {
-        std::sync::Mutex::new(LessComputerEventLog {
-            next_seq: 0,
-            events: std::collections::VecDeque::new(),
+pub(crate) fn less_computer_event_replay_after(
+    backend: &openless_core::OpenLessBackend,
+    sequence: u64,
+) -> LessComputerEventReplay {
+    let replay = backend.replay_events_after(sequence);
+    let mut events: Vec<serde_json::Value> = replay
+        .events
+        .into_iter()
+        .filter_map(|event| match event.kind {
+            openless_core::BackendEventKind::LessComputerEvent(event) => {
+                serde_json::to_value(event).ok()
+            }
+            _ => None,
         })
-    })
-}
-
-/// 纯逻辑：给 payload 编 seq 并写入缓冲（fresh user 先清空，超限丢最旧）。
-fn log_less_computer_event(log: &mut LessComputerEventLog, payload: &mut serde_json::Value) {
-    let fresh_user = payload.get("kind").and_then(|k| k.as_str()) == Some("user")
-        && payload.get("fresh").and_then(|f| f.as_bool()) == Some(true);
-    if fresh_user {
-        log.events.clear();
+        .collect();
+    if let Some(index) = events.iter().rposition(|event| {
+        event.get("kind").and_then(serde_json::Value::as_str) == Some("user")
+            && event.get("fresh").and_then(serde_json::Value::as_bool) == Some(true)
+    }) {
+        events.drain(0..index);
     }
-    log.next_seq += 1;
-    payload["seq"] = serde_json::json!(log.next_seq);
-    log.events.push_back(payload.clone());
-    while log.events.len() > LESS_COMPUTER_EVENT_LOG_CAP {
-        log.events.pop_front();
+    LessComputerEventReplay {
+        events,
+        oldest_sequence: replay.oldest_sequence,
+        latest_sequence: replay.latest_sequence,
+        truncated: replay.truncated,
     }
 }
 
-/// `less_computer_sync` 命令的数据源：当前会话已发生的事件（seq 升序）。
-pub(crate) fn less_computer_event_backlog() -> Vec<serde_json::Value> {
-    less_computer_event_log()
-        .lock()
-        .map(|log| log.events.iter().cloned().collect())
-        .unwrap_or_default()
-}
-
-/// 从浮窗事件流重建 dsh 可回放的已收尾轮次。delta / tool 等展示事件不进上下文；
-/// 当前尚未收尾的 user 也不进，避免把本轮需求同时作为历史与当前任务发两遍。
-fn dsh_continuation_turns(events: &[serde_json::Value]) -> Vec<serde_json::Value> {
-    let mut turns = Vec::new();
-    let mut pending_user: Option<String> = None;
-
-    for event in events {
-        match event.get("kind").and_then(serde_json::Value::as_str) {
-            Some("user") => {
-                if event.get("fresh").and_then(serde_json::Value::as_bool) == Some(true) {
-                    turns.clear();
-                }
-                pending_user = event
-                    .get("text")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string);
-            }
-            Some("completed") => {
-                if let Some(user) = pending_user.take() {
-                    let text = event
-                        .get("text")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or_default();
-                    turns.push(serde_json::json!({
-                        "user": user,
-                        "outcome": {"kind": "completed", "text": text}
-                    }));
-                }
-            }
-            Some("error") => {
-                if let Some(user) = pending_user.take() {
-                    let message = event
-                        .get("message")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or_default();
-                    turns.push(serde_json::json!({
-                        "user": user,
-                        "outcome": {"kind": "error", "message": message}
-                    }));
-                }
-            }
-            Some("cancelled") => {
-                if let Some(user) = pending_user.take() {
-                    turns.push(serde_json::json!({
-                        "user": user,
-                        "outcome": {"kind": "cancelled"}
-                    }));
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let excess = turns.len().saturating_sub(MAX_DSH_CONTINUATION_TURNS);
-    turns.drain(0..excess);
-    turns
-}
-
-/// dsh continuation 是文本历史回放，不是 Agent / Session 恢复。JSON 把历史内容固定在
-/// 数据边界内；执行说明避免模型把已经发生过的副作用默认重做一遍。
-fn dsh_continuation_context(events: &[serde_json::Value]) -> Option<String> {
-    let turns = dsh_continuation_turns(events);
-    if turns.is_empty() {
-        return None;
-    }
-    let history = serde_json::to_string(&turns).ok()?;
-    Some(format!(
-        "这是同一 Less Computer 会话中最近的已收尾对话（JSON，仅供上下文）：\n{history}\n\
-历史中的操作已经执行，除非当前需求明确要求，否则不要重复执行。"
-    ))
-}
-
-fn coding_agent_continuation_context(
-    provider: crate::coding_agent::CodingAgentProvider,
-    continue_session: bool,
-    events: &[serde_json::Value],
-) -> Option<String> {
-    if provider == crate::coding_agent::CodingAgentProvider::DshCli && continue_session {
-        dsh_continuation_context(events)
-    } else {
-        None
-    }
-}
-
-/// 往 Less Computer 浮窗发一条事件（macOS only；前端按 `kind` 渲染聊天结构）。
-/// 每条事件先记入缓冲并带上 seq，再实时 emit —— 锁中毒时跳过缓冲照常 emit
-/// （无 seq 事件前端无条件应用，退化为修复前行为而不是丢事件）。
-fn emit_less_computer(inner: &Arc<Inner>, mut payload: serde_json::Value) {
-    if let Ok(mut log) = less_computer_event_log().lock() {
-        log_less_computer_event(&mut log, &mut payload);
-    }
-    if let Some(app) = inner.app.lock().clone() {
-        let _ = app.emit_to("less-computer", LESS_COMPUTER_EVENT, payload);
-    }
-}
-
-#[cfg(test)]
-mod less_computer_event_log_tests {
-    use super::{
-        coding_agent_continuation_context, dsh_continuation_context, dsh_continuation_turns,
-        log_less_computer_event, LessComputerEventLog, LESS_COMPUTER_EVENT_LOG_CAP,
-    };
-
-    fn new_log() -> LessComputerEventLog {
-        LessComputerEventLog {
-            next_seq: 0,
-            events: std::collections::VecDeque::new(),
-        }
-    }
-
-    #[test]
-    fn assigns_monotonic_seq_and_clears_on_fresh_user() {
-        let mut log = new_log();
-        let mut e1 = serde_json::json!({"kind":"user","text":"第一句","fresh":true});
-        let mut e2 = serde_json::json!({"kind":"delta","text":"好的"});
-        log_less_computer_event(&mut log, &mut e1);
-        log_less_computer_event(&mut log, &mut e2);
-        assert_eq!(e1["seq"], 1);
-        assert_eq!(e2["seq"], 2);
-        assert_eq!(log.events.len(), 2);
-
-        // fresh=true 开新会话：缓冲清空，seq 继续单调（前端按 seq 去重不回卷）。
-        let mut e3 = serde_json::json!({"kind":"user","text":"新会话","fresh":true});
-        log_less_computer_event(&mut log, &mut e3);
-        assert_eq!(log.events.len(), 1);
-        assert_eq!(e3["seq"], 3);
-
-        // 追加轮次（fresh=false / 缺省）不清空。
-        let mut e4 = serde_json::json!({"kind":"user","text":"追加","fresh":false});
-        log_less_computer_event(&mut log, &mut e4);
-        assert_eq!(log.events.len(), 2);
-        assert_eq!(log.events.front().unwrap()["seq"], 3);
-    }
-
-    #[test]
-    fn caps_backlog_dropping_oldest() {
-        let mut log = new_log();
-        for i in 0..(LESS_COMPUTER_EVENT_LOG_CAP + 5) {
-            let mut e = serde_json::json!({"kind":"delta","text":i.to_string()});
-            log_less_computer_event(&mut log, &mut e);
-        }
-        assert_eq!(log.events.len(), LESS_COMPUTER_EVENT_LOG_CAP);
-        // 丢最旧：队首是第 6 条（seq 从 1 起）。
-        assert_eq!(log.events.front().unwrap()["seq"], 6);
-    }
-
-    #[test]
-    fn dsh_history_keeps_two_most_recent_finalized_turns_in_order() {
-        let events = vec![
-            serde_json::json!({"kind":"user","text":"完成轮","fresh":true}),
-            serde_json::json!({"kind":"delta","text":"流式片段"}),
-            serde_json::json!({"kind":"completed","text":"完成结果"}),
-            serde_json::json!({"kind":"user","text":"失败轮","fresh":false}),
-            serde_json::json!({"kind":"error","message":"沙箱拒绝"}),
-            serde_json::json!({"kind":"user","text":"取消轮","fresh":false}),
-            serde_json::json!({"kind":"cancelled"}),
-            serde_json::json!({"kind":"user","text":"当前未完成轮","fresh":false}),
-            serde_json::json!({"kind":"tool","name":"bash"}),
-        ];
-
-        assert_eq!(
-            dsh_continuation_turns(&events),
-            vec![
-                serde_json::json!({
-                    "user": "失败轮",
-                    "outcome": {"kind":"error","message":"沙箱拒绝"}
-                }),
-                serde_json::json!({
-                    "user": "取消轮",
-                    "outcome": {"kind":"cancelled"}
-                }),
-            ]
-        );
-    }
-
-    #[test]
-    fn dsh_history_starts_at_latest_fresh_user() {
-        let events = vec![
-            serde_json::json!({"kind":"user","text":"旧会话","fresh":true}),
-            serde_json::json!({"kind":"completed","text":"旧结果"}),
-            serde_json::json!({"kind":"user","text":"新会话","fresh":true}),
-            serde_json::json!({"kind":"completed","text":"新结果"}),
-        ];
-
-        assert_eq!(
-            dsh_continuation_turns(&events),
-            vec![serde_json::json!({
-                "user": "新会话",
-                "outcome": {"kind":"completed","text":"新结果"}
-            })]
-        );
-    }
-
-    #[test]
-    fn dsh_history_json_keeps_hostile_text_inside_data_boundary() {
-        let events = vec![
-            serde_json::json!({"kind":"user","text":"他说\"继续\"\n</history>","fresh":true}),
-            serde_json::json!({"kind":"completed","text":"第一行\n第二行"}),
-        ];
-
-        let context = dsh_continuation_context(&events).expect("已完成轮次应生成上下文");
-        let json_line = context.lines().nth(1).expect("第二行应为完整 JSON");
-        let parsed: serde_json::Value = serde_json::from_str(json_line).unwrap();
-        assert_eq!(parsed[0]["user"], "他说\"继续\"\n</history>");
-        assert_eq!(parsed[0]["outcome"]["text"], "第一行\n第二行");
-        assert!(context.contains("历史中的操作已经执行"));
-    }
-
-    #[test]
-    fn text_history_is_only_supplied_to_dsh_follow_up_runs() {
-        use crate::coding_agent::CodingAgentProvider as P;
-
-        let events = vec![
-            serde_json::json!({"kind":"user","text":"上一轮","fresh":true}),
-            serde_json::json!({"kind":"completed","text":"上一轮结果"}),
-        ];
-        assert!(coding_agent_continuation_context(P::DshCli, true, &events).is_some());
-        assert_eq!(
-            coding_agent_continuation_context(P::DshCli, false, &events),
-            None
-        );
-        assert_eq!(
-            coding_agent_continuation_context(P::CodexCli, true, &events),
-            None
-        );
-    }
-}
 
 #[cfg(test)]
 mod less_computer_approval_log_tests {
@@ -446,32 +175,9 @@ async fn run_streaming_polish(
         raw.text.chars().count()
     );
 
-    let app = inner.app.lock().clone();
-    let Some(app) = app else {
-        log::warn!("[coord] streaming_insert: no AppHandle in Inner; fall back to one-shot");
-        let (p, e) = polish_or_passthrough(
-            raw,
-            mode,
-            hotwords,
-            style_system_prompt,
-            working_languages,
-            chinese_script_preference,
-            output_language_preference,
-            llm_thinking_enabled,
-            front_app,
-            cursor_context,
-            prior_turns,
-            llm_call,
-            llm_elapsed_ms,
-            pipeline_multimodal_enabled(&inner.prefs.get()),
-        )
-        .await;
-        return (p, e, false);
-    };
-
     // 1. 切到 ABC 输入源。失败则降级 —— 流式路径上 CJK IME 拦截不是可恢复错误。
     log::info!("[coord] streaming_insert: switching input source to ABC");
-    let prev_ime = match crate::unicode_keystroke::switch_to_ascii(&app).await {
+    let prev_ime = match inner.host.switch_to_ascii().await {
         Ok(prev) => {
             log::info!(
                 "[coord] streaming_insert: switched to ABC (had_previous={})",
@@ -497,7 +203,7 @@ async fn run_streaming_polish(
                 prior_turns,
                 llm_call,
                 llm_elapsed_ms,
-                pipeline_multimodal_enabled(&inner.prefs.get()),
+                pipeline_multimodal_enabled(&inner.backend.get_preferences()),
             )
             .await;
             return (p, err, false);
@@ -510,16 +216,9 @@ async fn run_streaming_polish(
     // from what the user actually sees\"。
     let (tx, rx) = std::sync::mpsc::channel::<String>();
     #[cfg(target_os = "windows")]
-    let sendinput_options = windows_sendinput_options_from_prefs(&inner.prefs.get());
+    let sendinput_options = windows_sendinput_options_from_prefs(&inner.backend.get_preferences());
     #[cfg(target_os = "macos")]
-    let macos_newline_mode = {
-        let configured = inner.prefs.get().macos_newline_mode;
-        let resolved = resolve_macos_newline_mode(configured, front_app);
-        log::info!(
-            "[coord] streaming_insert: macOS newline mode configured={configured:?} resolved={resolved:?}"
-        );
-        resolved
-    };
+    let macos_newline_mode = inner.backend.get_preferences().macos_newline_mode;
     let typer_handle = tokio::task::spawn_blocking(move || {
         #[cfg(target_os = "windows")]
         {
@@ -592,7 +291,7 @@ async fn run_streaming_polish(
 
     // 5. 无论流是否成功，都恢复用户原输入源。
     log::info!("[coord] streaming_insert: restoring input source");
-    if let Err(e) = crate::unicode_keystroke::restore_input_source(&app, prev_ime).await {
+    if let Err(e) = inner.host.restore_input_source(prev_ime).await {
         log::warn!("[coord] streaming_insert: restore_input_source failed: {e}");
     } else {
         log::info!("[coord] streaming_insert: input source restored");
@@ -640,7 +339,11 @@ async fn run_streaming_polish(
             // Linux：fcitx5 插件已直写文字到目标 app，跳过剪贴板避免破坏用户数据。
             // Android/iOS：无 arboard 剪贴板路径，v1 依赖 IME commit。
             #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "ios")))]
-            if inner.prefs.get().streaming_insert_save_clipboard {
+            if inner
+                .backend
+                .get_preferences()
+                .streaming_insert_save_clipboard
+            {
                 match arboard::Clipboard::new() {
                     Ok(mut cb) => match cb.set_text(final_text.clone()) {
                         Ok(()) => log::info!(
@@ -678,7 +381,7 @@ async fn run_streaming_polish(
                 prior_turns,
                 llm_call,
                 llm_elapsed_ms,
-                pipeline_multimodal_enabled(&inner.prefs.get()),
+                pipeline_multimodal_enabled(&inner.backend.get_preferences()),
             )
             .await;
             (p, e, false)
@@ -703,33 +406,6 @@ async fn run_streaming_polish(
                 (raw.text.clone(), Some(reason), false)
             }
         }
-    }
-}
-
-/// 把 Auto 解析成单次听写实际使用的模式。前台应用在听写开始时已经捕获，整个流式上屏
-/// 过程使用同一结果；未知应用保守使用 Shift+Return，避免聊天框换行时误发送。
-#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
-fn resolve_macos_newline_mode(
-    configured: crate::types::MacosNewlineMode,
-    front_app: Option<&str>,
-) -> crate::types::MacosNewlineMode {
-    use crate::types::MacosNewlineMode;
-
-    if configured != MacosNewlineMode::Auto {
-        return configured;
-    }
-
-    let bundle_id = front_app.and_then(|label| {
-        let front = crate::types::split_front_app_label(label, true);
-        front.bundle_id.or(front.name)
-    });
-    if bundle_id
-        .as_deref()
-        .is_some_and(crate::host_document::is_terminal_bundle_id)
-    {
-        MacosNewlineMode::LineFeed
-    } else {
-        MacosNewlineMode::ShiftReturn
     }
 }
 
@@ -1012,7 +688,11 @@ fn arm_edit_watch(inner: &Arc<Inner>, status: InsertStatus, typed_text: &str) {
     super::disarm_edit_watch(inner);
     let generation = inner.edit_watch_generation.load(Ordering::SeqCst);
 
-    if !should_arm_edit_watch(inner.prefs.get().cursor_context_enabled, status, typed_text) {
+    if !should_arm_edit_watch(
+        inner.backend.get_preferences().cursor_context_enabled,
+        status,
+        typed_text,
+    ) {
         return;
     }
     let mut slot = inner.edit_watcher.lock();
@@ -1036,22 +716,18 @@ fn arm_edit_watch(inner: &Arc<Inner>, status: InsertStatus, typed_text: &str) {
     });
 }
 
-/// 两条听写管线共同的插入后反馈：先武装手改监听，再累计词条命中并通知前端。
+/// 两条听写管线共同的插入后反馈：先武装手改监听，再累计词条命中。
+/// 前端失效通知由 core `VocabularyChanged` 事件桥统一发布。
 fn handle_post_insert_feedback(inner: &Arc<Inner>, status: InsertStatus, typed_text: &str) -> u64 {
     arm_edit_watch(inner, status, typed_text);
 
-    let total_hits = match inner.vocab.record_hits(typed_text) {
+    let total_hits = match inner.backend.record_vocabulary_hits(typed_text) {
         Ok(hits) => hits,
         Err(error) => {
             log::error!("[coord] record_hits failed: {error}");
             0
         }
     };
-    if total_hits > 0 {
-        if let Some(app) = inner.app.lock().clone() {
-            let _ = app.emit("vocab:updated", total_hits);
-        }
-    }
     total_hits
 }
 
@@ -1079,23 +755,16 @@ fn handle_user_edit(inner: &Arc<Inner>, edit: crate::host_document::EditPair) {
 /// 卡片本身不抢焦点 —— 胶囊窗口是 nonactivating panel，你在别的 app 里打字时它弹
 /// 出来不会把光标夺走。
 fn queue_correction_suggestion(inner: &Arc<Inner>, rule: &crate::host_document::LearnedRule) {
+    match inner
+        .backend
+        .queue_pending_correction(rule.pattern.clone(), rule.replacement.clone())
     {
-        let mut pending = inner.pending_corrections.lock();
-        // 同一条建议重复出现（用户在不同会话里犯了同样的错）不重复排队。
-        if pending
-            .iter()
-            .any(|p| p.pattern == rule.pattern && p.replacement == rule.replacement)
-        {
+        Ok(Some(_)) => {}
+        Ok(None) => return,
+        Err(error) => {
+            log::warn!("[cursor-context] queue vocabulary suggestion failed: {error}");
             return;
         }
-        if pending.len() >= crate::types::MAX_PENDING_CORRECTIONS {
-            pending.remove(0);
-        }
-        pending.push(crate::types::PendingCorrection {
-            id: uuid::Uuid::new_v4().to_string(),
-            pattern: rule.pattern.clone(),
-            replacement: rule.replacement.clone(),
-        });
     }
     log::info!(
         "[cursor-context] vocabulary suggested (awaiting confirmation): {:?} (was {:?})",
@@ -1104,47 +773,6 @@ fn queue_correction_suggestion(inner: &Arc<Inner>, rule: &crate::host_document::
     );
     super::show_vocab_suggestion_card(inner);
 }
-
-/// 收进词汇表。**只写词汇表，不写纠正规则。**
-///
-/// 学来的东西配不上「见字面就替换」那份权力：纠正规则错了是静默的、全局的，真机上学到
-/// 过 `小鱼 → x` 这种半截规则，会毁掉以后每一个「小鱼」。词条只是提示 —— 送给 ASR 提高
-/// 听对的概率，也进润色 prompt 让 LLM 带着上下文判断，错了最多是没帮上忙。
-///
-/// 两者并存还会直接打架：词汇表里的 `Codex`（「我要这个词」）和纠正规则
-/// `Codex → 扣的爱思`（「把这个词换掉」）在真机上撞出过一个来回震荡的环。
-///
-/// 失败只 warn —— 学不到东西可以接受。
-pub(super) fn commit_learned_rule(inner: &Arc<Inner>, rule: &crate::host_document::LearnedRule) {
-    match inner.vocab.add_if_absent(
-        rule.replacement.clone(),
-        Some(LEARNED_VOCAB_NOTE.to_string()),
-    ) {
-        Ok(Some(_)) => log::info!(
-            "[cursor-context] learned vocabulary entry: {:?} (was {:?})",
-            rule.replacement,
-            rule.pattern
-        ),
-        Ok(None) => {
-            log::info!(
-                "[cursor-context] already in vocabulary: {:?}",
-                rule.replacement
-            );
-            return;
-        }
-        Err(error) => {
-            log::warn!("[cursor-context] add learned vocab entry failed: {error}");
-            return;
-        }
-    }
-    if let Some(app) = inner.app.lock().clone() {
-        let _ = app.emit("vocab:updated", 0u64);
-    }
-}
-
-/// 自动收集的词条在 `note` 里带的标记。词汇表页靠它把「你自己加的」和「它替你收的」
-/// 分成两区 —— 用户随时能看清、能整块删掉，这是自动收集能被信任的前提。
-pub(crate) const LEARNED_VOCAB_NOTE: &str = "从手改中自动收集";
 
 fn streaming_insert_eligible(
     streaming_insert_enabled: bool,
@@ -1182,6 +810,87 @@ fn default_done_message(status: InsertStatus, polish_failed: bool) -> Option<Str
             }),
             InsertStatus::Failed => Some("插入失败".to_string()),
         }
+    }
+}
+
+fn core_dictation_active(inner: &Arc<Inner>) -> bool {
+    !matches!(
+        inner.backend.snapshot().dictation.phase,
+        openless_core::DictationPhase::Idle
+    )
+}
+
+fn mark_core_hotkey_session_finished(inner: &Arc<Inner>) {
+    inner.translation_active.store(false, Ordering::SeqCst);
+    *inner.session_cooldown_until.lock() = Some(
+        std::time::Instant::now() + std::time::Duration::from_millis(POST_SESSION_COOLDOWN_MS),
+    );
+}
+
+async fn dispatch_core_hotkey_edge(
+    inner: &Arc<Inner>,
+    edge: openless_core::DictationHotkeyEdge,
+) -> Result<openless_core::CliDispatchOutcome, openless_core::BackendError> {
+    if !inner.backend.snapshot().running {
+        inner.backend.start().await?;
+    }
+    let translation_requested = inner.translation_active.load(Ordering::SeqCst);
+    let outcome = inner
+        .backend
+        .dispatch_dictation_hotkey_edge_with_session_options(
+            edge,
+            openless_core::DictationHotkeyDispatchOptions {
+                start: openless_core::DictationStartOptions {
+                    translation_requested,
+                    ..openless_core::DictationStartOptions::default()
+                },
+                stop: openless_core::DictationStopOptions {
+                    translation_requested: translation_requested.then_some(true),
+                },
+            },
+        )
+        .await?;
+    if matches!(
+        outcome,
+        openless_core::CliDispatchOutcome::DictationCompleted(_)
+            | openless_core::CliDispatchOutcome::DictationCancelled
+    ) {
+        mark_core_hotkey_session_finished(inner);
+    }
+    Ok(outcome)
+}
+
+pub(super) async fn cancel_core_dictation(inner: &Arc<Inner>) -> bool {
+    if !core_dictation_active(inner) {
+        return false;
+    }
+    let session_id = inner.backend.snapshot().dictation.session_id;
+    match inner.backend.cancel_dictation(session_id).await {
+        Ok(()) => {
+            mark_core_hotkey_session_finished(inner);
+            true
+        }
+        Err(error) if error.code == openless_core::BackendErrorCode::InvalidState => false,
+        Err(error) => {
+            log::warn!("[coord] core dictation cancel failed: {error}");
+            false
+        }
+    }
+}
+
+/// Route a host cancellation to the owner of the active session. Less
+/// Computer still uses the Tauri recorder/ASR compatibility state machine,
+/// while ordinary dictation is owned by Core; Esc must not silently miss the
+/// former just because Core's dictation snapshot is idle.
+pub(super) async fn cancel_active_session(inner: &Arc<Inner>) -> bool {
+    let legacy_less_computer = {
+        let state = inner.state.lock();
+        state.voice_agent && state.phase != SessionPhase::Idle
+    };
+    if legacy_less_computer {
+        cancel_session(inner)
+    } else {
+        cancel_core_dictation(inner).await
     }
 }
 
@@ -1225,8 +934,8 @@ pub(super) async fn handle_pressed_edge(
         // 第二次抢同一个麦克风 device —— 在 Linux/PipeWire 上甚至会成功打开两路捕获，
         // dictation 的 recorder 没人停；在 macOS/Windows 上 cpal 会拒绝第二次 build_input_stream
         // 但 dictation session 仍在跑、用户找不到从 QA 面板停掉它的入口。审计 3.3.1。
-        let dictation_active = !matches!(inner.state.lock().phase, SessionPhase::Idle);
-        let panel_visible = inner.qa_state.lock().panel_visible;
+        let dictation_active = core_dictation_active(inner);
+        let panel_visible = inner.qa_context.is_panel_visible();
         if panel_visible && !dictation_active {
             handle_qa_option_edge(inner).await;
         } else {
@@ -1240,11 +949,11 @@ pub(super) async fn handle_pressed(
     pressed_at: std::time::Instant,
     press_id: u64,
 ) {
-    let mode = inner.prefs.get().hotkey.mode;
-    let phase = inner.state.lock().phase;
+    let mode = inner.backend.get_preferences().hotkey.mode;
+    let phase = inner.backend.snapshot().dictation.phase;
     log::info!("[coord] hotkey pressed (mode={mode:?}, phase={phase:?})");
     match (mode, phase) {
-        (HotkeyMode::Toggle, SessionPhase::Idle) => {
+        (HotkeyMode::Toggle, openless_core::DictationPhase::Idle) => {
             // 冷却检查：end_session / 取消收尾后禁止短时间内再次激活，避免三连按第 3 次误触
             // （此时胶囊仍在离场动画周期内，issue #545）。识别中按下想录下一条的 Pressed 会被
             // 缓在 hotkey channel 里、会话收尾后（距 Idle 落在冷却期内）才取出 —— 一律静默
@@ -1261,22 +970,36 @@ pub(super) async fn handle_pressed(
                 );
                 return;
             }
-            begin_session_from_press(inner, press_id).await;
+            begin_session_from_press(inner, pressed_at, press_id).await;
         }
-        (HotkeyMode::Toggle, SessionPhase::Listening) => {
-            let _ = end_session(inner).await;
+        (HotkeyMode::Toggle, openless_core::DictationPhase::Recording) => {
+            if let Err(error) = dispatch_core_hotkey_edge(
+                inner,
+                openless_core::DictationHotkeyEdge::Pressed { at: pressed_at },
+            )
+            .await
+            {
+                log::warn!("[coord] core toggle stop failed: {error}");
+            }
         }
-        (HotkeyMode::Hold, SessionPhase::Idle) => {
-            begin_session_from_press(inner, press_id).await;
+        (HotkeyMode::Hold, openless_core::DictationPhase::Idle) => {
+            begin_session_from_press(inner, pressed_at, press_id).await;
         }
         // Toggle 模式 Starting 阶段第二次按 → 用户想停。
         // 不能直接 end_session（ASR session 还没建好），存边沿，握手完成后立即触发。
-        (HotkeyMode::Toggle, SessionPhase::Starting) => {
-            request_stop_during_starting(inner, "toggle stop edge");
+        (HotkeyMode::Toggle, openless_core::DictationPhase::Starting) => {
+            if let Err(error) = dispatch_core_hotkey_edge(
+                inner,
+                openless_core::DictationHotkeyEdge::Pressed { at: pressed_at },
+            )
+            .await
+            {
+                log::warn!("[coord] core toggle stop-during-start failed: {error}");
+            }
         }
         // Auto 模式：按下即开录（与 Hold 一样不丢首字）。是短按还是长按要到松手时才知道，
         // 所以这里只负责「开始」并记下按下时刻，语义交给 handle_released 判定。
-        (HotkeyMode::Auto, SessionPhase::Idle) => {
+        (HotkeyMode::Auto, openless_core::DictationPhase::Idle) => {
             // 复用 Toggle 的冷却检查：#545 离场动画期间误触保护；识别中排队的按下同样丢弃（#856）。
             let now = std::time::Instant::now();
             let on_cooldown = inner
@@ -1291,15 +1014,29 @@ pub(super) async fn handle_pressed(
                 return;
             }
             *inner.hotkey_press_at.lock() = Some(pressed_at);
-            begin_session_from_press(inner, press_id).await;
+            begin_session_from_press(inner, pressed_at, press_id).await;
         }
         // Auto 模式已因上一次「短按」锁存为切换态，再次按下 → 用户想停。
-        (HotkeyMode::Auto, SessionPhase::Listening) => {
-            let _ = end_session(inner).await;
+        (HotkeyMode::Auto, openless_core::DictationPhase::Recording) => {
+            if let Err(error) = dispatch_core_hotkey_edge(
+                inner,
+                openless_core::DictationHotkeyEdge::Pressed { at: pressed_at },
+            )
+            .await
+            {
+                log::warn!("[coord] core auto stop failed: {error}");
+            }
         }
         // Auto 模式锁存后仍在 Starting 时第二次按 → 想停，同 Toggle 存边沿。
-        (HotkeyMode::Auto, SessionPhase::Starting) => {
-            request_stop_during_starting(inner, "auto stop edge");
+        (HotkeyMode::Auto, openless_core::DictationPhase::Starting) => {
+            if let Err(error) = dispatch_core_hotkey_edge(
+                inner,
+                openless_core::DictationHotkeyEdge::Pressed { at: pressed_at },
+            )
+            .await
+            {
+                log::warn!("[coord] core auto stop-during-start failed: {error}");
+            }
         }
         _ => {}
     }
@@ -1309,7 +1046,11 @@ pub(super) async fn handle_pressed(
 /// 标记的会话（见 handle_trigger_combined）。
 ///
 /// 开录之前先过一遍组合键仲裁窗口：命中就当这次按下没发生过——不开麦、不弹胶囊。
-async fn begin_session_from_press(inner: &Arc<Inner>, press_id: u64) {
+async fn begin_session_from_press(
+    inner: &Arc<Inner>,
+    pressed_at: std::time::Instant,
+    press_id: u64,
+) {
     if press_resolves_to_combo(inner, press_id).await {
         // 按住态一并清掉：随后必然到来的 Released 会被 handle_released_edge 的
         // was_held 检查吞掉，不会走 Auto 短按锁存。
@@ -1333,7 +1074,14 @@ async fn begin_session_from_press(inner: &Arc<Inner>, press_id: u64) {
         *inner.last_hotkey_dispatch_at.lock() = None;
         return;
     }
-    let _ = begin_session(inner).await;
+    let start_outcome = dispatch_core_hotkey_edge(
+        inner,
+        openless_core::DictationHotkeyEdge::Pressed { at: pressed_at },
+    )
+    .await;
+    if let Err(error) = &start_outcome {
+        log::warn!("[coord] core hotkey start failed: {error}");
+    }
     // 组合键撤销走独立通道，可能恰好在上面的仲裁检查之后、会话启动之前抵达。
     // 这种情况下撤销线程会留下 pending 标记，但在 phase=Idle 时无法取消；启动完成后
     // 必须再消费一次，否则这次组合键会把会话误启动出来。
@@ -1347,11 +1095,11 @@ async fn begin_session_from_press(inner: &Arc<Inner>, press_id: u64) {
             .hotkey_press_began_session
             .compare_exchange(press_id, 0, Ordering::SeqCst, Ordering::SeqCst)
             .ok();
-        cancel_combined_session_if_active(inner);
+        cancel_combined_session_if_active(inner).await;
         return;
     }
     if inner.hotkey_press_generation.load(Ordering::SeqCst) == press_id
-        && inner.state.lock().phase == SessionPhase::Idle
+        && !core_dictation_active(inner)
     {
         inner
             .hotkey_press_began_session
@@ -1366,7 +1114,7 @@ async fn begin_session_from_press(inner: &Arc<Inner>, press_id: u64) {
 /// 让它白等这一下纯粹是掉延迟。等待放在防抖 / 冷却判定之后，那些判定用的仍是未被本
 /// 窗口推迟的时刻。
 async fn press_resolves_to_combo(inner: &Arc<Inner>, press_id: u64) -> bool {
-    let binding = inner.prefs.get().dictation_hotkey;
+    let binding = inner.backend.get_preferences().dictation_hotkey;
     if crate::shortcut_binding::legacy_modifier_trigger(&binding).is_none() {
         return false;
     }
@@ -1427,6 +1175,12 @@ fn combo_seen_for_press(inner: &Arc<Inner>, press_id: u64) -> bool {
 }
 
 pub(super) fn handle_trigger_combined(inner: &Arc<Inner>, press_id: u64) {
+    inner
+        .host
+        .block_on(handle_trigger_combined_async(inner, press_id));
+}
+
+pub(super) async fn handle_trigger_combined_async(inner: &Arc<Inner>, press_id: u64) {
     if press_id == 0 {
         return;
     }
@@ -1457,7 +1211,7 @@ pub(super) fn handle_trigger_combined(inner: &Arc<Inner>, press_id: u64) {
         return;
     }
     log::info!("[coord] hotkey combined with another key —— 取消本次按下开出的会话");
-    cancel_combined_session_if_active(inner);
+    cancel_combined_session_if_active(inner).await;
 }
 
 /// 只取消仍处于可取消阶段的本次会话。
@@ -1466,8 +1220,12 @@ pub(super) fn handle_trigger_combined(inner: &Arc<Inner>, press_id: u64) {
 /// 消费。此时不能清掉正常会话留下的冷却和防抖时间戳，否则会重新打开 #545 的三连按窗口。
 /// 若会话尚未进入可取消阶段，pending 标记由 `begin_session_from_press` 的收尾检查消费，
 /// 防止「撤销先到、开录后到」的竞态。
-fn cancel_combined_session_if_active(inner: &Arc<Inner>) {
-    if !cancel_session(inner) {
+async fn cancel_combined_session_if_active(inner: &Arc<Inner>) {
+    let cancelled = matches!(
+        dispatch_core_hotkey_edge(inner, openless_core::DictationHotkeyEdge::Combined).await,
+        Ok(openless_core::CliDispatchOutcome::DictationCancelled)
+    );
+    if !cancelled {
         return;
     }
     *inner.session_cooldown_until.lock() = None;
@@ -1481,8 +1239,8 @@ pub(super) async fn handle_released_edge(inner: &Arc<Inner>, released_at: std::t
         // 与 handle_pressed_edge 的路由对称：dictation session 在跑时 Pressed 已经被路由到
         // dictation，那 Released 必须也路由到 dictation —— 否则 Hold 模式松开热键时
         // end_session 不会触发，dictation 永远停不下来。审计 3.3.1。
-        let dictation_active = !matches!(inner.state.lock().phase, SessionPhase::Idle);
-        let panel_visible = inner.qa_state.lock().panel_visible;
+        let dictation_active = core_dictation_active(inner);
+        let panel_visible = inner.qa_context.is_panel_visible();
         if panel_visible && !dictation_active {
             return;
         }
@@ -1491,8 +1249,8 @@ pub(super) async fn handle_released_edge(inner: &Arc<Inner>, released_at: std::t
 }
 
 pub(super) async fn handle_released(inner: &Arc<Inner>, released_at: std::time::Instant) {
-    let mode = inner.prefs.get().hotkey.mode;
-    let phase = inner.state.lock().phase;
+    let mode = inner.backend.get_preferences().hotkey.mode;
+    let phase = inner.backend.snapshot().dictation.phase;
     log::info!("[coord] hotkey released (mode={mode:?}, phase={phase:?})");
     if mode == HotkeyMode::Toggle {
         // Toggle 听写松手不做事（点一下停）。Less Computer 走独立专用键监听器。
@@ -1500,12 +1258,26 @@ pub(super) async fn handle_released(inner: &Arc<Inner>, released_at: std::time::
     }
     if mode == HotkeyMode::Hold {
         match phase {
-            SessionPhase::Listening => {
-                let _ = end_session(inner).await;
+            openless_core::DictationPhase::Recording => {
+                if let Err(error) = dispatch_core_hotkey_edge(
+                    inner,
+                    openless_core::DictationHotkeyEdge::Released { at: released_at },
+                )
+                .await
+                {
+                    log::warn!("[coord] core hold release failed: {error}");
+                }
             }
             // Hold 模式 Starting 阶段松开 → 用户想停。同上：握手完成后再 end。
-            SessionPhase::Starting => {
-                request_stop_during_starting(inner, "hold release edge");
+            openless_core::DictationPhase::Starting => {
+                if let Err(error) = dispatch_core_hotkey_edge(
+                    inner,
+                    openless_core::DictationHotkeyEdge::Released { at: released_at },
+                )
+                .await
+                {
+                    log::warn!("[coord] core hold stop-during-start failed: {error}");
+                }
             }
             _ => {}
         }
@@ -1522,14 +1294,28 @@ pub(super) async fn handle_released(inner: &Arc<Inner>, released_at: std::time::
             .unwrap_or(false);
         match phase {
             // 长按松手 = 按住说话，松手即停；短按 = 切换式，锁存保持录音，下次按下再停。
-            SessionPhase::Listening if held_long => {
-                let _ = end_session(inner).await;
+            openless_core::DictationPhase::Recording if held_long => {
+                if let Err(error) = dispatch_core_hotkey_edge(
+                    inner,
+                    openless_core::DictationHotkeyEdge::Released { at: released_at },
+                )
+                .await
+                {
+                    log::warn!("[coord] core auto hold release failed: {error}");
+                }
             }
             // 仍在握手就松手，且判为长按 → 用户按住说话想停，存边沿握手完成后再 end。
-            SessionPhase::Starting if held_long => {
-                request_stop_during_starting(inner, "auto hold release edge");
+            openless_core::DictationPhase::Starting if held_long => {
+                if let Err(error) = dispatch_core_hotkey_edge(
+                    inner,
+                    openless_core::DictationHotkeyEdge::Released { at: released_at },
+                )
+                .await
+                {
+                    log::warn!("[coord] core auto hold stop-during-start failed: {error}");
+                }
             }
-            SessionPhase::Listening | SessionPhase::Starting => {
+            openless_core::DictationPhase::Recording | openless_core::DictationPhase::Starting => {
                 log::info!("[coord] auto short-tap latched (toggle semantics); next press stops");
             }
             _ => {}
@@ -1537,25 +1323,24 @@ pub(super) async fn handle_released(inner: &Arc<Inner>, released_at: std::time::
     }
 }
 
-/// Less Computer 收尾：把转写当作指令交给无头 Claude，结果以胶囊展示（不插入到光标）。
-/// pub(super)：除语音路径外，浮窗的打字输入（less_computer_submit_text 命令）
-/// 也以文字直接进入同一条执行链（同样的护栏 / 审批 / 连续会话语义）。
+/// Less Computer 收尾适配器：把已经由宿主录音/ASR 得到的文本交给 Core。
+///
+/// Core 负责 provider、prompt、护栏、审批、continuation、stream 和唯一终态；这里
+/// 只把终态映射为现有 Tauri capsule 反馈，保证 React 兼容行为不变。Linux egui
+/// 不会调用这个 Tauri-only 映射，而是直接订阅 `BackendEvent`。
 pub(super) async fn run_voice_agent_transcript(
     inner: &Arc<Inner>,
-    _session_id: SessionId,
+    session_id: SessionId,
     transcript: String,
     elapsed: u64,
-    // 语音路径 Show：显示胶囊「处理中」反馈（既有行为）；打字路径
-    // （less_computer_submit_text）Hide —— 对话在浮窗里已可见，不应在输入法
-    // auxDown 闪「润色中」，用户已确认。
     capsule_feedback: super::CapsuleFeedback,
 ) -> Result<(), String> {
-    log::info!(
-        "[coord] Cloud Agent 语音：指令 {} 字",
-        transcript.chars().count()
-    );
-    // 胶囊保留「处理中」反馈（用户熟悉的小录音条状态机）；聊天浮窗承载完整对话。
-    // Linux 下会映射到 fcitx5 auxDown（"✨ 润色中..."）显示在候选词栏下方。
+    let transcript = transcript.trim().to_string();
+    let core_id = core_session_id(session_id);
+    if transcript.is_empty() {
+        let _ = inner.backend.abort_less_computer_capture(core_id);
+        return Err("Less Computer transcript cannot be empty".to_string());
+    }
     if capsule_feedback == super::CapsuleFeedback::Show {
         emit_capsule(
             inner,
@@ -1566,539 +1351,100 @@ pub(super) async fn run_voice_agent_transcript(
             None,
         );
     }
-
-    // 聊天浮窗：显示窗口 + 落用户气泡（语音指令转写）。macOS only（helper 内部 gating）。
-    if let Some(app) = inner.app.lock().clone() {
-        crate::show_less_computer_window(&app);
-        // 全屏彩虹描边已在按下键时（handle_less_computer_pressed）点亮，这里不重复。
+    inner.host.show_less_computer();
+    if inner.state.lock().cancelled || inner.backend.less_computer_capture_cancelled(core_id) {
+        let _ = inner.backend.abort_less_computer_capture(core_id);
+        inner.host.hide_less_computer_glow();
+        {
+            let mut state = inner.state.lock();
+            state.phase = SessionPhase::Idle;
+            state.focus_target = None;
+        }
+        emit_capsule(inner, CapsuleState::Cancelled, 0.0, elapsed, None, None);
+        schedule_capsule_idle(inner, CAPSULE_CANCEL_HIDE_DELAY_MS);
+        return Err("Less Computer cancelled".to_string());
     }
-    // 连续对话：浮窗里已有会话 → 原生 resume，或给 dsh 回放最近两轮文本历史；
-    // 否则是新会话（fresh）。dismiss 关窗会把标志复位为 false。
-    let continue_session = inner
-        .less_computer_conversation
-        .swap(true, Ordering::SeqCst);
-    emit_less_computer(
-        inner,
-        serde_json::json!({ "kind": "user", "text": transcript, "fresh": !continue_session }),
-    );
-
-    let prefs = inner.prefs.get();
-    // 工作目录：用户设的 workdir，否则 $HOME。--add-dir 把文件作用域限定在此。
-    let cwd = prefs
-        .coding_agent_workdir
-        .clone()
-        .filter(|d| !d.trim().is_empty())
-        .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var("HOME").ok().map(std::path::PathBuf::from));
-    // 运行前 git 快照（cwd 是 git 仓库才有效；非仓库无副作用），便于回滚文件改动。
-    if let Some(dir) = &cwd {
-        if let Some(sha) = crate::coding_agent::create_git_snapshot(dir) {
-            log::info!("[less-computer] 运行前 git 快照 {sha}（git stash apply 可回滚）");
-        }
-    }
-
-    let provider =
-        crate::coding_agent::CodingAgentProvider::from_pref(&prefs.coding_agent_provider);
-    // 钳制：语音 → shell 这条全自动路径禁止 bypassPermissions 绕过护栏（无人审、动手即生效）。
-    // Claude / OpenCode 保持原有的 acceptEdits 降级；Codex / dsh 的遗留 default/bypass
-    // 更严格地归一为只读，避免旧偏好在新沙箱语义下意外获得写权限。
-    let mode = match coding_agent_mode_from_pref(provider, &prefs.coding_agent_permission_mode) {
-        crate::coding_agent::CodingAgentPermissionMode::BypassPermissions => {
-            log::warn!(
-                "[less-computer] 语音 Agent 路径禁止 bypassPermissions，已降级为 acceptEdits（保留护栏）"
-            );
-            crate::coding_agent::CodingAgentPermissionMode::AcceptEdits
-        }
-        other => other,
-    };
-    let model =
-        crate::coding_agent::resolve_coding_agent_model(provider, prefs.coding_agent_model.clone());
-    let prompt = crate::coding_agent::autonomous_prompt(&transcript);
-
-    // 第一轮：默认护栏（高风险全 deny）。运行后若检测到护栏拦截，弹审批卡；
-    // 用户 Approve 则在第二轮把该高风险模式从 deny 移除 + 加进 allowed，重跑一次。
-    let outcome = run_less_computer_once(
-        inner,
-        &prompt,
-        cwd.as_deref(),
-        mode,
-        model.as_deref(),
-        &[],
-        continue_session,
-    )
-    .await;
-
-    // 审批卡只对「能精确放行单条命令」的后端弹（Claude / OpenCode 的 deny 清单）。
-    // Codex / dsh 只有沙箱档位，批准了也只能整体降档、不是放行这一条——弹卡等于给用户
-    // 一个假承诺（点了批准，重跑还是同样被拦）。它们直接把失败如实报出去。
-    let approval = if provider.supports_command_approval() {
-        maybe_request_approval(inner, &outcome).await
-    } else {
-        None
-    };
-    let final_outcome = match approval {
-        Some(approved_pattern) => {
-            log::info!("[less-computer] 审批通过，放行高风险模式后重跑：{approved_pattern}");
-            run_less_computer_once(
-                inner,
-                &prompt,
-                cwd.as_deref(),
-                mode,
-                model.as_deref(),
-                &[approved_pattern],
-                continue_session,
-            )
-            .await
-        }
-        None => outcome,
-    };
-    // 审批等待期间会话被取消（Esc）：把结果强制为 Cancelled，避免把第一轮拦截文本
-    // 当 Done 收尾（cancelled 旗标已置、插入被跳过；胶囊/浮窗语义应一致显示「已取消」）。
-    let final_outcome = if inner.state.lock().cancelled {
-        LessComputerOutcome::Cancelled
-    } else {
-        final_outcome
-    };
-
+    let result = inner
+        .backend
+        .submit_less_computer_with_session(
+            core_id,
+            transcript,
+        )
+        .await;
+    inner.host.hide_less_computer_glow();
     {
         let mut state = inner.state.lock();
         state.phase = SessionPhase::Idle;
-        state.focus_target = None; // 清除过期焦点目标，避免影响下次会话
+        state.focus_target = None;
     }
-    // 工作结束：熄灭全屏彩虹描边（聊天浮窗保留，等用户读完/关闭）。
-    if let Some(app) = inner.app.lock().clone() {
-        crate::hide_less_computer_glow(&app);
-    }
+    *inner.session_cooldown_until.lock() =
+        Some(std::time::Instant::now() + std::time::Duration::from_millis(POST_SESSION_COOLDOWN_MS));
 
-    match final_outcome {
-        LessComputerOutcome::Done { text, cost_usd } => {
-            let text = text.trim().to_string();
-            if text.is_empty() {
-                let msg = "Agent 无结果（确认已登录且额度充足）".to_string();
-                emit_less_computer(
-                    inner,
-                    serde_json::json!({ "kind": "error", "message": msg }),
-                );
-                emit_capsule(inner, CapsuleState::Error, 0.0, elapsed, Some(msg), None);
-                schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-                return Err("voice agent empty".to_string());
-            }
-            log::info!("[coord] Cloud Agent 语音：返回 {} 字", text.chars().count());
-            emit_less_computer(
-                inner,
-                serde_json::json!({ "kind": "completed", "text": text, "costUsd": cost_usd }),
-            );
-            emit_capsule(inner, CapsuleState::Done, 0.0, elapsed, Some(text), None);
-            schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-            Ok(())
-        }
-        LessComputerOutcome::Failed { message } => {
-            log::warn!("[coord] Cloud Agent 语音失败: {message}");
-            emit_less_computer(
-                inner,
-                serde_json::json!({ "kind": "error", "message": message }),
-            );
+    let result = match result {
+        Ok(result) => result,
+        Err(error) => {
+            // If submit failed before Core promoted the capture lease (for
+            // example runtime/publisher is not configured), release it so a
+            // subsequent hotkey is not stuck in Busy. This is a no-op after
+            // a successful promotion, where Core owns run cleanup.
+            let _ = inner.backend.abort_less_computer_capture(core_id);
+            let message = error.to_string();
             emit_capsule(
                 inner,
                 CapsuleState::Error,
                 0.0,
                 elapsed,
-                Some(message),
+                Some(message.clone()),
                 None,
             );
             schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-            Err("voice agent failed".to_string())
+            return Err(message);
         }
-        LessComputerOutcome::Cancelled => {
-            log::info!("[coord] Cloud Agent 语音已取消");
-            emit_less_computer(inner, serde_json::json!({ "kind": "cancelled" }));
+    };
+    match result.outcome {
+        openless_core::LessComputerRunOutcome::Completed { text, .. } => {
+            let text = text.trim().to_string();
+            if text.is_empty() {
+                let message = "Agent 无结果（确认已登录且额度充足）".to_string();
+                emit_capsule(
+                    inner,
+                    CapsuleState::Error,
+                    0.0,
+                    elapsed,
+                    Some(message.clone()),
+                    None,
+                );
+                schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
+                return Err(message);
+            }
+            emit_capsule(
+                inner,
+                CapsuleState::Done,
+                0.0,
+                elapsed,
+                Some(text),
+                None,
+            );
+            schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
+            Ok(())
+        }
+        openless_core::LessComputerRunOutcome::Failed { message } => {
+            emit_capsule(
+                inner,
+                CapsuleState::Error,
+                0.0,
+                elapsed,
+                Some(message.clone()),
+                None,
+            );
+            schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
+            Err(message)
+        }
+        openless_core::LessComputerRunOutcome::Cancelled => {
             emit_capsule(inner, CapsuleState::Cancelled, 0.0, elapsed, None, None);
             schedule_capsule_idle(inner, CAPSULE_CANCEL_HIDE_DELAY_MS);
-            Err("voice agent cancelled".to_string())
+            Err("Less Computer cancelled".to_string())
         }
-    }
-}
-
-/// 一轮无头 Less Computer 运行的结果。
-#[derive(Debug, PartialEq)]
-enum LessComputerOutcome {
-    Done { text: String, cost_usd: Option<f64> },
-    Failed { message: String },
-    Cancelled,
-}
-
-fn resolve_less_computer_run_outcome(
-    final_text: String,
-    cost_usd: Option<f64>,
-    error: Option<String>,
-) -> LessComputerOutcome {
-    if let Some(message) = error {
-        return LessComputerOutcome::Failed { message };
-    }
-    let text = final_text.trim().to_string();
-    if text.is_empty() {
-        LessComputerOutcome::Failed {
-            message: "Agent 无结果（确认已登录且额度充足）".to_string(),
-        }
-    } else {
-        LessComputerOutcome::Done {
-            text,
-            cost_usd,
-        }
-    }
-}
-
-/// 跑一轮无头 Claude（「放行 + 护栏」），把 Delta/ToolUse 实时 stream 到聊天浮窗，
-/// 终局收敛为 [`LessComputerOutcome`]。`extra_allow_patterns` 为审批通过后放行的
-/// 高风险子串（如 "git push --force"）：从 deny 清单剔除 + 作为 `Bash(<pat>:*)` 加进 allowed。
-async fn run_less_computer_once(
-    inner: &Arc<Inner>,
-    prompt: &str,
-    cwd: Option<&std::path::Path>,
-    mode: crate::coding_agent::CodingAgentPermissionMode,
-    model: Option<&str>,
-    extra_allow_patterns: &[String],
-    continue_session: bool,
-) -> LessComputerOutcome {
-    use crate::coding_agent::CodingAgentProvider;
-
-    let provider = CodingAgentProvider::from_pref(&inner.prefs.get().coding_agent_provider);
-    // 可配置可执行文件：用户在「高级 → Less Computer」填了路径就用它，留空/空白按后端取默认
-    // （claude / opencode）。trim 后为空视作未配置。
-    let configured_exe: Option<String> = inner
-        .prefs
-        .get()
-        .coding_agent_exe
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
-
-    // 审批放行的高风险子串按「风险等价组」整组放行（如 --force / -f）：只放行被点那一个会让
-    // 等价写法仍被拦。Claude / OpenCode 共用这组前缀。见 guard::risk_equivalent_patterns。
-    let approved_patterns: Vec<String> = extra_allow_patterns
-        .iter()
-        .flat_map(|p| {
-            let group = crate::coding_agent::guard::risk_equivalent_patterns(p);
-            if group.is_empty() {
-                vec![p.clone()]
-            } else {
-                group.into_iter().map(|s| s.to_string()).collect()
-            }
-        })
-        // 不可安全批准的模式（提权/毁盘/系统级如 "sudo "、"dd if=" 等，deny_rule_for_pattern
-        // 返回 None）在审批阶段保持拦截，不注入 allow 列表也不生成 OpenCode allow glob。
-        .filter(|p| crate::coding_agent::guard::deny_rule_for_pattern(p).is_some())
-        .collect();
-
-    let mut req = crate::coding_agent::CodingAgentRequest::new("less-computer", prompt.to_string());
-    req.cwd = cwd.map(|p| p.to_path_buf());
-    req.model = model.map(|m| m.to_string());
-    req.permission_mode = mode;
-    // 真实任务（开应用、多步操作、读写文件）常超过 120s → 老是「运行超时」。放宽到
-    // 5 分钟；仅 Claude CLI 能力支持美元硬上限，Codex/OpenCode/dsh 保持 None。
-    req.max_budget_usd = provider.max_budget_usd();
-    req.timeout_secs = 300;
-    // 原生支持的后端续最近会话；dsh 没有 resume，只消费最近两轮的有界文本回放。
-    req.session_persistence = true;
-    req.continue_session = continue_session;
-    req.continuation_context = coding_agent_continuation_context(
-        provider,
-        continue_session,
-        &less_computer_event_backlog(),
-    );
-
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let cancel = Arc::new(AtomicBool::new(false));
-    let cancel_for_runner = Arc::clone(&cancel);
-
-    // 护栏 + 运行器按 provider 分派。两条路径都 fail-closed：护栏配置生成失败一律中止，
-    // 绝不在无护栏下裸跑。`settings_path` 仅 Claude 路径用临时文件（OpenCode 走 env 注入，
-    // 无临时文件需清理）。
-    let settings_path: Option<std::path::PathBuf>;
-    let run = match provider {
-        CodingAgentProvider::ClaudeCodeCli => {
-            // 护栏 deny：默认全量；审批放行的模式从 deny 中剔除。
-            let mut deny = crate::coding_agent::guard::default_deny_rules();
-            // 只放行「可批准」的命令：deny_rule_for_pattern 返回该 pattern 在 default_deny_rules
-            // 里的精确 deny 规则；提权/毁盘/系统级等不可安全表达的命令返回 None → 即使被批准也
-            // 保持拦截（fail-closed），且不向 allow 注入畸形规则。
-            let allow_rules: Vec<String> = approved_patterns
-                .iter()
-                .filter_map(|p| crate::coding_agent::guard::deny_rule_for_pattern(p))
-                .map(|rule| rule.to_string())
-                .collect();
-            if !allow_rules.is_empty() {
-                deny.retain(|d| !allow_rules.iter().any(|a| a == d));
-            }
-            let settings_json = serde_json::json!({
-                "permissions": { "defaultMode": mode.as_cli_arg(), "deny": deny }
-            });
-            let path = std::env::temp_dir().join(format!(
-                "openless-less-computer-guard-{}.json",
-                uuid::Uuid::new_v4()
-            ));
-            // fail-closed：序列化或写入失败时立即中止，绝不把无效路径交给 `claude -p --settings`
-            //（找不到文件 = 完全裸跑）。宁可不跑也不裸跑。
-            let settings_bytes = match serde_json::to_vec_pretty(&settings_json) {
-                Ok(b) => b,
-                Err(e) => {
-                    log::warn!("[less-computer] 序列化护栏配置失败: {e}");
-                    return LessComputerOutcome::Failed {
-                        message: "护栏配置写入失败，已中止（拒绝在无护栏下执行）".into(),
-                    };
-                }
-            };
-            if let Err(e) = std::fs::write(&path, settings_bytes) {
-                log::warn!("[less-computer] 写护栏配置失败: {e}");
-                return LessComputerOutcome::Failed {
-                    message: "护栏配置写入失败，已中止（拒绝在无护栏下执行）".into(),
-                };
-            }
-            settings_path = Some(path.clone());
-            req.settings_json_path = Some(path);
-            // 去掉 WebFetch：无出站白名单时它是 prompt 注入 SSRF 面。保留 WebSearch（走搜索引擎）。
-            req.allowed_tools = vec![
-                "Bash".into(),
-                "Read".into(),
-                "Edit".into(),
-                "Write".into(),
-                "Glob".into(),
-                "Grep".into(),
-                "WebSearch".into(),
-            ];
-            req.allowed_tools.extend(allow_rules);
-            let exe = configured_exe.unwrap_or_else(|| "claude".to_string());
-            async_runtime::spawn(async move {
-                crate::coding_agent::run_claude_agent(&exe, req, tx, cancel_for_runner).await
-            })
-        }
-        CodingAgentProvider::OpenCodeCli => {
-            // OpenCode 无 `--settings`，护栏走 `permission` 配置经 OPENCODE_CONFIG_CONTENT 注入。
-            // build_opencode_guard_config 默认 bash deny 高风险前缀、webfetch deny，审批放行的
-            // 前缀显式 allow。fail-closed：序列化失败立即中止，绝不无护栏裸跑。
-            let guard = crate::coding_agent::guard::build_opencode_guard_config(&approved_patterns);
-            let guard_str = match serde_json::to_string(&guard) {
-                Ok(s) => s,
-                Err(e) => {
-                    log::warn!("[less-computer] 序列化 OpenCode 护栏配置失败: {e}");
-                    return LessComputerOutcome::Failed {
-                        message: "护栏配置写入失败，已中止（拒绝在无护栏下执行）".into(),
-                    };
-                }
-            };
-            settings_path = None;
-            let exe = configured_exe.unwrap_or_else(|| "opencode".to_string());
-            async_runtime::spawn(async move {
-                crate::coding_agent::run_opencode_agent(
-                    &exe,
-                    req,
-                    Some(guard_str),
-                    tx,
-                    cancel_for_runner,
-                )
-                .await
-            })
-        }
-        CodingAgentProvider::CodexCli => {
-            // Codex 没有逐命令 deny 清单（`.rules` execpolicy 只从 $CODEX_HOME / 项目目录读，
-            // 无法从外部注入）。护栏是它自带的 seatbelt 沙箱，由 `-s <mode>` 决定，
-            // 在 build_codex_args 里跟着 permission_mode 一起落。这里没有临时护栏文件。
-            //
-            // 注意这不是「无护栏裸跑」：mode 已在上游钳制为 Plan 或 AcceptEdits，分别落到
-            // `-s read-only` / `-s workspace-write`，遗留宽权限值不会放大 Codex 能力。
-            // approved_patterns 对它无意义（沙箱放行只能整体降档，不能放行单条），
-            // 上游也不会给它弹审批卡，见 CodingAgentProvider::supports_command_approval。
-            settings_path = None;
-            let exe = configured_exe.unwrap_or_else(|| "codex".to_string());
-            async_runtime::spawn(async move {
-                crate::coding_agent::run_codex_agent(&exe, req, tx, cancel_for_runner).await
-            })
-        }
-        CodingAgentProvider::DshCli => {
-            // dsh 同样只有粗粒度沙箱，经 DSH_PERMISSION_MODE 注入（在 run_dsh_agent 里设），
-            // 沙箱根 = 子进程工作目录。同上：不是裸跑，也没有可放行的单条命令。
-            settings_path = None;
-            let exe = configured_exe.unwrap_or_else(|| "dsh".to_string());
-            async_runtime::spawn(async move {
-                crate::coding_agent::run_dsh_agent(&exe, req, tx, cancel_for_runner).await
-            })
-        }
-    };
-    let cancel_for_watcher = Arc::clone(&cancel);
-    let inner_for_cancel = Arc::clone(inner);
-    let cancel_watcher = async_runtime::spawn(async move {
-        loop {
-            if cancel_for_watcher.load(Ordering::Relaxed) {
-                return;
-            }
-            if inner_for_cancel.state.lock().cancelled {
-                cancel_for_watcher.store(true, Ordering::Relaxed);
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
-        }
-    });
-
-    let mut final_text = String::new();
-    let mut cost_usd: Option<f64> = None;
-    let mut error_msg: Option<String> = None;
-    let mut cancelled = false;
-    while let Some(ev) = rx.recv().await {
-        use crate::coding_agent::CodingAgentEvent as E;
-        match ev {
-            E::Started { .. } => {
-                emit_less_computer(inner, serde_json::json!({ "kind": "started" }));
-            }
-            E::Delta { text, .. } => {
-                emit_less_computer(inner, serde_json::json!({ "kind": "delta", "text": text }));
-            }
-            E::ToolUse { name, .. } => {
-                emit_less_computer(inner, serde_json::json!({ "kind": "tool", "name": name }));
-            }
-            E::Compaction { .. } => {
-                emit_less_computer(inner, serde_json::json!({ "kind": "compaction" }));
-            }
-            E::Completed {
-                text, cost_usd: c, ..
-            } => {
-                final_text = text;
-                cost_usd = c;
-            }
-            E::Error { message, .. } => error_msg = Some(message),
-            E::Cancelled { .. } => cancelled = true,
-        }
-    }
-    let run_result = run.await;
-    cancel.store(true, Ordering::Relaxed);
-    let _ = cancel_watcher.await;
-    // 仅 Claude 路径有临时护栏文件需清理；OpenCode 走 env 注入无文件。
-    if let Some(path) = &settings_path {
-        let _ = std::fs::remove_file(path);
-    }
-
-    if cancelled
-        || matches!(
-            &run_result,
-            Ok(Err(crate::coding_agent::CodingAgentError::Cancelled))
-        )
-    {
-        return LessComputerOutcome::Cancelled;
-    }
-
-    let run_error = error_msg.or_else(|| match run_result {
-        Ok(Err(e)) => Some(e.to_string()),
-        _ => None,
-    });
-    resolve_less_computer_run_outcome(final_text, cost_usd, run_error)
-}
-
-/// 护栏拦截探测 + 内联审批（best-effort）。
-///
-/// 无头 `claude -p`（v2.1.165）没有 mid-run 的 `--permission-prompt-tool` 通道，所以
-/// 我们只能在「一轮跑完」后判断护栏是否拦了高风险动作：扫描终局文本里是否提到某个
-/// 高风险模式 + 权限/拒绝/blocked 关键词。命中则发 `approval` 事件、挂一个 oneshot 等
-/// 用户决断（前端 Approve/Deny → `less_computer_approve` 命令解析）。
-///
-/// 返回 `Some(pattern)` 表示用户 Approve 了某高风险模式 → 调用方应放行该模式重跑一轮；
-/// `None` 表示无需审批 / 用户 Deny / 超时。**注意**这是「重跑放行」而非真正的 mid-run
-/// 续跑——headless 下没有干净的 mid-run round-trip，详见 report。
-async fn maybe_request_approval(
-    inner: &Arc<Inner>,
-    outcome: &LessComputerOutcome,
-) -> Option<String> {
-    let text = match outcome {
-        LessComputerOutcome::Done { text, .. } => text.as_str(),
-        LessComputerOutcome::Failed { message } => message.as_str(),
-        LessComputerOutcome::Cancelled => return None,
-    };
-    let lowered = text.to_lowercase();
-    // 必须同时出现「拒绝/权限/blocked」语义 + 某个已知高风险模式，才认为是护栏拦截，
-    // 避免把正常提到 "rm" 的回答误判成审批请求。
-    let mentions_block = [
-        "denied",
-        "permission",
-        "not allowed",
-        "blocked",
-        "拒绝",
-        "权限",
-        "被拦",
-    ]
-    .iter()
-    .any(|kw| lowered.contains(kw));
-    if !mentions_block {
-        return None;
-    }
-    let hit = crate::coding_agent::guard::HIGH_RISK_PATTERNS
-        .iter()
-        .find(|(pat, _)| lowered.contains(*pat))?;
-    let (pattern, reason) = (hit.0.to_string(), hit.1.to_string());
-
-    // 挂 oneshot 等用户决断。
-    let token = uuid::Uuid::new_v4().to_string();
-    let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
-    if let Ok(mut map) = less_computer_approvals().lock() {
-        map.insert(token.clone(), tx);
-    }
-    emit_less_computer(
-        inner,
-        serde_json::json!({
-            "kind": "approval",
-            "token": token,
-            "command": pattern,
-            "reason": reason,
-        }),
-    );
-
-    // 等用户点 Approve/Deny；90s 无响应按 Deny 处理并清理注册表项。会话被取消
-    // （Esc → esc-cancel-bridge → cancel_session 置 cancelled，PR #855 场景）时
-    // 同样按 Deny 处理并清理——否则审批挂起期间 Esc 被独占吞掉却毫无效果。
-    let approved = tokio::select! {
-        v = rx => v.unwrap_or(false),
-        _ = tokio::time::sleep(std::time::Duration::from_secs(90)) => {
-            less_computer_approvals()
-                .lock()
-                .ok()
-                .map(|mut m| m.remove(&token));
-            false
-        }
-        _ = wait_for_processing_cancel(inner) => {
-            less_computer_approvals()
-                .lock()
-                .ok()
-                .map(|mut m| m.remove(&token));
-            false
-        }
-    };
-    if approved {
-        Some(pattern)
-    } else {
-        None
-    }
-}
-
-/// 把 prefs 里的权限模式字符串映射成枚举；只有沙箱档位的后端把遗留宽权限值
-/// fail-closed 到只读，避免后续通用降级把它们意外放宽为可写。
-fn coding_agent_mode_from_pref(
-    provider: crate::coding_agent::CodingAgentProvider,
-    s: &str,
-) -> crate::coding_agent::CodingAgentPermissionMode {
-    use crate::coding_agent::CodingAgentPermissionMode as M;
-    let mode = match s.trim() {
-        "plan" => M::Plan,
-        "default" => M::Default,
-        "bypassPermissions" => M::BypassPermissions,
-        _ => M::AcceptEdits,
-    };
-    if matches!(
-        provider,
-        crate::coding_agent::CodingAgentProvider::CodexCli
-            | crate::coding_agent::CodingAgentProvider::DshCli
-    ) && matches!(mode, M::Default | M::BypassPermissions)
-    {
-        M::Plan
-    } else {
-        mode
     }
 }
 
@@ -2113,17 +1459,60 @@ pub(super) fn request_stop_during_starting(inner: &Arc<Inner>, reason: &str) {
     stop_recorder_if_pending_start_stop(inner);
 }
 
+/// Reserve and start one Less Computer capture using a single session id in
+/// both Core and the legacy host recorder/ASR state machine.
+///
+/// The Core lease is deliberately acquired first. If Coordinator startup is
+/// rejected, fails, or loses a cancellation race, the lease is released here
+/// so a later press cannot be reported as spuriously busy.
+pub(super) async fn begin_less_computer_session(
+    inner: &Arc<Inner>,
+) -> Result<Option<SessionId>, String> {
+    let session_id = new_session_id();
+    let core_id = core_session_id(session_id);
+    inner
+        .backend
+        .begin_less_computer_capture(core_id)
+        .map_err(|error| error.to_string())?;
+
+    if let Err(error) = begin_session_as_with_session_id(inner, true, Some(session_id)).await {
+        let _ = inner.backend.abort_less_computer_capture(core_id);
+        return Err(error);
+    }
+
+    let started = {
+        let state = inner.state.lock();
+        state.session_id == session_id
+            && state.voice_agent
+            && matches!(
+                state.phase,
+                SessionPhase::Starting | SessionPhase::Listening | SessionPhase::Processing
+            )
+    };
+    if !started {
+        let _ = inner.backend.abort_less_computer_capture(core_id);
+        return Ok(None);
+    }
+    Ok(Some(session_id))
+}
+
 pub(super) async fn begin_session(inner: &Arc<Inner>) -> Result<(), String> {
-    begin_session_as(inner, false, false).await
+    begin_session_as(inner, false).await
 }
 
 /// begin_session 的带参版本，voice_agent=true 时在 Starting 阶段就标记好，
 /// 防止 finish_starting_session 处理 pending_stop 时丢失标志。
-/// `remote=true` 时用手机推来的 PCM，不打开电脑麦克风。
-pub(super) async fn begin_session_as(
+pub(super) async fn begin_session_as(inner: &Arc<Inner>, voice_agent: bool) -> Result<(), String> {
+    begin_session_as_with_session_id(inner, voice_agent, None).await
+}
+
+/// 与 [`begin_session_as`] 相同，但允许 Less Computer 复用已经由 Core 预留的
+/// session id。普通听写继续由 Coordinator 自己生成 id；只有跨 Core/Host 的
+/// Less Computer capture 生命周期使用这个显式 id。
+pub(super) async fn begin_session_as_with_session_id(
     inner: &Arc<Inner>,
     voice_agent: bool,
-    remote: bool,
+    supplied_session_id: Option<SessionId>,
 ) -> Result<(), String> {
     #[cfg(all(not(mobile), target_os = "windows"))]
     if super::selection_voice_session::selection_voice_blocks_other_recording(inner) {
@@ -2132,26 +1521,40 @@ pub(super) async fn begin_session_as(
     }
     let current_session_id = {
         let mut state = inner.state.lock();
-        let Some(session_id) =
-            begin_session_state(&mut state, capture_focus_target(), capture_frontmost_app())
+        let Some(session_id) = supplied_session_id
+            .map(|session_id| {
+                begin_session_state_with_id(
+                    &mut state,
+                    capture_focus_target(),
+                    capture_frontmost_app(),
+                    session_id,
+                )
+            })
+            .unwrap_or_else(|| {
+                begin_session_state(&mut state, capture_focus_target(), capture_frontmost_app())
+            })
         else {
             return Ok(());
         };
         if voice_agent {
             state.voice_agent = true;
         }
+        if supplied_session_id.is_some()
+            && inner
+                .backend
+                .less_computer_capture_cancelled(core_session_id(session_id))
+        {
+            // Esc/cancel may have arrived in the short window between Core
+            // lease reservation and this host state transition. Do not start
+            // recorder/ASR for an already-cancelled capture.
+            state.phase = SessionPhase::Idle;
+            return Ok(());
+        }
         if let Some(label) = state.front_app.as_deref() {
             log::info!("[coord] front_app captured: {label}");
         }
         session_id
     };
-    #[cfg(not(mobile))]
-    if remote {
-        let bridge = Arc::new(super::DeferredAsrBridge::new());
-        *inner.remote_pcm_bridge.lock() = Some(Arc::clone(&bridge));
-        *inner.remote_audio_sink.lock() = Some(bridge);
-        log::info!("[coord] remote mic sink armed (phone PCM, local mic skipped)");
-    }
     // 新一次听写开始 → 上一次的手改监听作废。用户已经不在改上一段了，继续盯着只会
     // 把新的输入误判成对旧文本的修改。这是「必须保证解除」的四条规则之一。
     //
@@ -2165,7 +1568,9 @@ pub(super) async fn begin_session_as(
     super::hide_insert_fallback_card(inner);
     #[cfg(target_os = "windows")]
     {
-        if inner.prefs.get().windows_insertion_mode == crate::types::WindowsInsertionMode::Tsf {
+        if inner.backend.get_preferences().windows_insertion_mode
+            == crate::types::WindowsInsertionMode::Tsf
+        {
             let prepared = inner.windows_ime.prepare_session();
             let mut slots = inner.prepared_windows_ime_session.lock();
             store_prepared_windows_ime_session(&mut slots, current_session_id, prepared);
@@ -2191,7 +1596,7 @@ pub(super) async fn begin_session_as(
     emit_capsule(inner, CapsuleState::Recording, 0.0, 0, None, None);
 
     // 多模态（Omni）模式：不构建 ASR，录音 PCM 直接进缓冲器，松键后一步出文。
-    if pipeline_multimodal_enabled(&inner.prefs.get()) {
+    if pipeline_multimodal_enabled(&inner.backend.get_preferences()) {
         if let Err(message) = ensure_omni_credentials() {
             log::warn!("[coord] omni credential gate failed: {message}");
             emit_capsule(
@@ -2204,36 +1609,30 @@ pub(super) async fn begin_session_as(
             );
             restore_prepared_windows_ime_session(inner, current_session_id);
             inner.state.lock().phase = SessionPhase::Idle;
-            #[cfg(not(mobile))]
-            super::clear_remote_mic_path(inner, current_session_id);
             return Err(message);
         }
-        if !remote {
-            if let Err(message) = ensure_microphone_permission(inner) {
-                log::warn!("[coord] omni microphone permission gate failed: {message}");
-                emit_capsule(
-                    inner,
-                    CapsuleState::Error,
-                    0.0,
-                    0,
-                    Some(message.clone()),
-                    None,
-                );
-                restore_prepared_windows_ime_session(inner, current_session_id);
-                inner.state.lock().phase = SessionPhase::Idle;
-                #[cfg(not(mobile))]
-                super::clear_remote_mic_path(inner, current_session_id);
-                return Err(message);
-            }
+        if let Err(message) = ensure_microphone_permission(inner) {
+            log::warn!("[coord] omni microphone permission gate failed: {message}");
+            emit_capsule(
+                inner,
+                CapsuleState::Error,
+                0.0,
+                0,
+                Some(message.clone()),
+                None,
+            );
+            restore_prepared_windows_ime_session(inner, current_session_id);
+            inner.state.lock().phase = SessionPhase::Idle;
+            return Err(message);
         }
         let consumer = PcmBufferConsumer::new();
         store_omni_pcm_for_session(inner, current_session_id, Arc::clone(&consumer));
-        start_recorder_and_enter_listening(inner, current_session_id, "omni", consumer, remote)
-            .await?;
+        start_recorder_and_enter_listening(inner, current_session_id, "omni", consumer).await?;
         return Ok(());
     }
 
-    if let Err(message) = ensure_asr_credentials() {
+    let preferences = inner.backend.get_preferences();
+    if let Err(message) = ensure_asr_credentials(&preferences) {
         log::warn!("[coord] ASR credential gate failed: {message}");
         emit_capsule(
             inner,
@@ -2245,8 +1644,6 @@ pub(super) async fn begin_session_as(
         );
         restore_prepared_windows_ime_session(inner, current_session_id);
         inner.state.lock().phase = SessionPhase::Idle;
-        #[cfg(not(mobile))]
-        super::clear_remote_mic_path(inner, current_session_id);
         return Err(message);
     }
 
@@ -2270,28 +1667,24 @@ pub(super) async fn begin_session_as(
             restore_prepared_windows_ime_session(inner, current_session_id);
             inner.state.lock().phase = SessionPhase::Idle;
             schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-            #[cfg(not(mobile))]
-            super::clear_remote_mic_path(inner, current_session_id);
             return Err(message);
         }
     };
 
-    if !remote {
-        if let Err(message) = ensure_microphone_permission(inner) {
-            log::warn!("[coord] microphone permission gate failed: {message}");
-            emit_capsule(
-                inner,
-                CapsuleState::Error,
-                0.0,
-                0,
-                Some(message.clone()),
-                None,
-            );
-            restore_prepared_windows_ime_session(inner, current_session_id);
-            inner.state.lock().phase = SessionPhase::Idle;
-            schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-            return Err(message);
-        }
+    if let Err(message) = ensure_microphone_permission(inner) {
+        log::warn!("[coord] microphone permission gate failed: {message}");
+        emit_capsule(
+            inner,
+            CapsuleState::Error,
+            0.0,
+            0,
+            Some(message.clone()),
+            None,
+        );
+        restore_prepared_windows_ime_session(inner, current_session_id);
+        inner.state.lock().phase = SessionPhase::Idle;
+        schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
+        return Err(message);
     }
 
     // 不在这里 emit Recording capsule —— 让 start_recorder_for_starting 在
@@ -2300,7 +1693,7 @@ pub(super) async fn begin_session_as(
     // 窗口（50-200ms）内 → 开头几个字物理上录不到。详见 issue 备注。
     #[cfg(target_os = "windows")]
     if foundry::is_foundry_local_whisper(&active_asr) {
-        let prefs = inner.prefs.get();
+        let prefs = inner.backend.get_preferences();
         let model_alias = if foundry::model_alias_is_known(&prefs.foundry_local_asr_model) {
             prefs.foundry_local_asr_model.clone()
         } else {
@@ -2325,7 +1718,7 @@ pub(super) async fn begin_session_as(
             AsrCallLabel::new(foundry::PROVIDER_ID, Some(model_alias)),
         );
         let consumer: Arc<dyn crate::recorder::AudioConsumer> = local;
-        start_recorder_and_enter_listening(inner, current_session_id, &active_asr, consumer, remote)
+        start_recorder_and_enter_listening(inner, current_session_id, &active_asr, consumer)
             .await?;
         return Ok(());
     }
@@ -2336,7 +1729,7 @@ pub(super) async fn begin_session_as(
     // 推 partial 给前端胶囊。
     #[cfg(target_os = "windows")]
     if sherpa::is_sherpa_onnx_local(&active_asr) {
-        let prefs = inner.prefs.get();
+        let prefs = inner.backend.get_preferences();
         let model_alias = if sherpa::model_alias_is_known(&prefs.sherpa_onnx_model) {
             prefs.sherpa_onnx_model.clone()
         } else {
@@ -2348,13 +1741,7 @@ pub(super) async fn begin_session_as(
         } else {
             Some(language_hint)
         };
-        let token_handler = inner.app.lock().clone().map(|app| {
-            Arc::new(move |piece: String| {
-                if let Err(error) = app.emit("local-asr-token", piece) {
-                    log::warn!("[sherpa-asr] emit token failed: {error}");
-                }
-            }) as crate::asr::local::sherpa_provider::SherpaTokenHandler
-        });
+        let token_handler = Some(sherpa_transcript_handler(inner, Some(current_session_id)));
         let local = match SherpaOnnxAsr::new_for_model(
             Arc::clone(&inner.sherpa_onnx_runtime),
             model_alias.clone(),
@@ -2377,8 +1764,6 @@ pub(super) async fn begin_session_as(
                 restore_prepared_windows_ime_session(inner, current_session_id);
                 inner.state.lock().phase = SessionPhase::Idle;
                 schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-                #[cfg(not(mobile))]
-                super::clear_remote_mic_path(inner, current_session_id);
                 return Err(format!("sherpa-onnx init failed: {e}"));
             }
         };
@@ -2389,7 +1774,7 @@ pub(super) async fn begin_session_as(
             AsrCallLabel::new(sherpa::PROVIDER_ID, Some(model_alias)),
         );
         let consumer: Arc<dyn crate::recorder::AudioConsumer> = local;
-        start_recorder_and_enter_listening(inner, current_session_id, &active_asr, consumer, remote)
+        start_recorder_and_enter_listening(inner, current_session_id, &active_asr, consumer)
             .await?;
         return Ok(());
     }
@@ -2413,8 +1798,6 @@ pub(super) async fn begin_session_as(
                         restore_prepared_windows_ime_session(inner, current_session_id);
                         inner.state.lock().phase = SessionPhase::Idle;
                         schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-                        #[cfg(not(mobile))]
-                        super::clear_remote_mic_path(inner, current_session_id);
                         return Err(format!("local ASR init failed: {e}"));
                     }
                 };
@@ -2430,13 +1813,12 @@ pub(super) async fn begin_session_as(
                     current_session_id,
                     &active_asr,
                     consumer,
-                    remote,
                 )
                 .await?;
             }
             #[cfg(target_os = "macos")]
             DesktopKeylessDictationProvider::AppleSpeech => {
-                let local = build_apple_speech(&inner.prefs.get());
+                let local = build_apple_speech(&inner.backend.get_preferences());
                 store_asr_for_session(
                     inner,
                     current_session_id,
@@ -2450,7 +1832,6 @@ pub(super) async fn begin_session_as(
                     current_session_id,
                     &active_asr,
                     consumer,
-                    remote,
                 )
                 .await?;
             }
@@ -2471,8 +1852,6 @@ pub(super) async fn begin_session_as(
                         restore_prepared_windows_ime_session(inner, current_session_id);
                         inner.state.lock().phase = SessionPhase::Idle;
                         schedule_capsule_idle(inner, CAPSULE_AUTO_HIDE_DELAY_MS);
-                        #[cfg(not(mobile))]
-                        super::clear_remote_mic_path(inner, current_session_id);
                         return Err(format!("local Whisper init failed: {error}"));
                     }
                 };
@@ -2488,7 +1867,6 @@ pub(super) async fn begin_session_as(
                     current_session_id,
                     &active_asr,
                     consumer,
-                    remote,
                 )
                 .await?;
             }
@@ -2527,8 +1905,7 @@ pub(super) async fn begin_session_as(
             ActiveAsr::Bailian(Arc::clone(&asr)),
             asr_call_label,
         );
-        start_recorder_for_starting(inner, current_session_id, &active_asr, consumer, remote)
-            .await?;
+        start_recorder_for_starting(inner, current_session_id, &active_asr, consumer).await?;
 
         if let Err(e) = asr.open_session().await {
             log::error!("[coord] open Bailian ASR session failed: {e}");
@@ -2604,8 +1981,7 @@ pub(super) async fn begin_session_as(
             ActiveAsr::Qwen3Realtime(Arc::clone(&asr)),
             asr_call_label,
         );
-        start_recorder_for_starting(inner, current_session_id, &active_asr, consumer, remote)
-            .await?;
+        start_recorder_for_starting(inner, current_session_id, &active_asr, consumer).await?;
 
         if let Err(e) = asr.open_session().await {
             log::error!("[coord] open Qwen3 realtime ASR session failed: {e}");
@@ -2687,8 +2063,7 @@ pub(super) async fn begin_session_as(
             ActiveAsr::StepfunRealtime(Arc::clone(&asr)),
             asr_call_label,
         );
-        start_recorder_for_starting(inner, current_session_id, &active_asr, consumer, remote)
-            .await?;
+        start_recorder_for_starting(inner, current_session_id, &active_asr, consumer).await?;
 
         if let Err(e) = asr.open_session().await {
             log::error!("[coord] open StepFun realtime ASR session failed: {e}");
@@ -2766,7 +2141,7 @@ pub(super) async fn begin_session_as(
             asr_call_label,
         );
         let consumer: Arc<dyn crate::recorder::AudioConsumer> = mimo;
-        start_recorder_and_enter_listening(inner, current_session_id, &active_asr, consumer, remote)
+        start_recorder_and_enter_listening(inner, current_session_id, &active_asr, consumer)
             .await?;
     } else if is_dashscope_multimodal_provider(&effective_asr) {
         let (api_key, base_url, model) = read_dashscope_multimodal_credentials();
@@ -2779,7 +2154,7 @@ pub(super) async fn begin_session_as(
             asr_call_label,
         );
         let consumer: Arc<dyn crate::recorder::AudioConsumer> = asr;
-        start_recorder_and_enter_listening(inner, current_session_id, &active_asr, consumer, remote)
+        start_recorder_and_enter_listening(inner, current_session_id, &active_asr, consumer)
             .await?;
     } else if is_elevenlabs_provider(&effective_asr) {
         let (api_key, base_url, model) = read_elevenlabs_credentials();
@@ -2792,7 +2167,7 @@ pub(super) async fn begin_session_as(
             asr_call_label,
         );
         let consumer: Arc<dyn crate::recorder::AudioConsumer> = asr;
-        start_recorder_and_enter_listening(inner, current_session_id, &active_asr, consumer, remote)
+        start_recorder_and_enter_listening(inner, current_session_id, &active_asr, consumer)
             .await?;
     } else if is_whisper_compatible_provider(&effective_asr) {
         let (api_key, base_url, model) = read_whisper_credentials();
@@ -2827,7 +2202,7 @@ pub(super) async fn begin_session_as(
             asr_call_label,
         );
         let consumer: Arc<dyn crate::recorder::AudioConsumer> = whisper;
-        start_recorder_and_enter_listening(inner, current_session_id, &active_asr, consumer, remote)
+        start_recorder_and_enter_listening(inner, current_session_id, &active_asr, consumer)
             .await?;
     } else if is_xfyun_provider(&effective_asr) {
         // 讯飞 RTASR 实时流式：与 Bailian / 火山同构（open_session → 录音 → end → final）。
@@ -2842,8 +2217,7 @@ pub(super) async fn begin_session_as(
             ActiveAsr::Xfyun(Arc::clone(&asr)),
             asr_call_label,
         );
-        start_recorder_for_starting(inner, current_session_id, &active_asr, consumer, remote)
-            .await?;
+        start_recorder_for_starting(inner, current_session_id, &active_asr, consumer).await?;
 
         if let Err(e) = asr.open_session().await {
             log::error!("[coord] open iFlytek ASR session failed: {e}");
@@ -2924,8 +2298,7 @@ pub(super) async fn begin_session_as(
             ActiveAsr::Volcengine(Arc::clone(&asr)),
             asr_call_label,
         );
-        start_recorder_for_starting(inner, current_session_id, &active_asr, consumer, remote)
-            .await?;
+        start_recorder_for_starting(inner, current_session_id, &active_asr, consumer).await?;
 
         if let Err(e) = asr.open_session().await {
             log::error!("[coord] open ASR session failed: {e}");
@@ -2994,99 +2367,12 @@ pub(super) async fn begin_session_as(
     Ok(())
 }
 
-#[cfg(not(mobile))]
-fn arm_remote_microphone(
-    inner: &Arc<Inner>,
-    session_id: SessionId,
-    active_asr: &str,
-    consumer: Arc<dyn crate::recorder::AudioConsumer>,
-    level_handler: Arc<dyn Fn(f32) + Send + Sync>,
-) -> Result<(), String> {
-    inner
-        .audio_archive_active
-        .store(false, std::sync::atomic::Ordering::Relaxed);
-    let fanout = Arc::new(RemoteMicFanout {
-        consumer,
-        level_handler,
-        frames: AtomicUsize::new(0),
-        peak_rms_milli: AtomicUsize::new(0),
-    });
-    if let Some(bridge) = inner.remote_pcm_bridge.lock().clone() {
-        let flushed = bridge.attach(fanout);
-        log::info!(
-            "[coord] remote mic attached (asr={active_asr}, session={session_id}, flushed={flushed} bytes)"
-        );
-    } else {
-        *inner.remote_audio_sink.lock() = Some(fanout);
-        log::info!("[coord] remote mic sink set (asr={active_asr}, session={session_id})");
-    }
-    stop_recorder_if_pending_start_stop(inner);
-    Ok(())
-}
-
-struct RemoteMicFanout {
-    consumer: Arc<dyn crate::recorder::AudioConsumer>,
-    level_handler: Arc<dyn Fn(f32) + Send + Sync>,
-    frames: AtomicUsize,
-    peak_rms_milli: AtomicUsize,
-}
-
-fn pcm_i16_le_rms(pcm: &[u8]) -> f32 {
-    let mut sum = 0.0f32;
-    let mut n = 0u32;
-    for chunk in pcm.chunks_exact(2) {
-        let sample = i16::from_le_bytes([chunk[0], chunk[1]]) as f32 / 32768.0;
-        sum += sample * sample;
-        n += 1;
-    }
-    if n == 0 {
-        return 0.0;
-    }
-    (sum / n as f32).sqrt()
-}
-
-impl RemoteMicFanout {
-    fn consume(&self, pcm: &[u8]) {
-        let rms = pcm_i16_le_rms(pcm);
-        let level = (rms * 4.0).clamp(0.0, 1.0);
-        self.consumer.consume_pcm_chunk(pcm);
-        (self.level_handler)(level);
-        let count = self.frames.fetch_add(1, Ordering::Relaxed) + 1;
-        let milli = (rms * 1000.0) as usize;
-        self.peak_rms_milli.fetch_max(milli, Ordering::Relaxed);
-        if count == 1 || count % 50 == 0 {
-            let peak = self.peak_rms_milli.load(Ordering::Relaxed) as f32 / 1000.0;
-            log::info!(
-                "[coord] remote mic cb#{count} bytes={} rms={:.5} peak={:.5}",
-                pcm.len(),
-                rms,
-                peak
-            );
-        }
-    }
-}
-
-impl crate::recorder::AudioConsumer for RemoteMicFanout {
-    fn consume_pcm_chunk(&self, pcm: &[u8]) {
-        self.consume(pcm);
-    }
-}
-
-impl crate::asr::AudioConsumer for RemoteMicFanout {
-    fn consume_pcm_chunk(&self, pcm: &[u8]) {
-        self.consume(pcm);
-    }
-}
-
 pub(super) async fn start_recorder_for_starting(
     inner: &Arc<Inner>,
     session_id: SessionId,
     active_asr: &str,
     consumer: Arc<dyn crate::recorder::AudioConsumer>,
-    remote: bool,
 ) -> Result<(), String> {
-    #[cfg(mobile)]
-    let _ = remote;
     let inner_for_level = Arc::clone(inner);
     // ── Toggle 模式「说完自动停止」（issue #860）──────────────────────────
     // 仅在开关开启且当前热键模式为 Toggle 时启用；默认关闭，行为与旧版一致。
@@ -3095,11 +2381,15 @@ pub(super) async fn start_recorder_for_starting(
     // emit_capsule，不影响检测），产出一次性 Stop / Cancel 决策后由独立 task
     // 执行 end_session / cancel_session。
     let auto_stop_enabled = {
-        let prefs = inner.prefs.get();
+        let prefs = inner.backend.get_preferences();
         prefs.hotkey.mode == HotkeyMode::Toggle && prefs.silence_auto_stop_enabled
     };
     let auto_stop = Arc::new(Mutex::new(auto_stop_enabled.then(|| {
-        let secs = inner.prefs.get().silence_auto_stop_seconds.clamp(0.5, 30.0);
+        let secs = inner
+            .backend
+            .get_preferences()
+            .silence_auto_stop_seconds
+            .clamp(0.5, 30.0);
         silence_auto_stop::SilenceAutoStop::new(
             std::time::Duration::from_secs_f32(secs),
             std::time::Instant::now(),
@@ -3109,7 +2399,8 @@ pub(super) async fn start_recorder_for_starting(
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let task_inner = Arc::clone(inner);
         let captured_session_id = session_id;
-        tauri::async_runtime::spawn(async move {
+        let host = task_inner.host.clone();
+        host.spawn(async move {
             let Some(decision) = rx.recv().await else {
                 return;
             };
@@ -3193,11 +2484,6 @@ pub(super) async fn start_recorder_for_starting(
         );
     });
 
-    #[cfg(not(mobile))]
-    if remote {
-        return arm_remote_microphone(inner, session_id, active_asr, consumer, level_handler);
-    }
-
     let microphone_device_name = selected_microphone_device_name(inner);
     stop_microphone_preview_monitor(inner, "dictation recorder");
     acquire_recording_mute(inner, "dictation").await;
@@ -3209,7 +2495,7 @@ pub(super) async fn start_recorder_for_starting(
     // 文件名用 coordinator 的 SessionId，跟 history 那条记录 id 对齐（见下游 polish 收尾
     // `history_session_id = current_session_id.to_string()`），前端凭 id 就能找到录音。
     let audio_archive_path = {
-        let prefs = inner.prefs.get();
+        let prefs = inner.backend.get_preferences();
         let _ = crate::persistence::prune_recordings(
             prefs.history_retention_days,
             prefs.audio_recording_max_entries,
@@ -3332,9 +2618,8 @@ pub(super) async fn start_recorder_and_enter_listening(
     session_id: SessionId,
     active_asr: &str,
     consumer: Arc<dyn crate::recorder::AudioConsumer>,
-    remote: bool,
 ) -> Result<(), String> {
-    start_recorder_for_starting(inner, session_id, active_asr, consumer, remote).await?;
+    start_recorder_for_starting(inner, session_id, active_asr, consumer).await?;
     finish_starting_session(inner, session_id).await;
     Ok(())
 }
@@ -3424,7 +2709,7 @@ fn write_transcribe_failed_history(
     asr_ms: u64,
     asr_call_label: Option<&AsrCallLabel>,
 ) {
-    let prefs = inner.prefs.get();
+    let prefs = inner.backend.get_preferences();
     let front_app = inner.state.lock().front_app.clone();
     let mut session = build_transcribe_failed_session(
         session_id,
@@ -3440,7 +2725,7 @@ fn write_transcribe_failed_history(
         session.asr_provider = Some(label.provider.clone());
         session.asr_model = label.model.clone();
     }
-    if let Err(e) = inner.history.append_with_retention(
+    if let Err(e) = inner.backend.append_history(
         session,
         prefs.history_retention_days,
         prefs.history_max_entries,
@@ -3553,24 +2838,25 @@ fn pcm_duration_ms(pcm_len: usize) -> u64 {
 }
 
 /// 用「当前」provider 把一段 PCM 重新转录（建一条全新 ASR 会话——原会话失败/断开后不可
-/// 复用）。复用 Coordinator::retranscribe_pcm（历史「重新转录」同款逻辑）；Coordinator 只持有
-/// `inner`，这里用 inner 重建一个轻量句柄，零副作用。
+/// 复用）。历史重转录与静默重试共用 Core `AuxiliaryApi`，因此 provider 快照、取消和
+/// Foundry 终态错误分类不会在两个 Tauri 调用点漂移。
 async fn retranscribe_pcm_via_inner(
     inner: &Arc<Inner>,
     pcm: Vec<u8>,
-) -> (Result<String, RetranscribeError>, Option<AsrCallLabel>) {
-    Coordinator {
-        inner: Arc::clone(inner),
-    }
-    .retranscribe_pcm_until_cancelled(pcm)
-    .await
+) -> Result<openless_core::RetranscriptionResult, openless_core::RetranscriptionFailure> {
+    inner
+        .backend
+        .services()
+        .auxiliary
+        .retranscribe_pcm(pcm)
+        .await
 }
 
 /// 一次重试失败后的处置决策：终态 Foundry 回退错误立即耗尽重试（保留本次尝试的
 /// label 归因），瞬态错误继续下一轮。独立纯函数以便测试覆盖循环短路路径
 /// （PR #945 review P1-1）。
 fn retry_error_outcome(
-    error: &RetranscribeError,
+    error: &openless_core::RetranscriptionFailure,
     last_attempted_label: &Option<AsrCallLabel>,
 ) -> Option<SilentRetryOutcome> {
     error
@@ -3615,24 +2901,28 @@ async fn try_silent_retranscribe(inner: &Arc<Inner>, session_id: SessionId) -> S
                 SILENT_RETRY_BACKOFF_MS * attempt as u64,
             )) => {}
         }
-        let (result, attempted_label) = tokio::select! {
+        let result = tokio::select! {
             biased;
             _ = wait_for_processing_cancel(inner) => return SilentRetryOutcome::Cancelled,
             result = retranscribe_pcm_via_inner(inner, pcm.clone()) => result,
         };
-        if attempted_label.is_some() {
-            last_attempted_label = attempted_label.clone();
+        if let Err(error) = &result {
+            if error.attempted_asr.is_some() {
+                last_attempted_label = error.attempted_asr.clone();
+            }
         }
         match result {
-            Ok(text) if !text.trim().is_empty() => {
+            Ok(result) if !result.text.trim().is_empty() => {
                 log::info!(
                     "[coord] 自动静默重试第 {attempt}/{SILENT_RETRY_MAX} 次成功（{} 字）",
-                    text.chars().count()
+                    result.text.chars().count()
                 );
                 return SilentRetryOutcome::Transcript {
-                    raw: RawTranscript { text, duration_ms },
-                    asr_call_label: attempted_label
-                        .expect("successful retranscription must have a build-time ASR label"),
+                    raw: RawTranscript {
+                        text: result.text,
+                        duration_ms,
+                    },
+                    asr_call_label: result.asr,
                 };
             }
             Ok(_) => {
@@ -3646,13 +2936,13 @@ async fn try_silent_retranscribe(inner: &Arc<Inner>, session_id: SessionId) -> S
                 if let Some(outcome) = retry_error_outcome(&e, &last_attempted_label) {
                     log::warn!(
                         "[coord] 自动静默重试第 {attempt}/{SILENT_RETRY_MAX} 次命中终态 Foundry 回退错误，停止重试: {}",
-                        e.into_string()
+                        e.into_message()
                     );
                     return outcome;
                 }
                 log::warn!(
                     "[coord] 自动静默重试第 {attempt}/{SILENT_RETRY_MAX} 次失败: {}",
-                    e.into_string()
+                    e.into_message()
                 );
             }
         }
@@ -3744,7 +3034,7 @@ async fn insert_final_text(
         crate::android::android_insert_with_strategy(
             &inner.inserter,
             text,
-            inner.prefs.get().android_insert_strategy,
+            inner.backend.get_preferences().android_insert_strategy,
         )
     }
     #[cfg(not(target_os = "android"))]
@@ -3768,7 +3058,7 @@ async fn insert_final_text(
                         .insert(text, restore_clipboard, paste_shortcut)
                 }
                 crate::types::WindowsInsertionMode::Tsf => {
-                    let ime_target = capture_ime_submit_target();
+                    let ime_target = crate::windows_ime_target::capture_ime_submit_target();
                     insert_with_windows_ime_first(
                         inner,
                         current_session_id,
@@ -3826,12 +3116,10 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         rec.stop();
         release_recording_mute(inner, "dictation");
     }
-    #[cfg(not(mobile))]
-    super::clear_remote_mic_path(inner, current_session_id);
 
     // 多模态（Omni）模式：不走 ASR 转写 + LLM 润色，录音 PCM 直接编码 WAV，
     // 一次调用出最终文本（issue #902）。两套配置隔离，缺 omni 配置时明确报错。
-    if pipeline_multimodal_enabled(&inner.prefs.get()) {
+    if pipeline_multimodal_enabled(&inner.backend.get_preferences()) {
         return finish_dictation_multimodal(inner, current_session_id, elapsed).await;
     }
 
@@ -4235,8 +3523,10 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
                     let result =
                         tokio::time::timeout(timeout_duration, local.clone().transcribe()).await;
                     if result.is_err() {
-                        // MLX 的 cancel() 会终止隔离 worker；C 后端仍只能驱逐 cache，
-                        // 让旧 spawn_blocking 任务自行收尾。两者都不复用超时后的引擎。
+                        // 超时只放弃结果：spawn_blocking 里的解码任务仍在跑并持有引擎锁，
+                        // cancel() 只能关 token 门控、中止不了它。直接驱逐引擎，让下次
+                        // 会话加载新引擎而不是排队等旧任务跑完（旧任务持有的 Arc 会在
+                        // 完成后自动释放内存）。
                         local.cancel();
                         log::warn!(
                             "[coord] local Qwen3-ASR 超时 {}s，驱逐引擎避免下次会话排队",
@@ -4495,7 +3785,7 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
             // 空转写：没有内容，也就无所谓「规则前的原文」。
             asr_transcript: None,
             final_text: String::new(),
-            mode: inner.prefs.get().default_mode,
+            mode: inner.backend.get_preferences().default_mode,
             style_pack_id: None,
             translation_active: false,
             polish_source: None,
@@ -4518,8 +3808,8 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
             asr_ms: Some(asr_ms),
             polish_ms: None,
         };
-        let prefs_snapshot = inner.prefs.get();
-        if let Err(e) = inner.history.append_with_retention(
+        let prefs_snapshot = inner.backend.get_preferences();
+        if let Err(e) = inner.backend.append_history(
             session,
             prefs_snapshot.history_retention_days,
             prefs_snapshot.history_max_entries,
@@ -4551,7 +3841,7 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
     // audio_archive_active 翻成 false，让下游 history 的 has_audio_recording 读到真实状态
     // （成功条目不会渲染播放/重转按钮再 404）。debug 用户：保留全部录音（原调试行为）。
     // 失败/超时路径在上面的 match 内就产出 Err 并走 fail_dictation，不会走到这里，失败录音始终留存。
-    if !inner.prefs.get().record_audio_for_debug
+    if !inner.backend.get_preferences().record_audio_for_debug
         && inner.audio_archive_active.swap(false, Ordering::Relaxed)
     {
         if let Ok(path) =
@@ -4565,7 +3855,7 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         }
     }
 
-    let correction_rules = match inner.correction_rules.list() {
+    let correction_rules = match inner.backend.list_correction_rules() {
         Ok(rules) => rules,
         Err(e) => {
             log::warn!("[coord] load correction rules failed: {e}; continue without correction");
@@ -4605,10 +3895,10 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
 
     emit_capsule(inner, CapsuleState::Polishing, 0.0, elapsed, None, None);
 
-    let prefs = inner.prefs.get();
+    let prefs = inner.backend.get_preferences();
     let pack = match inner
-        .style_packs
-        .get_or_default_active(&prefs.active_style_pack_id)
+        .backend
+        .get_active_style_pack(&prefs.active_style_pack_id)
     {
         Ok(pack) => pack,
         Err(error) => {
@@ -4659,8 +3949,8 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         && polish_context_window_minutes > 0
     {
         match inner
-            .history
-            .recent_within_minutes(polish_context_window_minutes)
+            .backend
+            .recent_history_within_minutes(polish_context_window_minutes)
         {
             Ok(sessions) => eligible_polish_context_turns(sessions, &pack.id, translation_active),
             Err(e) => {
@@ -4727,7 +4017,7 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
             &prior_turns,
             &mut llm_call,
             &mut llm_elapsed_ms,
-            pipeline_multimodal_enabled(&inner.prefs.get()),
+            pipeline_multimodal_enabled(&inner.backend.get_preferences()),
         )
         .await;
         polish_source = src;
@@ -4765,7 +4055,7 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
             &prior_turns,
             &mut llm_call,
             &mut llm_elapsed_ms,
-            pipeline_multimodal_enabled(&inner.prefs.get()),
+            pipeline_multimodal_enabled(&inner.backend.get_preferences()),
         )
         .await;
         (p, e, false)
@@ -4816,7 +4106,7 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
 
     let focus_target = inner.state.lock().focus_target;
     let focus_ready_for_paste = restore_focus_target_if_possible(focus_target);
-    let prefs = inner.prefs.get();
+    let prefs = inner.backend.get_preferences();
     let allow_non_tsf_insertion_fallback = prefs.allow_non_tsf_insertion_fallback;
     let windows_insertion_mode = prefs.windows_insertion_mode;
     // 逐字上屏中途断了（Secure Input 打开、SendInput / enigo 拒绝）时，
@@ -4871,7 +4161,7 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
     // 跟 history 这条 DictationSession.id 同名，前端凭 id 就能找到对应录音文件。
     let history_session_id = current_session_id.to_string();
     let history_created_at = Utc::now().to_rfc3339();
-    let prefs_snapshot = inner.prefs.get();
+    let prefs_snapshot = inner.backend.get_preferences();
     // 落字目标应用：begin_session 就采过（capture_frontmost_app），此前只喂给了 polish
     // prompt，没写进历史 —— 于是详情页的「插入」行永远只有字数，看不出这段话落到了哪。
     // 前端早就会渲染 app_name，缺的一直是这里的写入。
@@ -4906,7 +4196,8 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         asr_ms: Some(asr_ms),
         polish_ms,
     };
-    if let Err(e) = inner.history.append_with_retention(
+    let completion_polish_source = session.polish_source.clone();
+    if let Err(e) = inner.backend.append_history(
         session,
         prefs_snapshot.history_retention_days,
         prefs_snapshot.history_max_entries,
@@ -4918,7 +4209,7 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
     //
     // 字数口径与历史详情页的「N 字」一致（最终插入文本的 Unicode 字符数）；时长口径
     // 是录音时长，不含识别/润色耗时——与详情页「录音 x.x 秒」同源，避免两处对不上。
-    if let Err(e) = inner.activity.bump(
+    if let Err(e) = inner.backend.record_activity(
         &chrono::Local::now().format("%Y-%m-%d").to_string(),
         polished.chars().count() as u64,
         raw.duration_ms,
@@ -4926,13 +4217,21 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         log::warn!("[coord] activity bump failed: {e}");
     }
 
-    // 远程输入：把本次最终文字回传给手机端。remote_server 的 WS handler 订阅了
-    // "remote:result"（mod.rs:614），但此前全仓从未 emit，导致手机结果区永远空（#691）。
-    // 与上面的 vocab:updated 同模式：无手机连接时无人转发 = 无害空操作。
+    // 远程输入由集中 Tauri event bridge 从 typed completion 转发；无手机连接时
+    // 没有 transport 订阅者，仍是无害空操作。
     if !polished.trim().is_empty() {
-        if let Some(app) = inner.app.lock().clone() {
-            let _ = app.emit("remote:result", polished.clone());
-        }
+        let core_session_id = core_session_id(current_session_id);
+        inner.backend.event_publisher().publish(
+            Some(core_session_id),
+            openless_core::BackendEventKind::DictationCompleted(openless_core::DictationResult {
+                session_id: core_session_id,
+                raw_text: raw.text.clone(),
+                polished_text: polished.clone(),
+                polish_source: completion_polish_source,
+                duration_ms: raw.duration_ms,
+                inserted: core_completion_insert_status(status),
+            }),
+        );
     }
 
     let done_message = if tsf_required_insert_failed {
@@ -4991,10 +4290,7 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
 /// `Inserted` / `PasteSent` 是成功语义。`CopiedFallback` 说明只写了剪贴板、没插进去，
 /// `Failed` 连剪贴板都没写成 —— 这两种情况用户屏幕上都看不到自己刚说的话。
 pub(super) fn insert_delivery_failed(status: InsertStatus) -> bool {
-    matches!(
-        status,
-        InsertStatus::CopiedFallback | InsertStatus::Failed
-    )
+    matches!(status, InsertStatus::CopiedFallback | InsertStatus::Failed)
 }
 
 /// 落字失败时把完整的那段话弹出来。
@@ -5047,10 +4343,10 @@ async fn finish_dictation_multimodal(
 
     // 提示词装配：风格包提示词 + 词典热词 + 工作语言 + 翻译目标（同一次调用生效，
     // 这正是多模态管线解决专有名词误识别的关键）；Less Computer 用逐字转写指令。
-    let prefs = inner.prefs.get();
+    let prefs = inner.backend.get_preferences();
     let pack = match inner
-        .style_packs
-        .get_or_default_active(&prefs.active_style_pack_id)
+        .backend
+        .get_active_style_pack(&prefs.active_style_pack_id)
     {
         Ok(pack) => pack,
         Err(error) => {
@@ -5163,8 +4459,8 @@ async fn finish_dictation_multimodal(
             asr_ms: None,
             polish_ms: Some(omni_ms),
         };
-        let prefs_snapshot = inner.prefs.get();
-        if let Err(e) = inner.history.append_with_retention(
+        let prefs_snapshot = inner.backend.get_preferences();
+        if let Err(e) = inner.backend.append_history(
             session,
             prefs_snapshot.history_retention_days,
             prefs_snapshot.history_max_entries,
@@ -5202,7 +4498,7 @@ async fn finish_dictation_multimodal(
         .await;
     }
 
-    let correction_rules = match inner.correction_rules.list() {
+    let correction_rules = match inner.backend.list_correction_rules() {
         Ok(rules) => rules,
         Err(e) => {
             log::warn!("[coord] load correction rules failed: {e}; continue without correction");
@@ -5242,7 +4538,7 @@ async fn finish_dictation_multimodal(
 
     let focus_target = inner.state.lock().focus_target;
     let focus_ready_for_paste = restore_focus_target_if_possible(focus_target);
-    let prefs = inner.prefs.get();
+    let prefs = inner.backend.get_preferences();
     let allow_non_tsf_insertion_fallback = prefs.allow_non_tsf_insertion_fallback;
     let windows_insertion_mode = prefs.windows_insertion_mode;
     let status = insert_final_text(
@@ -5268,7 +4564,7 @@ async fn finish_dictation_multimodal(
     .map(str::to_string);
     let tsf_required_insert_failed = error_code.as_deref() == Some("windowsImeTsfRequired");
 
-    let prefs_snapshot = inner.prefs.get();
+    let prefs_snapshot = inner.backend.get_preferences();
     let session = DictationSession {
         id: current_session_id.to_string(),
         created_at: Utc::now().to_rfc3339(),
@@ -5296,14 +4592,14 @@ async fn finish_dictation_multimodal(
         asr_ms: None,
         polish_ms: Some(omni_ms),
     };
-    if let Err(e) = inner.history.append_with_retention(
+    if let Err(e) = inner.backend.append_history(
         session,
         prefs_snapshot.history_retention_days,
         prefs_snapshot.history_max_entries,
     ) {
         log::error!("[coord] history append failed: {e}");
     }
-    if let Err(e) = inner.activity.bump(
+    if let Err(e) = inner.backend.record_activity(
         &chrono::Local::now().format("%Y-%m-%d").to_string(),
         polished.chars().count() as u64,
         duration_ms,
@@ -5311,9 +4607,18 @@ async fn finish_dictation_multimodal(
         log::warn!("[coord] activity bump failed: {e}");
     }
     if !polished.trim().is_empty() {
-        if let Some(app) = inner.app.lock().clone() {
-            let _ = app.emit("remote:result", polished.clone());
-        }
+        let core_session_id = core_session_id(current_session_id);
+        inner.backend.event_publisher().publish(
+            Some(core_session_id),
+            openless_core::BackendEventKind::DictationCompleted(openless_core::DictationResult {
+                session_id: core_session_id,
+                raw_text: polished.clone(),
+                polished_text: polished.clone(),
+                polish_source: None,
+                duration_ms,
+                inserted: core_completion_insert_status(status),
+            }),
+        );
     }
 
     let done_message = if tsf_required_insert_failed {
@@ -5364,7 +4669,7 @@ fn fail_dictation_multimodal(
     user_msg: String,
     err: String,
 ) -> Result<(), String> {
-    let prefs = inner.prefs.get();
+    let prefs = inner.backend.get_preferences();
     let front_app = inner.state.lock().front_app.clone();
     let mut session = build_transcribe_failed_session(
         session_id,
@@ -5375,7 +4680,7 @@ fn fail_dictation_multimodal(
         front_app.as_deref(),
     );
     session.pipeline_mode = Some("multimodal".to_string());
-    if let Err(e) = inner.history.append_with_retention(
+    if let Err(e) = inner.backend.append_history(
         session,
         prefs.history_retention_days,
         prefs.history_max_entries,
@@ -5425,15 +4730,17 @@ pub(super) fn dictation_error_code(
 }
 
 pub(super) fn cancel_session(inner: &Arc<Inner>) -> bool {
-    let Some(decision) = ({
+    let (was_voice_agent, decision) = {
         let mut state = inner.state.lock();
         let phase = state.phase;
+        let was_voice_agent = state.voice_agent;
         let decision = begin_cancel_session_state(&mut state);
         if phase == SessionPhase::Inserting {
             log::info!("[coord] cancel ignored — already in Inserting phase, can't undo paste");
         }
-        decision
-    }) else {
+        (was_voice_agent, decision)
+    };
+    let Some(decision) = decision else {
         return false;
     };
 
@@ -5467,14 +4774,28 @@ pub(super) fn cancel_session(inner: &Arc<Inner>) -> bool {
     log::info!("[coord] session cancelled (was {:?})", decision.phase);
     schedule_capsule_idle(inner, CAPSULE_CANCEL_HIDE_DELAY_MS);
     // 取消时也熄灭整屏彩虹描边（dictation session 没开描边，hide 是无害 no-op）。
-    if let Some(app) = inner.app.lock().clone() {
-        crate::hide_less_computer_glow(&app);
+    inner.host.hide_less_computer_glow();
+
+    // The Core Less Computer run owns provider/process cancellation.  The
+    // legacy dictation state machine still owns recorder/ASR teardown for this
+    // voice session, so both cancellation paths must be signalled.
+    if was_voice_agent {
+        let backend = Arc::clone(&inner.backend);
+        let core_id = core_session_id(decision.session_id);
+        inner.host.spawn(async move {
+            if let Err(error) = backend.cancel_less_computer(Some(core_id)).await {
+                log::warn!("[less-computer] core cancellation failed: {error}");
+            }
+            // A capture lease has no Core run future that can clear it. Once
+            // cancellation is signalled, release that pre-submit lease; if
+            // submission already promoted it to a run this is a no-op and the
+            // run's normal completion path remains authoritative.
+            let _ = backend.abort_less_computer_capture(core_id);
+        });
     }
 
     stop_recorder_for_session(inner, decision.session_id);
     cancel_asr_for_session(inner, decision.session_id);
-    #[cfg(not(mobile))]
-    super::clear_remote_mic_path(inner, decision.session_id);
     restore_prepared_windows_ime_session(inner, decision.session_id);
     true
 }
@@ -5490,43 +4811,19 @@ fn append_typed_prefix(target: &mut String, delta: &str, typed_chars: usize) -> 
     appended
 }
 
-/// 多轮上下文最多回看的历史轮数。时间窗口（polish_context_window_minutes）只限"多久内"，
-/// 不限"多少条"——5 分钟内堆积几十条历史时，全部前置进 LLM 会让输入 token 暴涨、首字延迟
-/// （TTFT）显著变长，影响全体用户（#678）。取最近 2 轮即可保留代词/续写所需的对话连续性，
-/// 同时把上下文 token 控制在常数量级。sessions 为 newest-first，`.take` 即取最近若干轮。
-const MAX_POLISH_CONTEXT_TURNS: usize = 2;
-
 fn eligible_polish_context_turns(
     sessions: Vec<DictationSession>,
     active_style_pack_id: &str,
     current_translation_active: bool,
 ) -> Vec<(String, String)> {
-    sessions
-        .into_iter()
-        // 只取实际成功润色过的会话作为上下文：失败的会话 final_text 是 raw 兜底，
-        // 喂回 LLM 会让模型以为"上一轮我什么都没做"——没意义且占 token。
-        // 这条同时保证下面 filter_map 里翻译历史的 final_text 一定是真译文（而非 passthrough
-        // 原文）——失败 / 兜底的翻译会话 error_code 非空，已在此被滤掉。
-        .filter(|s| s.error_code.is_none() && !s.final_text.trim().is_empty())
-        // 风格包切换 = 上下文边界。旧历史没有 style_pack_id，无法证明同源，保守排除。
-        .filter(|s| s.style_pack_id.as_deref() == Some(active_style_pack_id))
-        // 翻译历史按"下一轮是否也翻译"决定喂哪一段，既保留对话连续性又不让译文串味：
-        //   - 当前是翻译轮 → 喂译文(final_text)，保持目标语言一致；
-        //   - 当前是普通轮 → 喂润色后的源文(polish_source)，把译文剔除掉；源文缺失（解析
-        //     失败 / 旧历史）则整条跳过——宁可少一条上下文，也不让外语译文混进普通润色。
-        //   - 普通历史无论当前轮是什么，都喂 final_text（本就是源语言润色结果）。
-        .filter_map(|s| {
-            if s.translation_active && !current_translation_active {
-                s.polish_source
-                    .filter(|src| !src.trim().is_empty())
-                    .map(|src| (s.raw_transcript, src))
-            } else {
-                Some((s.raw_transcript, s.final_text))
-            }
-        })
-        // 限制条数：sessions newest-first，过滤后取最近 MAX_POLISH_CONTEXT_TURNS 轮（#678）。
-        .take(MAX_POLISH_CONTEXT_TURNS)
-        .collect()
+    openless_core::eligible_polish_context_turns(
+        sessions,
+        active_style_pack_id,
+        current_translation_active,
+    )
+    .into_iter()
+    .map(|turn| (turn.raw_text, turn.polished_text))
+    .collect()
 }
 
 #[cfg(test)]
@@ -5534,125 +4831,20 @@ mod tests {
     use super::{
         accept_silent_retry_transcript, append_cursor_context_to_multimodal_prompt,
         append_typed_prefix, batch_asr_chunk_limit_ms, build_transcribe_failed_session,
-        coding_agent_mode_from_pref, default_done_message, drain_streaming_insert_deltas_with,
+        default_done_message, drain_streaming_insert_deltas_with,
         eligible_polish_context_turns, finalize_polished_text, flush_streaming_insert_buffer_with,
-        insert_delivery_failed, pcm_duration_ms, pcm_from_wav_bytes, pcm_i16_le_rms,
-        resolve_less_computer_run_outcome, resolve_macos_newline_mode, retry_error_outcome,
-        should_arm_edit_watch, should_attempt_silent_retry, should_read_cursor_context,
-        streaming_insert_eligible, SilentRetryOutcome,
+        insert_delivery_failed, pcm_duration_ms, pcm_from_wav_bytes, retry_error_outcome,
+        should_arm_edit_watch,
+        should_attempt_silent_retry, should_read_cursor_context, streaming_insert_eligible,
+        SilentRetryOutcome,
     };
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     use super::{desktop_keyless_dictation_provider, DesktopKeylessDictationProvider};
-    use crate::coordinator::RetranscribeError;
     use crate::types::{
-        ChineseScriptPreference, CorrectionRule, DictationSession, InsertStatus, MacosNewlineMode,
-        PolishMode,
+        ChineseScriptPreference, CorrectionRule, DictationSession, InsertStatus, PolishMode,
     };
     use uuid::Uuid;
 
-    #[test]
-    fn macos_auto_newline_uses_line_feed_in_known_terminals() {
-        for front_app in [
-            "Terminal (com.apple.Terminal)",
-            "iTerm2 (com.googlecode.iterm2)",
-            "Warp (dev.warp.Warp-Stable)",
-            "WezTerm (com.github.wez.wezterm)",
-            "Alacritty (io.alacritty)",
-            "Alacritty (org.alacritty)",
-            "kitty (net.kovidgoyal.kitty)",
-            "Hyper (co.zeit.hyper)",
-            "Tabby (org.tabby)",
-            "Tabby (com.tabby)",
-            "Ghostty (com.mitchellh.ghostty)",
-        ] {
-            assert_eq!(
-                resolve_macos_newline_mode(MacosNewlineMode::Auto, Some(front_app)),
-                MacosNewlineMode::LineFeed,
-                "{front_app} should use U+000A"
-            );
-        }
-    }
-
-    #[test]
-    fn macos_auto_newline_uses_shift_return_outside_known_terminals() {
-        for front_app in [
-            None,
-            Some("Terminal"),
-            Some("Safari (com.apple.Safari)"),
-            Some("Slack (com.tinyspeck.slackmacgap)"),
-        ] {
-            assert_eq!(
-                resolve_macos_newline_mode(MacosNewlineMode::Auto, front_app),
-                MacosNewlineMode::ShiftReturn,
-                "{front_app:?} should use the chat-safe fallback"
-            );
-        }
-    }
-
-    #[test]
-    fn macos_explicit_newline_modes_override_target_app_detection() {
-        let terminal = Some("Terminal (com.apple.Terminal)");
-        for configured in [
-            MacosNewlineMode::ShiftReturn,
-            MacosNewlineMode::LineFeed,
-            MacosNewlineMode::Return,
-        ] {
-            assert_eq!(resolve_macos_newline_mode(configured, terminal), configured);
-        }
-    }
-
-    #[test]
-    fn sandbox_providers_legacy_permission_modes_fail_closed_to_read_only() {
-        use crate::coding_agent::{CodingAgentPermissionMode as M, CodingAgentProvider as P};
-
-        for provider in [P::CodexCli, P::DshCli] {
-            assert_eq!(
-                coding_agent_mode_from_pref(provider, "acceptEdits"),
-                M::AcceptEdits
-            );
-            assert_eq!(coding_agent_mode_from_pref(provider, "plan"), M::Plan);
-            assert_eq!(coding_agent_mode_from_pref(provider, "default"), M::Plan);
-            assert_eq!(
-                coding_agent_mode_from_pref(provider, "bypassPermissions"),
-                M::Plan
-            );
-        }
-        assert_eq!(
-            coding_agent_mode_from_pref(P::ClaudeCodeCli, "default"),
-            M::Default
-        );
-    }
-
-    #[test]
-    fn agent_error_wins_over_partial_output() {
-        assert!(matches!(
-            resolve_less_computer_run_outcome(
-                "partial output".into(),
-                None,
-                Some("Codex 协议错误".into()),
-            ),
-            super::LessComputerOutcome::Failed { message } if message == "Codex 协议错误"
-        ));
-    }
-
-    #[tokio::test]
-    async fn approval_request_is_denied_when_session_cancelled_during_wait() {
-        let coordinator = crate::coordinator::Coordinator::new();
-        {
-            let mut state = coordinator.inner.state.lock();
-            state.cancelled = true; // 模拟审批挂起期间用户按 Esc（cancel_session 置位）
-        }
-        let outcome = super::LessComputerOutcome::Done {
-            text: "permission denied: rm -rf".into(),
-            cost_usd: None,
-        };
-        let result = super::maybe_request_approval(&coordinator.inner, &outcome).await;
-        assert_eq!(result, None, "会话取消后审批应按 Deny 处理");
-        assert!(
-            super::less_computer_approvals().lock().unwrap().is_empty(),
-            "取消后审批注册表应被清理"
-        );
-    }
 
     #[test]
     fn edit_watch_is_not_armed_while_the_feature_is_off() {
@@ -5744,15 +4936,121 @@ mod tests {
         binding: crate::types::ShortcutBinding,
     ) -> super::super::Coordinator {
         let coordinator = super::super::Coordinator::new();
-        coordinator
-            .inner
-            .prefs
-            .set(crate::types::UserPreferences {
+        crate::set_backend_preferences_for_test(
+            &coordinator.inner.backend,
+            crate::types::UserPreferences {
                 dictation_hotkey: binding,
                 ..Default::default()
-            })
-            .unwrap();
+            },
+        );
         coordinator
+    }
+
+    fn coordinator_with_fixture_core(
+        mode: crate::types::HotkeyMode,
+    ) -> (
+        super::super::Coordinator,
+        std::sync::Arc<openless_core::OpenLessBackend>,
+        std::path::PathBuf,
+    ) {
+        let data_dir = std::env::temp_dir().join(format!(
+            "openless-tauri-hotkey-core-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let backend = std::sync::Arc::new(
+            openless_core::OpenLessBackend::new(
+                openless_core::BackendConfig {
+                    data_dir: data_dir.clone(),
+                    ..openless_core::BackendConfig::default()
+                },
+                openless_core::BackendDependencies {
+                    host_actions: std::sync::Arc::new(
+                        openless_core::testing::RecordingHostActions::default(),
+                    ),
+                    text_inserter: std::sync::Arc::new(
+                        openless_core::testing::FixtureTextInserter::with_outcome(
+                            openless_core::InsertOutcome::Inserted,
+                        ),
+                    ),
+                    dictation_engine: std::sync::Arc::new(
+                        openless_core::testing::FixtureDictationEngine::successful(
+                            "raw", "polished",
+                        ),
+                    ),
+                    task_spawner: std::sync::Arc::new(openless_core::TokioTaskSpawner),
+                    credential_store: std::sync::Arc::new(
+                        openless_core::InMemoryCredentialStore::default(),
+                    ),
+                    services: openless_core::BackendServices::unsupported(),
+                    local_asr_runtime: None,
+                    selection_runtime: None,
+                    selection_polisher: None,
+                    qa_runtime: None,
+                    marketplace_config: None,
+                },
+            )
+            .unwrap(),
+        );
+        let mut preferences = backend.get_preferences();
+        preferences.hotkey.mode = mode;
+        preferences.dictation_hotkey = crate::types::ShortcutBinding {
+            primary: "D".to_string(),
+            modifiers: vec!["control".to_string()],
+        };
+        preferences.translation_target_language = "English".to_string();
+        preferences.working_languages = vec!["简体中文".to_string()];
+        crate::set_backend_preferences_for_test(&backend, preferences);
+
+        let mut coordinator = super::super::Coordinator::new();
+        std::sync::Arc::get_mut(&mut coordinator.inner)
+            .expect("fixture coordinator must not be shared yet")
+            .backend = std::sync::Arc::clone(&backend);
+        (coordinator, backend, data_dir)
+    }
+
+    #[tokio::test]
+    async fn tauri_dictation_hotkey_bridge_uses_core_and_preserves_translation_modifier() {
+        let (coordinator, backend, data_dir) =
+            coordinator_with_fixture_core(crate::types::HotkeyMode::Toggle);
+        backend.start().await.unwrap();
+        let pressed_at = std::time::Instant::now();
+
+        super::handle_pressed_edge(&coordinator.inner, pressed_at, 1).await;
+        assert_eq!(
+            backend.snapshot().dictation.phase,
+            openless_core::DictationPhase::Recording
+        );
+        assert_eq!(
+            coordinator.inner.state.lock().phase,
+            crate::coordinator_state::SessionPhase::Idle,
+            "the compatibility Coordinator state must not own the new session"
+        );
+        assert!(
+            crate::coordinator::hotkey_loops::arm_translation_if_effective(&coordinator.inner)
+                .await
+        );
+        assert!(backend.snapshot().dictation.translation_active);
+
+        super::handle_released_edge(
+            &coordinator.inner,
+            pressed_at + std::time::Duration::from_millis(10),
+        )
+        .await;
+        tokio::time::sleep(super::HOTKEY_DEBOUNCE + std::time::Duration::from_millis(10)).await;
+        super::handle_pressed_edge(
+            &coordinator.inner,
+            pressed_at + std::time::Duration::from_secs(1),
+            2,
+        )
+        .await;
+
+        assert_eq!(
+            backend.snapshot().dictation.phase,
+            openless_core::DictationPhase::Idle
+        );
+        assert!(backend.list_history().unwrap()[0].translation_active);
+        backend.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(data_dir);
     }
 
     // modifier-only 触发键：按下后必须先过仲裁窗口，才能知道这是说话还是
@@ -5787,7 +5085,7 @@ mod tests {
             .push_back(1);
         *coordinator.inner.last_hotkey_dispatch_at.lock() = Some(std::time::Instant::now());
 
-        super::begin_session_from_press(&coordinator.inner, 1).await;
+        super::begin_session_from_press(&coordinator.inner, std::time::Instant::now(), 1).await;
 
         assert!(coordinator.inner.last_hotkey_dispatch_at.lock().is_none());
         assert_eq!(
@@ -5868,9 +5166,23 @@ mod tests {
         // 终态时，循环立即耗尽重试而不是再空转剩余次数。循环本身依赖 Inner
         // 全链路难以单测，此处固定分类契约 + 循环决策（Retryable 可再试 /
         // 终态短路 / 消息还原）。
-        let transient: RetranscribeError = "network blip".to_string().into();
-        let terminal =
-            RetranscribeError::TerminalFoundryFallback("Foundry CUDA CPU fallback failed".into());
+        let transient = openless_core::RetranscriptionFailure {
+            error: openless_core::BackendError::new(
+                openless_core::BackendErrorCode::Provider,
+                "network blip",
+            )
+            .retryable(true),
+            attempted_asr: None,
+        };
+        let terminal = openless_core::RetranscriptionFailure {
+            error: openless_core::BackendError {
+                code: openless_core::BackendErrorCode::Provider,
+                message: "Foundry CUDA CPU fallback failed".into(),
+                retryable: false,
+                details: Some(serde_json::json!({ "terminal": "foundry_fallback" })),
+            },
+            attempted_asr: None,
+        };
 
         assert!(!transient.is_terminal());
         assert!(terminal.is_terminal());
@@ -5883,7 +5195,7 @@ mod tests {
         ));
 
         // 消息还原（消费值放最后）。
-        assert_eq!(terminal.into_string(), "Foundry CUDA CPU fallback failed");
+        assert_eq!(terminal.into_message(), "Foundry CUDA CPU fallback failed");
     }
 
     fn correction_rule(pattern: &str, replacement: &str) -> CorrectionRule {
@@ -5946,7 +5258,6 @@ mod tests {
 
         let turns = eligible_polish_context_turns(sessions, "pack.id", false);
 
-        assert_eq!(turns.len(), super::MAX_POLISH_CONTEXT_TURNS);
         assert_eq!(
             turns,
             vec![
@@ -6408,13 +5719,5 @@ mod tests {
     #[cfg(target_os = "android")]
     fn platform_type_error() -> crate::unicode_keystroke::TypeError {
         crate::unicode_keystroke::TypeError::Unavailable
-    }
-
-    #[test]
-    fn pcm_i16_le_rms_silence_is_zero_and_speech_is_not() {
-        assert_eq!(pcm_i16_le_rms(&[]), 0.0);
-        assert_eq!(pcm_i16_le_rms(&[0, 0, 0, 0]), 0.0);
-        let loud = i16::MAX.to_le_bytes();
-        assert!(pcm_i16_le_rms(&loud) > 0.9);
     }
 }

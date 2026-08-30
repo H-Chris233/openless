@@ -7,7 +7,7 @@
  *
  * DBus 接口: org.fcitx.Fcitx.OpenLess1  (对象路径 /openless)
  *  方法:
- *    CommitText(s: text)           — 将文字提交到当前焦点输入上下文
+ *    CommitText(s: text) -> b      — 将文字提交到当前焦点输入上下文
  *                                    安全性：本接口在会话总线(session bus)上对同用户
  *                                    所有进程开放，此为 fcitx5/IBus 体系的标准安全模型
  *                                    （非特权进程隔离）。
@@ -259,9 +259,9 @@ public:
     ~OpenLess() = default;
 
     // ---- DBus 方法 ----
-    // 返回 void 而非 std::tuple<>，以匹配 FCITX_OBJECT_VTABLE_METHOD 的 RET("")
+    // 返回 bool，让调用方区分“无焦点输入上下文”的安全失败和实际提交成功。
 
-    void commitText(const std::string &text) {
+    bool commitText(const std::string &text) {
         // 优先使用快捷键按下时保存的输入上下文（savedIc_），
         // 此时用户在目标 app 中，此后胶囊窗口抢焦点不影响提交。
         // 若 savedIc_ 为空则兜底用 foreachFocused。
@@ -278,10 +278,16 @@ public:
         if (!ic) {
             FCITX_LOGC(openless, Warn)
                 << "CommitText: no input context available";
-            throw std::runtime_error("no focused input context");
+            // A DBus call must not bring down the fcitx5 host when the target
+            // application has no focused input context (for example during
+            // startup or in a headless session).  The Rust adapter observes
+            // the successful method return and can use its own capability or
+            // clipboard fallback policy; fcitx5 remains alive either way.
+            return false;
         }
         FCITX_LOGC(openless, Debug) << "CommitText: " << text;
         ic->commitString(text);
+        return true;
     }
 
     void setAuxDown(const std::string &text) {
@@ -472,7 +478,7 @@ public:
         return text;
     }
 
-    FCITX_OBJECT_VTABLE_METHOD(commitText, "CommitText", "s", "");
+    FCITX_OBJECT_VTABLE_METHOD(commitText, "CommitText", "s", "b");
     FCITX_OBJECT_VTABLE_METHOD(setAuxDown, "SetAuxDown", "s", "");
     FCITX_OBJECT_VTABLE_METHOD(clearAuxDown, "ClearAuxDown", "", "");
     FCITX_OBJECT_VTABLE_METHOD(setHotkey, "SetHotkey", "as", "");

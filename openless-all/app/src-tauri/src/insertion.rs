@@ -201,9 +201,7 @@ fn map_sendinput_type_result(
     match result {
         Ok(typed_chars) if typed_chars == expected => InsertStatus::Inserted,
         Ok(typed_chars) => {
-            log::warn!(
-                "[insertion] Unicode SendInput typed only {typed_chars}/{expected} chars"
-            );
+            log::warn!("[insertion] Unicode SendInput typed only {typed_chars}/{expected} chars");
             InsertStatus::CopiedFallback
         }
         Err(err) => {

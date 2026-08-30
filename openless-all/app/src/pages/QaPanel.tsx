@@ -224,11 +224,21 @@ export function QaPanel({ embedded = false, onRequestClose }: QaPanelProps = {})
                 setStreamingAnswer(prev => prev + payload.chunk);
               }
               break;
+            case 'awaiting_approval':
+              setStatus('thinking');
+              break;
             case 'answer':
               setStatus('idle');
               setErrorMsg('');
               // messages 已被上面的 setMessages 落定，清掉流式 buffer 避免和最终气泡重影。
               setStreamingAnswer('');
+              break;
+            case 'cancelled':
+              setStatus('idle');
+              setErrorMsg('');
+              setStreamingAnswer('');
+              setEditApplyAvailable(false);
+              setEditRevertAvailable(false);
               break;
             case 'error':
               setStatus('error');

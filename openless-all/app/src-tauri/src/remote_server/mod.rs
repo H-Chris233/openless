@@ -2,9 +2,8 @@
 //!
 //! 手机在同一局域网用浏览器打开 `https://<PC-IP>:<port>`，得到一个录音页
 //! （assets/ 下的 index.html / app.js / style.css，编译期 include_str! 内嵌）。
-//! 手机录音以 16k/单声道/16-bit LE PCM 经 WebSocket 实时推回 PC，由 Coordinator
-//! 当作"手机麦克风"喂进现有「录音→ASR→润色→光标落字」管线（见
-//! `Coordinator::start_remote_dictation`）。
+//! 手机录音以 16k/单声道/16-bit LE PCM 经 WebSocket 实时推回 PC，并通过共享
+//! [`openless_core::OpenLessBackend`] 的 external-audio seam 进入同一听写管线。
 //!
 //! 关键约束：浏览器 `getUserMedia` 仅在安全上下文可用，所以必须 HTTPS。证书用
 //! rcgen 自签名（SAN 含本机局域网 IP），手机首次访问需手动信任。TLS 走 ring
@@ -27,10 +26,6 @@ use serde::Serialize;
 use tauri::{AppHandle, Listener, Manager};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
-
-use crate::coordinator::Coordinator;
-
-mod lan_addresses;
 
 mod assets {
     pub const INDEX_HTML: &str = include_str!("assets/index.html");
@@ -71,7 +66,7 @@ const IDLE_TIMEOUT_SECS: u64 = 90;
 pub struct RemoteServerConfig {
     pub port: u16,
     pub pin: String,
-    pub coordinator: Arc<Coordinator>,
+    pub backend: Arc<openless_core::OpenLessBackend>,
     pub app: AppHandle,
 }
 
@@ -86,8 +81,6 @@ pub struct RemoteServerHandle {
     pub bound_port: u16,
     #[allow(dead_code)]
     pub pin: String,
-    pub urls: Vec<String>,
-    pub urls_stale: bool,
 }
 
 impl RemoteServerHandle {
@@ -105,11 +98,9 @@ impl RemoteServerHandle {
 #[serde(rename_all = "camelCase")]
 pub struct RemoteInputStatus {
     pub running: bool,
-    pub starting: bool,
     pub port: u16,
     pub pin: String,
     pub urls: Vec<String>,
-    pub urls_stale: bool,
 }
 
 // ───────────────────────── 工具函数 ─────────────────────────
@@ -130,20 +121,11 @@ pub fn generate_pin() -> String {
     }
 }
 
-fn app_config_dir(app: &AppHandle) -> Option<std::path::PathBuf> {
-    // Windows 上 Tauri 的 path API 从 async runtime 调会和主线程互相等，卡住
-    // 远程输入启动。标识符固定为 com.openless.app，直接拼 APPDATA 即可。
-    #[cfg(target_os = "windows")]
-    {
-        if let Some(appdata) = std::env::var_os("APPDATA") {
-            return Some(std::path::PathBuf::from(appdata).join("com.openless.app"));
-        }
-    }
-    app.path().app_config_dir().ok()
-}
-
 fn pin_path(app: &AppHandle) -> Option<std::path::PathBuf> {
-    app_config_dir(app).map(|d| d.join("remote-input-pin.txt"))
+    app.path()
+        .app_config_dir()
+        .ok()
+        .map(|d| d.join("remote-input-pin.txt"))
 }
 
 mod pin_persistence;
@@ -170,13 +152,36 @@ pub fn save_pin(app: &AppHandle, pin: &str) -> std::io::Result<()> {
     pin_persistence::persist_pin_atomically(&path, pin)
 }
 
-pub(crate) fn discover_lan_addresses(app: &AppHandle) -> lan_addresses::LanAddressSnapshot {
-    lan_addresses::discover_lan_addresses(app_config_dir(app).as_deref())
+fn is_private_lan(ip: &Ipv4Addr) -> bool {
+    let o = ip.octets();
+    !ip.is_loopback()
+        && !ip.is_link_local()
+        && ((o[0] == 192 && o[1] == 168)
+            || o[0] == 10
+            || (o[0] == 172 && (16..=31).contains(&o[1])))
 }
 
-/// 给前端展示的访问网址列表。地址必须来自已经完成的快照，避免状态查询再次探测网卡。
-pub fn access_urls(ips: &[Ipv4Addr], port: u16) -> Vec<String> {
-    ips.iter()
+/// 本机所有局域网 IPv4（过滤回环 / link-local / 虚拟网卡的非私网段）。
+pub fn local_lan_ipv4s() -> Vec<Ipv4Addr> {
+    let mut out: Vec<Ipv4Addr> = Vec::new();
+    if let Ok(ifaces) = local_ip_address::list_afinet_netifas() {
+        for (_name, ip) in ifaces {
+            if let IpAddr::V4(v4) = ip {
+                if is_private_lan(&v4) {
+                    out.push(v4);
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// 给前端展示的访问网址列表。
+pub fn access_urls(port: u16) -> Vec<String> {
+    local_lan_ipv4s()
+        .iter()
         .map(|ip| format!("https://{ip}:{port}"))
         .collect()
 }
@@ -282,7 +287,7 @@ fn build_server_config(
 
 struct WsState {
     pin: String,
-    coordinator: Arc<Coordinator>,
+    backend: Arc<openless_core::OpenLessBackend>,
     app: AppHandle,
     /// 按源 IP 的 PIN 失败计数 + 锁定截止时刻（防爆破；TLS+6 位 PIN 已是主防线）。
     pin_fails: Mutex<std::collections::HashMap<IpAddr, (u32, Option<Instant>)>>,
@@ -369,7 +374,13 @@ fn build_router(state: Arc<WsState>) -> Router {
 /// 首页：按 PC 端当前界面语言把 `__OL_LANG__` 占位替换成实际 locale，
 /// H5 据此（window.__OL_LANG__ / <html lang>）选择显示语言。
 async fn index_handler(State(state): State<Arc<WsState>>) -> impl IntoResponse {
-    let lang = state.coordinator.remote_locale();
+    let lang = state
+        .backend
+        .services()
+        .remote_input
+        .status()
+        .map(|status| status.locale)
+        .unwrap_or_else(|_| "zh-CN".to_string());
     Html(assets::INDEX_HTML.replace("%%OL_LANG%%", &lang))
 }
 
@@ -425,25 +436,13 @@ async fn mobileconfig_handler(State(state): State<Arc<WsState>>) -> impl IntoRes
 
 pub async fn start(cfg: RemoteServerConfig) -> Result<RemoteServerHandle, String> {
     let _ = HEADER_HTML; // index 用 axum Html() 自带 content-type
-    log::info!("[remote-input] starting server on port {}", cfg.port);
-    let app_for_cert = cfg.app.clone();
-    let (cert_der, key_der, lan_snapshot) = tauri::async_runtime::spawn_blocking(move || {
-        let mut sans = vec!["localhost".to_string(), "127.0.0.1".to_string()];
-        let lan_snapshot = discover_lan_addresses(&app_for_cert);
-        log::info!(
-            "[remote-input] lan ips for cert SAN: {:?} (stale={})",
-            lan_snapshot.ips,
-            lan_snapshot.stale
-        );
-        for ip in &lan_snapshot.ips {
-            sans.push(ip.to_string());
-        }
-        let cert_dir = app_config_dir(&app_for_cert);
-        load_or_generate_cert(cert_dir.as_deref(), &sans)
-            .map(|(cert, key)| (cert, key, lan_snapshot))
-    })
-    .await
-    .map_err(|e| format!("cert worker failed: {e}"))??;
+    let mut sans = vec!["localhost".to_string(), "127.0.0.1".to_string()];
+    for ip in local_lan_ipv4s() {
+        sans.push(ip.to_string());
+    }
+    // 证书目录用 app 配置目录（跨重启稳定）；拿不到则退回内存生成（不持久化）。
+    let cert_dir = cfg.app.path().app_config_dir().ok();
+    let (cert_der, key_der) = load_or_generate_cert(cert_dir.as_deref(), &sans)?;
     let rustls_config = build_server_config(cert_der.clone(), key_der)?;
     let acceptor = TlsAcceptor::from(rustls_config);
 
@@ -456,12 +455,11 @@ pub async fn start(cfg: RemoteServerConfig) -> Result<RemoteServerHandle, String
         }
     })?;
     let bound_port = listener.local_addr().map(|a| a.port()).unwrap_or(cfg.port);
-    let urls = access_urls(&lan_snapshot.ips, bound_port);
 
     let (conn_shutdown_tx, conn_shutdown_rx) = tokio::sync::watch::channel(false);
     let state = Arc::new(WsState {
         pin: cfg.pin.clone(),
-        coordinator: cfg.coordinator,
+        backend: cfg.backend,
         app: cfg.app,
         pin_fails: Mutex::new(std::collections::HashMap::new()),
         pin_global_fails: Mutex::new((0, Instant::now())),
@@ -517,8 +515,6 @@ pub async fn start(cfg: RemoteServerConfig) -> Result<RemoteServerHandle, String
         join,
         bound_port,
         pin: cfg.pin,
-        urls,
-        urls_stale: lan_snapshot.stale,
     })
 }
 
@@ -613,6 +609,18 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<WsState>, peer_ip: IpAddr) 
         }
     }
 
+    let connection_id = openless_core::SessionId::new();
+    if let Err(error) = state
+        .backend
+        .services()
+        .remote_input
+        .connect(connection_id)
+        .await
+    {
+        log::warn!("[remote-input] authenticated connection rejected: {error}");
+        return;
+    }
+
     // 2) 订阅 capsule 事件，转发给手机做状态显示。
     let (evt_tx, mut evt_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let listener_id = {
@@ -645,6 +653,7 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<WsState>, peer_ip: IpAddr) 
     let mut keepalive = tokio::time::interval(Duration::from_secs(KEEPALIVE_PING_SECS));
     keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_rx = Instant::now();
+    let mut remote_session_id = None;
     loop {
         tokio::select! {
             incoming = socket.recv() => {
@@ -652,11 +661,29 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<WsState>, peer_ip: IpAddr) 
                 match incoming {
                     Some(Ok(Message::Binary(pcm))) => {
                         if pcm.len() >= 2 && pcm.len() % 2 == 0 && pcm.len() <= MAX_PCM_FRAME_BYTES {
-                            state.coordinator.feed_remote_pcm(&pcm);
+                            if let Some(session_id) = remote_session_id {
+                                if let Err(error) = state
+                                    .backend
+                                    .services()
+                                    .remote_input
+                                    .feed_pcm(connection_id, session_id, pcm.to_vec())
+                                    .await
+                                {
+                                    log::warn!("[remote-input] PCM frame rejected: {error}");
+                                }
+                            }
                         }
                     }
                     Some(Ok(Message::Text(txt))) => {
-                        if !handle_control(&txt, &state, &mut socket).await {
+                        if !handle_control(
+                            &txt,
+                            &state,
+                            connection_id,
+                            &mut socket,
+                            &mut remote_session_id,
+                        )
+                        .await
+                        {
                             break;
                         }
                     }
@@ -696,46 +723,79 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<WsState>, peer_ip: IpAddr) 
     log::info!("[remote-input] WS 连接已关闭");
     state.app.unlisten(listener_id);
     state.app.unlisten(result_listener_id);
-    state.coordinator.cancel_remote_dictation();
+    let _ = state
+        .backend
+        .services()
+        .remote_input
+        .disconnect(connection_id)
+        .await;
 }
 
 /// 返回 false 表示应断开连接。
-async fn handle_control(txt: &str, state: &Arc<WsState>, socket: &mut WebSocket) -> bool {
+async fn handle_control(
+    txt: &str,
+    state: &Arc<WsState>,
+    connection_id: openless_core::SessionId,
+    socket: &mut WebSocket,
+    remote_session_id: &mut Option<openless_core::SessionId>,
+) -> bool {
+    if let Some(reply) = apply_remote_control(
+        txt,
+        state.backend.services().remote_input.as_ref(),
+        connection_id,
+        remote_session_id,
+    )
+    .await
+    {
+        let _ = socket.send(send_json(&reply)).await;
+    }
+    true
+}
+
+async fn apply_remote_control(
+    txt: &str,
+    remote_input: &dyn openless_core::RemoteInputApi,
+    connection_id: openless_core::SessionId,
+    remote_session_id: &mut Option<openless_core::SessionId>,
+) -> Option<serde_json::Value> {
     let v: serde_json::Value = match serde_json::from_str(txt) {
         Ok(v) => v,
-        Err(_) => return true,
+        Err(_) => return None,
     };
     match v.get("type").and_then(|t| t.as_str()).unwrap_or("") {
         "start" => {
             log::info!("[remote-input] 收到「开始录音」");
-            match state.coordinator.start_remote_dictation().await {
-                Ok(()) => {}
-                Err(reason) => {
+            match remote_input.start_stream(connection_id).await {
+                Ok(session_id) => *remote_session_id = Some(session_id),
+                Err(error) => {
+                    if error.code == openless_core::BackendErrorCode::Cancelled {
+                        *remote_session_id = None;
+                    }
+                    let reason = error.to_string();
                     log::warn!("[remote-input] 开始录音被拒：{reason}");
-                    let _ = socket
-                        .send(send_json(
-                            &serde_json::json!({"type":"busy","reason":reason}),
-                        ))
-                        .await;
+                    return Some(serde_json::json!({"type":"busy","reason":reason}));
                 }
             }
         }
         "stop" => {
             log::info!("[remote-input] 收到「结束录音」");
-            let _ = state.coordinator.stop_remote_dictation().await;
+            if let Some(session_id) = remote_session_id.take() {
+                let _ = remote_input.stop_stream(connection_id, session_id).await;
+            }
         }
         "cancel" => {
-            state.coordinator.cancel_remote_dictation();
+            if let Some(session_id) = remote_session_id.take() {
+                let _ = remote_input.cancel_stream(connection_id, session_id).await;
+            }
         }
         "set_insert" => {
             // 手机端「电脑落字」开关：value=true 表示要落字。no_insert = !value。
             let insert = v.get("value").and_then(|b| b.as_bool()).unwrap_or(true);
-            state.coordinator.set_remote_no_insert(!insert);
             log::info!("[remote-input] 电脑落字开关 = {insert}");
         }
         _ => {}
     }
-    true
+    None
 }
 
 enum AuthResult {
@@ -814,4 +874,121 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         diff |= x ^ y;
     }
     diff == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use openless_core::{
+        BackendConfig, BackendDependencies, BackendErrorCode, OpenLessBackend, RemoteInputConfig,
+        RemoteInputService, SessionId,
+    };
+
+    use super::apply_remote_control;
+
+    fn backend() -> (
+        OpenLessBackend,
+        Arc<openless_core::testing::RecordingRemoteInputRuntime>,
+        std::path::PathBuf,
+    ) {
+        let data_dir = std::env::temp_dir().join(format!(
+            "openless-remote-ws-contract-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let runtime = Arc::new(openless_core::testing::RecordingRemoteInputRuntime::default());
+        let mut dependencies = BackendDependencies::unsupported();
+        dependencies.services.remote_input = Arc::new(
+            RemoteInputService::new(runtime.clone(), 8443, "zh-CN")
+                .expect("fixture remote config is valid"),
+        );
+        let backend = OpenLessBackend::new(
+            BackendConfig {
+                data_dir: data_dir.clone(),
+                ..BackendConfig::default()
+            },
+            dependencies,
+        )
+        .expect("fixture backend is valid");
+        (backend, runtime, data_dir)
+    }
+
+    #[tokio::test]
+    async fn websocket_control_owns_one_stream_and_drops_a_stale_restart_lease() {
+        let (backend, runtime, data_dir) = backend();
+        let remote = &backend.services().remote_input;
+        remote
+            .configure(RemoteInputConfig {
+                enabled: true,
+                port: 8443,
+            })
+            .await
+            .unwrap();
+        let connection_id = SessionId::new();
+        remote.connect(connection_id).await.unwrap();
+        let mut session_id = None;
+
+        assert!(apply_remote_control(
+            r#"{"type":"start"}"#,
+            remote.as_ref(),
+            connection_id,
+            &mut session_id,
+        )
+        .await
+        .is_none());
+        let first_session = session_id.expect("start must establish a session lease");
+        let duplicate = apply_remote_control(
+            r#"{"type":"start"}"#,
+            remote.as_ref(),
+            connection_id,
+            &mut session_id,
+        )
+        .await
+        .expect("duplicate start must return a busy response");
+        assert_eq!(duplicate["type"], "busy");
+        assert_eq!(session_id, Some(first_session));
+        assert_eq!(runtime.audio_start_count(), 1);
+
+        assert!(apply_remote_control(
+            r#"{"type":"stop"}"#,
+            remote.as_ref(),
+            connection_id,
+            &mut session_id,
+        )
+        .await
+        .is_none());
+        assert_eq!(session_id, None);
+        assert_eq!(runtime.audio_stop_count(), 1);
+
+        apply_remote_control(
+            r#"{"type":"start"}"#,
+            remote.as_ref(),
+            connection_id,
+            &mut session_id,
+        )
+        .await;
+        remote
+            .configure(RemoteInputConfig {
+                enabled: true,
+                port: 9443,
+            })
+            .await
+            .unwrap();
+        let stale = apply_remote_control(
+            r#"{"type":"start"}"#,
+            remote.as_ref(),
+            connection_id,
+            &mut session_id,
+        )
+        .await
+        .expect("stale connection must be rejected");
+        assert_eq!(stale["type"], "busy");
+        assert_eq!(session_id, None, "cancelled core lease must be forgotten");
+        assert_eq!(runtime.audio_cancel_count(), 1);
+        assert_eq!(
+            remote.start_stream(connection_id).await.unwrap_err().code,
+            BackendErrorCode::Cancelled
+        );
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
 }

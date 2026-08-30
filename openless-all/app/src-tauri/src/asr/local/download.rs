@@ -18,7 +18,7 @@ use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
 use super::models::{model_dir, ModelId, READY_SENTINEL};
@@ -705,8 +705,8 @@ async fn run_download(
                     .iter()
                     .map(|a| a.load(Ordering::Relaxed))
                     .sum();
-                let _ = app_emit.emit(
-                    "local-asr-download-progress",
+                emit(
+                    &app_emit,
                     DownloadProgress {
                         model_id: model_id_emit.clone(),
                         file: file_path_emit.clone(),
@@ -1467,9 +1467,30 @@ async fn single_stream_download(
 }
 
 fn emit(app: &AppHandle, payload: DownloadProgress) {
-    if let Err(e) = app.emit("local-asr-download-progress", payload) {
-        log::warn!("[local-asr] emit progress failed: {e}");
-    }
+    let phase = match payload.phase {
+        DownloadPhase::Started => openless_core::LocalAsrDownloadPhase::Started,
+        DownloadPhase::Progress => openless_core::LocalAsrDownloadPhase::Progress,
+        DownloadPhase::Finished => openless_core::LocalAsrDownloadPhase::Finished,
+        DownloadPhase::Cancelled => openless_core::LocalAsrDownloadPhase::Cancelled,
+        DownloadPhase::Failed => openless_core::LocalAsrDownloadPhase::Failed,
+    };
+    crate::tauri_events::publish(
+        app,
+        None,
+        openless_core::BackendEventKind::LocalAsrDownloadProgress(
+            openless_core::LocalAsrDownloadProgress {
+                runtime: openless_core::LocalAsrRuntimeKind::Generic,
+                model_id: payload.model_id,
+                file: payload.file,
+                file_index: payload.file_index,
+                file_count: payload.file_count,
+                bytes_downloaded: payload.bytes_downloaded,
+                bytes_total: payload.bytes_total,
+                phase,
+                error: payload.error,
+            },
+        ),
+    );
 }
 
 fn emit_cancelled(

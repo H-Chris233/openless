@@ -340,7 +340,10 @@ async fn macos_probe(budget_chars: usize) -> HostDocumentReadResult {
 
 #[cfg(target_os = "macos")]
 fn blocked_result(reason: BlockReason) -> HostDocumentReadResult {
-    HostDocumentReadResult::new(HostDocumentStatus::Blocked, Some(reason.as_str().to_string()))
+    HostDocumentReadResult::new(
+        HostDocumentStatus::Blocked,
+        Some(reason.as_str().to_string()),
+    )
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -361,8 +364,7 @@ impl EditWatcher {
     /// 主动解除。幂等，drop 时会自动调用。
     pub fn disarm(&self) {
         #[cfg(target_os = "macos")]
-        self.stop
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -463,7 +465,11 @@ mod tests {
     #[test]
     fn secure_text_field_role_blocks() {
         assert_eq!(
-            evaluate_gate(&gate(Some("com.apple.Safari"), Some("AXSecureTextField"), None)),
+            evaluate_gate(&gate(
+                Some("com.apple.Safari"),
+                Some("AXSecureTextField"),
+                None
+            )),
             Some(BlockReason::SecureTextField)
         );
     }

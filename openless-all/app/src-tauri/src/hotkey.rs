@@ -29,8 +29,13 @@ use crate::types::{HotkeyAdapterKind, HotkeyBinding, HotkeyCapability, HotkeyIns
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HotkeyEvent {
-    Pressed { at: Instant, press_id: u64 },
-    Released { at: Instant },
+    Pressed {
+        at: Instant,
+        press_id: u64,
+    },
+    Released {
+        at: Instant,
+    },
     // 组合键撤销不在此枚举里：走独立的 `combo_abort` 通道，避免被上面 Pressed →
     // begin_session 的同步开麦流程堵在队列里（见模块注释）。
     /// Shift（或未来配置项指定的修饰键）按下边沿。可在录音过程中任何时刻产生；
@@ -310,13 +315,9 @@ fn start_listener_thread<T, F>(
 ) -> Result<ListenerThread<T>, HotkeyInstallError>
 where
     T: Send + 'static,
-    F: FnOnce(
-            Arc<Shared>,
-            Sender<HotkeyEvent>,
-            Sender<()>,
-            Sender<u64>,
-            StartupTx<T>,
-        ) + Send + 'static,
+    F: FnOnce(Arc<Shared>, Sender<HotkeyEvent>, Sender<()>, Sender<u64>, StartupTx<T>)
+        + Send
+        + 'static,
 {
     let shared = Arc::new(Shared {
         binding: RwLock::new(binding),
@@ -426,9 +427,8 @@ mod platform {
 
     use super::{
         esc_exclusive, install_error, reset_shared_held_state, send_cancel_or_log,
-        send_combo_abort_or_log, send_or_log,
-        start_listener_thread, update_shared_binding, update_shared_modifier_shortcuts,
-        HotkeyAdapter, HotkeyEvent, Shared, StartupTx,
+        send_combo_abort_or_log, send_or_log, start_listener_thread, update_shared_binding,
+        update_shared_modifier_shortcuts, HotkeyAdapter, HotkeyEvent, Shared, StartupTx,
     };
     use crate::types::{HotkeyAdapterKind, HotkeyBinding, HotkeyInstallError, HotkeyTrigger};
 
@@ -509,10 +509,7 @@ mod platform {
         }
 
         fn trigger_combined_since_press(&self, press_id: u64) -> bool {
-            self.shared
-                .trigger_companion_seen
-                .load(Ordering::SeqCst)
-                == press_id
+            self.shared.trigger_companion_seen.load(Ordering::SeqCst) == press_id
         }
 
         fn shutdown(&self) {
@@ -636,9 +633,7 @@ mod platform {
         combo_tx: Sender<u64>,
         status_tx: StartupTx<Arc<MacShutdownHandles>>,
     ) {
-        let mask: CgEventMask = (1u64 << FLAGS_CHANGED)
-            | (1u64 << KEY_DOWN)
-            | (1u64 << KEY_UP);
+        let mask: CgEventMask = (1u64 << FLAGS_CHANGED) | (1u64 << KEY_DOWN) | (1u64 << KEY_UP);
         let handles = Arc::new(MacShutdownHandles {
             tap: std::sync::Mutex::new(None),
             runloop: std::sync::Mutex::new(None),
@@ -808,9 +803,7 @@ mod platform {
             ctx.shared
                 .trigger_press_id
                 .store(press_id, Ordering::SeqCst);
-            ctx.shared
-                .trigger_companion_seen
-                .store(0, Ordering::SeqCst);
+            ctx.shared.trigger_companion_seen.store(0, Ordering::SeqCst);
             send_or_log(
                 &ctx.tx,
                 HotkeyEvent::Pressed {
@@ -820,7 +813,12 @@ mod platform {
             );
         } else if !is_active && was_held {
             ctx.shared.trigger_held.store(false, Ordering::SeqCst);
-            send_or_log(&ctx.tx, HotkeyEvent::Released { at: std::time::Instant::now() });
+            send_or_log(
+                &ctx.tx,
+                HotkeyEvent::Released {
+                    at: std::time::Instant::now(),
+                },
+            );
         }
     }
 
@@ -1064,9 +1062,7 @@ mod platform {
             note_companion_key_down(&ctx);
             assert_eq!(drain_combo(&combo_rx), 0);
 
-            shared
-                .trigger_press_id
-                .store(1, Ordering::SeqCst);
+            shared.trigger_press_id.store(1, Ordering::SeqCst);
             shared.trigger_held.store(true, Ordering::SeqCst);
             // OS 自动重复 / 按住触发键连按多个键，都只撤销一次。
             note_companion_key_down(&ctx);
@@ -1075,9 +1071,7 @@ mod platform {
 
             // 下一次 Pressed 边沿会重置 latch（handle_flags_changed 里做），下一轮组合键
             // 才能再次撤销 —— 否则第二次组合键会被当成正常听写。
-            shared
-                .trigger_companion_seen
-                .store(0, Ordering::SeqCst);
+            shared.trigger_companion_seen.store(0, Ordering::SeqCst);
             note_companion_key_down(&ctx);
             assert_eq!(drain_combo(&combo_rx), 1);
 
@@ -1106,9 +1100,8 @@ mod platform {
 
     use super::{
         esc_exclusive, install_error, reset_shared_held_state, send_cancel_or_log,
-        send_combo_abort_or_log, send_or_log,
-        start_listener_thread, update_shared_binding, update_shared_modifier_shortcuts,
-        HotkeyAdapter, HotkeyEvent, Shared, StartupTx,
+        send_combo_abort_or_log, send_or_log, start_listener_thread, update_shared_binding,
+        update_shared_modifier_shortcuts, HotkeyAdapter, HotkeyEvent, Shared, StartupTx,
     };
     use crate::types::{HotkeyAdapterKind, HotkeyBinding, HotkeyInstallError, HotkeyTrigger};
 
@@ -1187,10 +1180,7 @@ mod platform {
         }
 
         fn trigger_combined_since_press(&self, press_id: u64) -> bool {
-            self.shared
-                .trigger_companion_seen
-                .load(Ordering::SeqCst)
-                == press_id
+            self.shared.trigger_companion_seen.load(Ordering::SeqCst) == press_id
         }
 
         fn shutdown(&self) {
@@ -1390,9 +1380,7 @@ mod platform {
                     ctx.shared
                         .trigger_press_id
                         .store(press_id, Ordering::SeqCst);
-                    ctx.shared
-                        .trigger_companion_seen
-                        .store(0, Ordering::SeqCst);
+                    ctx.shared.trigger_companion_seen.store(0, Ordering::SeqCst);
                     log::info!("[hotkey] Windows trigger pressed vk={vk_code}");
                     send_or_log(
                         &ctx.tx,
@@ -1407,7 +1395,12 @@ mod platform {
                 let was_held = ctx.shared.trigger_held.swap(false, Ordering::SeqCst);
                 if was_held {
                     log::info!("[hotkey] Windows trigger released vk={vk_code}");
-                    send_or_log(&ctx.tx, HotkeyEvent::Released { at: std::time::Instant::now() });
+                    send_or_log(
+                        &ctx.tx,
+                        HotkeyEvent::Released {
+                            at: std::time::Instant::now(),
+                        },
+                    );
                 }
             }
             _ => {}
@@ -1599,10 +1592,7 @@ mod platform {
             assert!(dispatch_keyboard_event(&ctx, VK_RCONTROL, WM_KEYUP));
             assert!(dispatch_keyboard_event(&ctx, VK_RCONTROL, WM_KEYUP));
 
-            assert_eq!(
-                edge_names(drain(&rx)),
-                vec!["pressed", "released"]
-            );
+            assert_eq!(edge_names(drain(&rx)), vec!["pressed", "released"]);
         }
 
         #[test]
@@ -1688,10 +1678,7 @@ mod platform {
             assert!(!dispatch_keyboard_event(&left_ctx, VK_RMENU, WM_KEYDOWN));
             assert!(dispatch_keyboard_event(&left_ctx, VK_LMENU, WM_KEYDOWN));
             assert!(dispatch_keyboard_event(&left_ctx, VK_LMENU, WM_KEYUP));
-            assert_eq!(
-                edge_names(drain(&left_rx)),
-                vec!["pressed", "released"]
-            );
+            assert_eq!(edge_names(drain(&left_rx)), vec!["pressed", "released"]);
 
             let right_option_shared = shared(HotkeyTrigger::RightOption);
             let (right_option_ctx, right_option_rx) = callback_context(right_option_shared);
@@ -1768,12 +1755,13 @@ mod platform {
             dispatch_keyboard_event(&ctx, VK_LSHIFT, WM_KEYDOWN);
             dispatch_keyboard_event(&ctx, 0x44, WM_KEYDOWN);
 
-            assert!(matches!(combo_rx.recv().unwrap(), ComboHotkeyEvent::Pressed { .. }));
-            assert!(
-                hotkey_rx
-                    .try_iter()
-                    .any(|evt| evt == HotkeyEvent::TranslationModifierPressed)
-            );
+            assert!(matches!(
+                combo_rx.recv().unwrap(),
+                ComboHotkeyEvent::Pressed { .. }
+            ));
+            assert!(hotkey_rx
+                .try_iter()
+                .any(|evt| evt == HotkeyEvent::TranslationModifierPressed));
 
             drop(monitor);
         }

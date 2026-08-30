@@ -531,7 +531,13 @@ fn migration_fills_empty_selection_prompts_with_style_defaults() {
         .map(|pack| pack.selection_prompt.as_str())
         .collect();
     assert_eq!(prompts.len(), 4);
-    assert_eq!(prompts.iter().collect::<std::collections::HashSet<_>>().len(), 4);
+    assert_eq!(
+        prompts
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        4
+    );
 
     let prompt_for = |mode| {
         packs
@@ -615,7 +621,10 @@ fn reconcile_builtin_packs_upgrades_prompt_only_and_preserves_user_fields() {
         .find(|p| p.id == "builtin.structured")
         .expect("builtin structured pack");
     assert_eq!(upgraded.version, "3.0.0", "版本应推进到官方 3.0.0");
-    assert!(upgraded.prompt.contains("# 场景优先级"), "prompt 应推进为 v3.0 Beta");
+    assert!(
+        upgraded.prompt.contains("# 场景优先级"),
+        "prompt 应推进为 v3.0 Beta"
+    );
     assert_eq!(upgraded.name, "我的清晰结构", "用户改名必须保留");
     assert!(!upgraded.enabled, "用户 enabled 状态必须保留");
 }
@@ -630,5 +639,7 @@ fn reconcile_builtin_packs_skips_equal_version_and_adds_missing() {
     let mut empty: Vec<StylePack> = Vec::new();
     assert!(super::reconcile_builtin_packs(&mut empty));
     assert_eq!(empty.len(), 4);
-    assert!(empty.iter().all(|p| p.kind == crate::types::StylePackKind::Builtin));
+    assert!(empty
+        .iter()
+        .all(|p| p.kind == crate::types::StylePackKind::Builtin));
 }

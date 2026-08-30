@@ -267,8 +267,12 @@ fn pad_to_min_length(edit: &EditPair) -> Option<(String, String)> {
 /// 只看中文标点和 ASCII 的 `?!;` —— **不看 ASCII 句点**，`Node.js`、`co.uk`、`v1.2`
 /// 都带点，把它们当句子边界会误杀一整类技术名词，而那正是这个功能最该学会的东西。
 fn crosses_a_sentence_boundary(s: &str) -> bool {
-    s.chars()
-        .any(|c| matches!(c, '\n' | '\r' | '。' | '？' | '！' | '；' | '，' | '、' | '：' | '?' | '!' | ';'))
+    s.chars().any(|c| {
+        matches!(
+            c,
+            '\n' | '\r' | '。' | '？' | '！' | '；' | '，' | '、' | '：' | '?' | '!' | ';'
+        )
+    })
 }
 
 /// 这处改动是不是落在「我们刚插进去的那段文字」里。
@@ -388,7 +392,10 @@ mod tests {
             "Type / for commands",
         )
         .expect("形式上确实是一处改动 —— 检测到它没问题");
-        assert!(!is_vocab_worthy(&e), "整句被替换不该变成规则：以后每次说那句话都会被换成占位符");
+        assert!(
+            !is_vocab_worthy(&e),
+            "整句被替换不该变成规则：以后每次说那句话都会被换成占位符"
+        );
     }
 
     #[test]
@@ -416,8 +423,8 @@ mod tests {
     /// 这么长怎么要」。
     #[test]
     fn a_trailing_newline_must_not_swallow_the_whole_tail() {
-        let e = minimal_edit("我压根就没有给我提醒", "我根本就没有给我提醒\n")
-            .expect("是一处有效改动");
+        let e =
+            minimal_edit("我压根就没有给我提醒", "我根本就没有给我提醒\n").expect("是一处有效改动");
         assert_eq!(e.source, "压根", "只该抠出真正改掉的那两个字");
         assert_eq!(e.target, "根本");
     }
@@ -437,7 +444,10 @@ mod tests {
             before: String::new(),
             after: String::new(),
         };
-        assert!(e.source.chars().count() <= 64, "前提：没被 minimal_edit 拦掉");
+        assert!(
+            e.source.chars().count() <= 64,
+            "前提：没被 minimal_edit 拦掉"
+        );
         assert!(!is_vocab_worthy(&e));
     }
 
@@ -505,10 +515,7 @@ mod tests {
     fn overlapping_prefix_and_suffix_do_not_double_count() {
         // "aa" → "aaa"：前缀吃掉 2、后缀若不设上限会再吃 2，中间段会算出负长度。
         assert_eq!(edit("aa", "aaa"), None); // 纯插入，被拒
-        assert_eq!(
-            edit("aaa", "aa"),
-            Some(("a".to_string(), String::new()))
-        );
+        assert_eq!(edit("aaa", "aa"), Some(("a".to_string(), String::new())));
     }
 
     #[test]

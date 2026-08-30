@@ -276,9 +276,7 @@ unsafe fn focused_element_passing_the_gate(mut gate: GateInputs) -> GatedElement
         .flatten();
     let Some(owner) = owner else {
         CFRelease(focused as CFTypeRef);
-        return GatedElement::Unavailable(
-            "could not confirm which app owns the focused element",
-        );
+        return GatedElement::Unavailable("could not confirm which app owns the focused element");
     };
     gate.bundle_id = Some(owner);
     // Secure Input 是全局状态，顺手也刷新一次 —— 同样可能在这几次 AX 调用期间才打开。
@@ -658,7 +656,11 @@ unsafe extern "C" fn value_changed_shim(
             log::debug!(
                 "[cursor-context] baseline anchored at {} chars ({})",
                 current.chars().count(),
-                if inserted { "insertion landed" } else { "timeout" }
+                if inserted {
+                    "insertion landed"
+                } else {
+                    "timeout"
+                }
             );
             // 两者必须一起推进：`baseline` 是比对起点，`last_text` 是「上次看到的样子」。
             // 只更新前者的话，锚定后第一条通知会把「插入生效」当成一次用户编辑。
@@ -975,7 +977,9 @@ fn run_edit_watch_loop(
             }
         }
         if registered.is_empty() {
-            log::info!("[cursor-context] no usable AX notification on this element; edit watch off");
+            log::info!(
+                "[cursor-context] no usable AX notification on this element; edit watch off"
+            );
             CFRelease(observer as CFTypeRef);
             return;
         }
@@ -1109,7 +1113,11 @@ mod tests {
     fn a_negative_caret_location_is_not_the_start_of_the_document() {
         assert_eq!(caret_offset_from_location(0), Some(0), "光标真在开头");
         assert_eq!(caret_offset_from_location(42), Some(42));
-        assert_eq!(caret_offset_from_location(-1), None, "kCFNotFound：没有光标");
+        assert_eq!(
+            caret_offset_from_location(-1),
+            None,
+            "kCFNotFound：没有光标"
+        );
         assert_eq!(caret_offset_from_location(isize::MIN), None);
     }
 }

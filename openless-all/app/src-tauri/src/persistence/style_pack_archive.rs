@@ -901,10 +901,7 @@ mod tests {
             bytes: vec![0x89, 0x50, 0x4e, 0x47],
         };
         let err = persist_style_pack_icon(&PathBuf::new(), pack_id, icon).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("memory-only store"),
-            "{err:#}"
-        );
+        assert!(format!("{err:#}").contains("memory-only store"), "{err:#}");
         assert!(
             !relative_dir.exists(),
             "empty asset_root must not create {} under cwd",

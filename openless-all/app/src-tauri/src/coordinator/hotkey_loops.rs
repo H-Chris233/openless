@@ -17,11 +17,23 @@ use super::*;
 /// 中按 Esc 停不下来」。独立通道 + 本线程保证 `cancel_session` 随到随执行（它是纯同步
 /// 快路径：置旗标 + 清资源，不 await）。
 pub(super) fn esc_cancel_bridge_loop(inner: Arc<Inner>, rx: mpsc::Receiver<()>) {
+    esc_cancel_bridge_loop_with(inner, rx, |inner| {
+        inner
+            .host
+            .block_on(super::dictation::cancel_active_session(inner));
+    });
+}
+
+fn esc_cancel_bridge_loop_with(
+    inner: Arc<Inner>,
+    rx: mpsc::Receiver<()>,
+    cancel: impl Fn(&Arc<Inner>),
+) {
     while rx.recv().is_ok() {
         if inner.shortcut_recording_active.load(Ordering::SeqCst) {
             continue;
         }
-        cancel_session(&inner);
+        cancel(&inner);
     }
 }
 
@@ -74,7 +86,7 @@ pub(super) fn hotkey_supervisor_loop(inner: Arc<Inner>) {
         if inner.shutdown.load(Ordering::SeqCst) {
             return;
         }
-        let prefs = inner.prefs.get();
+        let target = hotkey_runtime_target(&inner);
 
         if inner.hotkey.lock().is_some() {
             return;
@@ -102,11 +114,11 @@ pub(super) fn hotkey_supervisor_loop(inner: Arc<Inner>) {
             message: Some(format!("正在安装全局快捷键监听（第 {} 次）", attempts + 1)),
             last_error: None,
         };
-        let trigger = crate::shortcut_binding::legacy_modifier_trigger(&prefs.dictation_hotkey)
+        let trigger = crate::shortcut_binding::legacy_modifier_trigger(&target.dictation)
             .unwrap_or(crate::types::HotkeyTrigger::Custom);
         let binding = crate::types::HotkeyBinding {
             trigger,
-            mode: prefs.hotkey.mode,
+            mode: target.dictation_mode,
             keys: None,
         };
         let (tx, rx) = mpsc::channel::<HotkeyEvent>();
@@ -196,8 +208,8 @@ pub(super) fn qa_hotkey_supervisor_loop(inner: Arc<Inner>) {
         if inner.shutdown.load(Ordering::SeqCst) {
             return;
         }
-        // 用户已经把 QA 关掉就睡着等 prefs 改动；改动通过 update_qa_hotkey_binding 唤醒。
-        let binding = match inner.prefs.get().qa_hotkey.clone() {
+        // 用户已经把 QA 关掉就睡着等 runtime target 改动；改动通过显式 settings effect 唤醒。
+        let binding = match hotkey_runtime_target(&inner).qa {
             Some(b) => b,
             None => {
                 inner.qa_hotkey.lock().take();
@@ -230,23 +242,20 @@ pub(super) fn qa_hotkey_supervisor_loop(inner: Arc<Inner>) {
         // 在主线程构造，否则 register() 看起来 Ok 但事件根本不会派发——这是 issue #118
         // PR #119 第一版漏掉的关键步骤，导致用户按了 hotkey 完全无反应。这里通过
         // run_on_main_thread 把 QaHotkeyMonitor::start 跳到主线程跑，结果再回 channel。
-        let app = inner.app.lock().clone();
-        let app = match app {
-            Some(a) => a,
-            None => {
-                // 启动期 AppHandle 还没 bind，再等。
-                std::thread::sleep(std::time::Duration::from_secs(1));
-                continue;
-            }
-        };
-
         let (tx, rx) = mpsc::channel::<QaHotkeyEvent>();
         let (init_tx, init_rx) = mpsc::sync_channel::<Result<QaHotkeyMonitor, QaHotkeyError>>(1);
         let binding_for_main = binding.clone();
-        let _ = app.run_on_main_thread(move || {
-            let result = QaHotkeyMonitor::start(binding_for_main, tx);
-            let _ = init_tx.send(result);
-        });
+        if inner
+            .host
+            .run_on_main_thread(move || {
+                let result = QaHotkeyMonitor::start(binding_for_main, tx);
+                let _ = init_tx.send(result);
+            })
+            .is_err()
+        {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            continue;
+        }
 
         // run_on_main_thread 是 fire-and-forget；等主线程跑完结果回来。给 5s 上限避免
         // 主线程繁忙时 supervisor 永久阻塞。
@@ -297,7 +306,9 @@ pub(super) fn qa_hotkey_bridge_loop(inner: Arc<Inner>, rx: mpsc::Receiver<QaHotk
         let inner_cloned = Arc::clone(&inner);
         match evt {
             QaHotkeyEvent::Pressed => {
-                async_runtime::spawn(async move { handle_qa_hotkey_pressed(&inner_cloned).await });
+                inner
+                    .host
+                    .spawn(async move { handle_qa_hotkey_pressed(&inner_cloned).await });
             }
         }
     }
@@ -330,7 +341,7 @@ pub(super) fn selection_polish_hotkey_supervisor_loop(inner: Arc<Inner>) {
 
 #[cfg(not(mobile))]
 pub(super) fn try_update_selection_polish_hotkey_binding(inner: &Arc<Inner>) -> Result<(), String> {
-    let binding = inner.prefs.get().selection_polish_hotkey.clone();
+    let binding = hotkey_runtime_target(inner).selection_polish;
     let Some(binding) = binding else {
         take_selection_polish_hotkey_on_main_thread(inner);
         update_selection_polish_modifier_shortcut(inner);
@@ -347,17 +358,13 @@ pub(super) fn try_update_selection_polish_hotkey_binding(inner: &Arc<Inner>) -> 
     // deliberately not routed through the side-aware singleton: side-specific
     // combos remain dictation-only until that monitor supports multiple owners.
     update_selection_polish_modifier_shortcut(inner);
-    let app = inner.app.lock().clone().ok_or_else(|| {
-        "AppHandle unavailable while registering Selection Polish hotkey".to_string()
-    })?;
     let (result_tx, result_rx) = mpsc::sync_channel(1);
     let inner_for_main = Arc::clone(inner);
-    app.run_on_main_thread(move || {
+    inner.host.run_on_main_thread(move || {
         let result = update_selection_polish_hotkey_on_main_thread(inner_for_main, binding)
             .map_err(|error| error.to_string());
         let _ = result_tx.send(result);
-    })
-    .map_err(|error| error.to_string())?;
+    })?;
     result_rx
         .recv_timeout(std::time::Duration::from_secs(5))
         .map_err(|_| "Selection Polish hotkey registration timed out".to_string())?
@@ -418,19 +425,77 @@ fn selection_polish_hotkey_bridge_loop(inner: Arc<Inner>, rx: mpsc::Receiver<Com
 #[cfg(not(mobile))]
 fn handle_selection_workspace_hotkey_pressed(inner: &Arc<Inner>) {
     #[cfg(target_os = "windows")]
-    if inner.prefs.get().selection_voice_enabled {
+    if inner.backend.get_preferences().selection_voice_enabled {
         let inner_cloned = Arc::clone(inner);
-        async_runtime::spawn(async move {
+        inner.host.spawn(async move {
             super::selection_voice_session::handle_selection_voice_pressed(&inner_cloned).await;
         });
         return;
     }
-    let coordinator = Coordinator {
-        inner: Arc::clone(inner),
-    };
-    async_runtime::spawn(async move {
-        if let Err(error) = coordinator.trigger_selection_polish().await {
-            log::warn!("[selection-polish] hotkey workflow failed: {error}");
+    let inner = Arc::clone(inner);
+    let host = inner.host.clone();
+    host.spawn(async move {
+        let result = inner
+            .backend
+            .services()
+            .selection
+            .begin_polish(openless_core::SelectionPolishRequest {
+                selected_text: None,
+                mode: openless_core::PolishMode::Raw,
+                instruction: None,
+            })
+            .await;
+        match result {
+            Ok(_) => match inner.backend.services().selection.snapshot().await {
+                Ok(snapshot) => {
+                    let message = match snapshot.phase {
+                        openless_core::SelectionPhase::Preview => "已打开预览，等待确认",
+                        openless_core::SelectionPhase::Completed => match snapshot.insert_outcome {
+                            Some(openless_core::InsertOutcome::CopiedFallback) => {
+                                "已复制结果，请手动粘贴"
+                            }
+                            _ => "已替换",
+                        },
+                        _ => return,
+                    };
+                    let epoch = emit_selection_polish_capsule(&inner, CapsuleState::Done, message);
+                    schedule_selection_polish_capsule_idle(
+                        &inner,
+                        epoch,
+                        CAPSULE_AUTO_HIDE_DELAY_MS,
+                    );
+                }
+                Err(error) => {
+                    log::warn!("[selection-polish] read completed snapshot failed: {error}");
+                }
+            },
+            Err(error) => {
+                log::warn!("[selection-polish] hotkey workflow failed: {error}");
+                let message = match error.message.as_str() {
+                    "selectionPolishNoSelection" | "selected text must not be empty" => {
+                        "未选中内容"
+                    }
+                    "selectionPolishTargetUnavailable" => "目标输入框不可用，请重新选择",
+                    "selectionPolishTargetChanged" | "selectionPolishSelectionChanged" => {
+                        "选区已变化，未替换"
+                    }
+                    _ if error.code == openless_core::BackendErrorCode::Busy => {
+                        "选区润色正在进行中"
+                    }
+                    _ => "润色失败，请重试",
+                };
+                let state = if matches!(
+                    error.code,
+                    openless_core::BackendErrorCode::Cancelled
+                        | openless_core::BackendErrorCode::InvalidArgument
+                ) {
+                    CapsuleState::Cancelled
+                } else {
+                    CapsuleState::Error
+                };
+                let epoch = emit_selection_polish_capsule(&inner, state, message);
+                schedule_selection_polish_capsule_idle(&inner, epoch, CAPSULE_AUTO_HIDE_DELAY_MS);
+            }
         }
     });
 }
@@ -439,11 +504,11 @@ fn handle_selection_workspace_hotkey_pressed(inner: &Arc<Inner>) {
 fn handle_selection_workspace_hotkey_released(inner: &Arc<Inner>) {
     #[cfg(target_os = "windows")]
     {
-        if !inner.prefs.get().selection_voice_enabled {
+        if !inner.backend.get_preferences().selection_voice_enabled {
             return;
         }
         let inner_cloned = Arc::clone(inner);
-        async_runtime::spawn(async move {
+        inner.host.spawn(async move {
             super::selection_voice_session::handle_selection_voice_released(&inner_cloned).await;
         });
     }
@@ -453,13 +518,14 @@ fn handle_selection_workspace_hotkey_released(inner: &Arc<Inner>) {
 
 #[cfg(not(mobile))]
 pub(super) fn take_selection_polish_hotkey_on_main_thread(inner: &Arc<Inner>) {
-    let app = inner.app.lock().clone();
-    if let Some(app) = app {
-        let inner = Arc::clone(inner);
-        let _ = app.run_on_main_thread(move || {
-            inner.selection_polish_hotkey.lock().take();
-        });
-    } else {
+    let main_inner = Arc::clone(inner);
+    if inner
+        .host
+        .run_on_main_thread(move || {
+            main_inner.selection_polish_hotkey.lock().take();
+        })
+        .is_err()
+    {
         inner.selection_polish_hotkey.lock().take();
     }
 }
@@ -506,15 +572,15 @@ pub(super) fn update_coding_agent_hotkey_binding_now(inner: &Arc<Inner>) {
 
     #[cfg(target_os = "macos")]
     {
-        let prefs = inner.prefs.get();
-        let Some(binding) = prefs.coding_agent_voice_hotkey.clone() else {
+        let target = hotkey_runtime_target(inner);
+        let Some(binding) = target.coding_agent_voice else {
             take_coding_agent_hotkeys_on_main_thread(inner);
             if !LESS_COMPUTER_HOTKEY_DISABLED_LOGGED.swap(true, Ordering::SeqCst) {
                 log::info!("[less-computer] hotkey disabled");
             }
             return;
         };
-        if !prefs.coding_agent_enabled || is_unconfigured_shortcut(&binding) {
+        if !target.coding_agent_enabled || is_unconfigured_shortcut(&binding) {
             take_coding_agent_hotkeys_on_main_thread(inner);
             return;
         }
@@ -550,39 +616,38 @@ pub(super) fn update_coding_agent_hotkey_binding_now(inner: &Arc<Inner>) {
         }
 
         inner.coding_agent_modifier_hotkey.lock().take();
-        let app = match inner.app.lock().clone() {
-            Some(app) => app,
-            None => {
-                log::warn!("[less-computer] AppHandle 未 bind，跳过组合键注册");
-                return;
-            }
-        };
         let inner_clone = Arc::clone(inner);
         let binding_for_main = binding.clone();
-        let _ = app.run_on_main_thread(move || {
-            if let Some(monitor) = inner_clone.coding_agent_combo_hotkey.lock().as_ref() {
-                if let Err(e) = monitor.update_binding(binding_for_main.clone()) {
-                    log::warn!("[less-computer] combo hotkey update failed: {e}");
+        if inner
+            .host
+            .run_on_main_thread(move || {
+                if let Some(monitor) = inner_clone.coding_agent_combo_hotkey.lock().as_ref() {
+                    if let Err(e) = monitor.update_binding(binding_for_main.clone()) {
+                        log::warn!("[less-computer] combo hotkey update failed: {e}");
+                    }
+                    return;
                 }
-                return;
-            }
-            let (tx, rx) = mpsc::channel::<ComboHotkeyEvent>();
-            match ComboHotkeyMonitor::start(binding_for_main.clone(), tx) {
-                Ok(monitor) => {
-                    *inner_clone.coding_agent_combo_hotkey.lock() = Some(monitor);
-                    log::info!(
-                        "[less-computer] combo hotkey installed ({})",
-                        binding_for_main.display_label()
-                    );
-                    let bridge_inner = Arc::clone(&inner_clone);
-                    std::thread::Builder::new()
-                        .name("openless-less-computer-combo-bridge".into())
-                        .spawn(move || less_computer_combo_bridge_loop(bridge_inner, rx))
-                        .ok();
+                let (tx, rx) = mpsc::channel::<ComboHotkeyEvent>();
+                match ComboHotkeyMonitor::start(binding_for_main.clone(), tx) {
+                    Ok(monitor) => {
+                        *inner_clone.coding_agent_combo_hotkey.lock() = Some(monitor);
+                        log::info!(
+                            "[less-computer] combo hotkey installed ({})",
+                            binding_for_main.display_label()
+                        );
+                        let bridge_inner = Arc::clone(&inner_clone);
+                        std::thread::Builder::new()
+                            .name("openless-less-computer-combo-bridge".into())
+                            .spawn(move || less_computer_combo_bridge_loop(bridge_inner, rx))
+                            .ok();
+                    }
+                    Err(e) => log::warn!("[less-computer] combo hotkey install failed: {e}"),
                 }
-                Err(e) => log::warn!("[less-computer] combo hotkey install failed: {e}"),
-            }
-        });
+            })
+            .is_err()
+        {
+            log::warn!("[less-computer] AppHandle 未 bind，跳过组合键注册");
+        }
     }
 }
 
@@ -609,20 +674,21 @@ pub(super) fn less_computer_modifier_bridge_loop(
         let inner_cloned = Arc::clone(&inner);
         match evt {
             HotkeyEvent::Pressed { press_id, .. } => {
-                async_runtime::block_on(async {
+                inner.host.block_on(async {
                     handle_less_computer_modifier_pressed(&inner_cloned, press_id).await
                 });
             }
             HotkeyEvent::Released { .. } => {
-                async_runtime::block_on(async {
-                    handle_less_computer_released(&inner_cloned).await
-                });
+                inner
+                    .host
+                    .block_on(async { handle_less_computer_released(&inner_cloned).await });
             }
             // Esc 取消与组合键撤销都不在此枚举里：分别走 esc_cancel_bridge_loop /
             // combo_abort_bridge_loop（见各自函数注释）。
             HotkeyEvent::TranslationModifierPressed | HotkeyEvent::QaShortcutPressed => {}
             #[cfg(not(mobile))]
-            HotkeyEvent::SelectionPolishShortcutPressed | HotkeyEvent::SelectionPolishShortcutReleased => {}
+            HotkeyEvent::SelectionPolishShortcutPressed
+            | HotkeyEvent::SelectionPolishShortcutReleased => {}
             #[cfg(not(mobile))]
             HotkeyEvent::FnRecordingPressed => {}
         }
@@ -683,9 +749,7 @@ fn cancel_less_computer_voice_session(inner: &Arc<Inner>) {
         .swap(0, Ordering::SeqCst);
     log::info!("[less-computer] 触发键与其他键组合按下 —— 取消本次按下开出的会话");
     cancel_session(inner);
-    if let Some(app) = inner.app.lock().clone() {
-        crate::hide_less_computer_glow(&app);
-    }
+    inner.host.hide_less_computer_glow();
 }
 
 pub(super) fn less_computer_combo_bridge_loop(
@@ -699,59 +763,56 @@ pub(super) fn less_computer_combo_bridge_loop(
         let inner_cloned = Arc::clone(&inner);
         match evt {
             ComboHotkeyEvent::Pressed { .. } => {
-                async_runtime::block_on(async {
-                    handle_less_computer_pressed(&inner_cloned).await
-                });
+                inner
+                    .host
+                    .block_on(async { handle_less_computer_pressed(&inner_cloned).await });
             }
             ComboHotkeyEvent::Released { .. } => {
-                async_runtime::block_on(async {
-                    handle_less_computer_released(&inner_cloned).await
-                });
+                inner
+                    .host
+                    .block_on(async { handle_less_computer_released(&inner_cloned).await });
             }
         }
     }
 }
 
 pub(super) async fn handle_less_computer_pressed(inner: &Arc<Inner>) {
-    let prefs = inner.prefs.get();
-    if !prefs.coding_agent_enabled {
+    if !hotkey_runtime_target(inner).coding_agent_enabled {
         return;
     }
     if !matches!(inner.state.lock().phase, SessionPhase::Idle) {
         log::info!("[less-computer] press ignored: dictation session already active");
         return;
     }
-    if !matches!(inner.qa_state.lock().phase, QaPhase::Idle) {
+    let qa_active = inner
+        .backend
+        .services()
+        .qa
+        .snapshot()
+        .await
+        .map(|snapshot| snapshot.phase != openless_core::QaPhase::Idle)
+        .unwrap_or(false);
+    if qa_active {
         log::info!("[less-computer] press ignored: QA session active");
         return;
     }
 
-    // voice_agent=true 在 Starting 阶段就写入 state，防止 finish_starting_session
-    // 处理 pending_stop 时（快速松手 race）丢失标志，导致意外走普通听写路径。
-    if begin_session_as(inner, true, false).await.is_err() {
-        return;
-    }
-    let started = {
-        let state = inner.state.lock();
-        // voice_agent 已在 begin_session_as 内设置；这里只检查阶段是否推进成功。
-        if matches!(
-            state.phase,
-            SessionPhase::Starting | SessionPhase::Listening | SessionPhase::Processing
-        ) {
-            log::info!(
-                "[less-computer] voice session started (session={:?})",
-                state.session_id
-            );
+    // Core 先预留 capture lease，再由 Coordinator 启动宿主 recorder/ASR；两边复用
+    // 同一个 session id，Esc/组合键取消时不会把迟到事件投递到另一轮会话。
+    let started = match super::dictation::begin_less_computer_session(inner).await {
+        Ok(Some(session_id)) => {
+            log::info!("[less-computer] voice session started (session={session_id:?})");
             true
-        } else {
+        }
+        Ok(None) => false,
+        Err(error) => {
+            log::warn!("[less-computer] voice session startup failed: {error}");
             false
         }
     };
     // 一按下键（开始录音）就点亮整屏彩虹描边，贯穿 录音 → 处理 → 出结果，完成/关闭才熄灭。
     if started {
-        if let Some(app) = inner.app.lock().clone() {
-            crate::show_less_computer_glow(&app);
-        }
+        inner.host.show_less_computer_glow();
     }
 }
 
@@ -768,18 +829,14 @@ pub(super) async fn handle_less_computer_released(inner: &Arc<Inner>) {
             let _ = end_session(inner).await;
             // 收尾后熄灭整屏描边。正常路径 run_voice_agent_transcript 已熄过、这里兜底；
             // 空转写/出错路径不进 run_voice_agent_transcript，全靠这里熄，否则描边卡住不灭。
-            if let Some(app) = inner.app.lock().clone() {
-                crate::hide_less_computer_glow(&app);
-            }
+            inner.host.hide_less_computer_glow();
         }
         SessionPhase::Starting => {
             // 握手中松手：排队；正常路径真正收尾在 begin 续流的 end_session → run_voice_agent_transcript 熄灭。
             request_stop_during_starting(inner, "less-computer release edge");
             // 但若初始化失败永远到不了 Listening（不会进 run_voice_agent_transcript），
             // 描边会永久卡屏 → 这里兜底熄灭。Listening 分支已有熄灭逻辑，故只在 Starting 加。
-            if let Some(app) = inner.app.lock().clone() {
-                crate::hide_less_computer_glow(&app);
-            }
+            inner.host.hide_less_computer_glow();
         }
         _ => {}
     }
@@ -791,13 +848,14 @@ pub(super) fn take_coding_agent_hotkeys_on_main_thread(inner: &Arc<Inner>) {
 }
 
 pub(super) fn take_coding_agent_combo_hotkey_on_main_thread(inner: &Arc<Inner>) {
-    let app = inner.app.lock().clone();
-    if let Some(app) = app {
-        let inner = Arc::clone(inner);
-        let _ = app.run_on_main_thread(move || {
-            inner.coding_agent_combo_hotkey.lock().take();
-        });
-    } else {
+    let main_inner = Arc::clone(inner);
+    if inner
+        .host
+        .run_on_main_thread(move || {
+            main_inner.coding_agent_combo_hotkey.lock().take();
+        })
+        .is_err()
+    {
         inner.coding_agent_combo_hotkey.lock().take();
     }
 }
@@ -808,15 +866,14 @@ pub(super) fn combo_hotkey_supervisor_loop(inner: Arc<Inner>) {
         if inner.shutdown.load(Ordering::SeqCst) {
             return;
         }
-        // 读当前 prefs
-        let prefs = inner.prefs.get();
-        if crate::shortcut_binding::legacy_modifier_trigger(&prefs.dictation_hotkey).is_some() {
+        let target = hotkey_runtime_target(&inner);
+        if crate::shortcut_binding::legacy_modifier_trigger(&target.dictation).is_some() {
             take_combo_hotkey_on_main_thread(&inner);
             inner.side_aware_combo.lock().take();
             return;
         }
 
-        let binding = prefs.dictation_hotkey.clone();
+        let binding = target.dictation;
         if is_unconfigured_shortcut(&binding) {
             take_combo_hotkey_on_main_thread(&inner);
             inner.side_aware_combo.lock().take();
@@ -858,23 +915,21 @@ pub(super) fn combo_hotkey_supervisor_loop(inner: Arc<Inner>) {
             return;
         }
 
-        let app = inner.app.lock().clone();
-        let app = match app {
-            Some(a) => a,
-            None => {
-                std::thread::sleep(std::time::Duration::from_secs(1));
-                continue;
-            }
-        };
-
         let (tx, rx) = mpsc::channel::<ComboHotkeyEvent>();
         let (init_tx, init_rx) =
             mpsc::sync_channel::<Result<ComboHotkeyMonitor, ComboHotkeyError>>(1);
         let binding_for_main = binding.clone();
-        let _ = app.run_on_main_thread(move || {
-            let result = ComboHotkeyMonitor::start(binding_for_main, tx);
-            let _ = init_tx.send(result);
-        });
+        if inner
+            .host
+            .run_on_main_thread(move || {
+                let result = ComboHotkeyMonitor::start(binding_for_main, tx);
+                let _ = init_tx.send(result);
+            })
+            .is_err()
+        {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            continue;
+        }
 
         let init_result = match init_rx.recv_timeout(std::time::Duration::from_secs(5)) {
             Ok(r) => r,
@@ -927,12 +982,12 @@ pub(super) fn combo_hotkey_bridge_loop(inner: Arc<Inner>, rx: mpsc::Receiver<Com
             // P0 #468/#475: 同 hotkey_bridge_loop —— Pressed/Released 必须串行 await，
             // 否则 latch 竞态导致 combo 快捷键二次按键失效。
             ComboHotkeyEvent::Pressed { at } => {
-                async_runtime::block_on(async {
+                inner.host.block_on(async {
                     handle_pressed_edge(&inner_cloned, at, 0).await;
                 });
             }
             ComboHotkeyEvent::Released { at } => {
-                async_runtime::block_on(async {
+                inner.host.block_on(async {
                     handle_released_edge(&inner_cloned, at).await;
                 });
             }
@@ -946,7 +1001,7 @@ pub(super) fn translation_hotkey_supervisor_loop(inner: Arc<Inner>) {
         if inner.shutdown.load(Ordering::SeqCst) {
             return;
         }
-        let binding = inner.prefs.get().translation_hotkey;
+        let binding = hotkey_runtime_target(&inner).translation;
         if is_builtin_translation_shift(&binding)
             || crate::shortcut_binding::legacy_modifier_trigger(&binding).is_some()
         {
@@ -969,22 +1024,21 @@ pub(super) fn translation_hotkey_supervisor_loop(inner: Arc<Inner>) {
             return;
         }
 
-        let app = match inner.app.lock().clone() {
-            Some(a) => a,
-            None => {
-                std::thread::sleep(std::time::Duration::from_secs(1));
-                continue;
-            }
-        };
-
         let (tx, rx) = mpsc::channel::<ComboHotkeyEvent>();
         let (init_tx, init_rx) =
             mpsc::sync_channel::<Result<ComboHotkeyMonitor, ComboHotkeyError>>(1);
         let binding_for_main = binding.clone();
-        let _ = app.run_on_main_thread(move || {
-            let result = ComboHotkeyMonitor::start(binding_for_main, tx);
-            let _ = init_tx.send(result);
-        });
+        if inner
+            .host
+            .run_on_main_thread(move || {
+                let result = ComboHotkeyMonitor::start(binding_for_main, tx);
+                let _ = init_tx.send(result);
+            })
+            .is_err()
+        {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            continue;
+        }
 
         let init_result = match init_rx.recv_timeout(std::time::Duration::from_secs(5)) {
             Ok(r) => r,
@@ -1045,7 +1099,9 @@ pub(super) fn translation_hotkey_bridge_loop(
             continue;
         }
         if matches!(evt, ComboHotkeyEvent::Pressed { .. }) {
-            arm_translation_if_effective(&inner);
+            inner.host.block_on(async {
+                arm_translation_if_effective(&inner).await;
+            });
         }
     }
 }
@@ -1073,22 +1129,21 @@ pub(super) fn action_hotkey_supervisor_loop(inner: Arc<Inner>, kind: ActionHotke
             return;
         }
 
-        let app = match inner.app.lock().clone() {
-            Some(a) => a,
-            None => {
-                std::thread::sleep(std::time::Duration::from_secs(1));
-                continue;
-            }
-        };
-
         let (tx, rx) = mpsc::channel::<ComboHotkeyEvent>();
         let (init_tx, init_rx) =
             mpsc::sync_channel::<Result<ComboHotkeyMonitor, ComboHotkeyError>>(1);
         let binding_for_main = binding.clone();
-        let _ = app.run_on_main_thread(move || {
-            let result = ComboHotkeyMonitor::start(binding_for_main, tx);
-            let _ = init_tx.send(result);
-        });
+        if inner
+            .host
+            .run_on_main_thread(move || {
+                let result = ComboHotkeyMonitor::start(binding_for_main, tx);
+                let _ = init_tx.send(result);
+            })
+            .is_err()
+        {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            continue;
+        }
 
         let init_result = match init_rx.recv_timeout(std::time::Duration::from_secs(5)) {
             Ok(r) => r,
@@ -1149,14 +1204,7 @@ pub(super) fn action_hotkey_bridge_loop(
 pub(super) fn handle_action_hotkey_pressed(inner: &Arc<Inner>, kind: ActionHotkeyKind) {
     match kind {
         ActionHotkeyKind::SwitchStyle => switch_to_previous_style(inner),
-        ActionHotkeyKind::OpenApp => {
-            if let Some(app) = inner.app.lock().clone() {
-                let app_for_main = app.clone();
-                let _ = app.run_on_main_thread(move || {
-                    crate::show_main_window(&app_for_main);
-                });
-            }
-        }
+        ActionHotkeyKind::OpenApp => inner.host.show_main_window(),
     }
 }
 
@@ -1172,85 +1220,61 @@ pub(super) fn show_style_switch_capsule(inner: &Arc<Inner>, name: &str) {
 }
 
 pub(super) fn switch_to_previous_style(inner: &Arc<Inner>) {
-    let mut prefs = inner.prefs.get();
-    let packs = match inner.style_packs.list() {
-        Ok(packs) => packs,
+    let selected = match inner.backend.activate_previous_style_pack() {
+        Ok(selected) => selected,
         Err(error) => {
-            log::warn!("[coord] switch style hotkey failed to load style packs: {error}");
+            log::warn!("[coord] switch style hotkey failed: {error}");
             return;
         }
     };
-    let enabled: Vec<crate::types::StylePack> =
-        packs.into_iter().filter(|pack| pack.enabled).collect();
-    if enabled.len() <= 1 {
+    let Some(selected) = selected else {
         log::info!("[coord] switch style hotkey ignored: enabled style count <= 1");
         return;
-    }
-    let current_index = enabled
-        .iter()
-        .position(|pack| pack.id == prefs.active_style_pack_id)
-        .unwrap_or(0);
-    let next_index = if current_index == 0 {
-        enabled.len() - 1
-    } else {
-        current_index - 1
     };
-    prefs.active_style_pack_id = enabled[next_index].id.clone();
-    sync_style_pack_preferences(&mut prefs, &enabled);
-    if let Err(e) = inner.prefs.set(prefs.clone()) {
-        log::warn!("[coord] switch style hotkey 保存失败: {e}");
-    } else {
-        log::info!(
-            "[coord] switch style hotkey changed active style pack to {}",
-            prefs.active_style_pack_id
-        );
-        #[cfg(not(mobile))]
-        show_style_switch_capsule(inner, &enabled[next_index].name);
-        if let Some(app) = inner.app.lock().clone() {
-            let _ = app.emit("prefs:changed", &prefs);
-            let _ = app.emit_to("main", "prefs:changed", &prefs);
-            let app_for_main = app.clone();
-            let _ = app.run_on_main_thread(move || {
-                if let Err(err) = crate::refresh_tray_microphone_menu(&app_for_main) {
-                    log::warn!("[tray] refresh style menu after switch style hotkey failed: {err}");
-                }
-            });
-        }
-    }
+    log::info!(
+        "[coord] switch style hotkey changed active style pack to {}",
+        selected.id
+    );
+    #[cfg(not(mobile))]
+    show_style_switch_capsule(inner, &selected.name);
+    inner.host.refresh_tray_microphone_menu();
 }
 
 pub(super) fn take_combo_hotkey_on_main_thread(inner: &Arc<Inner>) {
-    let app = inner.app.lock().clone();
-    if let Some(app) = app {
-        let inner = Arc::clone(inner);
-        let _ = app.run_on_main_thread(move || {
-            inner.combo_hotkey.lock().take();
-        });
-    } else {
+    let main_inner = Arc::clone(inner);
+    if inner
+        .host
+        .run_on_main_thread(move || {
+            main_inner.combo_hotkey.lock().take();
+        })
+        .is_err()
+    {
         inner.combo_hotkey.lock().take();
     }
 }
 
 pub(super) fn take_translation_hotkey_on_main_thread(inner: &Arc<Inner>) {
-    let app = inner.app.lock().clone();
-    if let Some(app) = app {
-        let inner = Arc::clone(inner);
-        let _ = app.run_on_main_thread(move || {
-            inner.translation_hotkey.lock().take();
-        });
-    } else {
+    let main_inner = Arc::clone(inner);
+    if inner
+        .host
+        .run_on_main_thread(move || {
+            main_inner.translation_hotkey.lock().take();
+        })
+        .is_err()
+    {
         inner.translation_hotkey.lock().take();
     }
 }
 
 pub(super) fn take_action_hotkey_on_main_thread(inner: &Arc<Inner>, kind: ActionHotkeyKind) {
-    let app = inner.app.lock().clone();
-    if let Some(app) = app {
-        let inner = Arc::clone(inner);
-        let _ = app.run_on_main_thread(move || {
-            action_hotkey_slot(&inner, kind).lock().take();
-        });
-    } else {
+    let main_inner = Arc::clone(inner);
+    if inner
+        .host
+        .run_on_main_thread(move || {
+            action_hotkey_slot(&main_inner, kind).lock().take();
+        })
+        .is_err()
+    {
         action_hotkey_slot(inner, kind).lock().take();
     }
 }
@@ -1269,11 +1293,15 @@ pub(super) fn action_hotkey_binding(
     inner: &Arc<Inner>,
     kind: ActionHotkeyKind,
 ) -> Option<crate::types::ShortcutBinding> {
-    let prefs = inner.prefs.get();
+    let target = hotkey_runtime_target(inner);
     match kind {
-        ActionHotkeyKind::SwitchStyle => prefs.switch_style_hotkey,
-        ActionHotkeyKind::OpenApp => prefs.open_app_hotkey,
+        ActionHotkeyKind::SwitchStyle => target.switch_style,
+        ActionHotkeyKind::OpenApp => target.open_app,
     }
+}
+
+pub(super) fn hotkey_runtime_target(inner: &Arc<Inner>) -> openless_core::HotkeyRuntimeTarget {
+    inner.hotkey_runtime_target.lock().clone()
 }
 
 pub(super) fn is_modifier_only_shortcut(binding: &crate::types::ShortcutBinding) -> bool {
@@ -1329,10 +1357,8 @@ fn style_pack_hotkey_registrations_match<R>(
 }
 
 fn configured_style_pack_hotkeys(inner: &Arc<Inner>) -> Vec<crate::types::StylePackHotkey> {
-    inner
-        .prefs
-        .get()
-        .style_pack_hotkeys
+    hotkey_runtime_target(inner)
+        .style_packs
         .into_iter()
         .filter(|entry| {
             !is_unconfigured_shortcut(&entry.binding) && !is_modifier_only_shortcut(&entry.binding)
@@ -1384,7 +1410,7 @@ pub(super) fn style_pack_hotkey_supervisor_loop(inner: Arc<Inner>) {
     }
 }
 
-/// 按 prefs 全量对齐风格包快捷键注册状态。**必须在主线程执行**（macOS Carbon
+/// 按 runtime target 全量对齐风格包快捷键注册状态。**必须在主线程执行**（macOS Carbon
 /// 要求 manager 在主线程构造）。策略为整表重建：先 drop 全部旧注册再逐条注册，
 /// 避免「两个包互换按键」时新键仍被旧注册占用。任意条目失败会清空本轮全部注册。
 pub(super) fn sync_style_pack_hotkeys(inner: &Arc<Inner>) -> Result<(), String> {
@@ -1418,17 +1444,11 @@ pub(super) fn sync_style_pack_hotkeys(inner: &Arc<Inner>) -> Result<(), String> 
 
 /// 事务式设置路径：派发到主线程并等待最多 5s，确保调用方能回滚偏好并展示错误。
 pub(super) fn try_sync_style_pack_hotkeys_on_main_thread(inner: &Arc<Inner>) -> Result<(), String> {
-    let app = inner
-        .app
-        .lock()
-        .clone()
-        .ok_or_else(|| "AppHandle 未 bind，无法注册风格包快捷键".to_string())?;
     let (result_tx, result_rx) = mpsc::sync_channel::<Result<(), String>>(1);
     let sync_inner = Arc::clone(inner);
-    app.run_on_main_thread(move || {
+    inner.host.run_on_main_thread(move || {
         let _ = result_tx.send(sync_style_pack_hotkeys(&sync_inner));
-    })
-    .map_err(|error| error.to_string())?;
+    })?;
     result_rx
         .recv_timeout(std::time::Duration::from_secs(5))
         .map_err(|_| "注册风格包快捷键超时".to_string())?
@@ -1437,13 +1457,8 @@ pub(super) fn try_sync_style_pack_hotkeys_on_main_thread(inner: &Arc<Inner>) -> 
 /// 设置导入、删除风格包等不可整体回滚路径使用的主动同步。失败只记录日志，
 /// 常驻 supervisor 会根据 prefs 与实际注册表差异继续重试。
 pub(super) fn sync_style_pack_hotkeys_on_main_thread(inner: &Arc<Inner>) {
-    let app = inner.app.lock().clone();
-    let Some(app) = app else {
-        log::warn!("[coord] sync style pack hotkeys: AppHandle 未 bind，等待 supervisor 重试");
-        return;
-    };
     let sync_inner = Arc::clone(inner);
-    if let Err(error) = app.run_on_main_thread(move || {
+    if let Err(error) = inner.host.run_on_main_thread(move || {
         if let Err(error) = sync_style_pack_hotkeys(&sync_inner) {
             log::warn!("[coord] style pack hotkeys 主动同步失败: {error}");
         }
@@ -1453,13 +1468,14 @@ pub(super) fn sync_style_pack_hotkeys_on_main_thread(inner: &Arc<Inner>) {
 }
 
 pub(super) fn clear_style_pack_hotkeys_on_main_thread(inner: &Arc<Inner>) {
-    let app = inner.app.lock().clone();
-    if let Some(app) = app {
-        let inner = Arc::clone(inner);
-        let _ = app.run_on_main_thread(move || {
-            inner.style_pack_hotkeys.lock().clear();
-        });
-    } else {
+    let main_inner = Arc::clone(inner);
+    if inner
+        .host
+        .run_on_main_thread(move || {
+            main_inner.style_pack_hotkeys.lock().clear();
+        })
+        .is_err()
+    {
         inner.style_pack_hotkeys.lock().clear();
     }
 }
@@ -1482,14 +1498,10 @@ pub(super) fn style_pack_hotkey_bridge_loop(
 /// 复用 `activate_style_pack_by_id`（禁用包自动启用、写 prefs、sync、广播、刷托盘），
 /// 与前端「点选风格包」走完全相同的激活路径；包已被删除时仅 warn 不做事。
 pub(super) fn handle_style_pack_hotkey_pressed(inner: &Arc<Inner>, pack_id: &str) {
-    let Some(app) = inner.app.lock().clone() else {
-        log::warn!("[coord] style pack hotkey {pack_id} pressed but AppHandle not bound");
-        return;
-    };
     let coord = Coordinator {
         inner: Arc::clone(inner),
     };
-    match crate::commands::activate_style_pack_by_id(&coord, &app, pack_id) {
+    match inner.host.activate_style_pack_by_id(&coord, pack_id) {
         Ok(pack) => {
             log::info!(
                 "[coord] style pack hotkey activated {} ({})",
@@ -1509,11 +1521,11 @@ pub(super) fn is_builtin_translation_shift(binding: &crate::types::ShortcutBindi
     binding.modifiers.is_empty() && binding.primary.eq_ignore_ascii_case("shift")
 }
 
-/// Linux: 从 prefs 读取自定义组合键，同步到 fcitx5 插件。
+/// Linux: 从 runtime target 读取自定义组合键，同步到 fcitx5 插件。
 #[cfg(target_os = "linux")]
 pub(super) fn custom_dictation_key_string(inner: &Arc<Inner>) -> Option<String> {
-    let prefs = inner.prefs.get();
-    let key_string = crate::linux_fcitx::binding_to_fcitx_key_string(&prefs.dictation_hotkey);
+    let target = hotkey_runtime_target(inner);
+    let key_string = crate::linux_fcitx::binding_to_fcitx_key_string(&target.dictation);
     if key_string.is_empty() {
         None
     } else {
@@ -1523,8 +1535,8 @@ pub(super) fn custom_dictation_key_string(inner: &Arc<Inner>) -> Option<String> 
 
 #[cfg(target_os = "linux")]
 pub(super) fn sync_custom_dictation_to_plugin(inner: &Arc<Inner>) {
-    let prefs = inner.prefs.get();
-    let dictation = &prefs.dictation_hotkey;
+    let target = hotkey_runtime_target(inner);
+    let dictation = &target.dictation;
     let key_string = crate::linux_fcitx::binding_to_fcitx_key_string(dictation);
     if key_string.is_empty() {
         return;
@@ -1545,18 +1557,18 @@ pub(super) fn modifier_shortcut_triggers(
     Option<crate::types::HotkeyTrigger>,
     Option<crate::types::HotkeyTrigger>,
 ) {
-    let prefs = inner.prefs.get();
-    let qa_trigger = prefs
-        .qa_hotkey
+    let target = hotkey_runtime_target(inner);
+    let qa_trigger = target
+        .qa
         .as_ref()
         .and_then(crate::shortcut_binding::legacy_modifier_trigger);
-    let translation_trigger = if is_builtin_translation_shift(&prefs.translation_hotkey) {
+    let translation_trigger = if is_builtin_translation_shift(&target.translation) {
         None
     } else {
-        crate::shortcut_binding::legacy_modifier_trigger(&prefs.translation_hotkey)
+        crate::shortcut_binding::legacy_modifier_trigger(&target.translation)
     };
-    let selection_polish_trigger = prefs
-        .selection_polish_hotkey
+    let selection_polish_trigger = target
+        .selection_polish
         .as_ref()
         .and_then(crate::shortcut_binding::legacy_modifier_trigger);
     (qa_trigger, selection_polish_trigger, translation_trigger)
@@ -1570,12 +1582,15 @@ pub(super) fn modifier_shortcut_triggers(
 /// 收紧后这个 flag 的语义从「按过 Shift」变成「本次会话真的要翻译」，胶囊提示与 polish
 /// 分派读同一个值，不会再出现「胶囊说正在翻译、后端其实没翻」的漂移（用户未设目标语言
 /// 时按 Shift 就会撞上）。返回 true 表示本次会话翻译已置位。
-pub(super) fn arm_translation_if_effective(inner: &Arc<Inner>) -> bool {
-    let phase = inner.state.lock().phase;
-    if !matches!(phase, SessionPhase::Starting | SessionPhase::Listening) {
+pub(super) async fn arm_translation_if_effective(inner: &Arc<Inner>) -> bool {
+    let phase = inner.backend.snapshot().dictation.phase;
+    if !matches!(
+        phase,
+        openless_core::DictationPhase::Starting | openless_core::DictationPhase::Recording
+    ) {
         return false;
     }
-    let prefs = inner.prefs.get();
+    let prefs = inner.backend.get_preferences();
     if !crate::types::translation_effective(
         true,
         &prefs.translation_target_language,
@@ -1589,6 +1604,14 @@ pub(super) fn arm_translation_if_effective(inner: &Arc<Inner>) -> bool {
             prefs.translation_target_language,
             prefs.working_languages
         );
+        return false;
+    }
+    if let Err(error) = inner
+        .backend
+        .update_dictation_translation_requested(true)
+        .await
+    {
+        log::warn!("[coord] failed to update active core translation state: {error}");
         return false;
     }
     inner.translation_active.store(true, Ordering::SeqCst);
@@ -1621,12 +1644,12 @@ pub(super) fn hotkey_bridge_loop(inner: Arc<Inner>, rx: mpsc::Receiver<HotkeyEve
             // request_stop_during_starting 兜底，begin_session 完成进 Listening 后
             // bridge 立刻 recv Released → end_session，行为正确，仅有短暂 stop 延迟。
             HotkeyEvent::Pressed { at, press_id } => {
-                async_runtime::block_on(async {
+                inner.host.block_on(async {
                     handle_pressed_edge(&inner_cloned, at, press_id).await;
                 });
             }
             HotkeyEvent::Released { at } => {
-                async_runtime::block_on(async {
+                inner.host.block_on(async {
                     handle_released_edge(&inner_cloned, at).await;
                 });
             }
@@ -1634,16 +1657,18 @@ pub(super) fn hotkey_bridge_loop(inner: Arc<Inner>, rx: mpsc::Receiver<HotkeyEve
             // combo_abort_bridge_loop，避免被上面 Released → end_session /
             // Pressed → begin_session 的同步流程堵在队列里（见各自函数注释）。
             HotkeyEvent::TranslationModifierPressed => {
-                let translation_hotkey = inner_cloned.prefs.get().translation_hotkey;
+                let translation_hotkey = hotkey_runtime_target(&inner_cloned).translation;
                 if is_builtin_translation_shift(&translation_hotkey)
                     || crate::shortcut_binding::legacy_modifier_trigger(&translation_hotkey)
                         .is_some()
                 {
-                    arm_translation_if_effective(&inner_cloned);
+                    inner.host.block_on(async {
+                        arm_translation_if_effective(&inner_cloned).await;
+                    });
                 }
             }
             HotkeyEvent::QaShortcutPressed => {
-                async_runtime::block_on(async {
+                inner.host.block_on(async {
                     handle_qa_hotkey_pressed(&inner_cloned).await;
                 });
             }
@@ -1665,10 +1690,12 @@ pub(super) fn hotkey_bridge_loop(inner: Arc<Inner>, rx: mpsc::Receiver<HotkeyEve
 /// 录制态检测到 Fn 按下 → 发事件给前端，让 ShortcutRecorder 提交 Fn 绑定。
 #[cfg(not(mobile))]
 fn emit_fn_recording_pressed(inner: &Arc<Inner>) {
-    let app = inner.app.lock().clone();
-    log::info!("[hotkey] 录制 Fn 按下 → emit fn-shortcut-pressed (app_ready={})", app.is_some());
-    if let Some(app) = app {
-        let _ = app.emit("fn-shortcut-pressed", ());
+    log::info!(
+        "[hotkey] 录制 Fn 按下 → emit fn-shortcut-pressed (app_ready={})",
+        inner.host.is_bound()
+    );
+    if inner.host.is_bound() {
+        inner.host.emit_fn_shortcut_pressed();
     }
 }
 
@@ -1677,8 +1704,8 @@ pub(super) fn reset_shortcut_held_state(inner: &Arc<Inner>) {
     if let Some(monitor) = inner.hotkey.lock().as_ref() {
         monitor.reset_held_state();
     }
-    let prefs = inner.prefs.get();
-    if let Some(binding) = prefs.qa_hotkey.as_ref() {
+    let target = hotkey_runtime_target(inner);
+    if let Some(binding) = target.qa.as_ref() {
         if crate::shortcut_binding::legacy_modifier_trigger(binding).is_none() {
             if let Some(monitor) = inner.qa_hotkey.lock().as_ref() {
                 if let Err(e) = monitor.update_binding(binding.clone()) {
@@ -1687,16 +1714,16 @@ pub(super) fn reset_shortcut_held_state(inner: &Arc<Inner>) {
             }
         }
     }
-    if !is_builtin_translation_shift(&prefs.translation_hotkey)
-        && crate::shortcut_binding::legacy_modifier_trigger(&prefs.translation_hotkey).is_none()
+    if !is_builtin_translation_shift(&target.translation)
+        && crate::shortcut_binding::legacy_modifier_trigger(&target.translation).is_none()
     {
         if let Some(monitor) = inner.translation_hotkey.lock().as_ref() {
-            if let Err(e) = monitor.update_binding(prefs.translation_hotkey.clone()) {
+            if let Err(e) = monitor.update_binding(target.translation.clone()) {
                 log::warn!("[coord] reset translation hotkey latch failed: {e}");
             }
         }
     }
-    if let Some(switch_style) = prefs.switch_style_hotkey.as_ref() {
+    if let Some(switch_style) = target.switch_style.as_ref() {
         if !is_modifier_only_shortcut(switch_style) {
             if let Some(monitor) = inner.switch_style_hotkey.lock().as_ref() {
                 if let Err(e) = monitor.update_binding(switch_style.clone()) {
@@ -1705,7 +1732,7 @@ pub(super) fn reset_shortcut_held_state(inner: &Arc<Inner>) {
             }
         }
     }
-    if let Some(open_app) = prefs.open_app_hotkey.as_ref() {
+    if let Some(open_app) = target.open_app.as_ref() {
         if !is_modifier_only_shortcut(open_app) {
             if let Some(monitor) = inner.open_app_hotkey.lock().as_ref() {
                 if let Err(e) = monitor.update_binding(open_app.clone()) {
@@ -1730,14 +1757,21 @@ pub(super) async fn handle_window_hotkey_event(
         // Esc 路由（issue #161）：QA 浮窗可见时优先取消 QA（不动 dictation）；
         // 否则走 dictation 取消通路。之前无条件 cancel_session 导致 QA 浮窗
         // 按 Esc 杀的是 dictation 而 QA 流还在烧 token。
-        let qa_active = {
-            let st = inner.qa_state.lock();
-            st.panel_visible || st.phase != QaPhase::Idle
-        };
-        if qa_active {
-            close_qa_panel(inner);
+        let panel_visible = inner.qa_context.is_panel_visible();
+        let qa_active = inner
+            .backend
+            .services()
+            .qa
+            .snapshot()
+            .await
+            .map(|snapshot| snapshot.phase != openless_core::QaPhase::Idle)
+            .unwrap_or(false);
+        if panel_visible || qa_active {
+            if let Err(error) = inner.backend.services().qa.dismiss().await {
+                log::warn!("[coord] QA dismiss from Escape failed: {error}");
+            }
         } else {
-            cancel_session(inner);
+            super::dictation::cancel_active_session(inner).await;
         }
         return Ok(());
     }
@@ -1759,9 +1793,9 @@ pub(super) async fn handle_window_hotkey_event(
             return Ok(());
         }
 
-        let Some(trigger) =
-            crate::shortcut_binding::legacy_modifier_trigger(&inner.prefs.get().dictation_hotkey)
-        else {
+        let Some(trigger) = crate::shortcut_binding::legacy_modifier_trigger(
+            &hotkey_runtime_target(inner).dictation,
+        ) else {
             return Ok(());
         };
         if !window_key_matches_trigger(trigger, &key, &code) {
@@ -1941,7 +1975,7 @@ mod tests {
         false
     }
 
-    /// 构造一个处于 Processing 阶段、cancelled=false 的 Coordinator。
+    /// 构造旧 Coordinator 状态，用注入的 handler 验证 bridge 自身的信号语义。
     fn coordinator_in_processing() -> Coordinator {
         let coordinator = Coordinator::new();
         let mut state = coordinator.inner.state.lock();
@@ -1955,7 +1989,11 @@ mod tests {
     fn spawn_loop(inner: &Arc<Inner>) -> (mpsc::Sender<()>, std::thread::JoinHandle<()>) {
         let (tx, rx) = mpsc::channel::<()>();
         let bridge_inner = Arc::clone(inner);
-        let handle = std::thread::spawn(move || esc_cancel_bridge_loop(bridge_inner, rx));
+        let handle = std::thread::spawn(move || {
+            esc_cancel_bridge_loop_with(bridge_inner, rx, |inner| {
+                inner.state.lock().cancelled = true;
+            })
+        });
         (tx, handle)
     }
 

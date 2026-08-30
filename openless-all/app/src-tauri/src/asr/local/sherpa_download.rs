@@ -9,7 +9,7 @@ use futures_util::StreamExt;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 
 use super::download::{
     build_client, download_one, now_millis, partial_actual_size, DownloadPhase, DownloadProgress,
@@ -432,8 +432,8 @@ async fn run_download(
                     .iter()
                     .map(|bytes| bytes.load(Ordering::Relaxed))
                     .sum();
-                let _ = app_emit.emit(
-                    "sherpa-onnx-asr-download-progress",
+                emit(
+                    &app_emit,
                     DownloadProgress {
                         model_id: model_alias_emit.clone(),
                         file: file_path_emit.clone(),
@@ -574,8 +574,8 @@ async fn run_release_archive_download(
             return;
         }
         last_emit.store(now, Ordering::Relaxed);
-        let _ = app_emit.emit(
-            "sherpa-onnx-asr-download-progress",
+        emit(
+            &app_emit,
             DownloadProgress {
                 model_id: model_alias_emit.clone(),
                 file: file_name_emit.clone(),
@@ -822,9 +822,30 @@ fn is_sha256_hex(value: &str) -> bool {
 }
 
 fn emit(app: &AppHandle, payload: DownloadProgress) {
-    if let Err(error) = app.emit("sherpa-onnx-asr-download-progress", payload) {
-        log::warn!("[sherpa-asr] 发送下载进度失败: {error}");
-    }
+    let phase = match payload.phase {
+        DownloadPhase::Started => openless_core::LocalAsrDownloadPhase::Started,
+        DownloadPhase::Progress => openless_core::LocalAsrDownloadPhase::Progress,
+        DownloadPhase::Finished => openless_core::LocalAsrDownloadPhase::Finished,
+        DownloadPhase::Cancelled => openless_core::LocalAsrDownloadPhase::Cancelled,
+        DownloadPhase::Failed => openless_core::LocalAsrDownloadPhase::Failed,
+    };
+    crate::tauri_events::publish(
+        app,
+        None,
+        openless_core::BackendEventKind::LocalAsrDownloadProgress(
+            openless_core::LocalAsrDownloadProgress {
+                runtime: openless_core::LocalAsrRuntimeKind::SherpaOnnx,
+                model_id: payload.model_id,
+                file: payload.file,
+                file_index: payload.file_index,
+                file_count: payload.file_count,
+                bytes_downloaded: payload.bytes_downloaded,
+                bytes_total: payload.bytes_total,
+                phase,
+                error: payload.error,
+            },
+        ),
+    );
 }
 
 fn emit_cancelled(app: &AppHandle, model_alias: &str, file_count: usize, total_bytes: u64) {

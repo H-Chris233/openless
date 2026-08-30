@@ -1,15 +1,11 @@
 use std::sync::Arc;
 
+#[cfg(target_os = "windows")]
+use crate::asr::local::foundry_runtime::{FoundryFallbackNotice, FoundryFallbackNoticeCallback};
 use crate::coordinator_state::{SessionId, SessionPhase};
 use crate::recorder::Recorder;
 use crate::types::CapsuleState;
-use tauri::Manager;
 
-#[cfg(target_os = "windows")]
-use crate::asr::local::foundry_runtime::{FoundryFallbackNotice, FoundryFallbackNoticeCallback};
-
-#[cfg(target_os = "windows")]
-use super::QaPhase;
 use super::{emit_capsule, ActiveAsr, AsrCallLabel, Inner};
 
 /// 把 Foundry GPU→CPU 回退的内部通知投影到当前听写胶囊。
@@ -46,26 +42,19 @@ pub(super) fn foundry_dictation_fallback_notice_callback(
     })
 }
 
-/// 把 Foundry GPU→CPU 回退的内部通知投影到当前 QA 胶囊。
+/// 把 Foundry GPU→CPU 回退的内部通知投影到当前 Selection Voice 胶囊。
 #[cfg(target_os = "windows")]
-pub(super) fn foundry_qa_fallback_notice_callback(
+pub(super) fn foundry_selection_voice_fallback_notice_callback(
     inner: &Arc<Inner>,
     session_id: SessionId,
 ) -> FoundryFallbackNoticeCallback {
     let inner = Arc::clone(inner);
     Arc::new(move |notice: FoundryFallbackNotice| {
-        let active = {
-            let state = inner.qa_state.lock();
-            state.panel_visible
-                && state.session_id == session_id
-                && !state.cancelled
-                && state.phase == QaPhase::Processing
-        };
-        if !active {
+        if !super::selection_voice_session::selection_voice_recording_active(&inner, session_id) {
             return;
         }
         log::info!(
-            "[foundry-asr] fallback_notice context=qa phase={notice:?} session_id={session_id}"
+            "[foundry-asr] fallback_notice context=selection-voice phase={notice:?} session_id={session_id}"
         );
         emit_capsule(
             &inner,
@@ -191,21 +180,6 @@ pub(super) fn take_omni_pcm_for_session(
     take_session_resource(&mut inner.omni_pcm.lock(), session_id)
 }
 
-pub(super) fn store_qa_omni_pcm_for_session(
-    inner: &Arc<Inner>,
-    session_id: SessionId,
-    consumer: Arc<PcmBufferConsumer>,
-) {
-    *inner.qa_omni_pcm.lock() = Some(SessionResource::new(session_id, consumer));
-}
-
-pub(super) fn take_qa_omni_pcm_for_session(
-    inner: &Arc<Inner>,
-    session_id: SessionId,
-) -> Option<Arc<PcmBufferConsumer>> {
-    take_session_resource(&mut inner.qa_omni_pcm.lock(), session_id)
-}
-
 pub(super) fn take_asr_for_session(inner: &Arc<Inner>, session_id: SessionId) -> Option<ActiveAsr> {
     let mut slot = inner.asr.lock();
     take_session_resource(&mut slot, session_id)
@@ -259,7 +233,12 @@ pub(super) fn store_recorder_for_session(
 }
 
 pub(super) fn selected_microphone_device_name(inner: &Arc<Inner>) -> Option<String> {
-    let name = inner.prefs.get().microphone_device_name.trim().to_string();
+    let name = inner
+        .backend
+        .get_preferences()
+        .microphone_device_name
+        .trim()
+        .to_string();
     if name.is_empty() {
         None
     } else {
@@ -274,15 +253,7 @@ pub(super) fn stop_microphone_preview_monitor(inner: &Arc<Inner>, owner: &str) {
     }
     #[cfg(not(mobile))]
     {
-        let Some(app) = inner.app.lock().as_ref().cloned() else {
-            return;
-        };
-        let state = app.state::<crate::commands::MicrophoneMonitorState>();
-        let recorder = state.lock().take();
-        if let Some(recorder) = recorder {
-            log::info!("[recorder] stopping microphone preview monitor before {owner}");
-            recorder.stop();
-        }
+        inner.host.stop_microphone_preview(owner);
     }
 }
 
@@ -296,7 +267,7 @@ pub(super) fn stop_microphone_preview_monitor(inner: &Arc<Inner>, owner: &str) {
 /// while the shell-out runs. Parking-lot `Mutex` guards never cross an await
 /// (they live entirely inside the blocking task). Audit 3.2.4.
 pub(super) async fn acquire_recording_mute(inner: &Arc<Inner>, owner: &'static str) {
-    if !inner.prefs.get().mute_during_recording {
+    if !inner.backend.get_preferences().mute_during_recording {
         return;
     }
     let inner = Arc::clone(inner);
@@ -364,36 +335,40 @@ pub(super) fn release_recording_mute(inner: &Arc<Inner>, owner: &'static str) {
     }
 }
 
-pub(super) fn store_qa_asr_for_session(inner: &Arc<Inner>, session_id: SessionId, asr: ActiveAsr) {
-    *inner.qa_asr.lock() = Some(SessionResource::new(session_id, asr));
+pub(super) fn store_selection_voice_asr_for_session(
+    inner: &Arc<Inner>,
+    session_id: SessionId,
+    asr: ActiveAsr,
+) {
+    *inner.selection_voice_asr.lock() = Some(SessionResource::new(session_id, asr));
 }
 
-pub(super) fn take_qa_asr_for_session(
+pub(super) fn take_selection_voice_asr_for_session(
     inner: &Arc<Inner>,
     session_id: SessionId,
 ) -> Option<ActiveAsr> {
-    take_session_resource(&mut inner.qa_asr.lock(), session_id)
+    take_session_resource(&mut inner.selection_voice_asr.lock(), session_id)
 }
 
-pub(super) fn cancel_qa_asr_for_session(inner: &Arc<Inner>, session_id: SessionId) {
-    if let Some(asr) = take_qa_asr_for_session(inner, session_id) {
+pub(super) fn cancel_selection_voice_asr_for_session(inner: &Arc<Inner>, session_id: SessionId) {
+    if let Some(asr) = take_selection_voice_asr_for_session(inner, session_id) {
         cancel_active_asr(asr);
     }
 }
 
-pub(super) fn store_qa_recorder_for_session(
+pub(super) fn store_selection_voice_recorder_for_session(
     inner: &Arc<Inner>,
     session_id: SessionId,
     recorder: Recorder,
 ) {
-    *inner.qa_recorder.lock() = Some(SessionResource::new(session_id, recorder));
+    *inner.selection_voice_recorder.lock() = Some(SessionResource::new(session_id, recorder));
 }
 
-pub(super) fn stop_qa_recorder_for_session(inner: &Arc<Inner>, session_id: SessionId) {
-    let recorder = take_session_resource(&mut inner.qa_recorder.lock(), session_id);
+pub(super) fn stop_selection_voice_recorder_for_session(inner: &Arc<Inner>, session_id: SessionId) {
+    let recorder = take_session_resource(&mut inner.selection_voice_recorder.lock(), session_id);
     if let Some(rec) = recorder {
         rec.stop();
-        release_recording_mute(inner, "qa");
+        release_recording_mute(inner, "selection-voice");
     }
 }
 

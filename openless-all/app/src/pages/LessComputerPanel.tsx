@@ -67,6 +67,7 @@ import {
   lessComputerSync,
   lessComputerWindowDismiss,
 } from '../lib/ipc';
+import { reconcileLessComputerReplay } from '../lib/lessComputerReplay';
 import type { CapsulePayload, LessComputerEvent } from '../lib/types';
 import '../components/chat/chat.css';
 
@@ -229,14 +230,20 @@ export function LessComputerPanel() {
           return;
         }
         unlisten = handle;
-        const backlog = await lessComputerSync().catch(error => {
+        const replay = await lessComputerSync(lcAppliedSeq).catch(error => {
           console.error('[LessComputer] sync failed', error);
-          return [] as LessComputerEvent[];
+          return {
+            events: [] as LessComputerEvent[],
+            latestSequence: lcAppliedSeq,
+            truncated: false,
+          };
         });
         if (cancelled) return;
-        for (const ev of backlog) applyDeduped(ev);
+        const reconciled = reconcileLessComputerReplay(lcAppliedSeq, replay, pending);
+        if (reconciled.reset) setTurns([]);
+        for (const ev of reconciled.events) applyEvent(ev);
+        lcAppliedSeq = reconciled.latestAppliedSequence;
         synced = true;
-        for (const ev of pending) applyDeduped(ev);
         pending.length = 0;
       } catch (error) {
         console.error('[LessComputer] listener setup failed', error);

@@ -1,15 +1,28 @@
-//! JNI bridge between Kotlin overlay code and Rust Coordinator.
+//! JNI bridge between Kotlin overlay code and the shared Rust backend.
+//!
+//! Dictation lifecycle calls use [`openless_core::OpenLessBackend`] directly.
+//! Android-only overlay, QA and style-pack actions remain compatibility calls
+//! into [`Coordinator`] until those domains move to the shared core.
 
 use std::sync::{Arc, OnceLock};
+
+use openless_core::{
+    BackendError, BackendErrorCode, DictationStartOptions, DictationStopOptions, OpenLessBackend,
+};
 
 use crate::coordinator::Coordinator;
 use crate::types::{CapsulePayload, CapsuleState};
 
 static COORDINATOR: OnceLock<Arc<Coordinator>> = OnceLock::new();
+static CORE_BACKEND: OnceLock<Arc<OpenLessBackend>> = OnceLock::new();
 static OVERLAY_VISIBLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub fn register_android_coordinator(coordinator: Arc<Coordinator>) {
     let _ = COORDINATOR.set(coordinator);
+}
+
+pub fn register_android_backend(backend: Arc<OpenLessBackend>) {
+    let _ = CORE_BACKEND.set(backend);
 }
 
 pub fn notify_capsule_state(payload: &CapsulePayload) {
@@ -148,16 +161,12 @@ pub fn overlay_trigger_mode_name() -> &'static str {
 }
 
 fn spawn_start_dictation(translation: bool) {
-    let Some(coordinator) = COORDINATOR.get().cloned() else {
-        log::warn!("[android-native] coordinator unavailable");
+    let Some(backend) = CORE_BACKEND.get().cloned() else {
+        log::warn!("[android-native] core backend unavailable");
         return;
     };
     tauri::async_runtime::spawn(async move {
-        let result = if translation {
-            coordinator.start_dictation_with_translation().await
-        } else {
-            coordinator.start_dictation().await
-        };
+        let result = start_core_dictation(&backend, translation).await;
         if let Err(error) = result {
             log::warn!(
                 "[android-native] {} failed: {error}",
@@ -172,37 +181,80 @@ fn spawn_start_dictation(translation: bool) {
 }
 
 fn spawn_stop_dictation() {
-    let Some(coordinator) = COORDINATOR.get().cloned() else {
-        log::warn!("[android-native] coordinator unavailable");
+    let Some(backend) = CORE_BACKEND.get().cloned() else {
+        log::warn!("[android-native] core backend unavailable");
         return;
     };
     tauri::async_runtime::spawn(async move {
-        if let Err(error) = coordinator.stop_dictation().await {
+        if let Err(error) = stop_core_dictation(&backend, None).await {
             log::warn!("[android-native] stop_dictation failed: {error}");
         }
     });
 }
 
 fn spawn_stop_dictation_with_translation(translation: bool) {
-    let Some(coordinator) = COORDINATOR.get().cloned() else {
-        log::warn!("[android-native] coordinator unavailable");
+    let Some(backend) = CORE_BACKEND.get().cloned() else {
+        log::warn!("[android-native] core backend unavailable");
         return;
     };
     tauri::async_runtime::spawn(async move {
-        if let Err(error) = coordinator
-            .stop_dictation_with_translation(translation)
-            .await
-        {
+        if let Err(error) = stop_core_dictation(&backend, Some(translation)).await {
             log::warn!("[android-native] stop_dictation_with_translation failed: {error}");
         }
     });
 }
 
 fn spawn_cancel_dictation() {
-    let Some(coordinator) = COORDINATOR.get().cloned() else {
+    let Some(backend) = CORE_BACKEND.get().cloned() else {
+        log::warn!("[android-native] core backend unavailable");
         return;
     };
-    coordinator.cancel_dictation();
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = cancel_core_dictation(&backend).await {
+            log::warn!("[android-native] cancel_dictation failed: {error}");
+        }
+    });
+}
+
+async fn ensure_core_started(backend: &OpenLessBackend) -> Result<(), BackendError> {
+    if !backend.snapshot().running {
+        backend.start().await?;
+    }
+    Ok(())
+}
+
+async fn start_core_dictation(
+    backend: &OpenLessBackend,
+    translation: bool,
+) -> Result<(), BackendError> {
+    ensure_core_started(backend).await?;
+    backend
+        .start_dictation_with_options(DictationStartOptions {
+            translation_requested: translation,
+            ..DictationStartOptions::default()
+        })
+        .await
+        .map(|_| ())
+}
+
+async fn stop_core_dictation(
+    backend: &OpenLessBackend,
+    translation: Option<bool>,
+) -> Result<(), BackendError> {
+    ensure_core_started(backend).await?;
+    backend
+        .stop_dictation_with_options(DictationStopOptions {
+            translation_requested: translation,
+        })
+        .await
+        .map(|_| ())
+}
+
+async fn cancel_core_dictation(backend: &OpenLessBackend) -> Result<(), BackendError> {
+    match backend.cancel_dictation(None).await {
+        Err(error) if error.code == BackendErrorCode::InvalidState => Ok(()),
+        result => result,
+    }
 }
 
 fn spawn_switch_style_pack() {
@@ -410,5 +462,76 @@ mod jni_exports {
         _class: JClass,
     ) {
         notify_overlay_destroyed();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openless_core::testing::{
+        FixtureDictationEngine, FixtureEngineAction, FixtureTextInserter, RecordingHostActions,
+    };
+    use openless_core::{
+        BackendConfig, BackendDependencies, BackendServices, DictationPhase,
+        InMemoryCredentialStore, InsertOutcome, TokioTaskSpawner,
+    };
+
+    #[tokio::test]
+    async fn android_dictation_bridge_uses_core_and_preserves_stop_time_translation() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "openless-android-core-bridge-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let engine = FixtureDictationEngine::successful("raw", "translated");
+        let backend = OpenLessBackend::new(
+            BackendConfig {
+                data_dir: data_dir.clone(),
+                ..BackendConfig::default()
+            },
+            BackendDependencies {
+                host_actions: Arc::new(RecordingHostActions::default()),
+                text_inserter: Arc::new(FixtureTextInserter::with_outcome(InsertOutcome::Inserted)),
+                dictation_engine: Arc::new(engine.clone()),
+                task_spawner: Arc::new(TokioTaskSpawner),
+                credential_store: Arc::new(InMemoryCredentialStore::default()),
+                services: BackendServices::unsupported(),
+                local_asr_runtime: None,
+                selection_runtime: None,
+                selection_polisher: None,
+                qa_runtime: None,
+                marketplace_config: None,
+            },
+        )
+        .unwrap();
+        let mut preferences = backend.get_preferences();
+        preferences.translation_target_language = "English".to_string();
+        preferences.working_languages = vec!["简体中文".to_string()];
+        crate::set_backend_preferences_for_test(&backend, preferences);
+
+        start_core_dictation(&backend, false).await.unwrap();
+        let translated_session = backend.snapshot().dictation.session_id.unwrap();
+        stop_core_dictation(&backend, Some(true)).await.unwrap();
+        start_core_dictation(&backend, true).await.unwrap();
+        let cancelled_session = backend.snapshot().dictation.session_id.unwrap();
+        cancel_core_dictation(&backend).await.unwrap();
+
+        assert_eq!(backend.snapshot().dictation.phase, DictationPhase::Idle);
+        assert_eq!(
+            engine.actions(),
+            vec![
+                FixtureEngineAction::Start(translated_session),
+                FixtureEngineAction::UpdateContext(translated_session),
+                FixtureEngineAction::Finish(translated_session),
+                FixtureEngineAction::Start(cancelled_session),
+                FixtureEngineAction::Cancel(cancelled_session),
+            ]
+        );
+        let contexts = engine.contexts();
+        assert!(!contexts[0].polish.translation_active);
+        assert!(contexts[1].polish.translation_active);
+        assert!(contexts[2].polish.translation_active);
+
+        backend.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(data_dir);
     }
 }

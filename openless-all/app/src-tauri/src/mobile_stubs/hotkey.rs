@@ -12,7 +12,6 @@ pub enum HotkeyEvent {
     Pressed { at: Instant, press_id: u64 },
     Released { at: Instant },
     // 组合键撤销与 Esc 取消在移动端无全局键盘监听，不在此枚举里（见 hotkey.rs 模块注释）。
-
     TranslationModifierPressed,
     QaShortcutPressed,
     // SelectionPolishShortcutPressed 为桌面（Windows-first）选区润色专属，mobile stub 不声明。

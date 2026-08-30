@@ -38,9 +38,13 @@ pub fn run() {
 
             let coordinator = Arc::new(Coordinator::new());
             app.manage(coordinator.clone());
-            coordinator.bind_app(app.handle().clone());
+            let core_backend = coordinator.backend();
+            app.manage(Arc::clone(&core_backend));
+            coordinator.tauri_host().bind(app.handle().clone());
+            crate::tauri_events::start(app.handle().clone(), Arc::clone(&core_backend));
             #[cfg(target_os = "android")]
             {
+                crate::android::register_android_backend(core_backend);
                 crate::android::register_android_coordinator(coordinator.clone());
                 coordinator.apply_android_overlay_on_startup();
             }
@@ -53,6 +57,10 @@ pub fn run() {
             RunEvent::Exit => {
                 if let Some(coordinator) = app.try_state::<Arc<Coordinator>>() {
                     coordinator.stop_hotkey_listener();
+                    let backend = coordinator.backend();
+                    tauri::async_runtime::spawn(async move {
+                        let _ = backend.shutdown().await;
+                    });
                 }
             }
             _ => {}

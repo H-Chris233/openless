@@ -15,6 +15,21 @@ pub struct SelectionCaptureOutcome {
     pub selection: Option<SelectionContext>,
 }
 
+/// Mobile has no desktop insertion target.  Keep the type-level seam so the
+/// shared QA adapter can compile without carrying platform-specific branches
+/// through its session state.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SelectionInsertionTarget;
+
+pub(crate) fn resolve_selection_workspace_capture(
+) -> (Option<SelectionContext>, SelectionInsertionTarget) {
+    (capture_selection(), SelectionInsertionTarget)
+}
+
+pub(crate) fn selection_insertion_target_is_captured(_target: &SelectionInsertionTarget) -> bool {
+    false
+}
+
 pub fn capture_selection_with_status() -> SelectionCaptureOutcome {
     SelectionCaptureOutcome {
         selection: capture_selection(),

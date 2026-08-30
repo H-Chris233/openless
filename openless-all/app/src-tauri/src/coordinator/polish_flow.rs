@@ -326,68 +326,10 @@ pub(super) async fn translate_text(
     Ok(result?)
 }
 
-/// "润色+翻译"单次调用的两段哨兵。模型按 `SRC\n源文\nTGT\n译文` 输出，解析器据此切分。
-/// 这两个串必须与 build_polish_translate_system_prompt 写给模型的完全一致。
-pub(super) const POLISH_TRANSLATE_SRC_MARKER: &str = "[[OPENLESS_POLISHED_SOURCE]]";
-pub(super) const POLISH_TRANSLATE_TGT_MARKER: &str = "[[OPENLESS_TRANSLATION]]";
-
-/// 合成"按当前风格润色源文、再翻译"的系统提示词。当前风格包决定源文的结构与语气，
-/// 翻译规则负责把该结果忠实转换为目标语言；末尾的严格两段格式覆盖两套 prompt 各自的
-/// "只输出正文"约束。译文用于插入，风格化源文只写入历史供后续上下文复用。
-pub(super) fn build_polish_translate_system_prompt(
-    style_system_prompt: &str,
-    target_language: &str,
-) -> String {
-    let translation_rules = crate::polish::prompts::translate_system_prompt_rules(target_language);
-    format!(
-        "# 任务（按当前风格润色并翻译）\n\
-         先完整执行下方的当前风格包规则，把原始 ASR 转写整理为同语言的风格化源文；\
-         再把该风格化源文翻译成\u{300C}{lang}\u{300D}。翻译对象是风格化源文，不是原始转写。\n\n\
-         # 当前风格包规则\n\
-         {style}\n\n\
-         # 翻译规则\n\
-         {translation_rules}\n\n\
-         # 两阶段约束\n\
-         - 风格包决定内容的组织方式、语气和信息密度；翻译不得把它还原成普通连续段落。\n\
-         - 译文必须保留风格化源文的列表、编号、段落和 Markdown 结构，并忠实保留原意。\n\
-         - 风格化源文保持原语言；最终译文只使用\u{300C}{lang}\u{300D}表达需要翻译的正文。\n\n\
-         # 输出格式（优先级最高，覆盖上面所有\u{201C}只输出正文\u{201D}的说明）\n\
-         严格按下面两段输出，两个标记必须原样出现、各占一行，标记之外不要有任何多余文字：\n\
-         {src}\n\
-         （这里放按当前风格包完整润色后的源文，保持原语言）\n\
-         {tgt}\n\
-         （这里放保留相同风格与结构的\u{300C}{lang}\u{300D}译文）",
-        style = style_system_prompt.trim(),
-        translation_rules = translation_rules,
-        src = POLISH_TRANSLATE_SRC_MARKER,
-        tgt = POLISH_TRANSLATE_TGT_MARKER,
-        lang = target_language,
-    )
-}
-
-/// 解析"润色+翻译"单次调用输出 → Some((润色后源文, 译文))。
-/// 找到译文标记且译文非空 → Some((源文, 译文))：源文标记缺失 / 源文段为空时源文为 None，
-/// 译文取标记之后的干净正文。**没有译文标记、或译文段为空（模型截断 / 只吐了标记）→ None**，
-/// 表示没拿到可信译文，交由调用方退回专用翻译——避免把空串当"成功译文"插进光标而丢字。
-pub(super) fn split_polish_translate_output(raw: &str) -> Option<(Option<String>, String)> {
-    let tgt_idx = raw.find(POLISH_TRANSLATE_TGT_MARKER)?;
-    let translation = raw[tgt_idx + POLISH_TRANSLATE_TGT_MARKER.len()..]
-        .trim()
-        .to_string();
-    if translation.is_empty() {
-        return None;
-    }
-    let before_tgt = &raw[..tgt_idx];
-    let source = before_tgt
-        .find(POLISH_TRANSLATE_SRC_MARKER)
-        .map(|i| {
-            before_tgt[i + POLISH_TRANSLATE_SRC_MARKER.len()..]
-                .trim()
-                .to_string()
-        })
-        .filter(|s| !s.is_empty());
-    Some((source, translation))
-}
+pub(super) use openless_core::{
+    build_polish_translate_system_prompt, split_polish_translate_output,
+    POLISH_TRANSLATE_SRC_MARKER, POLISH_TRANSLATE_TGT_MARKER,
+};
 
 /// 翻译路径——单次 LLM 调用同时润色源文 + 翻译。和 polish 一样失败时返回原文 + 失败原因，
 /// 避免"不丢字"约定被违反（CLAUDE.md）。返回 (要插入的译文, 润色后源文供上下文用, 失败原因)。

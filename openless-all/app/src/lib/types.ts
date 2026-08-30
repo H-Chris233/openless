@@ -586,6 +586,8 @@ export type QaStateKind =
   | 'thinking'
   | 'answer_delta'
   | 'answer'
+  | 'awaiting_approval'
+  | 'cancelled'
   | 'error';
 
 export interface QaChatMessage {
@@ -613,6 +615,8 @@ export interface QaStatePayload {
   edit_revert_available?: boolean;
   /** 划词提问面板「编辑指令」复选框。 */
   edit_instruction_mode?: boolean;
+  /** 当前轮等待工具审批时的 session-scoped token。 */
+  approval_token?: string;
 }
 
 /**
@@ -643,6 +647,15 @@ export type LessComputerEvent = (
    *  缓冲锁异常时后端可能省略，无 seq 的事件前端无条件应用。 */
   seq?: number;
 };
+
+/** `less_computer_sync` 的有界 replay 结果。`truncated=true` 表示调用方的水位
+ * 已早于后端仍保留的最老事件，前端必须清空派生视图后再应用 `events`。 */
+export interface LessComputerSyncResult {
+  events: LessComputerEvent[];
+  oldestSequence?: number;
+  latestSequence: number;
+  truncated: boolean;
+}
 
 /** 内置语言列表 — 前端 Settings UI 用，后端只接收原生名字符串拼 prompt。
  *  添加新语言时直接在这里加一项（原生名），无需修改后端。 */

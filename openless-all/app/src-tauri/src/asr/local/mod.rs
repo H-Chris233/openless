@@ -67,7 +67,7 @@ pub use whisper_provider::{
 pub use whisper_provider::{LocalWhisperAsr, LocalWhisperCache};
 
 pub use download::{DownloadManager, Mirror};
-pub use models::{ModelId, ModelStatus};
+pub use models::ModelId;
 
 /// 本地 Qwen3-ASR 在 active_asr 字段里的标识；与前端 ASR_PRESETS 的 id 对齐。
 /// 旧版本的本地 Qwen3-ASR provider id。macOS 映射到 MLX，Linux 映射到 C，

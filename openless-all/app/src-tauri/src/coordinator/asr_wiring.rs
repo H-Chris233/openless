@@ -64,7 +64,14 @@ pub(super) fn ensure_microphone_permission(_inner: &Arc<Inner>) -> Result<(), St
     }
 }
 
-pub(super) fn ensure_asr_credentials() -> Result<(), String> {
+pub(super) fn ensure_asr_credentials(
+    preferences: &crate::types::UserPreferences,
+) -> Result<(), String> {
+    // 活动 provider 仍由凭据 Adapter 提供（它可能是映射到 provider type 的渠道）；模型选择
+    // 必须来自这个 Core 所有的快照。在本地模型分支被 cfg 禁用的平台上仍保留该参数，避免
+    // 重新打开第二份偏好存储。
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let _ = preferences;
     let active_asr = CredentialsVault::get_active_asr();
 
     // 本地 Qwen3-ASR 没有"凭据"概念，但需要：(a) 当前渠道的后端可用 (b) 模型已下载。
@@ -74,7 +81,7 @@ pub(super) fn ensure_asr_credentials() -> Result<(), String> {
             if crate::asr::local::qwen_backend_for_provider(&active_asr).is_none() {
                 return Err(format!("本地 Qwen3-ASR 渠道 {active_asr} 不支持当前系统"));
             }
-            return ensure_local_qwen3_model_ready();
+            return ensure_local_qwen3_model_ready(preferences);
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
@@ -91,7 +98,7 @@ pub(super) fn ensure_asr_credentials() -> Result<(), String> {
         }
         #[cfg(target_os = "macos")]
         {
-            return ensure_local_whisper_model_ready();
+            return ensure_local_whisper_model_ready(preferences);
         }
     }
 
@@ -170,7 +177,7 @@ pub(super) fn ensure_asr_credentials() -> Result<(), String> {
                         Err("请先在设置中填写火山引擎 ASR App Key 和 Access Key".to_string())
                     }
                     VolcengineAuthMode::ApiKey => {
-                        Err("请先在设置中填写豆包语音新版控制台 API Key".to_string())
+                        Err("请先在设置中填写火山方舟语音模型 API Key".to_string())
                     }
                 }
             }
@@ -220,15 +227,11 @@ pub(super) fn is_keyless_local_asr_provider(id: &str) -> bool {
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-pub(super) fn ensure_local_qwen3_model_ready() -> Result<(), String> {
-    let prefs = || -> Result<crate::types::UserPreferences, String> {
-        // 这里没法拿到 inner，直接读 preferences.json 即可（Coordinator 写盘后总是同步的）。
-        crate::persistence::PreferencesStore::new()
-            .map_err(|e| e.to_string())
-            .map(|s| s.get())
-    }()?;
-    let model_id = crate::asr::local::ModelId::from_str(&prefs.local_asr_active_model)
-        .ok_or_else(|| format!("未知的本地模型 id: {}", prefs.local_asr_active_model))?;
+pub(super) fn ensure_local_qwen3_model_ready(
+    preferences: &crate::types::UserPreferences,
+) -> Result<(), String> {
+    let model_id = crate::asr::local::ModelId::from_str(&preferences.local_asr_active_model)
+        .ok_or_else(|| format!("未知的本地模型 id: {}", preferences.local_asr_active_model))?;
     if !model_id.is_qwen() {
         return Err(format!(
             "当前模型 {} 不属于本地 Qwen3-ASR",
@@ -245,16 +248,17 @@ pub(super) fn ensure_local_qwen3_model_ready() -> Result<(), String> {
 }
 
 #[cfg(target_os = "macos")]
-pub(super) fn ensure_local_whisper_model_ready() -> Result<(), String> {
-    let model_id = crate::persistence::PreferencesStore::new()
-        .map(|store| store.get().local_whisper_active_model)
-        .ok()
-        .filter(|id| {
-            crate::asr::local::ModelId::from_str(id)
-                .map(|model| model.is_whisper())
-                .unwrap_or(false)
-        })
-        .unwrap_or_else(|| crate::asr::local::WHISPER_MODEL_ID.to_string());
+pub(super) fn ensure_local_whisper_model_ready(
+    preferences: &crate::types::UserPreferences,
+) -> Result<(), String> {
+    let model_id = if crate::asr::local::ModelId::from_str(&preferences.local_whisper_active_model)
+        .map(|model| model.is_whisper())
+        .unwrap_or(false)
+    {
+        preferences.local_whisper_active_model.clone()
+    } else {
+        crate::asr::local::WHISPER_MODEL_ID.to_string()
+    };
     if crate::asr::local::whisper_model_ready_for_model(&model_id) {
         return Ok(());
     }
@@ -293,15 +297,40 @@ pub(super) fn active_local_asr_loaded_model(_inner: &Arc<Inner>) -> Option<Strin
 #[cfg(not(target_os = "android"))]
 pub(super) fn emit_local_asr_engine_status(inner: &Arc<Inner>) {
     let model_id = active_local_asr_loaded_model(inner);
-    let keep_loaded_secs = inner.prefs.get().local_asr_keep_loaded_secs;
+    let preferences = inner.backend.get_preferences();
+    let keep_loaded_secs = preferences.local_asr_keep_loaded_secs;
+    let active_model = if crate::asr::local::is_local_whisper(&preferences.active_asr_provider) {
+        preferences.local_whisper_active_model
+    } else {
+        preferences.local_asr_active_model
+    };
     let status = crate::commands::LocalAsrEngineStatus {
         loaded: model_id.is_some(),
         model_id,
         keep_loaded_secs,
     };
-    if let Some(app) = inner.app.lock().clone() {
-        let _ = app.emit("local-asr:engine-changed", &status);
-    }
+    inner.backend.event_publisher().publish(
+        None,
+        openless_core::BackendEventKind::LocalAsrEngineChanged(
+            openless_core::LocalAsrRuntimeStatus {
+                runtime: openless_core::LocalAsrRuntime::Generic,
+                provider_id: crate::asr::local::PROVIDER_ID.into(),
+                available: cfg!(any(target_os = "macos", target_os = "linux")),
+                loaded: status.loaded,
+                active_model,
+                model_id: status.model_id,
+                keep_loaded_secs: status.keep_loaded_secs,
+                runtime_source: None,
+                endpoint: None,
+                operation: None,
+                error: None,
+                last_error: None,
+                last_prepare_ms: None,
+                last_transcribe_ms: None,
+                last_audio_ms: None,
+            },
+        ),
+    );
 }
 
 /// Android no-op：该 target 不编译 LocalAsrEngineStatus / 本地 ASR 引擎。issue #470 / #6。
@@ -310,22 +339,13 @@ pub(super) fn emit_local_asr_engine_status(_inner: &Arc<Inner>) {}
 
 /// 统一通过本地 ASR 生命周期门闩驱逐 Qwen / Whisper cache。
 ///
-/// `spawn_blocking` 被 timeout 或取消时，单纯丢弃 future 不会停止 native 解码。
-/// MLX provider 的 operation cancel 会终止自己的隔离 worker；cache 自动驱逐不再
-/// 终止其它共享会话。C / Whisper 保持原有行为，旧任务由自身持有的 `Arc` 安全收尾。
+/// `spawn_blocking` 被 timeout 或取消时不会停止 native 解码；此时只丢弃
+/// future 会让旧引擎继续持有 context 锁。驱逐 cache 后下一次会话可以加载
+/// 新引擎，旧任务仍由自身持有的 `Arc` 安全收尾。
 #[cfg(not(target_os = "android"))]
-fn release_local_asr_engines_locked(
-    inner: &Arc<Inner>,
-    release_qwen: bool,
-    release_whisper: bool,
-    abort_qwen_in_use: bool,
-) {
+fn release_local_asr_engines_locked(inner: &Arc<Inner>, release_qwen: bool, release_whisper: bool) {
     if release_qwen {
-        if abort_qwen_in_use {
-            inner.local_asr_cache.release_now();
-        } else {
-            inner.local_asr_cache.evict_now();
-        }
+        inner.local_asr_cache.release_now();
     }
     #[cfg(target_os = "macos")]
     if release_whisper {
@@ -342,7 +362,7 @@ pub(super) fn release_local_asr_engines_now(
     release_whisper: bool,
 ) {
     let _lifecycle_guard = inner.local_asr_lifecycle.lock();
-    release_local_asr_engines_locked(inner, release_qwen, release_whisper, false);
+    release_local_asr_engines_locked(inner, release_qwen, release_whisper);
 }
 
 #[cfg(target_os = "android")]
@@ -353,30 +373,11 @@ pub(super) fn release_local_asr_engines_now(
 ) {
 }
 
-/// 用户主动释放、切换 provider 或删除模型时保留原有全局终止语义。
-#[cfg(not(target_os = "android"))]
-pub(super) fn abort_local_asr_engines_now(
-    inner: &Arc<Inner>,
-    release_qwen: bool,
-    release_whisper: bool,
-) {
-    let _lifecycle_guard = inner.local_asr_lifecycle.lock();
-    release_local_asr_engines_locked(inner, release_qwen, release_whisper, true);
-}
-
-#[cfg(target_os = "android")]
-pub(super) fn abort_local_asr_engines_now(
-    _inner: &Arc<Inner>,
-    _release_qwen: bool,
-    _release_whisper: bool,
-) {
-}
-
 /// 一次 dictation 结束后，按 prefs.local_asr_keep_loaded_secs 决定何时释放
 /// 内存里的 Qwen3-ASR 引擎。0 = 立即释放；其它值 = sleep N 秒后看 last_used。
 /// 多次会话叠加多个 sleep 任务，每个独立 check：只要中间又被使用过就跳过释放。
 pub(super) fn schedule_local_asr_release(inner: &Arc<Inner>) {
-    let keep_secs = inner.prefs.get().local_asr_keep_loaded_secs;
+    let keep_secs = inner.backend.get_preferences().local_asr_keep_loaded_secs;
     let cache = Arc::clone(&inner.local_asr_cache);
     if keep_secs == 0 {
         release_local_asr_engines_now(inner, true, false);
@@ -385,7 +386,8 @@ pub(super) fn schedule_local_asr_release(inner: &Arc<Inner>) {
     }
     let dur = std::time::Duration::from_secs(keep_secs as u64);
     let inner = Arc::clone(inner);
-    tauri::async_runtime::spawn(async move {
+    let host = inner.host.clone();
+    host.spawn(async move {
         tokio::time::sleep(dur).await;
         let released = {
             let _lifecycle_guard = inner.local_asr_lifecycle.lock();
@@ -399,7 +401,7 @@ pub(super) fn schedule_local_asr_release(inner: &Arc<Inner>) {
 
 #[cfg(target_os = "macos")]
 pub(super) fn schedule_local_whisper_release(inner: &Arc<Inner>) {
-    let keep_secs = inner.prefs.get().local_asr_keep_loaded_secs;
+    let keep_secs = inner.backend.get_preferences().local_asr_keep_loaded_secs;
     let cache = Arc::clone(&inner.local_whisper_cache);
     if keep_secs == 0 {
         release_local_asr_engines_now(inner, false, true);
@@ -408,7 +410,8 @@ pub(super) fn schedule_local_whisper_release(inner: &Arc<Inner>) {
     }
     let threshold = std::time::Duration::from_secs(keep_secs as u64);
     let inner = Arc::clone(inner);
-    tauri::async_runtime::spawn(async move {
+    let host = inner.host.clone();
+    host.spawn(async move {
         tokio::time::sleep(threshold).await;
         let released = {
             let _lifecycle_guard = inner.local_asr_lifecycle.lock();
@@ -422,14 +425,17 @@ pub(super) fn schedule_local_whisper_release(inner: &Arc<Inner>) {
 
 #[cfg(target_os = "windows")]
 pub(super) fn foundry_local_asr_release_keep_secs(inner: &Arc<Inner>) -> u32 {
-    inner.prefs.get().foundry_local_asr_keep_loaded_secs
+    inner
+        .backend
+        .get_preferences()
+        .foundry_local_asr_keep_loaded_secs
 }
 
 #[cfg(target_os = "windows")]
 #[derive(Clone, Copy)]
 pub(super) enum AsrReleaseSession {
     Dictation(SessionId),
-    Qa(SessionId),
+    SelectionVoice(SessionId),
 }
 
 #[cfg(target_os = "windows")]
@@ -439,7 +445,9 @@ pub(super) fn asr_release_session_is_current(
 ) -> bool {
     match session {
         AsrReleaseSession::Dictation(session_id) => inner.state.lock().session_id == session_id,
-        AsrReleaseSession::Qa(session_id) => inner.qa_state.lock().session_id == session_id,
+        AsrReleaseSession::SelectionVoice(session_id) => {
+            super::selection_voice_session::selection_voice_recording_active(inner, session_id)
+        }
     }
 }
 
@@ -453,7 +461,8 @@ pub(super) fn schedule_foundry_local_asr_release(
     let runtime = Arc::clone(&inner.foundry_local_runtime);
     let scheduled_epoch = runtime.route_epoch_snapshot();
     let inner = Arc::clone(inner);
-    tauri::async_runtime::spawn(async move {
+    let host = inner.host.clone();
+    host.spawn(async move {
         let deadline = tokio::time::Instant::now()
             .checked_add(std::time::Duration::from_secs(keep_secs as u64));
         if let Some(token) = primary_recovery.as_ref() {
@@ -495,7 +504,7 @@ pub(super) fn schedule_foundry_local_asr_release(
 
 #[cfg(target_os = "windows")]
 pub(super) fn sherpa_onnx_release_keep_secs(inner: &Arc<Inner>) -> u32 {
-    inner.prefs.get().sherpa_onnx_keep_loaded_secs
+    inner.backend.get_preferences().sherpa_onnx_keep_loaded_secs
 }
 
 /// 与 `schedule_foundry_local_asr_release` 同形：session_id 老旧则不释放，
@@ -505,7 +514,8 @@ pub(super) fn schedule_sherpa_onnx_release(inner: &Arc<Inner>, session: AsrRelea
     let keep_secs = sherpa_onnx_release_keep_secs(inner);
     let runtime = Arc::clone(&inner.sherpa_onnx_runtime);
     let inner = Arc::clone(inner);
-    tauri::async_runtime::spawn(async move {
+    let host = inner.host.clone();
+    host.spawn(async move {
         if keep_secs > 0 {
             tokio::time::sleep(std::time::Duration::from_secs(keep_secs as u64)).await;
         }
@@ -522,7 +532,7 @@ pub(super) fn schedule_sherpa_onnx_release(inner: &Arc<Inner>, session: AsrRelea
 fn selected_local_qwen_target(
     inner: &Arc<Inner>,
 ) -> anyhow::Result<(crate::asr::local::ModelId, std::path::PathBuf)> {
-    let prefs = inner.prefs.get();
+    let prefs = inner.backend.get_preferences();
     let model_id = crate::asr::local::ModelId::from_str(&prefs.local_asr_active_model)
         .filter(|id| id.is_qwen())
         .ok_or_else(|| anyhow::anyhow!("未知本地模型 id: {}", prefs.local_asr_active_model))?;
@@ -539,7 +549,7 @@ fn load_current_local_qwen_engine(
 ) -> anyhow::Result<Arc<crate::asr::local::LocalQwenEngine>> {
     let _lifecycle_guard = inner.local_asr_lifecycle.lock();
     let target_is_current = || {
-        let prefs = inner.prefs.get();
+        let prefs = inner.backend.get_preferences();
         let model_matches = crate::asr::local::ModelId::from_str(&prefs.local_asr_active_model)
             .filter(|id| id.is_qwen())
             .is_some_and(|id| id.as_str() == model_id);
@@ -556,7 +566,7 @@ fn load_current_local_qwen_engine(
         .get_or_load(backend, model_id, model_dir)?;
     if !target_is_current() {
         drop(engine);
-        release_local_asr_engines_locked(inner, true, false, true);
+        release_local_asr_engines_locked(inner, true, false);
         anyhow::bail!("本地 Qwen3-ASR 加载期间目标已切换，丢弃旧后端");
     }
     Ok(engine)
@@ -572,13 +582,15 @@ pub(super) async fn preload_local_qwen3(
     let (model_id, dir) = selected_local_qwen_target(inner)?;
     let model_id = model_id.as_str().to_string();
     let load_inner = Arc::clone(inner);
-    tauri::async_runtime::spawn_blocking(move || {
-        let engine = load_current_local_qwen_engine(&load_inner, backend, &model_id, &dir)?;
-        drop(engine);
-        Ok::<(), anyhow::Error>(())
-    })
-    .await
-    .map_err(|e| anyhow::anyhow!("spawn_blocking join failed: {e:#}"))??;
+    inner
+        .host
+        .spawn_blocking(move || {
+            let engine = load_current_local_qwen_engine(&load_inner, backend, &model_id, &dir)?;
+            drop(engine);
+            Ok::<(), anyhow::Error>(())
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("spawn_blocking join failed: {e:#}"))??;
     emit_local_asr_engine_status(inner);
     Ok(())
 }
@@ -593,38 +605,31 @@ pub(super) async fn build_local_qwen3(
     let backend = crate::asr::local::qwen_backend_for_provider(provider_id)
         .ok_or_else(|| anyhow::anyhow!("本地 Qwen3-ASR 渠道 {provider_id} 不支持当前系统"))?;
     let (model_id, dir) = selected_local_qwen_target(inner)?;
-    let app = inner
-        .app
-        .lock()
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("AppHandle 未绑定"))?;
     // 走缓存：如果已有同 id 的引擎在内存里就直接复用，避免每次会话都重加载
     // 1.2GB+ 模型。第一次加载阻塞数秒，spawn_blocking 不卡 tokio runtime。
     let mid = model_id.as_str().to_string();
     let load_inner = Arc::clone(inner);
-    let engine = tauri::async_runtime::spawn_blocking(move || {
-        load_current_local_qwen_engine(&load_inner, backend, &mid, &dir)
-    })
-    .await
-    .map_err(|e| anyhow::anyhow!("spawn_blocking join failed: {e:#}"))??;
+    let engine = inner
+        .host
+        .spawn_blocking(move || load_current_local_qwen_engine(&load_inner, backend, &mid, &dir))
+        .await
+        .map_err(|e| anyhow::anyhow!("spawn_blocking join failed: {e:#}"))??;
     // 加载完成（含缓存命中刷新 last_used）后推一次状态，前端零轮询更新「已加载」。
     emit_local_asr_engine_status(inner);
     let model_label = model_id.as_str().to_string();
-    Ok((
-        Arc::new(crate::asr::local::LocalQwenAsr::new(app, engine)),
-        model_label,
-    ))
+    Ok((inner.host.local_qwen_asr(engine)?, model_label))
 }
 
 #[cfg(target_os = "macos")]
 fn selected_local_whisper_target(
     inner: &Arc<Inner>,
 ) -> anyhow::Result<(String, std::path::PathBuf)> {
-    let model_id =
-        crate::asr::local::ModelId::from_str(&inner.prefs.get().local_whisper_active_model)
-            .filter(|id| id.is_whisper())
-            .map(|id| id.as_str().to_string())
-            .unwrap_or_else(|| crate::asr::local::WHISPER_MODEL_ID.to_string());
+    let model_id = crate::asr::local::ModelId::from_str(
+        &inner.backend.get_preferences().local_whisper_active_model,
+    )
+    .filter(|id| id.is_whisper())
+    .map(|id| id.as_str().to_string())
+    .unwrap_or_else(|| crate::asr::local::WHISPER_MODEL_ID.to_string());
     let path = crate::asr::local::whisper_model_path_for_model(&model_id)?;
     Ok((model_id, path))
 }
@@ -637,7 +642,7 @@ fn load_current_local_whisper_engine(
 ) -> anyhow::Result<Arc<crate::asr::local::WhisperEngine>> {
     let _lifecycle_guard = inner.local_asr_lifecycle.lock();
     let target_is_current = || {
-        let prefs = inner.prefs.get();
+        let prefs = inner.backend.get_preferences();
         let model_matches = crate::asr::local::ModelId::from_str(&prefs.local_whisper_active_model)
             .filter(|id| id.is_whisper())
             .map(|id| id.as_str() == model_id)
@@ -653,7 +658,7 @@ fn load_current_local_whisper_engine(
         .get_or_load(model_id, model_path)?;
     if !target_is_current() {
         drop(engine);
-        release_local_asr_engines_locked(inner, false, true, true);
+        release_local_asr_engines_locked(inner, false, true);
         anyhow::bail!("本地 Whisper 加载期间目标已切换，丢弃旧后端");
     }
     Ok(engine)
@@ -663,13 +668,15 @@ fn load_current_local_whisper_engine(
 pub(super) async fn preload_local_whisper(inner: &Arc<Inner>) -> anyhow::Result<()> {
     let (model_id, path) = selected_local_whisper_target(inner)?;
     let load_inner = Arc::clone(inner);
-    tauri::async_runtime::spawn_blocking(move || {
-        let engine = load_current_local_whisper_engine(&load_inner, &model_id, &path)?;
-        drop(engine);
-        Ok::<(), anyhow::Error>(())
-    })
-    .await
-    .map_err(|e| anyhow::anyhow!("spawn_blocking join failed: {e:#}"))??;
+    inner
+        .host
+        .spawn_blocking(move || {
+            let engine = load_current_local_whisper_engine(&load_inner, &model_id, &path)?;
+            drop(engine);
+            Ok::<(), anyhow::Error>(())
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("spawn_blocking join failed: {e:#}"))??;
     emit_local_asr_engine_status(inner);
     Ok(())
 }
@@ -681,15 +688,17 @@ pub(super) async fn build_local_whisper(
     let (model_id, path) = selected_local_whisper_target(inner)?;
     let cache_model_id = model_id.clone();
     let load_inner = Arc::clone(inner);
-    let engine = tauri::async_runtime::spawn_blocking(move || {
-        load_current_local_whisper_engine(&load_inner, &cache_model_id, &path)
-    })
-    .await
-    .map_err(|e| anyhow::anyhow!("spawn_blocking join failed: {e:#}"))??;
+    let engine = inner
+        .host
+        .spawn_blocking(move || {
+            load_current_local_whisper_engine(&load_inner, &cache_model_id, &path)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("spawn_blocking join failed: {e:#}"))??;
     emit_local_asr_engine_status(inner);
     let language = inner
-        .prefs
-        .get()
+        .backend
+        .get_preferences()
         .working_languages
         .first()
         .and_then(|name| crate::asr::local::native_name_to_apple_locale(name))
@@ -714,30 +723,12 @@ pub(super) fn build_apple_speech(
     Arc::new(crate::asr::local::AppleSpeechAsr::new(locale))
 }
 
-/// `whisper` 是 OpenAI 原生；`siliconflow` / `zhipu` / `groq` / `stepfun`
-/// 都暴露 OpenAI 兼容的 `/audio/transcriptions`，统一走 `WhisperBatchASR`。
-/// `openai-compatible` 是通用预设：任意 OpenAI 兼容端点（自建 / LAN llama.cpp
-/// 等），无默认 endpoint/model，高级选项见 `AdvancedAsrConfig`。
-/// 新增 OpenAI 兼容 ASR 时只需在这里加一项。
-///
-/// 注：DashScope 的 Qwen3-ASR-Flash 不在此列——它用 MultiModalConversation
-/// (messages=[{content:[{audio:...}]}]) 协议，不是 Whisper multipart，需要
-/// 单独 ASR 客户端，留给 V2。
-pub(super) fn is_whisper_compatible_provider(id: &str) -> bool {
-    matches!(
-        id,
-        "whisper" | "siliconflow" | "zhipu" | "groq" | "openrouter" | "stepfun" | "zenmux"
-    ) || id == OPENAI_COMPATIBLE_ASR_PROVIDER_ID
-}
-
-/// 用户词典该走 `prompt` 还是一等 `hotwords` 参数。
-///
-/// StepFun 的 `/audio/transcriptions` **静默忽略** `prompt`（实测 2026-07：带
-/// prompt 返回 200 但不参与偏置），词汇偏置走专门的 `hotwords` 字段（可解析的
-/// JSON 数组字符串）。其余兼容厂商维持 Whisper 惯例的 `prompt`。
-pub(super) fn whisper_uses_hotwords(provider_id: &str) -> bool {
-    provider_id == "stepfun"
-}
+pub(super) use openless_core::provider_rules::{
+    is_bailian_provider, is_dashscope_multimodal_provider, is_elevenlabs_provider,
+    is_mimo_provider, is_qwen3_realtime_provider, is_stepfun_realtime_provider,
+    is_whisper_compatible_provider, is_xfyun_provider, whisper_uses_hotwords,
+    zenmux_language_code,
+};
 
 /// 词典启用词条 → (prompt, hotwords) 二选一路由，QA 与听写两处构造点共用。
 /// hotwords 厂商不再拼 prompt（免得白占请求体），prompt 厂商 hotwords 恒空。
@@ -755,17 +746,6 @@ pub(super) fn whisper_vocab_for_provider(
     }
 }
 
-/// 该 provider 的请求体编码方式。OpenRouter 的 `/audio/transcriptions` 是
-/// `application/json` + base64 音频（issue #582），其余兼容厂商沿用 multipart。
-/// ZenMux 同形但带 `language` / `enable_itn`（issue #837），单独走 `ZenMuxJson`。
-pub(crate) fn whisper_request_format(provider_id: &str) -> crate::asr::whisper::AsrRequestFormat {
-    match provider_id {
-        "openrouter" => crate::asr::whisper::AsrRequestFormat::OpenRouterJson,
-        "zenmux" => crate::asr::whisper::AsrRequestFormat::ZenMuxJson,
-        _ => crate::asr::whisper::AsrRequestFormat::Multipart,
-    }
-}
-
 /// 该 provider 的 `/audio/transcriptions` 是否支持 `response_format=verbose_json`
 /// 并返回带 `no_speech_prob` / `avg_logprob` / `compression_ratio` 的 segments，
 /// 用于幻听过滤。
@@ -777,38 +757,11 @@ pub(crate) fn whisper_request_format(provider_id: &str) -> crate::asr::whisper::
 ///   为最小化行为变更，这里也**保持关闭**，仅对确证有收益的 whisper/groq 开启。
 /// - `openai-compatible`：由用户高级配置（`AdvancedAsrConfig.verbose_json`）决定，
 ///   默认关闭，与服务端能力对齐。
-pub(super) fn whisper_supports_verbose_json(provider_id: &str) -> bool {
-    match provider_id {
-        "whisper" | "groq" => true,
-        // ZenMux 的 JSON 请求体协议没有 response_format，恒关闭。
-        "zenmux" => false,
-        // openai-compatible 由用户高级配置决定；其余厂商保持关闭。
-        _ => read_advanced_asr_config(provider_id).verbose_json,
-    }
-}
-
-/// OpenLess 工作语言（原生名，见前端 `SUPPORTED_LANGUAGES`）→ ZenMux `language`
-/// 字段值（ISO 639-1 码）。取 `working_languages` 主语言映射；未收录的语言返回
-/// None —— 请求体省略 `language`，由 ZenMux 服务端自动检测（issue #837）。
-pub(super) fn zenmux_language_code(native_name: &str) -> Option<String> {
-    let code = match native_name.trim() {
-        "简体中文" | "繁体中文" => "zh",
-        "English" => "en",
-        "日本語" => "ja",
-        "한국어" => "ko",
-        "Français" => "fr",
-        "Deutsch" => "de",
-        "Español" => "es",
-        "Italiano" => "it",
-        "Português" => "pt",
-        "Русский" => "ru",
-        "العربية" => "ar",
-        "Tiếng Việt" => "vi",
-        "ไทย" => "th",
-        "हिन्दी" => "hi",
-        _ => return None,
-    };
-    Some(code.to_string())
+pub(crate) fn whisper_supports_verbose_json(provider_id: &str) -> bool {
+    openless_core::provider_rules::whisper_supports_verbose_json(
+        provider_id,
+        read_advanced_asr_config(provider_id),
+    )
 }
 
 /// 当前 prefs 的主工作语言 → ZenMux `language`（None = 不发送，自动检测）。
@@ -831,36 +784,8 @@ pub(super) fn apply_zenmux_asr_options(
         return builder;
     }
     builder
-        .with_language(zenmux_language_for_prefs(&inner.prefs.get()))
+        .with_language(zenmux_language_for_prefs(&inner.backend.get_preferences()))
         .with_enable_itn(read_advanced_asr_config(ZENMUX_ASR_PROVIDER_ID).enable_itn)
-}
-
-pub(super) fn is_bailian_provider(id: &str) -> bool {
-    id == crate::asr::bailian::PROVIDER_ID
-}
-
-pub(super) fn is_qwen3_realtime_provider(id: &str) -> bool {
-    id == crate::asr::qwen_realtime::PROVIDER_ID
-}
-
-pub(super) fn is_stepfun_realtime_provider(id: &str) -> bool {
-    id == crate::asr::stepfun_realtime::PROVIDER_ID
-}
-
-pub(super) fn is_mimo_provider(id: &str) -> bool {
-    id == crate::asr::mimo::PROVIDER_ID
-}
-
-pub(super) fn is_dashscope_multimodal_provider(id: &str) -> bool {
-    id == crate::asr::dashscope_multimodal::PROVIDER_ID
-}
-
-pub(super) fn is_elevenlabs_provider(id: &str) -> bool {
-    id == crate::asr::elevenlabs::PROVIDER_ID
-}
-
-pub(super) fn is_xfyun_provider(id: &str) -> bool {
-    id == crate::asr::xfyun::PROVIDER_ID
 }
 
 pub(super) fn apply_chinese_script_preference(text: &str, pref: ChineseScriptPreference) -> String {
@@ -992,7 +917,7 @@ pub(super) async fn build_qa_asr_start(
 ) -> Result<(QaAsrStart, AsrCallLabel), String> {
     #[cfg(target_os = "windows")]
     if foundry::is_foundry_local_whisper(active_asr) {
-        let prefs = inner.prefs.get();
+        let prefs = inner.backend.get_preferences();
         let model_alias = if foundry::model_alias_is_known(&prefs.foundry_local_asr_model) {
             prefs.foundry_local_asr_model.clone()
         } else {
@@ -1018,7 +943,7 @@ pub(super) async fn build_qa_asr_start(
 
     #[cfg(target_os = "windows")]
     if sherpa::is_sherpa_onnx_local(active_asr) {
-        let prefs = inner.prefs.get();
+        let prefs = inner.backend.get_preferences();
         let model_alias = if sherpa::model_alias_is_known(&prefs.sherpa_onnx_model) {
             prefs.sherpa_onnx_model.clone()
         } else {
@@ -1030,13 +955,7 @@ pub(super) async fn build_qa_asr_start(
         } else {
             Some(language_hint)
         };
-        let token_handler = inner.app.lock().clone().map(|app| {
-            Arc::new(move |piece: String| {
-                if let Err(error) = app.emit("local-asr-token", piece) {
-                    log::warn!("[sherpa-asr] emit token failed: {error}");
-                }
-            }) as crate::asr::local::sherpa_provider::SherpaTokenHandler
-        });
+        let token_handler = Some(sherpa_transcript_handler(inner, None));
         let local = SherpaOnnxAsr::new_for_model(
             Arc::clone(&inner.sherpa_onnx_runtime),
             model_alias.clone(),
@@ -1076,7 +995,7 @@ pub(super) async fn build_qa_asr_start(
 
     #[cfg(target_os = "macos")]
     if crate::asr::local::is_apple_speech(active_asr) {
-        let local = build_apple_speech(&inner.prefs.get());
+        let local = build_apple_speech(&inner.backend.get_preferences());
         let active = ActiveAsr::AppleSpeech(Arc::clone(&local));
         let consumer: Arc<dyn crate::recorder::AudioConsumer> = local;
         let label = AsrCallLabel::new(crate::asr::local::APPLE_SPEECH_PROVIDER_ID, None);

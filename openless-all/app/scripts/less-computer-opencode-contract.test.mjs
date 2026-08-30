@@ -6,18 +6,20 @@ import { fileURLToPath } from 'node:url';
 const appRoot = fileURLToPath(new URL('..', import.meta.url));
 const read = (relativePath) => readFile(join(appRoot, relativePath), 'utf8');
 
-const [settings, ipc, opencode, dictation, coordinator, lib, onboarding, lessComputerIpc, qaCommands, credentialCommands, miscCommands] = await Promise.all([
+const [settings, ipc, opencode, dictation, lib, onboarding, lessComputerIpc, qaCommands, credentialCommands, miscCommands, coreAdapters, coordinatorHost, coreApi] = await Promise.all([
   read('src/pages/settings/CodingAgentSection.tsx'),
   read('src/lib/ipc/coding-agent.ts'),
   read('src-tauri/src/coding_agent/opencode.rs'),
   read('src-tauri/src/coordinator/dictation.rs'),
-  read('src-tauri/src/coordinator.rs'),
   read('src-tauri/src/lib.rs'),
   read('src/components/Onboarding.tsx'),
   read('src/lib/ipc/less-computer.ts'),
   read('src-tauri/src/commands/qa.rs'),
   read('src-tauri/src/commands/credentials.rs'),
   read('src-tauri/src/commands/misc.rs'),
+  read('src-tauri/src/core_adapters.rs'),
+  read('src-tauri/src/tauri_coordinator_host.rs'),
+  read('crates/openless-core/src/api.rs'),
 ]);
 
 assert(
@@ -40,7 +42,8 @@ assert(
   'OpenCode adapter must not use the removed Claude-style permission flag',
 );
 assert(
-  dictation.includes('resolve_coding_agent_model(provider'),
+  coreApi.includes('resolve_coding_agent_model(provider') &&
+    dictation.includes('submit_less_computer_with_session'),
   'Less Computer must resolve model defaults per provider',
 );
 assert(
@@ -75,13 +78,16 @@ assert(
   'native microphone notifications must dispatch enumeration to a background thread',
 );
 assert(
-  credentialCommands.includes('pub async fn get_credentials()') &&
+  credentialCommands.includes('pub async fn get_credentials(') &&
+    credentialCommands.includes('core.get_credentials_status()') &&
     credentialCommands.includes('tauri::async_runtime::spawn_blocking'),
   'Keychain reads must not block the AppKit main thread while settings load',
 );
 assert(
-  miscCommands.includes('pub async fn list_microphone_devices()') &&
-    miscCommands.includes('microphone device worker failed'),
+  miscCommands.includes('pub async fn list_microphone_devices(') &&
+    miscCommands.includes('.platform') &&
+    miscCommands.includes('.microphone_devices()') &&
+    coreAdapters.includes('tauri::async_runtime::spawn_blocking(crate::recorder::list_input_devices'),
   'settings microphone enumeration must not block the AppKit main thread',
 );
 assert(
@@ -106,12 +112,16 @@ assert(
     showLessComputer.indexOf('position_less_computer_window(&window_clone)'),
   'Less Computer NSPanel positioning must run on the AppKit main thread',
 );
-const submitTextStart = coordinator.indexOf('pub fn less_computer_submit_text');
-const submitTextEnd = coordinator.indexOf('pub fn history', submitTextStart);
-const submitText = coordinator.slice(submitTextStart, submitTextEnd);
+const submitTextStart = qaCommands.indexOf('pub fn less_computer_submit_text');
+const submitTextEnd = qaCommands.indexOf('pub fn less_computer_window_open', submitTextStart);
+const submitText = qaCommands.slice(submitTextStart, submitTextEnd);
 assert(
-  submitText.includes('tauri::async_runtime::spawn') && !submitText.includes('tokio::spawn'),
-  'Less Computer text submit must spawn through the Tauri runtime from the WebKit IPC thread',
+  submitText.includes('host.spawn') &&
+    submitText.includes('backend.submit_less_computer(text)') &&
+    !submitText.includes('tauri::async_runtime::spawn') &&
+    !submitText.includes('tokio::spawn') &&
+    coordinatorHost.includes('tauri::async_runtime::spawn(future)'),
+  'Less Computer text submit must spawn through the explicit Tauri host from the WebKit IPC thread',
 );
 
 const localeFiles = ['zh-CN.ts', 'zh-TW.ts', 'en.ts', 'ja.ts', 'ko.ts'];

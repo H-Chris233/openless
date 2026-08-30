@@ -252,7 +252,11 @@ pub fn parse_dsh_guard_line(line: &str) -> Option<String> {
 /// 3. 兜底取最后一条非空行。
 fn summarize_stderr(lines: &[String]) -> String {
     let clean = |s: &String| s.trim().to_string();
-    if let Some(l) = lines.iter().rev().find(|l| l.trim_start().starts_with("dsh:")) {
+    if let Some(l) = lines
+        .iter()
+        .rev()
+        .find(|l| l.trim_start().starts_with("dsh:"))
+    {
         return clean(l);
     }
     if let Some(l) = lines
@@ -449,7 +453,12 @@ pub async fn run_dsh_agent(
 
     if !plain_stderr.is_empty() {
         // 失败定位全靠这段：摘要只有一行，真正的因果常在崩溃转储的中间。
-        let tail: Vec<&str> = plain_stderr.iter().rev().take(20).map(String::as_str).collect();
+        let tail: Vec<&str> = plain_stderr
+            .iter()
+            .rev()
+            .take(20)
+            .map(String::as_str)
+            .collect();
         log::debug!("[dsh] stderr 尾部（倒序）: {tail:?}");
     }
 
@@ -513,7 +522,11 @@ mod tests {
         // argv，以 `-` 开头的转写就会被劫持成 flag。prompt 只能走 patch 文件。
         let args = build_dsh_args(Path::new("/tmp/x/p.yml"));
         assert!(!args.iter().any(|a| a.contains("危险的原话")));
-        assert_eq!(args.len(), 5, "argv 只应有 profile/patch/占位任务，多一个都可疑");
+        assert_eq!(
+            args.len(),
+            5,
+            "argv 只应有 profile/patch/占位任务，多一个都可疑"
+        );
     }
 
     #[test]
@@ -608,10 +621,7 @@ mod tests {
                 )
             })
             .collect();
-        assert!(envs.contains(&(
-            "DSH_PERMISSION_MODE".into(),
-            Some("workspace-write".into())
-        )));
+        assert!(envs.contains(&("DSH_PERMISSION_MODE".into(), Some("workspace-write".into()))));
         assert!(envs.contains(&("DSH_EVENTS_OUT".into(), Some("stderr".into()))));
         assert!(envs.contains(&("DSH_EVENTS_RAW".into(), None)));
     }
@@ -713,7 +723,10 @@ mod tests {
     fn successful_end_is_not_an_event_but_failure_is() {
         // 成功终局由运行器用 stdout 合成，tap 的 end 不再重复抛一次。
         assert_eq!(
-            parse_dsh_tap_line("s1", r#"{"v":1,"seq":9,"ts":1,"type":"turn.end","turn":1,"ok":true}"#),
+            parse_dsh_tap_line(
+                "s1",
+                r#"{"v":1,"seq":9,"ts":1,"type":"turn.end","turn":1,"ok":true}"#
+            ),
             None
         );
         assert_eq!(
@@ -728,7 +741,10 @@ mod tests {
         );
         // 失败但没给文案时也要有话说。
         assert_eq!(
-            parse_dsh_tap_line("s1", r#"{"v":1,"seq":9,"ts":1,"type":"turn.end","turn":1,"ok":false}"#),
+            parse_dsh_tap_line(
+                "s1",
+                r#"{"v":1,"seq":9,"ts":1,"type":"turn.end","turn":1,"ok":false}"#
+            ),
             Some(CodingAgentEvent::Error {
                 session_id: "s1".into(),
                 message: "dsh 本轮执行失败".into()
@@ -767,10 +783,16 @@ mod tests {
             None
         );
         // 没有信封的 JSON 不是我们的行。
-        assert_eq!(parse_dsh_tap_line("s1", r#"{"type":"text.delta","text":"x"}"#), None);
+        assert_eq!(
+            parse_dsh_tap_line("s1", r#"{"type":"text.delta","text":"x"}"#),
+            None
+        );
         assert_eq!(parse_dsh_tap_line("s1", "not json"), None);
         assert_eq!(parse_dsh_tap_line("s1", ""), None);
-        assert_eq!(parse_dsh_guard_line(r#"{"v":1,"type":"text.delta","text":"x"}"#), None);
+        assert_eq!(
+            parse_dsh_guard_line(r#"{"v":1,"type":"text.delta","text":"x"}"#),
+            None
+        );
     }
 
     #[test]
@@ -778,10 +800,7 @@ mod tests {
         let dir = {
             let ws = TapWorkspace::create("跑个测试").unwrap();
             assert!(ws.patch_path.exists(), "patch 文件应已落盘");
-            assert!(
-                ws.dir.join("dsh-events.mjs").exists(),
-                "tap 插件应已落盘"
-            );
+            assert!(ws.dir.join("dsh-events.mjs").exists(), "tap 插件应已落盘");
             let yaml = std::fs::read_to_string(&ws.patch_path).unwrap();
             assert!(yaml.contains("跑个测试"));
             ws.dir.clone()
@@ -856,10 +875,16 @@ mod live {
             c.tools, c.deltas, c.completed, c.error
         );
         assert!(c.error.is_none(), "不应报错: {:?}", c.error);
-        assert!(c.deltas > 0, "tap 插件没产出逐字流：说明它没挂上或事件形状变了");
+        assert!(
+            c.deltas > 0,
+            "tap 插件没产出逐字流：说明它没挂上或事件形状变了"
+        );
         assert!(!c.tools.is_empty(), "应至少有一次工具调用（读文件）");
         let text = c.completed.expect("应有终局文本");
-        assert!(text.to_lowercase().contains("hello"), "终局文本应含 hello，实际: {text}");
+        assert!(
+            text.to_lowercase().contains("hello"),
+            "终局文本应含 hello，实际: {text}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -885,11 +910,18 @@ mod live {
             CodingAgentPermissionMode::AcceptEdits,
         )
         .await;
-        println!("[dsh] 越权写入结果 completed={:?} error={:?}", c.completed, c.error);
+        println!(
+            "[dsh] 越权写入结果 completed={:?} error={:?}",
+            c.completed, c.error
+        );
         let escaped = victim.exists();
         let _ = std::fs::remove_file(&victim);
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(!escaped, "沙箱失效：家目录下的文件被创建了 {}", victim.display());
+        assert!(
+            !escaped,
+            "沙箱失效：家目录下的文件被创建了 {}",
+            victim.display()
+        );
     }
 
     #[tokio::test]
@@ -904,7 +936,10 @@ mod live {
             CodingAgentPermissionMode::AcceptEdits,
         )
         .await;
-        println!("[dsh] 参数注入用例 completed={:?} error={:?}", c.completed, c.error);
+        println!(
+            "[dsh] 参数注入用例 completed={:?} error={:?}",
+            c.completed, c.error
+        );
         let text = c.completed.expect("应有终局文本");
         assert!(
             !text.trim().starts_with("0."),

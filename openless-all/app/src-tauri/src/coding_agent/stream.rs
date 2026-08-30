@@ -30,6 +30,36 @@ pub enum CodingAgentEvent {
     Error { session_id: String, message: String },
 }
 
+impl From<CodingAgentEvent> for openless_core::CodingAgentStreamEvent {
+    fn from(event: CodingAgentEvent) -> Self {
+        match event {
+            CodingAgentEvent::Started { session_id } => Self::Started { session_id },
+            CodingAgentEvent::Delta { session_id, text } => Self::Delta { session_id, text },
+            CodingAgentEvent::ToolUse { session_id, name } => Self::ToolUse { session_id, name },
+            CodingAgentEvent::Compaction { session_id } => Self::Compaction { session_id },
+            CodingAgentEvent::Completed {
+                session_id,
+                text,
+                cost_usd,
+                duration_ms,
+            } => Self::Completed {
+                session_id,
+                text,
+                cost_usd,
+                duration_ms,
+            },
+            CodingAgentEvent::Cancelled { session_id } => Self::Cancelled { session_id },
+            CodingAgentEvent::Error {
+                session_id,
+                message,
+            } => Self::Error {
+                session_id,
+                message,
+            },
+        }
+    }
+}
+
 /// 解析一行 stream-json。无关行返回 `None`（防御式：解析失败也返回 `None`，不 panic）。
 pub fn parse_stream_json_line(session_id: &str, line: &str) -> Option<CodingAgentEvent> {
     let line = line.trim();

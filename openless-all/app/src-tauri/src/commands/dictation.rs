@@ -1,18 +1,39 @@
 use super::*;
 
-#[tauri::command]
-pub async fn start_dictation(coord: CoordinatorState<'_>) -> Result<(), String> {
-    coord.start_dictation().await
+async fn ensure_core_started(core: &openless_core::OpenLessBackend) -> Result<(), String> {
+    if !core.snapshot().running {
+        core.start().await.map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
-pub async fn stop_dictation(coord: CoordinatorState<'_>) -> Result<(), String> {
-    coord.stop_dictation().await
+pub async fn start_dictation(core: CoreState<'_>) -> Result<(), String> {
+    ensure_core_started(&core).await?;
+    core.start_dictation()
+        .await
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-pub fn cancel_dictation(coord: CoordinatorState<'_>) {
-    coord.cancel_dictation();
+pub async fn stop_dictation(core: CoreState<'_>) -> Result<(), String> {
+    ensure_core_started(&core).await?;
+    core.stop_dictation()
+        .await
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn cancel_dictation(core: CoreState<'_>) -> Result<(), String> {
+    ensure_core_started(&core).await?;
+    if let Err(error) = core.cancel_dictation(None).await {
+        if error.code != openless_core::BackendErrorCode::InvalidState {
+            log::warn!("[dictation] cancel failed: {error}");
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -38,7 +59,7 @@ pub async fn inject_hotkey_click_for_dev(coord: CoordinatorState<'_>) -> Result<
 /// 试算一次（历史页「换风格重润色」），不改变激活状态。
 #[tauri::command]
 pub async fn repolish(
-    coord: CoordinatorState<'_>,
+    core: CoreState<'_>,
     raw_text: String,
     mode: PolishMode,
     style_pack_id: Option<String>,
@@ -49,5 +70,13 @@ pub async fn repolish(
         raw_text.chars().count(),
         style_pack_id
     );
-    coord.repolish(raw_text, mode, style_pack_id).await
+    core.services()
+        .auxiliary
+        .repolish(openless_core::RepolishRequest {
+            raw_text,
+            style_pack_id,
+            front_app: crate::coordinator::capture_frontmost_app(),
+        })
+        .await
+        .map_err(|error| error.to_string())
 }

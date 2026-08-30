@@ -2,36 +2,27 @@ use super::*;
 use tauri_plugin_dialog::{DialogExt, FilePath};
 
 #[tauri::command]
-pub fn list_history(coord: CoordinatorState<'_>) -> Result<Vec<DictationSession>, String> {
-    coord.history().list().map_err(|e| e.to_string())
+pub fn list_history(core: CoreState<'_>) -> Result<Vec<DictationSession>, String> {
+    core.list_history().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn delete_history_entry(coord: CoordinatorState<'_>, id: String) -> Result<(), String> {
-    coord.history().delete(&id).map_err(|e| e.to_string())
+pub fn delete_history_entry(core: CoreState<'_>, id: String) -> Result<(), String> {
+    core.delete_history(&id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn clear_history(coord: CoordinatorState<'_>) -> Result<(), String> {
-    coord.history().clear().map_err(|e| e.to_string())
+pub fn clear_history(core: CoreState<'_>) -> Result<(), String> {
+    core.clear_history().map_err(|e| e.to_string())
 }
 
 /// 每日活动汇总（日期升序），概览页年度热力图与「近 7 天 / 近 30 天」指标的数据源。
 /// 与历史内容 / 保留策略解耦：清空历史不影响它，全年格子照亮，周期统计也不会被
 /// 历史 200 条上限截断。
 #[tauri::command]
-pub fn get_activity_stats(coord: CoordinatorState<'_>) -> Vec<ActivityDay> {
-    coord
-        .activity()
-        .snapshot()
-        .into_iter()
-        .map(|(date, stats)| ActivityDay {
-            date,
-            count: stats.count,
-            chars: stats.chars,
-            duration_ms: stats.duration_ms,
-        })
-        .collect()
+pub fn get_activity_stats(core: CoreState<'_>) -> Vec<ActivityDay> {
+    core.list_activity()
+        .expect("activity snapshot should only fail after a poisoned lock")
 }
 
 /// 读取某次会话的原始麦克风 wav 字节流。文件存在的条件：debug 用户的任意会话，或任意
@@ -222,7 +213,7 @@ fn copy_recording_to_mobile_url(
 /// 局部刷新。
 #[tauri::command]
 pub async fn retranscribe_recording(
-    coord: CoordinatorState<'_>,
+    core: CoreState<'_>,
     session_id: String,
 ) -> Result<DictationSession, String> {
     if !is_valid_session_id(&session_id) {
@@ -244,25 +235,30 @@ pub async fn retranscribe_recording(
     let pcm = wav[44..].to_vec();
 
     let retranscribe_started = std::time::Instant::now();
-    let (text, asr_call_label) = coord.retranscribe_pcm(pcm).await?;
+    let retranscription = core
+        .services()
+        .auxiliary
+        .retranscribe_pcm(pcm)
+        .await
+        .map_err(openless_core::RetranscriptionFailure::into_message)?;
+    let text = retranscription.text;
+    let asr_call_label = retranscription.asr;
     if text.trim().is_empty() {
         return Err("重新转录仍未识别到语音".into());
     }
     let retranscribe_ms = retranscribe_started.elapsed().as_millis() as u64;
 
     // 找到原条目，保留其它字段，只更新转写结果 + 清错误码。
-    let mut entry = coord
-        .history()
-        .list()
+    let mut entry = core
+        .list_history()
         .map_err(|e| e.to_string())?
         .into_iter()
         .find(|s| s.id == session_id)
         .ok_or_else(|| "history entry not found".to_string())?;
     apply_retranscription(&mut entry, text, &asr_call_label, retranscribe_ms);
 
-    let updated = coord
-        .history()
-        .update_entry(entry.clone())
+    let updated = core
+        .update_history_entry(entry.clone())
         .map_err(|e| e.to_string())?;
     if !updated {
         return Err("history entry not found".into());
@@ -278,7 +274,7 @@ pub async fn retranscribe_recording(
 fn apply_retranscription(
     entry: &mut DictationSession,
     text: String,
-    asr_call_label: &crate::coordinator::AsrCallLabel,
+    asr_call_label: &openless_core::AsrCallLabel,
     asr_ms: u64,
 ) {
     entry.raw_transcript = text.clone();
@@ -295,8 +291,8 @@ fn apply_retranscription(
 #[cfg(test)]
 mod retranscribe_tests {
     use super::apply_retranscription;
-    use crate::coordinator::AsrCallLabel;
     use crate::types::{DictationSession, HistorySource, InsertStatus, PolishMode};
+    use openless_core::AsrCallLabel;
 
     fn failed_entry() -> DictationSession {
         DictationSession {
