@@ -582,7 +582,7 @@ fn downsample_pcm_16k_to_8k(pcm: &[u8]) -> Vec<u8> {
     // 直接丢弃），平均能压低 4–8 kHz 频段折叠进 0–4 kHz 的混叠，识别更稳。
     // 用 i32 求和避免 i16 溢出；输出样本数减半。
     let mut out = Vec::with_capacity(pcm.len() / 2);
-    for pair in pcm.chunks_exact(4) {
+    for pair in pcm.as_chunks::<4>().0.iter() {
         let left = i16::from_le_bytes([pair[0], pair[1]]) as i32;
         let right = i16::from_le_bytes([pair[2], pair[3]]) as i32;
         let sample = ((left + right) / 2) as i16;
@@ -1015,7 +1015,7 @@ mod tests {
         .concat();
         let downsampled = downsample_pcm_16k_to_8k(&pcm);
         let samples = downsampled
-            .chunks_exact(2)
+            .as_chunks::<2>().0.iter()
             .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
             .collect::<Vec<_>>();
         assert_eq!(samples, vec![3, 7]);
@@ -1037,7 +1037,7 @@ mod tests {
         clear_downsample_tail(&mut remainder);
 
         let samples = downsampled
-            .chunks_exact(2)
+            .as_chunks::<2>().0.iter()
             .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
             .collect::<Vec<_>>();
         assert_eq!(samples, vec![(1 + 2) / 2]);
@@ -1064,7 +1064,7 @@ mod tests {
         let state = asr.state.lock();
         let samples = state
             .pending_audio
-            .chunks_exact(2)
+            .as_chunks::<2>().0.iter()
             .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
             .collect::<Vec<_>>();
         assert_eq!(samples, vec![1, 3]);

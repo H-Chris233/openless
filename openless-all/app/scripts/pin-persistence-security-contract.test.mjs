@@ -58,7 +58,7 @@ assert.match(
 )
 
 const regenerate = coreRemote.match(
-    /async fn regenerate_pairing_pin_inner[\s\S]*?\n    }\n\n    async fn connect_inner/,
+    /async fn regenerate_pairing_pin_inner[\s\S]*?async fn connect_inner/,
 )?.[0]
 assert.ok(regenerate, "Core pairing PIN transaction must be present")
 assert.match(

@@ -749,7 +749,7 @@ const NON_SILENT_MIN_SAMPLES: usize = 8;
 /// 非零，于是**任何**一帧都被判成「非静音」，`last_non_silent_audio_written_at`
 /// 被无意义地一路刷新，收尾判据永远不成立。这里改成按振幅判。
 fn contains_non_silent_pcm(pcm: &[u8]) -> bool {
-    pcm.chunks_exact(2)
+    pcm.as_chunks::<2>().0.iter()
         .filter(|sample| {
             i16::from_le_bytes([sample[0], sample[1]]).saturating_abs() > NON_SILENT_PEAK
         })

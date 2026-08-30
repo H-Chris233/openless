@@ -146,7 +146,7 @@ mod tests {
 
     fn decode(bytes: &[u8]) -> Vec<i16> {
         bytes
-            .chunks_exact(2)
+            .as_chunks::<2>().0.iter()
             .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
             .collect()
     }
