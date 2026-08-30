@@ -25,3 +25,4 @@ if (Test-Path -LiteralPath $crateDataDir) {
 }
 
 Write-Output "Core test isolation gate passed (no shared crate-local data directory or source-tree residue)."
+exit 0

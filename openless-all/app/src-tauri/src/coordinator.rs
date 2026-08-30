@@ -572,25 +572,19 @@ fn shared_backend_from_stores(
 /// attaching an opaque selection insertion target to a Core-owned preview.
 /// The callback only captures the shared opaque-target state; the QA adapter
 /// never performs a Tauri managed-state lookup back into `Coordinator`.
+#[cfg(all(not(mobile), target_os = "windows"))]
 fn bind_qa_selection_voice_target(
     qa_context: &Arc<TauriQaHostContext>,
     selection_voice_host: &Arc<Mutex<selection_voice_session::SelectionVoiceHostState>>,
 ) {
-    #[cfg(all(not(mobile), target_os = "windows"))]
-    {
-        let selection_voice_host = Arc::clone(selection_voice_host);
-        qa_context.set_selection_voice_target_binder(Arc::new(move |session_id, target| {
-            selection_voice_session::bind_selection_voice_target_state(
-                &selection_voice_host,
-                session_id,
-                target,
-            )
-        }));
-    }
-    #[cfg(not(all(not(mobile), target_os = "windows")))]
-    {
-        let _ = (qa_context, selection_voice_host);
-    }
+    let selection_voice_host = Arc::clone(selection_voice_host);
+    qa_context.set_selection_voice_target_binder(Arc::new(move |session_id, target| {
+        selection_voice_session::bind_selection_voice_target_state(
+            &selection_voice_host,
+            session_id,
+            target,
+        )
+    }));
 }
 
 struct StylePackHotkeyRegistration {
