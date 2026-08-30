@@ -1,7 +1,7 @@
 # OpenLess Linux egui 与共享后端 lib 拆分实施计划
 
-> 文档状态：可执行计划；实施状态：Linux egui Interface 已交付，全平台迁移与原生发布验证仍在进行。第 1.1 节只记录当前工作树事实，不代表未取得 runner 证据的里程碑已经获得最终验收；完成状态一律以第 12 节的逐项证据为准
-> 更新日期：2026-08-30；Linux 原生证据记录截至 2026-08-29
+> 文档状态：可执行计划；实施状态：Linux egui Interface 已交付，跨平台 CI runner 门禁已通过，正式原生发布与 egui UI 验收仍在进行。第 1.1 节只记录当前工作树事实，不代表未取得 runner 证据的里程碑已经获得最终验收；完成状态一律以第 12 节的逐项证据为准
+> 更新日期：2026-08-31；Linux 原生证据记录截至 2026-08-29，跨平台 CI 证据截至 2026-08-30
 > 范围：抽取无 Tauri 依赖的共享 Rust 应用核心；保留 macOS / Windows 的 Tauri 前端；为 Linux egui 前端准备公共接口、事件契约、测试适配器和构建契约
 > egui 责任：由另一组负责 egui/eframe 界面、交互、视觉和 UI 验收；本文只负责让他们能够稳定调用后端
 > 最终审查基线：`a569a8749188e7843d426f159523193c8d5363ce`；完成迁移后以该固定点执行 Standards / Spec 双轴审查
@@ -142,6 +142,17 @@ Ubuntu 桌面 runner 的原生证明：
 以上结果证明共享 core、Linux Interface 和 Tauri compatibility 在当前工作树可构建并通过
 本地契约；不证明真实音频设备、焦点输入、fcitx5 物理按键顺序、安装/签名、Android APK/JNI
 或 macOS/Windows 安装包行为。
+
+### 1.2.2 跨平台 CI runner 验收（2026-08-30）
+
+提交 `f487ab86cbbee80c76afd92a111541d1153f85e9` 在 fork 的 [CI run 33324599906](https://github.com/H-Chris233/openless/actions/runs/33324599906) 上四个平台全部成功：
+
+- Linux core and egui host：Core unit/clippy、Linux host contract、依赖/秘密/隔离/runtime/public-surface 门禁通过。
+- Android cargo check：`aarch64`/`x86_64` Tauri Rust check、Gradle scaffolding、JVM unit/instrumentation tests 和 Android Keystore instrumentation 通过。
+- Windows checks：前端 58 项、Tauri check、Windows backend test compile、Core contract、Rust 1.88 MSRV 和五处版本同步通过。
+- macOS checks：前端/契约、Qwen3/Tauri check、703 个 Tauri Rust unit tests、Rust 1.88 MSRV、backend test compile 和版本同步通过。
+
+该 run 证明当前提交在声明的原生 runner 上可编译并通过已配置的契约；它不等同于正式 release workflow 的安装包、签名、设备输入/音频或 egui UI 视觉验收。Linux egui UI 仍由 egui 组实现，正式发布仍按 M10 的 release gate 执行。
 
 ### 1.3 外部依据与本项目决策映射
 
