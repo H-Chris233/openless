@@ -688,6 +688,14 @@ impl TauriCoordinatorHost {
         tauri::async_runtime::spawn(future)
     }
 
+    pub(crate) fn spawn_blocking<F, R>(&self, task: F) -> tauri::async_runtime::JoinHandle<R>
+    where
+        F: FnOnce() -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        tauri::async_runtime::spawn_blocking(task)
+    }
+
     pub(crate) fn block_on<F: Future>(&self, future: F) -> F::Output {
         tauri::async_runtime::block_on(future)
     }
