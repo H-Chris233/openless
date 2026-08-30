@@ -233,6 +233,12 @@ jobs:
             label: Windows
             preflight: true
     runs-on: ${{ matrix.os }}
+    env:
+      # 新增 shared Core 后，macOS 首次编译同时构建 MLX C++ 依赖和完整
+      # Tauri test binary；限制并发避免 arm64 runner 在峰值内存处被系统终止。
+      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CMAKE_BUILD_PARALLEL_LEVEL: 2
     defaults:
       run:
         working-directory: openless-all/app
