@@ -20,7 +20,7 @@ if (openlessStart < 0 || nextPackage < 0) {
     throw new Error(`未找到 openless Cargo.lock package block：${lockPath}`)
 }
 const openlessBlock = lock.slice(openlessStart, nextPackage)
-const lockDependency = /^(\s*)"qwen3-asr-rs",\r?\n/m
+const lockDependency = /^([ \t]*)"qwen3-asr-rs",\r?\n/m
 if (!lockDependency.test(openlessBlock)) {
     throw new Error(`openless Cargo.lock package 未包含 qwen3-asr-rs：${lockPath}`)
 }
