@@ -12,6 +12,12 @@ on:
   pull_request:
     branches: [main, beta]
   workflow_dispatch:
+    inputs:
+      upload_linux_validation_artifact:
+        description: Build and upload the Linux egui validation packages (never a release)
+        required: false
+        default: false
+        type: boolean
 
 # 同一 PR 快速重复推送时取消旧运行；workflow_dispatch 用 run_id 隔离。
 concurrency:
@@ -218,6 +224,15 @@ jobs:
           ./scripts/check-core-test-isolation.ps1
           ./scripts/check-core-runtime-seam.ps1
           ./scripts/check-linux-public-surface.ps1
+
+  linux-egui-validation-artifact:
+    name: Linux egui validation artifact
+    if: github.event_name == 'workflow_dispatch' && inputs.upload_linux_validation_artifact
+    needs: linux-core-contract
+    uses: ./.github/workflows/release-linux-egui.yml
+    with:
+      release_tag: ''
+    secrets: inherit
 
   cross-platform:
     name: ${{ matrix.label }} checks
