@@ -7,4 +7,3 @@ Icon=openless
 Terminal=false
 Categories=Utility;Accessibility;
 StartupNotify=true
-SingleMainWindow=true
