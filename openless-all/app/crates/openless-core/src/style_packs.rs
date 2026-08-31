@@ -2,8 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::preferences::UserPreferences;
 use crate::prompt_compose::assemble_polish_system_prompt;
+use crate::shared_types::UserPreferences;
 use crate::types::PolishMode;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -953,7 +953,7 @@ pub fn default_selection_polish_style_prompt_for_mode(mode: PolishMode) -> Strin
 #[cfg(test)]
 mod tests {
     use super::{build_style_pack_runtime_diagnostics, StylePack};
-    use crate::preferences::UserPreferences;
+    use crate::shared_types::UserPreferences;
 
     #[test]
     fn runtime_diagnostics_use_the_core_prompt_composer() {
