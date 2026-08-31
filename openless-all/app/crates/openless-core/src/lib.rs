@@ -266,7 +266,4 @@ pub use types::{
     SelectionVoiceIntentMode, SelectionVoiceManualIntent, SessionId, StylePackChange,
     TranscriptDelta, VocabPreset, VocabPresetStore, VocabularyChange,
 };
-pub use vocabulary::{
-    list_vocab_presets, prioritize_vocabulary_for_asr, save_vocab_presets, DictionaryStore,
-    FRESH_VOCAB_SEATS,
-};
+pub use vocabulary::{list_vocab_presets, save_vocab_presets, DictionaryStore};

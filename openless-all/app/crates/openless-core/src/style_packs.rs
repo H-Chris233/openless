@@ -186,7 +186,7 @@ pub struct StylePackRuntimeDiagnostics {
 /// Build the settings-page prompt diagnostics from the same Core prompt
 /// composer used by the production dictation pipeline. Hosts may render the
 /// returned DTO, but must not rebuild these rules themselves.
-pub fn build_style_pack_runtime_diagnostics(
+pub(crate) fn build_style_pack_runtime_diagnostics(
     style_pack: &StylePack,
     preferences: &UserPreferences,
     hotwords: Vec<String>,

@@ -12,7 +12,7 @@ use crate::types::{DictionaryEntry, VocabPresetStore};
 
 /// Number of recently added manual entries that are guaranteed ASR hotword
 /// seats before hit-count ranking is applied.
-pub const FRESH_VOCAB_SEATS: usize = 5;
+pub(crate) const FRESH_VOCAB_SEATS: usize = 5;
 
 /// Order enabled vocabulary entries for ASR hotword biasing.
 ///
@@ -20,7 +20,7 @@ pub const FRESH_VOCAB_SEATS: usize = 5;
 /// bounded number of those entries, rank the remainder by hit count, then
 /// collapse case variants while keeping the highest-hit spelling at the first
 /// position. This is a pure Core rule shared by every host.
-pub fn prioritize_vocabulary_for_asr(entries: Vec<DictionaryEntry>) -> Vec<String> {
+pub(crate) fn prioritize_vocabulary_for_asr(entries: Vec<DictionaryEntry>) -> Vec<String> {
     let mut fresh_manual = Vec::with_capacity(FRESH_VOCAB_SEATS.min(entries.len()));
     let mut ranked = Vec::with_capacity(entries.len());
     for entry in entries {
@@ -330,6 +330,112 @@ mod tests {
         assert_eq!(
             prioritize_vocabulary_for_asr(entries),
             vec!["fresh", "Claude", "frequent"]
+        );
+    }
+
+    fn vocab_entry(phrase: &str, hits: u64) -> DictionaryEntry {
+        DictionaryEntry {
+            id: phrase.to_string(),
+            phrase: phrase.to_string(),
+            note: None,
+            enabled: true,
+            hits,
+            created_at: String::new(),
+        }
+    }
+
+    fn learned_vocab_entry(phrase: &str, hits: u64) -> DictionaryEntry {
+        let mut entry = vocab_entry(phrase, hits);
+        entry.note = Some(LEARNED_VOCAB_NOTE.to_string());
+        entry
+    }
+
+    #[test]
+    fn asr_priority_ranks_hits_after_fresh_manual_seats() {
+        let mut entries: Vec<_> = (0..FRESH_VOCAB_SEATS)
+            .map(|index| vocab_entry(&format!("fresh{index}"), 0))
+            .collect();
+        entries.extend([
+            vocab_entry("scrap", 1),
+            vocab_entry("hermes", 18),
+            vocab_entry("win-shukong", 7),
+        ]);
+
+        let ordered = prioritize_vocabulary_for_asr(entries);
+        let position = |phrase: &str| ordered.iter().position(|item| item == phrase).unwrap();
+        assert!(position("hermes") < position("scrap"));
+        assert!(position("win-shukong") < position("scrap"));
+        assert!(position("hermes") < position("win-shukong"));
+    }
+
+    #[test]
+    fn asr_priority_reserves_a_seat_for_a_new_manual_phrase() {
+        let mut entries = vec![vocab_entry("Pathwyze", 0)];
+        entries.extend((0..30).map(|index| vocab_entry(&format!("old{index}"), 100 + index)));
+
+        assert_eq!(
+            prioritize_vocabulary_for_asr(entries)
+                .first()
+                .map(String::as_str),
+            Some("Pathwyze")
+        );
+    }
+
+    #[test]
+    fn asr_priority_keeps_the_highest_hit_case_variant_at_the_first_position() {
+        let ordered = prioritize_vocabulary_for_asr(vec![
+            vocab_entry("claude", 0),
+            vocab_entry("mac-mini", 27),
+            vocab_entry("Claude", 33),
+        ]);
+        assert_eq!(ordered, vec!["Claude", "mac-mini"]);
+    }
+
+    #[test]
+    fn learned_entries_do_not_consume_or_backfill_manual_seats() {
+        let mut entries = Vec::new();
+        for index in 0..FRESH_VOCAB_SEATS {
+            entries.push(learned_vocab_entry(
+                &format!("learned{index}"),
+                1_000 - index as u64,
+            ));
+            entries.push(vocab_entry(&format!("manual{index}"), 0));
+        }
+        let ordered = prioritize_vocabulary_for_asr(entries);
+        let expected_manual: Vec<_> = (0..FRESH_VOCAB_SEATS)
+            .map(|index| format!("manual{index}"))
+            .collect();
+        assert_eq!(&ordered[..FRESH_VOCAB_SEATS], expected_manual.as_slice());
+
+        let ordered = prioritize_vocabulary_for_asr(vec![
+            learned_vocab_entry("learned-low", 1),
+            vocab_entry("only-manual", 0),
+            learned_vocab_entry("learned-high", 20),
+        ]);
+        assert_eq!(ordered, vec!["only-manual", "learned-high", "learned-low"]);
+    }
+
+    #[test]
+    fn asr_priority_ranks_all_learned_entries_by_hits() {
+        assert_eq!(
+            prioritize_vocabulary_for_asr(vec![
+                learned_vocab_entry("cold", 0),
+                learned_vocab_entry("hot", 12),
+                learned_vocab_entry("warm", 5),
+            ]),
+            vec!["hot", "warm", "cold"]
+        );
+    }
+
+    #[test]
+    fn asr_priority_dedupes_manual_and_learned_case_variants() {
+        assert_eq!(
+            prioritize_vocabulary_for_asr(vec![
+                vocab_entry("claude", 0),
+                learned_vocab_entry("Claude", 33),
+                learned_vocab_entry("other", 10),
+            ]),
+            vec!["Claude", "other"]
         );
     }
 }

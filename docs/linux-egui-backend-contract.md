@@ -100,7 +100,7 @@ let current: BackendSnapshot = backend.snapshot();
 | preferences | `get_preferences`；完整文档和单项更新统一通过 `LinuxHost` 的 validated settings Interface |
 | credentials/channels | status、显式 `SecretValue` read/write/remove、channel CRUD/reorder/test、active provider |
 | history/activity | list/recent/append/update/delete/clear、activity snapshot/bump |
-| vocabulary/correction | list/add/remove/enable/hits、preset、correction-rule lifecycle |
+| vocabulary/correction | list/add/remove/enable/hits、preset、correction-rule lifecycle；`enabled_vocabulary_phrases()` 与 `asr_vocabulary_phrases()` 返回 Core 过滤/排序后的 owned 词条 |
 | style packs | list/get/create/update/activate/enable/reset/delete、安全 ZIP import/export；`preview_style_pack_runtime(style_pack)` 返回由 Core 统一组装的单轮/多轮 prompt 诊断 |
 | dictation | start/stop/cancel、snapshot、session-scoped progress 与插入终态 |
 
