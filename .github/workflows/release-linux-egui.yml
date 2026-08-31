@@ -197,13 +197,14 @@ jobs:
           fi
           SHA256=$(sha256sum "$APPIMAGE" | cut -d' ' -f1)
           ASSET=$(basename "$APPIMAGE")
+          RELEASE_REPOSITORY="${GITHUB_REPOSITORY:-Open-Less/openless}"
           SIGNATURE=null
           if [ -f "$APPIMAGE.minisig" ]; then
             SIGNATURE=$(base64 -w0 "$APPIMAGE.minisig" | jq -R .)
           fi
           jq -n \
             --arg version "$VERSION" \
-            --arg url "https://github.com/Open-Less/openless/releases/download/${RELEASE_TAG:-manual}/$ASSET" \
+            --arg url "https://github.com/$RELEASE_REPOSITORY/releases/download/${RELEASE_TAG:-manual}/$ASSET" \
             --arg sha256 "$SHA256" \
             --argjson signature "$SIGNATURE" \
             '{schemaVersion:1, host:"linux-egui", arch:"x86_64", version:$version, url:$url, sha256:$sha256, minisign:$signature}' \
@@ -219,9 +220,11 @@ jobs:
           test -s "$APPIMAGE"
           test -s "$MANIFEST"
           SHA256=$(sha256sum "$APPIMAGE" | cut -d' ' -f1)
+          RELEASE_REPOSITORY="${GITHUB_REPOSITORY:-Open-Less/openless}"
           jq -e \
             --arg sha256 "$SHA256" \
-            '.schemaVersion == 1 and .host == "linux-egui" and .arch == "x86_64" and .sha256 == $sha256' \
+            --arg repository "$RELEASE_REPOSITORY" \
+            '.schemaVersion == 1 and .host == "linux-egui" and .arch == "x86_64" and .sha256 == $sha256 and (.url | startswith("https://github.com/" + $repository + "/releases/download/"))' \
             "$MANIFEST" >/dev/null
 
       - name: Upload Linux egui workflow artifacts
