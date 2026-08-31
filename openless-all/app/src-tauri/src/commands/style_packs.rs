@@ -92,7 +92,7 @@ pub fn save_style_pack(
 
 #[tauri::command]
 pub fn preview_style_pack_runtime(
-    coord: CoordinatorState<'_>,
+    core: CoreState<'_>,
     style_pack: StylePack,
 ) -> Result<StylePackRuntimeDiagnostics, String> {
     log::info!(
@@ -101,7 +101,7 @@ pub fn preview_style_pack_runtime(
         style_pack.base_mode,
         style_pack.prompt.chars().count()
     );
-    Ok(coord.preview_style_pack_runtime(&style_pack))
+    Ok(core.preview_style_pack_runtime(&style_pack))
 }
 
 #[tauri::command]

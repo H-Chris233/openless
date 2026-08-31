@@ -25,6 +25,7 @@ const [
   qaAdapter,
   selectionVoiceCoordinator,
   dictionaryCommand,
+  stylePacksCommand,
 ] =
   await Promise.all([
     read('src/lib/types.ts'),
@@ -49,6 +50,7 @@ const [
     read('src-tauri/src/qa_adapter.rs'),
     read('src-tauri/src/coordinator/selection_voice_session.rs'),
     read('src-tauri/src/commands/dictionary.rs'),
+    read('src-tauri/src/commands/style_packs.rs'),
   ]);
 
 for (const kind of ['awaiting_approval', 'cancelled', 'error']) {
@@ -357,6 +359,20 @@ assert.doesNotMatch(
   coordinator,
   /pub fn less_computer_(?:window_dismiss|window_open|submit_text)\(/,
   'Coordinator must not own Less Computer command business or window wrappers',
+);
+assert.match(
+  stylePacksCommand,
+  /core\.preview_style_pack_runtime\(&style_pack\)/,
+  'style-pack runtime diagnostics must be assembled by Core',
+);
+const stylePackPreviewCommand = stylePacksCommand.match(
+  /pub fn preview_style_pack_runtime\([^]*?\n\}\n/,
+)?.[0];
+assert.ok(stylePackPreviewCommand, 'style-pack preview command must remain present');
+assert.doesNotMatch(
+  stylePackPreviewCommand,
+  /CoordinatorState/,
+  'style-pack commands must not reach back into Coordinator for business diagnostics',
 );
 for (const legacyDictationFacade of [
   'start_dictation',

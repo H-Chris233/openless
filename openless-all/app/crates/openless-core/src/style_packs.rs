@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::preferences::UserPreferences;
+use crate::prompt_compose::assemble_polish_system_prompt;
 use crate::types::PolishMode;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -179,6 +181,59 @@ pub struct StylePackRuntimeDiagnostics {
     pub includes_hotword_block: bool,
     pub includes_history_instruction: bool,
     pub preview_omits_front_app: bool,
+}
+
+/// Build the settings-page prompt diagnostics from the same Core prompt
+/// composer used by the production dictation pipeline. Hosts may render the
+/// returned DTO, but must not rebuild these rules themselves.
+pub fn build_style_pack_runtime_diagnostics(
+    style_pack: &StylePack,
+    preferences: &UserPreferences,
+    hotwords: Vec<String>,
+) -> StylePackRuntimeDiagnostics {
+    let single_turn = assemble_polish_system_prompt(
+        &style_pack.prompt,
+        &hotwords,
+        &preferences.working_languages,
+        preferences.chinese_script_preference,
+        preferences.output_language_preference,
+        None,
+        None,
+        false,
+    );
+    let multi_turn = assemble_polish_system_prompt(
+        &style_pack.prompt,
+        &hotwords,
+        &preferences.working_languages,
+        preferences.chinese_script_preference,
+        preferences.output_language_preference,
+        None,
+        None,
+        true,
+    );
+    StylePackRuntimeDiagnostics {
+        pack_id: style_pack.id.clone(),
+        pack_name: style_pack.name.clone(),
+        pack_prompt: style_pack.prompt.clone(),
+        pack_prompt_chars: style_pack.prompt.chars().count(),
+        context_premise: single_turn.context_premise.clone(),
+        context_premise_chars: single_turn.context_premise.chars().count(),
+        hotword_block: single_turn.hotword_block.clone(),
+        hotword_block_chars: single_turn.hotword_block.chars().count(),
+        history_instruction: multi_turn.history_instruction.clone(),
+        history_instruction_chars: multi_turn.history_instruction.chars().count(),
+        single_turn_prompt: single_turn.effective_system_prompt.clone(),
+        single_turn_prompt_chars: single_turn.effective_system_prompt.chars().count(),
+        multi_turn_prompt: multi_turn.effective_system_prompt.clone(),
+        multi_turn_prompt_chars: multi_turn.effective_system_prompt.chars().count(),
+        working_languages: preferences.working_languages.clone(),
+        hotwords,
+        context_window_minutes: preferences.polish_context_window_minutes,
+        includes_context_premise: single_turn.includes_context_premise,
+        includes_hotword_block: single_turn.includes_hotword_block,
+        includes_history_instruction: multi_turn.includes_history_instruction,
+        preview_omits_front_app: true,
+    }
 }
 
 impl Default for StylePack {
@@ -892,5 +947,36 @@ pub fn default_selection_polish_style_prompt_for_mode(mode: PolishMode) -> Strin
         PolishMode::Light => include_str!("prompts/selection_light.md").trim().to_owned(),
         PolishMode::Structured => include_str!("prompts/selection_structured.md").trim().to_owned(),
         PolishMode::Formal => include_str!("prompts/selection_formal.md").trim().to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_style_pack_runtime_diagnostics, StylePack};
+    use crate::preferences::UserPreferences;
+
+    #[test]
+    fn runtime_diagnostics_use_the_core_prompt_composer() {
+        let pack = StylePack {
+            id: "fixture.pack".into(),
+            name: "Fixture".into(),
+            prompt: "STYLE\n\n{{HOTWORDS}}".into(),
+            ..StylePack::default()
+        };
+        let preferences = UserPreferences::default();
+        let diagnostics = build_style_pack_runtime_diagnostics(
+            &pack,
+            &preferences,
+            vec!["OpenLess".into(), "  ".into()],
+        );
+
+        assert_eq!(diagnostics.pack_id, "fixture.pack");
+        assert_eq!(diagnostics.hotwords, vec!["OpenLess", "  "]);
+        assert_eq!(
+            diagnostics.single_turn_prompt_chars,
+            diagnostics.single_turn_prompt.chars().count()
+        );
+        assert!(diagnostics.single_turn_prompt.contains("OpenLess"));
+        assert!(diagnostics.preview_omits_front_app);
     }
 }

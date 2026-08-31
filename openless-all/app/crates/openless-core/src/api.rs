@@ -1399,6 +1399,24 @@ impl OpenLessBackend {
         self.style_packs.list_with_active(active_id)
     }
 
+    /// Return settings-page prompt diagnostics assembled by Core. The DTO is
+    /// owned and safe for any host to render; hosts must not duplicate prompt
+    /// composition or hotword filtering.
+    pub fn preview_style_pack_runtime(
+        &self,
+        style_pack: &StylePack,
+    ) -> crate::style_packs::StylePackRuntimeDiagnostics {
+        let preferences = self.get_preferences();
+        let hotwords = self
+            .list_vocabulary()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|entry| entry.enabled)
+            .map(|entry| entry.phrase)
+            .collect();
+        crate::style_packs::build_style_pack_runtime_diagnostics(style_pack, &preferences, hotwords)
+    }
+
     /// Persist the microphone selected by a host-owned menu or device picker.
     ///
     /// This focused use-case keeps callers away from whole-document writes and

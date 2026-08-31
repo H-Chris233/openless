@@ -1991,58 +1991,6 @@ impl Coordinator {
         Ok(())
     }
 
-    pub fn preview_style_pack_runtime(
-        &self,
-        style_pack: &crate::types::StylePack,
-    ) -> crate::types::StylePackRuntimeDiagnostics {
-        let prefs = self.inner.backend.get_preferences();
-        let hotwords = enabled_phrases(&self.inner);
-        let single_turn = crate::polish::assemble_polish_system_prompt(
-            &style_pack.prompt,
-            &hotwords,
-            &prefs.working_languages,
-            prefs.chinese_script_preference,
-            prefs.output_language_preference,
-            None,
-            // front_app 一样传 None：这是脱离运行时的静态预览，前台 app 和光标上下文
-            // 都要等真正听写时才有值。
-            None,
-            false,
-        );
-        let multi_turn = crate::polish::assemble_polish_system_prompt(
-            &style_pack.prompt,
-            &hotwords,
-            &prefs.working_languages,
-            prefs.chinese_script_preference,
-            prefs.output_language_preference,
-            None,
-            None,
-            true,
-        );
-        crate::types::StylePackRuntimeDiagnostics {
-            pack_id: style_pack.id.clone(),
-            pack_name: style_pack.name.clone(),
-            pack_prompt: style_pack.prompt.clone(),
-            pack_prompt_chars: style_pack.prompt.chars().count(),
-            context_premise: single_turn.context_premise.clone(),
-            context_premise_chars: single_turn.context_premise.chars().count(),
-            hotword_block: single_turn.hotword_block.clone(),
-            hotword_block_chars: single_turn.hotword_block.chars().count(),
-            history_instruction: multi_turn.history_instruction.clone(),
-            history_instruction_chars: multi_turn.history_instruction.chars().count(),
-            single_turn_prompt: single_turn.effective_system_prompt.clone(),
-            single_turn_prompt_chars: single_turn.effective_system_prompt.chars().count(),
-            multi_turn_prompt: multi_turn.effective_system_prompt.clone(),
-            multi_turn_prompt_chars: multi_turn.effective_system_prompt.chars().count(),
-            working_languages: prefs.working_languages,
-            hotwords,
-            context_window_minutes: prefs.polish_context_window_minutes,
-            includes_context_premise: single_turn.includes_context_premise,
-            includes_hotword_block: single_turn.includes_hotword_block,
-            includes_history_instruction: multi_turn.includes_history_instruction,
-            preview_omits_front_app: true,
-        }
-    }
 }
 
 fn raw_style_pack_uses_llm(pack: &crate::types::StylePack) -> bool {
@@ -4668,20 +4616,9 @@ mod tests {
     }
 }
 
-fn enabled_phrases(inner: &Arc<Inner>) -> Vec<String> {
-    inner
-        .backend
-        .list_vocabulary()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|e| e.enabled)
-        .map(|e| e.phrase)
-        .collect()
-}
-
 /// 词典启用词条，**按送进 ASR 词汇偏置的优先级排好序**。
 ///
-/// LLM 侧的热词块没有名额限制（[`enabled_phrases`] 直接用词典顺序就行），ASR 侧
+/// LLM 侧的热词块没有名额限制，Core 直接使用词典顺序；ASR 侧
 /// 有：`whisper::PROMPT_CHAR_BUDGET` 只给 240 个字符，装不下的词条被直接丢弃。
 /// 于是「送进去的顺序」就等于「谁能被听见」。
 ///
