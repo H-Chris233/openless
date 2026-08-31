@@ -139,6 +139,7 @@ jobs:
       - name: Resolve package version
         id: version
         shell: bash
+        working-directory: openless-all/app
         run: |
           if [ -n "${RELEASE_TAG:-}" ]; then
             VERSION=${RELEASE_TAG#v}
