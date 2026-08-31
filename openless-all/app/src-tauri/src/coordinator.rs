@@ -3699,7 +3699,7 @@ mod tests {
             state.pending_stop = false;
         }
 
-        end_session(&coordinator.inner).await.unwrap();
+        request_stop_during_starting(&coordinator.inner, "manual stop");
 
         let state = coordinator.inner.state.lock();
         assert_eq!(state.phase, SessionPhase::Starting);
