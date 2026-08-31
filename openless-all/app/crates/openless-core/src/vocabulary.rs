@@ -7,6 +7,7 @@ use chrono::Utc;
 
 use crate::errors::{BackendError, BackendErrorCode};
 use crate::persistence::{atomic_write, persistence_error, read_or_default};
+use crate::shared_types::LEARNED_VOCAB_NOTE;
 use crate::types::{DictionaryEntry, VocabPresetStore};
 
 /// Number of recently added manual entries that are guaranteed ASR hotword
@@ -23,7 +24,7 @@ pub fn prioritize_vocabulary_for_asr(entries: Vec<DictionaryEntry>) -> Vec<Strin
     let mut fresh_manual = Vec::with_capacity(FRESH_VOCAB_SEATS.min(entries.len()));
     let mut ranked = Vec::with_capacity(entries.len());
     for entry in entries {
-        let learned = entry.note.as_deref() == Some(crate::types::LEARNED_VOCAB_NOTE);
+        let learned = entry.note.as_deref() == Some(LEARNED_VOCAB_NOTE);
         if !learned && fresh_manual.len() < FRESH_VOCAB_SEATS {
             fresh_manual.push(entry);
         } else {
@@ -322,8 +323,8 @@ mod tests {
         };
         let mut entries = vec![entry("fresh", 0, None), entry("claude", 0, None)];
         entries.extend([
-            entry("Claude", 33, Some(crate::types::LEARNED_VOCAB_NOTE)),
-            entry("frequent", 12, Some(crate::types::LEARNED_VOCAB_NOTE)),
+            entry("Claude", 33, Some(LEARNED_VOCAB_NOTE)),
+            entry("frequent", 12, Some(LEARNED_VOCAB_NOTE)),
         ]);
 
         assert_eq!(
