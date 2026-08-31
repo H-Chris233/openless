@@ -1496,12 +1496,14 @@ pub(super) async fn begin_less_computer_session(
     Ok(Some(session_id))
 }
 
+#[cfg(test)]
 pub(super) async fn begin_session(inner: &Arc<Inner>) -> Result<(), String> {
     begin_session_as(inner, false).await
 }
 
 /// begin_session 的带参版本，voice_agent=true 时在 Starting 阶段就标记好，
 /// 防止 finish_starting_session 处理 pending_stop 时丢失标志。
+#[cfg(test)]
 pub(super) async fn begin_session_as(inner: &Arc<Inner>, voice_agent: bool) -> Result<(), String> {
     begin_session_as_with_session_id(inner, voice_agent, None).await
 }

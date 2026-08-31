@@ -1015,7 +1015,9 @@ mod tests {
         .concat();
         let downsampled = downsample_pcm_16k_to_8k(&pcm);
         let samples = downsampled
-            .as_chunks::<2>().0.iter()
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
             .collect::<Vec<_>>();
         assert_eq!(samples, vec![3, 7]);
@@ -1037,7 +1039,9 @@ mod tests {
         clear_downsample_tail(&mut remainder);
 
         let samples = downsampled
-            .as_chunks::<2>().0.iter()
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
             .collect::<Vec<_>>();
         assert_eq!(samples, vec![(1 + 2) / 2]);
@@ -1064,7 +1068,9 @@ mod tests {
         let state = asr.state.lock();
         let samples = state
             .pending_audio
-            .as_chunks::<2>().0.iter()
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
             .collect::<Vec<_>>();
         assert_eq!(samples, vec![1, 3]);

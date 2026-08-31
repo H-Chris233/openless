@@ -358,5 +358,18 @@ assert.doesNotMatch(
   /pub fn less_computer_(?:window_dismiss|window_open|submit_text)\(/,
   'Coordinator must not own Less Computer command business or window wrappers',
 );
+for (const legacyDictationFacade of [
+  'start_dictation',
+  'start_dictation_with_translation',
+  'stop_dictation',
+  'stop_dictation_with_translation',
+  'cancel_dictation',
+]) {
+  assert.doesNotMatch(
+    coordinator,
+    new RegExp(`\\bpub(?:\\(crate\\))?\\s+(?:async\\s+)?fn\\s+${legacyDictationFacade}\\b`),
+    `Coordinator must not expose the legacy ${legacyDictationFacade} facade; production entry points use openless-core`,
+  );
+}
 
 console.log('shared-backend-wire-contract.test.mjs passed');

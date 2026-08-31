@@ -73,7 +73,9 @@ impl ElevenLabsBatchASR {
 
         let duration_ms = pcm_duration_ms(pcm);
         let samples: Vec<i16> = pcm
-            .as_chunks::<2>().0.iter()
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
             .collect();
         let wav = encode_wav_16k_mono(&samples);

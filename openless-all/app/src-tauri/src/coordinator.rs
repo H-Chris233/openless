@@ -1903,38 +1903,6 @@ impl Coordinator {
         HotkeyMonitor::capability()
     }
 
-    pub async fn start_dictation(&self) -> Result<(), String> {
-        begin_session(&self.inner).await
-    }
-
-    pub async fn start_dictation_with_translation(&self) -> Result<(), String> {
-        begin_session(&self.inner).await?;
-        // 与桌面 Shift 走同一个 gate：目标语言没设 / 与唯一工作语言相同时不置位，
-        // 避免安卓浮层也出现「提示在翻译、实际没翻」。
-        let translation_armed = arm_translation_if_effective(&self.inner).await;
-        log::info!("[coord] android overlay dictation started (translation={translation_armed})");
-        Ok(())
-    }
-
-    pub async fn stop_dictation(&self) -> Result<(), String> {
-        if self.inner.state.lock().phase == SessionPhase::Starting {
-            request_stop_during_starting(&self.inner, "manual stop");
-            return Ok(());
-        }
-        end_session(&self.inner).await
-    }
-
-    pub async fn stop_dictation_with_translation(&self, translation: bool) -> Result<(), String> {
-        if translation {
-            arm_translation_if_effective(&self.inner).await;
-        }
-        self.stop_dictation().await
-    }
-
-    pub fn cancel_dictation(&self) {
-        cancel_session(&self.inner);
-    }
-
     pub fn switch_to_previous_style_pack(&self) {
         switch_to_previous_style(&self.inner);
     }
@@ -3160,7 +3128,7 @@ mod tests {
             state.cancelled = true;
         }
 
-        coordinator.start_dictation().await.unwrap();
+        begin_session(&coordinator.inner).await.unwrap();
 
         let state = coordinator.inner.state.lock();
         assert_eq!(state.phase, SessionPhase::Listening);
@@ -3184,7 +3152,7 @@ mod tests {
             state.session_id
         };
 
-        coordinator.start_dictation().await.unwrap();
+        begin_session(&coordinator.inner).await.unwrap();
 
         let state = coordinator.inner.state.lock();
         assert_eq!(state.phase, SessionPhase::Processing);
@@ -3921,7 +3889,7 @@ mod tests {
             state.pending_stop = false;
         }
 
-        coordinator.stop_dictation().await.unwrap();
+        end_session(&coordinator.inner).await.unwrap();
 
         let state = coordinator.inner.state.lock();
         assert_eq!(state.phase, SessionPhase::Starting);
@@ -3937,7 +3905,7 @@ mod tests {
             state.session_id = session_id(123);
         }
 
-        coordinator.stop_dictation().await.unwrap();
+        end_session(&coordinator.inner).await.unwrap();
 
         assert_eq!(coordinator.inner.state.lock().phase, SessionPhase::Idle);
         tokio::time::sleep(std::time::Duration::from_millis(
@@ -4020,7 +3988,7 @@ mod tests {
                 state.focus_target = Some(1);
             }
 
-            coordinator.cancel_dictation();
+            cancel_session(&coordinator.inner);
 
             let state = coordinator.inner.state.lock();
             assert_eq!(state.phase, expected_phase, "initial={initial:?}");
