@@ -374,6 +374,16 @@ assert.doesNotMatch(
   /CoordinatorState/,
   'style-pack commands must not reach back into Coordinator for business diagnostics',
 );
+assert.match(
+  coordinatorBusinessSources,
+  /backend\.asr_vocabulary_phrases\(\)/,
+  'ASR hotword ordering must come from the shared Core vocabulary projection',
+);
+assert.doesNotMatch(
+  coordinatorBusinessSources,
+  /(?:fn|const)\s+(?:asr_vocab_phrases|prioritize_vocab_for_asr|FRESH_VOCAB_SEATS)\b/,
+  'Coordinator must not own the Core ASR vocabulary priority rule',
+);
 for (const legacyDictationFacade of [
   'start_dictation',
   'start_dictation_with_translation',

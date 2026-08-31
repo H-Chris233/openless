@@ -2709,7 +2709,7 @@ mod tests {
         );
     }
 
-    /// 造一条词典条目。传给 `prioritize_vocab_for_asr` 时必须是词典的原始顺序
+    /// 造一条词典条目。传给 Core `prioritize_vocabulary_for_asr` 时必须是词典的原始顺序
     /// （最近添加在前）。
     fn vocab_entry(phrase: &str, hits: u64) -> crate::types::DictionaryEntry {
         crate::types::DictionaryEntry {
@@ -2732,14 +2732,14 @@ mod tests {
     /// `win-shukong` 挤出了 240 字符的 ASR 预算。保底席位之后必须按命中排。
     #[test]
     fn asr_vocab_orders_by_hits_once_past_the_fresh_seats() {
-        let mut entries: Vec<_> = (0..super::FRESH_VOCAB_SEATS)
+        let mut entries: Vec<_> = (0..openless_core::FRESH_VOCAB_SEATS)
             .map(|i| vocab_entry(&format!("fresh{i}"), 0))
             .collect();
         entries.push(vocab_entry("scrap", 1));
         entries.push(vocab_entry("hermes", 18));
         entries.push(vocab_entry("win-shukong", 7));
 
-        let ordered = super::prioritize_vocab_for_asr(entries);
+        let ordered = openless_core::prioritize_vocabulary_for_asr(entries);
 
         let pos = |p: &str| ordered.iter().position(|x| x == p).expect("phrase kept");
         assert!(
@@ -2757,7 +2757,7 @@ mod tests {
         let mut entries = vec![vocab_entry("Pathwyze", 0)];
         entries.extend((0..30).map(|i| vocab_entry(&format!("old{i}"), 100 + i)));
 
-        let ordered = super::prioritize_vocab_for_asr(entries);
+        let ordered = openless_core::prioritize_vocabulary_for_asr(entries);
 
         assert_eq!(
             ordered.first().map(String::as_str),
@@ -2776,7 +2776,7 @@ mod tests {
             vocab_entry("Claude", 33),
         ];
 
-        let ordered = super::prioritize_vocab_for_asr(entries);
+        let ordered = openless_core::prioritize_vocabulary_for_asr(entries);
 
         assert_eq!(
             ordered,
@@ -2788,7 +2788,7 @@ mod tests {
     #[test]
     fn learned_vocab_does_not_consume_fresh_manual_seats() {
         let mut entries = Vec::new();
-        for i in 0..super::FRESH_VOCAB_SEATS {
+        for i in 0..openless_core::FRESH_VOCAB_SEATS {
             entries.push(learned_vocab_entry(
                 &format!("learned{i}"),
                 1_000 - i as u64,
@@ -2796,13 +2796,13 @@ mod tests {
             entries.push(vocab_entry(&format!("manual{i}"), 0));
         }
 
-        let ordered = super::prioritize_vocab_for_asr(entries);
-        let expected_manual: Vec<String> = (0..super::FRESH_VOCAB_SEATS)
+        let ordered = openless_core::prioritize_vocabulary_for_asr(entries);
+        let expected_manual: Vec<String> = (0..openless_core::FRESH_VOCAB_SEATS)
             .map(|i| format!("manual{i}"))
             .collect();
 
         assert_eq!(
-            &ordered[..super::FRESH_VOCAB_SEATS],
+            &ordered[..openless_core::FRESH_VOCAB_SEATS],
             expected_manual.as_slice(),
             "学习词条即使排在词典前面，也不能占用手动新增的保底席位"
         );
@@ -2816,7 +2816,7 @@ mod tests {
             learned_vocab_entry("learned-high", 20),
         ];
 
-        let ordered = super::prioritize_vocab_for_asr(entries);
+        let ordered = openless_core::prioritize_vocabulary_for_asr(entries);
 
         assert_eq!(ordered, vec!["only-manual", "learned-high", "learned-low"]);
     }
@@ -2829,7 +2829,7 @@ mod tests {
             learned_vocab_entry("warm", 5),
         ];
 
-        let ordered = super::prioritize_vocab_for_asr(entries);
+        let ordered = openless_core::prioritize_vocabulary_for_asr(entries);
 
         assert_eq!(ordered, vec!["hot", "warm", "cold"]);
     }
@@ -2842,7 +2842,7 @@ mod tests {
             learned_vocab_entry("other", 10),
         ];
 
-        let ordered = super::prioritize_vocab_for_asr(entries);
+        let ordered = openless_core::prioritize_vocabulary_for_asr(entries);
 
         assert_eq!(ordered, vec!["Claude", "other"]);
     }
@@ -4614,91 +4614,6 @@ mod tests {
             "选区终态 timer 不能在新的语音状态上调用 Idle"
         );
     }
-}
-
-/// 词典启用词条，**按送进 ASR 词汇偏置的优先级排好序**。
-///
-/// LLM 侧的热词块没有名额限制，Core 直接使用词典顺序；ASR 侧
-/// 有：`whisper::PROMPT_CHAR_BUDGET` 只给 240 个字符，装不下的词条被直接丢弃。
-/// 于是「送进去的顺序」就等于「谁能被听见」。
-///
-/// 而词典本身的顺序是**最近添加的在最前**（[`DictionaryStore::add`] 用
-/// `insert(0)`，为的是词汇表页面把刚加的词排在上面）。两个各自都合理的决定撞在
-/// 一起，结果是预算永远优先喂给最新的词，最老的先掉出去——而最老的那批恰恰是
-/// 攒了最多命中的常用词。真机上的表现：一份 40 条的词典里，命中 18 次、7 次、
-/// 10 次的三个专有名词全部排在预算外，从来没送到过 ASR；用户在词汇表里看得见
-/// 它们、以为在生效，实际上一次都没生效过。
-///
-/// 排序规则：
-/// 1. 最近手动添加的前 [`FRESH_VOCAB_SEATS`] 条保底——刚加的词还没机会攒命中，纯按
-///    命中排会让它永远进不去，而用户刚加它多半就是因为刚被它坑过。手改学习词条不占
-///    这些席位；它们本来就可能是半截词，必须靠真实命中自己爬进预算。
-/// 2. 其余按命中次数降序。
-/// 3. 同词异形（`claude` / `Claude`）只留命中多的那个写法。
-fn asr_vocab_phrases(inner: &Arc<Inner>) -> Vec<String> {
-    let entries: Vec<crate::types::DictionaryEntry> = inner
-        .backend
-        .list_vocabulary()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|e| e.enabled)
-        .collect();
-    prioritize_vocab_for_asr(entries)
-}
-
-/// 最近添加的词条无条件占住的名额，见 [`asr_vocab_phrases`]。
-const FRESH_VOCAB_SEATS: usize = 5;
-
-/// [`asr_vocab_phrases`] 的纯函数部分，方便直接测排序规则。
-///
-/// `entries` 必须是词典的原始顺序（最近添加在前）——保底席位靠它取「最近」，
-/// 不去解析 `created_at` 字符串（历史文件由 Swift 版写入，格式不保证一致）。
-fn prioritize_vocab_for_asr(entries: Vec<crate::types::DictionaryEntry>) -> Vec<String> {
-    let mut fresh_manual = Vec::with_capacity(FRESH_VOCAB_SEATS.min(entries.len()));
-    let mut ranked = Vec::with_capacity(entries.len());
-    for entry in entries {
-        let learned = entry.note.as_deref() == Some(crate::types::LEARNED_VOCAB_NOTE);
-        if !learned && fresh_manual.len() < FRESH_VOCAB_SEATS {
-            fresh_manual.push(entry);
-        } else {
-            ranked.push(entry);
-        }
-    }
-    // 保底席位之外的全部词条按命中降序；`sort_by_key` 是稳定排序，同命中次数的保持
-    // 词典原顺序（最近添加在前）。学习词条也在这里，不会被拿来填空缺的手动保底席位。
-    ranked.sort_by_key(|e| std::cmp::Reverse(e.hits));
-    fresh_manual.extend(ranked);
-    let ordered = fresh_manual;
-
-    // 同一个词的不同写法（`claude` / `Claude`）只留一个：既省预算，也免得两种
-    // 写法一起进词表让模型无所适从。留**命中多**的那个写法，但位置取最靠前那次
-    // ——否则一个刚被收进来、命中为 0 的小写变体会把攒了几十次命中的正确写法顶掉。
-    let mut best: std::collections::HashMap<String, (usize, crate::types::DictionaryEntry)> =
-        std::collections::HashMap::new();
-    for (index, entry) in ordered.into_iter().enumerate() {
-        let key = entry.phrase.trim().to_lowercase();
-        if key.is_empty() {
-            continue;
-        }
-        match best.entry(key) {
-            std::collections::hash_map::Entry::Vacant(slot) => {
-                slot.insert((index, entry));
-            }
-            std::collections::hash_map::Entry::Occupied(mut slot) => {
-                if entry.hits > slot.get().1.hits {
-                    let position = slot.get().0;
-                    slot.insert((position, entry));
-                }
-            }
-        }
-    }
-
-    let mut picked: Vec<(usize, String)> = best
-        .into_values()
-        .map(|(index, entry)| (index, entry.phrase))
-        .collect();
-    picked.sort_by_key(|(index, _)| *index);
-    picked.into_iter().map(|(_, phrase)| phrase).collect()
 }
 
 /// 终止态（Done / Error）后延迟 N ms 把胶囊改回 Idle，让浮窗自动消失。

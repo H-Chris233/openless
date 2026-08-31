@@ -1686,6 +1686,17 @@ impl OpenLessBackend {
             .collect()
     }
 
+    /// Return enabled vocabulary phrases in the Core ASR priority order.
+    pub fn asr_vocabulary_phrases(&self) -> Vec<String> {
+        let entries = self
+            .list_vocabulary()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|entry| entry.enabled)
+            .collect();
+        crate::vocabulary::prioritize_vocabulary_for_asr(entries)
+    }
+
     /// Return the instance-local correction suggestions awaiting a user
     /// decision. The returned value is owned and safe to render on any host.
     pub fn pending_corrections(&self) -> Vec<PendingCorrection> {

@@ -9,6 +9,58 @@ use crate::errors::{BackendError, BackendErrorCode};
 use crate::persistence::{atomic_write, persistence_error, read_or_default};
 use crate::types::{DictionaryEntry, VocabPresetStore};
 
+/// Number of recently added manual entries that are guaranteed ASR hotword
+/// seats before hit-count ranking is applied.
+pub const FRESH_VOCAB_SEATS: usize = 5;
+
+/// Order enabled vocabulary entries for ASR hotword biasing.
+///
+/// The persisted dictionary keeps the newest manual entries first. Reserve a
+/// bounded number of those entries, rank the remainder by hit count, then
+/// collapse case variants while keeping the highest-hit spelling at the first
+/// position. This is a pure Core rule shared by every host.
+pub fn prioritize_vocabulary_for_asr(entries: Vec<DictionaryEntry>) -> Vec<String> {
+    let mut fresh_manual = Vec::with_capacity(FRESH_VOCAB_SEATS.min(entries.len()));
+    let mut ranked = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let learned = entry.note.as_deref() == Some(crate::types::LEARNED_VOCAB_NOTE);
+        if !learned && fresh_manual.len() < FRESH_VOCAB_SEATS {
+            fresh_manual.push(entry);
+        } else {
+            ranked.push(entry);
+        }
+    }
+    ranked.sort_by_key(|entry| std::cmp::Reverse(entry.hits));
+    fresh_manual.extend(ranked);
+
+    let mut best: std::collections::HashMap<String, (usize, DictionaryEntry)> =
+        std::collections::HashMap::new();
+    for (index, entry) in fresh_manual.into_iter().enumerate() {
+        let key = entry.phrase.trim().to_lowercase();
+        if key.is_empty() {
+            continue;
+        }
+        match best.entry(key) {
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert((index, entry));
+            }
+            std::collections::hash_map::Entry::Occupied(mut slot) => {
+                if entry.hits > slot.get().1.hits {
+                    let position = slot.get().0;
+                    slot.insert((position, entry));
+                }
+            }
+        }
+    }
+
+    let mut picked: Vec<(usize, String)> = best
+        .into_values()
+        .map(|(index, entry)| (index, entry.phrase))
+        .collect();
+    picked.sort_by_key(|(index, _)| *index);
+    picked.into_iter().map(|(_, phrase)| phrase).collect()
+}
+
 pub struct DictionaryStore {
     path: PathBuf,
     lock: Mutex<()>,
@@ -256,5 +308,27 @@ mod tests {
         save_vocab_presets(&dir, &store).unwrap();
         assert_eq!(list_vocab_presets(&dir).unwrap(), store);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn asr_priority_preserves_fresh_manual_entries_and_dedupes_case_variants() {
+        let entry = |phrase: &str, hits: u64, note: Option<&str>| DictionaryEntry {
+            id: phrase.to_string(),
+            phrase: phrase.to_string(),
+            note: note.map(str::to_string),
+            enabled: true,
+            hits,
+            created_at: String::new(),
+        };
+        let mut entries = vec![entry("fresh", 0, None), entry("claude", 0, None)];
+        entries.extend([
+            entry("Claude", 33, Some(crate::types::LEARNED_VOCAB_NOTE)),
+            entry("frequent", 12, Some(crate::types::LEARNED_VOCAB_NOTE)),
+        ]);
+
+        assert_eq!(
+            prioritize_vocabulary_for_asr(entries),
+            vec!["fresh", "Claude", "frequent"]
+        );
     }
 }
