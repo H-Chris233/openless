@@ -6,7 +6,7 @@ use futures_util::future::BoxFuture;
 
 use crate::dictation_context::DictationContext;
 use crate::errors::{BackendError, BackendErrorCode};
-use crate::types::{DictationResult, InsertStatus, PolishDelta, SessionId, TranscriptDelta};
+use crate::types::{InsertStatus, PolishDelta, SessionId, TranscriptDelta};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostAction {
@@ -375,9 +375,6 @@ where
 {
     Box::pin(future)
 }
-
-#[allow(dead_code)]
-fn _keep_result_type_visible(_: DictationResult) {}
 
 #[cfg(test)]
 mod resource_tests {
