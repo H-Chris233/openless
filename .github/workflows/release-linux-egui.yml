@@ -208,6 +208,21 @@ jobs:
             '{schemaVersion:1, host:"linux-egui", arch:"x86_64", version:$version, url:$url, sha256:$sha256, minisign:$signature}' \
             > "$OUTPUT/latest-linux-egui-x86_64.json"
 
+      - name: Verify Linux updater manifest matches the artifact
+        working-directory: openless-all/app
+        run: |
+          set -euo pipefail
+          OUTPUT=target/linux-egui-packages
+          APPIMAGE=$(find "$OUTPUT" -maxdepth 1 -name '*.AppImage' -print -quit)
+          MANIFEST="$OUTPUT/latest-linux-egui-x86_64.json"
+          test -s "$APPIMAGE"
+          test -s "$MANIFEST"
+          SHA256=$(sha256sum "$APPIMAGE" | cut -d' ' -f1)
+          jq -e \
+            --arg sha256 "$SHA256" \
+            '.schemaVersion == 1 and .host == "linux-egui" and .arch == "x86_64" and .sha256 == $sha256' \
+            "$MANIFEST" >/dev/null
+
       - name: Upload Linux egui workflow artifacts
         uses: actions/upload-artifact@v4
         with:

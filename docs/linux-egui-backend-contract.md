@@ -101,7 +101,7 @@ let current: BackendSnapshot = backend.snapshot();
 | credentials/channels | status、显式 `SecretValue` read/write/remove、channel CRUD/reorder/test、active provider |
 | history/activity | list/recent/append/update/delete/clear、activity snapshot/bump |
 | vocabulary/correction | list/add/remove/enable/hits、preset、correction-rule lifecycle |
-| style packs | list/get/create/update/activate/enable/reset/delete、安全 ZIP import/export |
+| style packs | list/get/create/update/activate/enable/reset/delete、安全 ZIP import/export；`preview_style_pack_runtime(style_pack)` 返回由 Core 统一组装的单轮/多轮 prompt 诊断 |
 | dictation | start/stop/cancel、snapshot、session-scoped progress 与插入终态 |
 
 有平台、网络、进程或 runtime 变化点的复杂领域通过
@@ -124,6 +124,11 @@ let current: BackendSnapshot = backend.snapshot();
 `BackendServices::unsupported()` 是正式的降级 Adapter：每个调用返回
 `BackendErrorCode::Unsupported`，不会启动 task 或返回空成功。egui crate 不得直接 include
 `src-tauri/src/*.rs`，也不得为了暂时可用而复制业务逻辑。
+
+`preview_style_pack_runtime(style_pack)` 是同步、无 I/O 的 Core 查询。它读取当前偏好和已启用
+词典，使用与生产润色路径相同的 prompt composer，返回 `StylePackRuntimeDiagnostics`（包括
+单轮/多轮 prompt、上下文 premise、热词块及字符数）。宿主只渲染返回 DTO；不得在 Tauri 或
+egui 中重新拼接 prompt、过滤热词或推导字符数。
 
 ### 3.3 `ProviderApi`
 
