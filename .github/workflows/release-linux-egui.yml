@@ -54,7 +54,6 @@ jobs:
             libwayland-dev \
             libx11-dev \
             libxkbcommon-dev \
-            minisign \
             patchelf \
             pkg-config \
             rpm \
@@ -188,6 +187,9 @@ jobs:
             exit 1
           fi
           if [ -n "${MINISIGN_SECRET:-}" ]; then
+            if ! command -v minisign >/dev/null 2>&1; then
+              cargo install --locked --version 0.9.1 minisign
+            fi
             printf '%s' "$MINISIGN_SECRET" > "$RUNNER_TEMP/linux-egui.minisign.key"
             minisign -S -s "$RUNNER_TEMP/linux-egui.minisign.key" -m "$APPIMAGE" -x "$APPIMAGE.minisig"
           fi
