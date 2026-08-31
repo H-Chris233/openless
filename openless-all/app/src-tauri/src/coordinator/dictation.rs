@@ -3796,7 +3796,7 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
             insert_status: InsertStatus::Failed,
             error_code: Some("emptyTranscript".to_string()),
             duration_ms: Some(raw.duration_ms),
-            dictionary_entry_count: Some(enabled_phrases(inner).len() as u32),
+            dictionary_entry_count: Some(inner.backend.enabled_vocabulary_phrases().len() as u32),
             // empty-transcript（ASR 没识别到任何文字）也保留 wav 标记——这是用户最想
             // 通过原始录音定位"是不是麦克风太小声 / ASR 模型问题"的场景。修 pr_agent
             // "Missing Audio" 反馈。
@@ -3911,7 +3911,7 @@ pub(super) async fn end_session(inner: &Arc<Inner>) -> Result<(), String> {
         }
     };
     let mode = pack.base_mode;
-    let hotword_strs = enabled_phrases(inner);
+    let hotword_strs = inner.backend.enabled_vocabulary_phrases();
     let working_languages = prefs.working_languages.clone();
     let chinese_script_preference = prefs.chinese_script_preference;
     let output_language_preference = prefs.output_language_preference;
@@ -4378,7 +4378,7 @@ async fn finish_dictation_multimodal(
     } else {
         let base =
             crate::types::style_pack_prompt(&pack, crate::types::StylePromptKind::DictationAsr);
-        let hotwords = enabled_phrases(inner);
+        let hotwords = inner.backend.enabled_vocabulary_phrases();
         let mut prompt = base;
         if !prefs.working_languages.is_empty() {
             prompt.push_str(&format!(
@@ -4451,7 +4451,7 @@ async fn finish_dictation_multimodal(
             insert_status: InsertStatus::Failed,
             error_code: Some("emptyTranscript".to_string()),
             duration_ms: Some(duration_ms),
-            dictionary_entry_count: Some(enabled_phrases(inner).len() as u32),
+            dictionary_entry_count: Some(inner.backend.enabled_vocabulary_phrases().len() as u32),
             has_audio_recording: Some(inner.audio_archive_active.load(Ordering::Relaxed)),
             asr_provider: None,
             asr_model: None,

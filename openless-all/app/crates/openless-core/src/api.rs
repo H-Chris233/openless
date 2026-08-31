@@ -1407,13 +1407,7 @@ impl OpenLessBackend {
         style_pack: &StylePack,
     ) -> crate::style_packs::StylePackRuntimeDiagnostics {
         let preferences = self.get_preferences();
-        let hotwords = self
-            .list_vocabulary()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|entry| entry.enabled)
-            .map(|entry| entry.phrase)
-            .collect();
+        let hotwords = self.enabled_vocabulary_phrases();
         crate::style_packs::build_style_pack_runtime_diagnostics(style_pack, &preferences, hotwords)
     }
 
@@ -1679,6 +1673,17 @@ impl OpenLessBackend {
 
     pub fn list_vocabulary(&self) -> Result<Vec<DictionaryEntry>, BackendError> {
         self.vocabulary.list()
+    }
+
+    /// Return enabled vocabulary phrases in persisted order. Hosts reuse this
+    /// owned projection instead of duplicating the filtering rule.
+    pub fn enabled_vocabulary_phrases(&self) -> Vec<String> {
+        self.list_vocabulary()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|entry| entry.enabled)
+            .map(|entry| entry.phrase)
+            .collect()
     }
 
     /// Return the instance-local correction suggestions awaiting a user
