@@ -1986,6 +1986,7 @@ impl openless_core::RemoteInputRuntimeAdapter for TauriRemoteInputRuntimeAdapter
             let binding = openless_core::RemoteInputServerBinding {
                 port: handle.bound_port,
                 urls: crate::remote_server::access_urls(handle.bound_port),
+                urls_stale: false,
             };
             *server.lock().await = Some(handle);
             Ok(binding)

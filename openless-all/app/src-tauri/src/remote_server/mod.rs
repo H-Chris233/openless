@@ -98,9 +98,11 @@ impl RemoteServerHandle {
 #[serde(rename_all = "camelCase")]
 pub struct RemoteInputStatus {
     pub running: bool,
+    pub starting: bool,
     pub port: u16,
     pub pin: String,
     pub urls: Vec<String>,
+    pub urls_stale: bool,
 }
 
 // ───────────────────────── 工具函数 ─────────────────────────

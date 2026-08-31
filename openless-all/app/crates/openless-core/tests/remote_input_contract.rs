@@ -66,6 +66,7 @@ impl RemoteInputRuntimeAdapter for FixtureRemoteRuntime {
             Ok(RemoteInputServerBinding {
                 port: config.port,
                 urls: vec![format!("https://192.168.1.2:{}", config.port)],
+                urls_stale: false,
             })
         })
     }

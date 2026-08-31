@@ -381,8 +381,10 @@ mod tests {
             Some(RemoteInputStatus {
                 enabled: true,
                 running: true,
+                starting: false,
                 port: 9443,
                 urls: vec!["https://192.168.1.2:9443".into()],
+                urls_stale: false,
                 locale: "zh-CN".into(),
                 connection_count: 1,
                 active_session_id: None,

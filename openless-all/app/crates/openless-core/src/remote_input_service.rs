@@ -20,8 +20,10 @@ const SUPPORTED_LOCALES: [&str; 5] = ["zh-CN", "zh-TW", "en", "ja", "ko"];
 struct RemoteInputState {
     enabled: bool,
     running: bool,
+    starting: bool,
     port: u16,
     urls: Vec<String>,
+    urls_stale: bool,
     locale: String,
     pairing_pin: Option<SecretValue>,
     connections: HashMap<SessionId, Option<SessionId>>,
@@ -50,8 +52,10 @@ impl RemoteInputService {
             state: Arc::new(Mutex::new(RemoteInputState {
                 enabled: false,
                 running: false,
+                starting: false,
                 port,
                 urls: Vec::new(),
+                urls_stale: false,
                 locale,
                 pairing_pin: None,
                 connections: HashMap::new(),
@@ -103,7 +107,9 @@ impl RemoteInputService {
                 .collect::<Vec<_>>();
             state.connections.clear();
             state.running = false;
+            state.starting = false;
             state.urls.clear();
+            state.urls_stale = false;
             sessions
         };
         let mut first_error = None;
@@ -124,6 +130,14 @@ impl RemoteInputService {
 
     async fn start_server(&self, port: u16) -> Result<(), BackendError> {
         let pin = self.ensure_pairing_pin().await?;
+        {
+            let mut state = self.state.lock().expect("remote input state lock poisoned");
+            state.starting = true;
+            state.running = false;
+            state.urls.clear();
+            state.urls_stale = false;
+        }
+        self.publish_status();
         match self
             .runtime
             .start_server(RemoteInputServerConfig {
@@ -134,9 +148,11 @@ impl RemoteInputService {
         {
             Ok(binding) => {
                 let mut state = self.state.lock().expect("remote input state lock poisoned");
+                state.starting = false;
                 state.running = true;
                 state.port = binding.port;
                 state.urls = binding.urls;
+                state.urls_stale = binding.urls_stale;
                 drop(state);
                 self.publish_status();
                 Ok(())
@@ -144,8 +160,10 @@ impl RemoteInputService {
             Err(error) => {
                 {
                     let mut state = self.state.lock().expect("remote input state lock poisoned");
+                    state.starting = false;
                     state.running = false;
                     state.urls.clear();
+                    state.urls_stale = false;
                 }
                 let public = public_remote_error(&error);
                 self.event_publisher().publish(
@@ -353,8 +371,10 @@ impl RemoteInputApi for RemoteInputService {
         Ok(RemoteInputStatus {
             enabled: state.enabled,
             running: state.running,
+            starting: state.starting,
             port: state.port,
             urls: state.urls.clone(),
+            urls_stale: state.urls_stale,
             locale: state.locale.clone(),
             connection_count: state.connections.len(),
             active_session_id: state.connections.values().find_map(|session| *session),

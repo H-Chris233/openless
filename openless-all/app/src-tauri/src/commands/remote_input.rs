@@ -31,9 +31,11 @@ fn map_remote_input_status(
 ) -> crate::remote_server::RemoteInputStatus {
     crate::remote_server::RemoteInputStatus {
         running: status.running,
+        starting: status.starting,
         port: status.port,
         pin: pin.into_exposed(),
         urls: status.urls,
+        urls_stale: status.urls_stale,
     }
 }
 
@@ -94,8 +96,10 @@ mod tests {
             openless_core::RemoteInputStatus {
                 enabled: true,
                 running: true,
+                starting: false,
                 port: 9443,
                 urls: vec!["https://192.168.1.2:9443".into()],
+                urls_stale: false,
                 locale: "zh-CN".into(),
                 connection_count: 2,
                 active_session_id: Some(openless_core::SessionId::new()),

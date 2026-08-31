@@ -839,8 +839,10 @@ pub trait QaApi: Send + Sync {
 pub struct RemoteInputStatus {
     pub enabled: bool,
     pub running: bool,
+    pub starting: bool,
     pub port: u16,
     pub urls: Vec<String>,
+    pub urls_stale: bool,
     pub locale: String,
     pub connection_count: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -863,6 +865,7 @@ pub struct RemoteInputServerConfig {
 pub struct RemoteInputServerBinding {
     pub port: u16,
     pub urls: Vec<String>,
+    pub urls_stale: bool,
 }
 
 /// Native transport and shared-dictation bridge. TLS, sockets, H5 assets and
@@ -1806,8 +1809,10 @@ mod tests {
         let status = RemoteInputStatus {
             enabled: true,
             running: true,
+            starting: false,
             port: 18989,
             urls: vec!["https://192.168.1.2:18989".into()],
+            urls_stale: false,
             locale: "zh-CN".into(),
             connection_count: 1,
             active_session_id: Some(SessionId::new()),

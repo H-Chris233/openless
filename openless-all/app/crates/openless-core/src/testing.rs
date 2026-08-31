@@ -186,6 +186,7 @@ impl RemoteInputRuntimeAdapter for RecordingRemoteInputRuntime {
             Ok(RemoteInputServerBinding {
                 port: config.port,
                 urls: vec![format!("https://127.0.0.1:{}", config.port)],
+                urls_stale: false,
             })
         })
     }

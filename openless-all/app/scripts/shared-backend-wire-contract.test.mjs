@@ -77,8 +77,8 @@ assert.ok(remoteStatus, 'RemoteInputStatus interface must exist');
 const remoteFields = [...remoteStatus.matchAll(/^\s+(\w+):/gm)].map((match) => match[1]);
 assert.deepEqual(
   remoteFields,
-  ['running', 'port', 'pin', 'urls'],
-  'the explicit remote status command must preserve the legacy secret wire shape',
+  ['running', 'starting', 'port', 'pin', 'urls', 'urlsStale'],
+  'the explicit remote status command must preserve the beta secret wire shape',
 );
 assert.match(remoteIpc, /invokeOrMock\("get_remote_input_status"/, 'remote status command name drifted');
 assert.match(remoteSection, /listen\('remote-input:running'/, 'remote running event must refresh status');
