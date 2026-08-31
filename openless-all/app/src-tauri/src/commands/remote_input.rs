@@ -111,9 +111,11 @@ mod tests {
             serde_json::to_value(wire).unwrap(),
             serde_json::json!({
                 "running": true,
+                "starting": false,
                 "port": 9443,
                 "pin": "123456",
-                "urls": ["https://192.168.1.2:9443"]
+                "urls": ["https://192.168.1.2:9443"],
+                "urlsStale": false
             })
         );
     }
