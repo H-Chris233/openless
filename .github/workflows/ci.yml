@@ -229,6 +229,8 @@ jobs:
     name: Linux egui validation artifact
     if: github.event_name == 'workflow_dispatch' && inputs.upload_linux_validation_artifact
     needs: linux-core-contract
+    permissions:
+      contents: write
     uses: ./.github/workflows/release-linux-egui.yml
     with:
       release_tag: ''
