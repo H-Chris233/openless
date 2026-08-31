@@ -366,7 +366,7 @@ assert.match(
   'style-pack runtime diagnostics must be assembled by Core',
 );
 const stylePackPreviewCommand = stylePacksCommand.match(
-  /pub fn preview_style_pack_runtime\([^]*?\n\}\n/,
+  /pub fn preview_style_pack_runtime\([^]*?\r?\n\}\r?\n/,
 )?.[0];
 assert.ok(stylePackPreviewCommand, 'style-pack preview command must remain present');
 assert.doesNotMatch(
