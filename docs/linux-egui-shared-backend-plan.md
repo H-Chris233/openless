@@ -71,8 +71,8 @@ egui UI  ── Linux 适配器 ──┘
 | M6 | 进行中 | Tauri 已管理 `Arc<OpenLessBackend>`；生产云 ASR/LLM/Omni/Auxiliary/QA/Provider 管理面的运行时均调用 core 共享 Implementation，Tauri 只注入 `SystemCredentialStore`、平台录音、native/local ASR、窗口/插入与系统 runtime；Selection Voice Adapter 只提交原始 transcript、执行 Core `SelectionVoiceEditAction`、保存 opaque insertion target 并回报 apply outcome，源码门禁禁止业务规则回流；React command、CLI、Android JNI、remote WebSocket PCM、桌面普通听写热键及复杂领域的业务调用均调用 core Interface；Less Computer 文字入口、capture lease、同 session 的语音 submit/cancel 已调用 Core，Coordinator 仅保留宿主 recorder/ASR、热键边沿和 pending-stop 兼容编排；legacy provider/Selection Voice 业务副本及仅供历史测试使用的 coordinator runner/approval helper 已删除 | Provider command 已收窄为参数/错误转换，Linux factory 已接入同一 Core service；继续收窄 Less Computer 的兼容 host state（不向 Linux 暴露），并补齐 Android/macOS/Ubuntu 原生证据 |
 | M7 | 已完成（Interface） | `BackendServices` 全领域 Interface、完整 headless/unsupported 示例、Linux host contract、能力 fixture 和 unsupported 语义已交付；`LinuxHost::save_settings`/`update_settings_strict` 强制 snapshot revision；4 项公共 host contract 已覆盖设置事务以及 Selection/Selection Voice 的 preview、confirm、cancel、stale、outcome-unknown 与 Linux preview/revert `Unsupported`；Provider 管理面已有 Core/Tauri/Linux 接线和源码契约；当前公共面门禁和 headless 示例运行通过 | egui/eframe UI、交互、视觉与 UI 验收由另一组负责，不属于本交付 |
 | M8 | 进行中 | Linux Secret Service、资源布局、fcitx5 插入、cpal 录音、DBus 热键 listener、HostActions、能力矩阵、单实例与统一 `LinuxNativeRuntime` 已实现；`LinuxBackendBuilder::from_shared_providers(config)` 无需 UI 注入 provider factory，即可组装共享云 ASR/LLM/Omni/Auxiliary、ProviderService、Marketplace、传统 Pipeline、凭据和 settings runtime；`LinuxHost` 暴露同一 ProviderApi；`LinuxHost::download_marketplace_archive` 提供不覆盖已有文件的 filesystem sink；`LinuxSettingsRuntime` 按 receipt 恢复显式 effect；WSL Ubuntu 已通过真实 Secret Service adapter 的 set/read/remove + secret 边界 contract、fcitx5 插件加载/DBus method/listener/press-release-combined-translation signal contract、cpal 无输入设备的稳定错误分类，以及 desktop/AppStream metadata 校验 | 仍需真实焦点输入上下文中的按键/translation 顺序、存在音频设备时 cpal start/stop、settings effect/单实例退出的桌面流程，以及正式 Ubuntu runner 的安装/签名证据；合成 DBus signal 和 WSL contract 不能替代这些证明 |
-| M9 | 进行中（CI runner 门禁已通过；原生安装/设备证据待完成） | fork CI run 33357355484（head `457f97f2`）四个平台 job 全部成功：Linux `openless-core` 596 unit + 79 contract、Linux crate 30 + 4 host contract（3 个真实 Linux native contract 明确 ignored）；macOS Tauri 714 tests（707 passed、7 ignored）、Windows Tauri/Core checks、Android `aarch64`/`x86_64` mobile compile/Gradle/JVM/instrumentation/Keystore contract；frontend/contract 58、196/30/29 基线、依赖/秘密/隔离/runtime/public-surface/source/headless 等门禁均通过 | 仍缺 Android 签名安装/设备运行、macOS/Windows 安装升级 smoke、Ubuntu 真实桌面输入/音频/设置流程及正式 runner 的签名安装证据；Linux UI stub 仍不属于产品验收 |
-| M10 | 进行中（验证产物已可生成；正式发布待外部门） | Tauri/Linux release workflow 已拆分；Linux deb/rpm/AppImage/fcitx5/updater 契约和 README/RELEASING 已加入；CI run 33357355484 的 Linux artifact job 成功上传并校验 `openless-linux-egui-x86_64`（artifact ID 9745648004），手动 Tauri/Android workflow 也已分别生成桌面和四 ABI debug artifact | UI stub 未替换，故 Linux workflow 不监听 tag；正式签名密钥、真实 Ubuntu runner 安装/运行 proof、正式 macOS/Windows/Android 签名安装仍缺 |
+| M9 | 进行中（CI runner 门禁已通过；原生安装/设备证据待完成） | fork CI run 33389007642（head `4632e09c`）四个平台 job 全部成功：Linux `openless-core` 596 unit + 79 contract、Linux crate 30 + 4 host contract（3 个真实 Linux native contract 明确 ignored）；macOS Tauri 714 tests（707 passed、7 ignored）、Windows Tauri/Core checks、Android `aarch64`/`x86_64` mobile compile/Gradle/JVM/instrumentation/Keystore contract；frontend/contract 58、196/30/29 基线、依赖/秘密/隔离/runtime/public-surface/source/headless 等门禁均通过 | 仍缺 Android 签名安装/设备运行、macOS/Windows 安装升级 smoke、Ubuntu 真实桌面输入/音频/设置流程及正式 runner 的签名安装证据；Linux UI stub 仍不属于产品验收 |
+| M10 | 进行中（验证产物已可生成；正式发布待外部门） | Tauri/Linux release workflow 已拆分；Linux deb/rpm/AppImage/fcitx5/updater 契约和 README/RELEASING 已加入；CI run 33389007642 的 Linux artifact job 成功上传并校验 `openless-linux-egui-x86_64`（artifact ID 9756891660），手动 Tauri/Android workflow 也已分别生成桌面和四 ABI debug artifact | UI stub 未替换，故 Linux workflow 不监听 tag；正式签名密钥、真实 Ubuntu runner 安装/运行 proof、正式 macOS/Windows/Android 签名安装仍缺 |
 
 ### 1.1.1 当前 Coordinator 收口边界
 
@@ -145,7 +145,7 @@ Ubuntu 桌面 runner 的原生证明：
 
 ### 1.2.2 跨平台 CI runner 验收（2026-08-31）
 
-提交 `457f97f2c61f1086dcdc161862536fc876cd0173` 在 fork 的 [CI run 33357355484](https://github.com/H-Chris233/openless/actions/runs/33357355484) 上四个平台及 Linux artifact job 全部成功：
+提交 `4632e09c3ef407954df1bb053f0973457b42cf5e` 在 fork 的 [CI run 33389007642](https://github.com/H-Chris233/openless/actions/runs/33389007642) 上四个平台及 Linux artifact job 全部成功：
 
 - Linux core and egui host：Core 596 unit + 79 contract、Linux crate 30 tests + 4 host contract、严格 clippy 和依赖/秘密/隔离/runtime/public-surface 门禁通过。
 - Android cargo check：`aarch64`/`x86_64` Tauri Rust check、Gradle scaffolding、JVM unit/instrumentation tests 和 Android Keystore instrumentation 通过。
@@ -157,9 +157,9 @@ Ubuntu 桌面 runner 的原生证明：
 
 ### 1.2.3 远端验证 artifact（2026-08-31）
 
-- Linux artifact job [run 33357355484](https://github.com/H-Chris233/openless/actions/runs/33357355484) 成功上传 artifact `openless-linux-egui-x86_64`（ID `9745648004`），包含 1 个 deb、1 个 rpm、1 个 AppImage 和 `latest-linux-egui-x86_64.json`；下载后的 AppImage SHA-256 `7003188b415e6bde67cf11ba89e17a64d49acbab6cf597505e8b4dc524fdc9f0` 与 manifest 一致，manifest URL 指向 `H-Chris233/openless`。
-- Tauri 手动构建 [run 33355651399](https://github.com/H-Chris233/openless/actions/runs/33355651399) 三个 job 全部成功，上传 macOS arm64/x86_64 DMG 和 Windows x64 NSIS 安装包；Windows runner 的 NSIS 安装/卸载与 IME smoke 通过，非数字 Beta 版本明确跳过 MSI。
-- Android 手动构建 [run 33355654248](https://github.com/H-Chris233/openless/actions/runs/33355654248) 成功上传四个 ABI debug APK；`Collect split APKs` 已校验每个 APK 只包含一个预期 ABI，artifact 均未过期。
+- Linux artifact job [run 33389007642](https://github.com/H-Chris233/openless/actions/runs/33389007642) 成功上传 artifact `openless-linux-egui-x86_64`（ID `9756891660`），包含 1 个 deb、1 个 rpm、1 个 AppImage 和 `latest-linux-egui-x86_64.json`；下载后的 AppImage SHA-256 `b56c548f147f4fd99cc1ece63894cc00af030c4c6a4b8f3e08a969423743ea83` 与 manifest 一致，manifest URL 指向 `H-Chris233/openless`。
+- Tauri 手动构建 [run 33389007087](https://github.com/H-Chris233/openless/actions/runs/33389007087) 三个 job 全部成功，上传 macOS arm64/x86_64 DMG（artifact IDs `9757421887`、`9757475524`）和 Windows x64 NSIS 安装包（ID `9757290871`）；Windows runner 的 NSIS 安装/卸载与 IME smoke 通过，非数字 Beta 版本明确跳过 MSI。
+- Android 手动构建 [run 33389007792](https://github.com/H-Chris233/openless/actions/runs/33389007792) 成功上传四个 ABI debug APK（artifact IDs `9757082911`、`9757086428`、`9757090328`、`9757094381`）；`Collect split APKs` 已校验每个 APK 只包含一个预期 ABI，artifact 均未过期。
 
 以上是 CI 验证 artifact，不是正式签名发布：当前 Linux UI 仍是 stub，Tauri/Android 手动构建未注入正式签名密钥；真实设备安装、升级/回滚和 Ubuntu 桌面输入/音频仍由 12.4 未勾选门禁负责。
 
@@ -851,7 +851,7 @@ contract tests；仅更新实现代码不能视为完成。
    contract、workspace fmt、Tauri check/test 必须重新运行。该轮后续工作树已通过 frontend build/58
    tests、Core 596 unit + 79 integration contract、Linux 30 crate + 4 host contract，另有 3 个显式
    ignored native contract、公开 Core compatibility 1、Core/Linux 严格 clippy、Tauri check 与 707
-   passed/0 failed/7 ignored 的 macOS Tauri suite；最终证据以 fork CI run 33357355484 为准。fmt、
+   passed/0 failed/7 ignored 的 macOS Tauri suite；最终证据以 fork CI run 33389007642 为准。fmt、
     196/30/29 基线、依赖方向、秘密面、测试隔离、Linux 公共面、source contract、headless example
     和 tracked diff hygiene 也在该 CI run 通过。该本地证据不替代第 15 步的原生 runner 结果。
 15. **取得原生 CI 证据。** Ubuntu 验证 dbus/keyring/cpal/fcitx5、Linux host 和无 WebKitGTK
@@ -1984,7 +1984,8 @@ async fn forward_core_events(
 - [x] core 与 Linux package 依赖检查无 Tauri/WebKitGTK。
 - [x] Tauri `cargo check --locked --lib` 在 legacy provider 副本清理后于当前工作树通过；既有/迁移期
   warning 不作为测试成功或跨平台原生证明。
-- [x] Tauri `cargo test --locked --lib` 在当前工作树为 745 passed、0 failed、7 ignored。Provider
+- [x] 历史 Windows 本地 Tauri `cargo test --locked --lib` 为 745 passed、0 failed、7 ignored；远端
+  macOS CI 在 run 33389007642 运行 714 项，其中 707 passed、7 ignored。Provider
   旧 command 测试旁路已删除，解析与模型响应测试归入 Core `ProviderService`；旧“backend
   compatibility 118 项”已由 Tauri 原 crate 测试取代，不再作为当前证据。
 - [x] 历史 Windows 本地门禁记录 frontend build/58 项 tests、Core 594 项 unit + 79 项领域
@@ -1997,9 +1998,9 @@ async fn forward_core_events(
 - [x] Core runtime seam contract 已通过：生产源码不创建私有 `Runtime`，不直接调用 `tokio::spawn`；
   实时 ASR 的后台任务和关闭清理由宿主注入 `TaskSpawner` 提交，`check-core-runtime-seam.ps1`
   已加入 CI 与 Linux release workflow。
-- [x] CI artifact 门禁已通过：run 33357355484 的 Linux runner 生成 deb/rpm/AppImage、fcitx5
+- [x] CI artifact 门禁已通过：run 33389007642 的 Linux runner 生成 deb/rpm/AppImage、fcitx5
   plugin 和独立 `latest-linux-egui-x86_64.json`，验证 ELF/包内容/desktop/AppStream 及
-  manifest SHA-256；artifact `openless-linux-egui-x86_64`（ID `9745648004`）可下载，空
+  manifest SHA-256；artifact `openless-linux-egui-x86_64`（ID `9756891660`）可下载，空
   `release_tag` 的 `minisign` 为 `null`，不会被误当作正式签名。
 - [x] Core tests 使用每测试唯一且自动清理的临时目录；`check-core-test-isolation.ps1` 同时拒绝固定 crate-local `"data"` 和源码树运行残留。
 - [x] Local ASR command 接线后的 core contract 6 项、Tauri wire contract 4 项和 Tauri
@@ -2019,12 +2020,14 @@ async fn forward_core_events(
   Android/macOS/Ubuntu 的真实 native effect 继续由对应未勾选项约束。
 - [x] Provider validation/model-list Core/Tauri/Linux contract 已通过，且
   `commands/providers.rs` 不再包含 provider 协议、凭据读取或 HTTP/WS 请求构造。
-- [ ] macOS/Windows Tauri artifact 在对应 runner 上构建、签名、安装并完成启动/升级 smoke test。
+- [ ] macOS/Windows Tauri artifact 的正式签名、完整安装/升级 smoke 仍未完成；run 33389007087
+  已构建 macOS arm64/x86_64 DMG 和 Windows x64 NSIS，Windows NSIS 安装/卸载与 IME smoke 已通过，
+  MSI 因 Beta.6 非数字版本按设计跳过。
 - [x] Linux egui deb/rpm/AppImage、fcitx5 plugin、ELF 依赖、desktop/AppStream metadata 和临时
   minisign 签名/验签已在 WSL Ubuntu 验证；正式 updater manifest 仍需 release workflow 注入正式
   secret 后验证，UI stub 和正式发布门禁仍保持未完成。
 - [x] README、RELEASING 和开发命令已区分 Tauri hosts 与 Linux egui host，并明确 UI stub 发布门禁。
-- [x] Android CI debug artifact gate 已通过：run 33355654248 上传四个 ABI debug APK，
+- [x] Android CI debug artifact gate 已通过：run 33389007792 上传四个 ABI debug APK，
   `Collect split APKs` 校验每个 APK 只包含预期 ABI；这不包含 release 签名、设备运行或安装证明。
 - [ ] Android release 签名、设备安装/升级和 JNI/overlay/IME 真实 smoke；本机 `cargo ndk` 的
   `arm64-v8a` 与 `x86_64` Rust cross-target check 不能替代这些证明。
@@ -2174,15 +2177,13 @@ async fn forward_core_events(
   settings runtime 由 factory 内部组装。`LinuxBackendBuilder::new(...)` 的显式 provider 注入只用于
   测试/特殊宿主；仅 native/local ASR 等尚未提供 runtime 的能力可以返回 `Unsupported`。
 
-当前工作树的 Windows 本地全量证据：frontend build 与 58 项 frontend/contract tests 通过；Core
-为 594 项 unit、领域 contract 合计 79 项；Windows Linux Adapter 为 29 项 crate tests 与 4 项 host
-  contract；WSL Ubuntu Linux Adapter 为 29 项 crate tests 与 4 项 host contract，另有 3 项显式
- ignored native contract；公开 Core compatibility 为 1 项；Tauri `cargo check --locked --lib` 通过，
-`cargo test --locked --lib` 为 745 passed/0 failed/7 ignored；workspace fmt、Core/Linux 严格 clippy、
-测试隔离、公共接口、command/event baseline（196/30/29）、依赖方向、secret surface、现有
-source contract、headless example、Provider command 禁回流 contract 与 tracked `git diff --check` 均通过。
-已删除 path-include suite
-的 118 项数字不再作为证据。
+补充本地与远端全量证据：历史 Windows 本地记录 frontend build 与 58 项 frontend/contract tests、
+Core 594 项 unit、Linux Adapter 29 项 crate tests + 4 项 host contract、Tauri 745
+passed/0 failed/7 ignored；最新 fork CI run 33389007642（head `4632e09c`）记录 Core 596 unit、
+Linux Adapter 30 tests + 4 host contract、macOS Tauri 707 passed/0 failed/7 ignored，并通过
+workspace fmt、Core/Linux 严格 clippy、测试隔离、公共接口、command/event baseline（196/30/29）、
+依赖方向、secret surface、source contract、headless example、Provider command 禁回流 contract
+与 tracked `git diff --check`。已删除 path-include suite 的 118 项数字不再作为证据。
 Windows 上的 Linux package test 只证明跨平台 Rust contract，不证明 DBus/Secret
 Service/cpal/fcitx5 的真实 Linux 行为；Android、macOS、Ubuntu 打包与原生集成必须由对应
 runner 证明，不能从本机结果推断。
