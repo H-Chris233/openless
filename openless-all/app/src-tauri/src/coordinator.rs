@@ -101,7 +101,7 @@ pub(super) fn qa_event_target() -> &'static str {
 #[cfg(test)]
 use dictation::dictation_error_code;
 use dictation::{
-    begin_session, cancel_session, end_session, handle_pressed_edge, handle_released_edge,
+    cancel_session, end_session, handle_pressed_edge, handle_released_edge,
     handle_trigger_combined, request_stop_during_starting,
 };
 #[cfg(any(debug_assertions, test))]
@@ -2934,7 +2934,7 @@ mod tests {
 
     use super::dictation::abort_recording_with_error;
     use super::dictation::{
-        handle_pressed_edge, handle_released_edge, handle_trigger_combined_async,
+        begin_session, handle_pressed_edge, handle_released_edge, handle_trigger_combined_async,
     };
     use super::*;
     use crate::types::{HotkeyMode, HotkeyTrigger};
