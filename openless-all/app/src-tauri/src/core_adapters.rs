@@ -2227,6 +2227,7 @@ enum TauriNativeTranscriptionSessionKind {
         cache: Arc<crate::asr::local::LocalAsrCache>,
         pcm: Arc<Mutex<Vec<u8>>>,
         cancelled: Arc<AtomicBool>,
+        operation_id: u64,
     },
     #[cfg(target_os = "macos")]
     Whisper {
@@ -2386,6 +2387,7 @@ impl TranscriptionEngine for TauriNativeTranscriptionEngine {
                 .map_err(map_native_asr_error)?;
                 (
                     TauriNativeTranscriptionSessionKind::Qwen {
+                        operation_id: engine.next_operation_id(),
                         engine,
                         cache,
                         pcm: Arc::new(Mutex::new(Vec::new())),
@@ -2581,25 +2583,32 @@ impl TranscriptionSession for TauriNativeTranscriptionSession {
                     cache,
                     pcm,
                     cancelled,
+                    operation_id,
                 } => {
                     let bytes = std::mem::take(&mut *pcm.lock());
                     let duration_ms = pcm_duration_ms(&bytes);
                     let samples = pcm_i16_to_f32(&bytes);
                     let sink = Arc::clone(&partials);
                     let offset = Arc::clone(&next_offset);
+                    let worker_cancelled = Arc::clone(&cancelled);
                     let cancelled_for_tokens = Arc::clone(&cancelled);
                     let text = tauri::async_runtime::spawn_blocking(move || {
-                        engine.transcribe_dictation_with_handler(samples, move |piece| {
-                            if cancelled_for_tokens.load(Ordering::Acquire) {
-                                return;
-                            }
-                            let offset =
-                                offset.fetch_add(piece.chars().count() as u64, Ordering::AcqRel);
-                            let _ = sink.publish(TextStreamChunk {
-                                text: piece.to_string(),
-                                offset,
-                            });
-                        })
+                        engine.transcribe_dictation_with_handler(
+                            operation_id,
+                            worker_cancelled.as_ref(),
+                            samples,
+                            move |piece: &str| {
+                                if cancelled_for_tokens.load(Ordering::Acquire) {
+                                    return;
+                                }
+                                let offset = offset
+                                    .fetch_add(piece.chars().count() as u64, Ordering::AcqRel);
+                                let _ = sink.publish(TextStreamChunk {
+                                    text: piece.to_string(),
+                                    offset,
+                                });
+                            },
+                        )
                     })
                     .await
                     .map_err(map_native_asr_error)?
@@ -2656,9 +2665,16 @@ impl TranscriptionSession for TauriNativeTranscriptionSession {
                 #[cfg(target_os = "windows")]
                 TauriNativeTranscriptionSessionKind::Sherpa { provider, .. } => provider.cancel(),
                 #[cfg(any(target_os = "macos", target_os = "linux"))]
-                TauriNativeTranscriptionSessionKind::Qwen { pcm, cancelled, .. } => {
+                TauriNativeTranscriptionSessionKind::Qwen {
+                    engine,
+                    pcm,
+                    cancelled,
+                    operation_id,
+                    ..
+                } => {
                     cancelled.store(true, Ordering::Release);
                     pcm.lock().clear();
+                    engine.cancel_operation(operation_id);
                 }
                 #[cfg(target_os = "macos")]
                 TauriNativeTranscriptionSessionKind::Whisper { pcm, cancelled, .. } => {
