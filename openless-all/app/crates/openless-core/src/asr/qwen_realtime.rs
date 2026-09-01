@@ -33,6 +33,7 @@ use uuid::Uuid;
 use crate::config::{TaskSpawner, TokioTaskSpawner};
 
 use super::{AudioConsumer, RawTranscript};
+use crate::ports::{TextStreamChunk, TextStreamSink};
 
 pub const PROVIDER_ID: &str = "bailian-qwen3-realtime";
 pub const DEFAULT_ENDPOINT: &str = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime";
@@ -143,6 +144,7 @@ pub struct Qwen3RealtimeASR {
     final_rx: ParkingMutex<Option<oneshot::Receiver<Result<RawTranscript, Qwen3ASRError>>>>,
     session_started: Arc<Notify>,
     session_finished: Arc<Notify>,
+    partial_sink: ParkingMutex<Option<Arc<dyn TextStreamSink>>>,
 }
 
 impl Qwen3RealtimeASR {
@@ -162,7 +164,12 @@ impl Qwen3RealtimeASR {
             final_rx: ParkingMutex::new(None),
             session_started: Arc::new(Notify::new()),
             session_finished: Arc::new(Notify::new()),
+            partial_sink: ParkingMutex::new(None),
         }
+    }
+
+    pub fn set_partial_sink(&self, sink: Arc<dyn TextStreamSink>) {
+        *self.partial_sink.lock() = Some(sink);
     }
 
     pub async fn open_session(self: &Arc<Self>) -> Result<(), Qwen3ASRError> {
@@ -465,7 +472,24 @@ impl Qwen3RealtimeASR {
                     .filter(|s| !s.trim().is_empty())
             });
         if let Some(text) = text {
-            self.state.lock().partial_text = text.trim().to_string();
+            let text = text.trim();
+            let delta = {
+                let mut state = self.state.lock();
+                let delta = text
+                    .strip_prefix(&state.partial_text)
+                    .unwrap_or("")
+                    .to_string();
+                state.partial_text = text.to_string();
+                delta
+            };
+            if !delta.is_empty() {
+                if let Some(sink) = self.partial_sink.lock().clone() {
+                    let _ = sink.publish(TextStreamChunk {
+                        text: delta,
+                        offset: 0,
+                    });
+                }
+            }
         }
     }
 

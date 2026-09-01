@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -22,7 +23,8 @@ use crate::events::{
     BackendEventKind, BackendEventPublisher, EventBus, EventReplay, EventSubscription,
 };
 use crate::ports::{
-    EngineFailureStage, EngineProgress, EngineProgressSink, EngineStage, HostAction, InsertOutcome,
+    AudioConsumer, EngineFailureStage, EngineProgress, EngineProgressSink, EngineStage, HostAction,
+    InsertOutcome, TextStreamChunk, TextStreamSink, TranscriptionSession,
 };
 use crate::shared_types::{
     CredentialsStatus, PendingCorrection, UserPreferences, LEARNED_VOCAB_NOTE,
@@ -78,10 +80,207 @@ pub enum DictationHotkeyEdge {
     Combined,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LessComputerHotkeyAction {
+    Start,
+    Finish,
+    Cancel,
+    Noop,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DictationHotkeyDispatchOptions {
     pub start: DictationStartOptions,
     pub stop: DictationStopOptions,
+}
+
+/// Core-owned audio-to-Agent session shared by native hosts.
+///
+/// Hosts feed only canonical PCM and observe the existing `TranscriptDelta` /
+/// `LessComputerEvent` stream. Provider/model selection, cancellation and Agent
+/// submission stay inside Core so Tauri and Linux cannot drift apart.
+pub struct LessComputerVoiceSession {
+    session_id: SessionId,
+    transcription: Arc<dyn TranscriptionSession>,
+    less_computer: Arc<dyn crate::domains::LessComputerApi>,
+    request: crate::domains::LessComputerRunRequest,
+    partials: Arc<VoiceTranscriptSink>,
+    received_bytes: AtomicU64,
+    closed: std::sync::atomic::AtomicBool,
+}
+
+struct VoiceTranscriptSink {
+    publisher: crate::events::BackendEventPublisher,
+    session_id: SessionId,
+    next_offset: AtomicU64,
+    emitted_text: Mutex<String>,
+}
+
+impl TextStreamSink for VoiceTranscriptSink {
+    fn publish(&self, chunk: TextStreamChunk) -> Result<(), BackendError> {
+        self.emitted_text
+            .lock()
+            .expect("Less Computer transcript lock poisoned")
+            .push_str(&chunk.text);
+        let offset = self
+            .next_offset
+            .fetch_add(chunk.text.chars().count() as u64, Ordering::AcqRel);
+        self.publisher.publish(
+            Some(self.session_id),
+            BackendEventKind::TranscriptDelta(crate::types::TranscriptDelta {
+                text: chunk.text,
+                offset,
+                is_final: false,
+            }),
+        );
+        Ok(())
+    }
+}
+
+impl VoiceTranscriptSink {
+    fn publish_final(&self, transcript: String) {
+        let text = {
+            let mut emitted = self
+                .emitted_text
+                .lock()
+                .expect("Less Computer transcript lock poisoned");
+            let delta = transcript
+                .strip_prefix(emitted.as_str())
+                .unwrap_or(transcript.as_str())
+                .to_string();
+            *emitted = transcript;
+            delta
+        };
+        let offset = self
+            .next_offset
+            .fetch_add(text.chars().count() as u64, Ordering::AcqRel);
+        self.publisher.publish(
+            Some(self.session_id),
+            BackendEventKind::TranscriptDelta(crate::types::TranscriptDelta {
+                text,
+                offset,
+                is_final: true,
+            }),
+        );
+    }
+}
+
+impl LessComputerVoiceSession {
+    pub fn session_id(&self) -> SessionId {
+        self.session_id
+    }
+
+    /// Feed one 16 kHz / mono / signed 16-bit little-endian PCM frame.
+    pub fn feed_pcm(&self, pcm: &[u8]) -> Result<(), BackendError> {
+        if self.closed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(BackendError::new(
+                BackendErrorCode::InvalidState,
+                "Less Computer voice session is closed",
+            ));
+        }
+        if self.less_computer.capture_cancelled(self.session_id) {
+            return Err(BackendError::new(
+                BackendErrorCode::Cancelled,
+                "Less Computer voice session was cancelled",
+            ));
+        }
+        if pcm.is_empty() || !pcm.len().is_multiple_of(2) {
+            return Err(BackendError::new(
+                BackendErrorCode::InvalidArgument,
+                "Less Computer PCM must be non-empty and contain complete 16-bit samples",
+            ));
+        }
+        const MAX_PCM_BYTES: u64 = 128 * 1024 * 1024;
+        let next = self
+            .received_bytes
+            .fetch_add(pcm.len() as u64, Ordering::AcqRel)
+            .saturating_add(pcm.len() as u64);
+        if next > MAX_PCM_BYTES {
+            self.received_bytes
+                .fetch_sub(pcm.len() as u64, Ordering::AcqRel);
+            return Err(BackendError::new(
+                BackendErrorCode::InvalidArgument,
+                "Less Computer PCM exceeds the provider limit",
+            ));
+        }
+        self.transcription.consume_pcm_chunk(pcm);
+        Ok(())
+    }
+
+    pub fn cancel(&self) -> futures_util::future::BoxFuture<'static, Result<(), BackendError>> {
+        if self.closed.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            return Box::pin(async { Ok(()) });
+        }
+        let transcription = Arc::clone(&self.transcription);
+        let less_computer = Arc::clone(&self.less_computer);
+        let session_id = self.session_id;
+        Box::pin(async move {
+            let transcription_result = transcription.cancel().await;
+            let service_result = less_computer.cancel(Some(session_id)).await;
+            let _ = less_computer.abort_capture(session_id);
+            transcription_result.and(service_result)
+        })
+    }
+
+    pub fn finish(
+        self,
+    ) -> futures_util::future::BoxFuture<'static, Result<LessComputerRunResult, BackendError>> {
+        if self.closed.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            return Box::pin(async {
+                Err(BackendError::new(
+                    BackendErrorCode::Busy,
+                    "Less Computer voice session has already been finalized",
+                ))
+            });
+        }
+        let transcription = Arc::clone(&self.transcription);
+        let less_computer = Arc::clone(&self.less_computer);
+        let request = self.request;
+        let partials = Arc::clone(&self.partials);
+        let session_id = self.session_id;
+        Box::pin(async move {
+            if less_computer.capture_cancelled(session_id) {
+                let _ = transcription.cancel().await;
+                let _ = less_computer.abort_capture(session_id);
+                return Err(BackendError::new(
+                    BackendErrorCode::Cancelled,
+                    "Less Computer voice session was cancelled",
+                ));
+            }
+            let transcript = match transcription.finish().await {
+                Ok(output) => output.text,
+                Err(error) => {
+                    let _ = transcription.cancel().await;
+                    let _ = less_computer.abort_capture(session_id);
+                    return Err(error);
+                }
+            };
+            let transcript = transcript.trim().to_string();
+            if transcript.is_empty() {
+                let _ = less_computer.abort_capture(session_id);
+                return Err(BackendError::new(
+                    BackendErrorCode::Provider,
+                    "transcription provider returned an empty transcript",
+                ));
+            }
+            partials.publish_final(transcript.clone());
+            let mut request = request;
+            request.transcript = transcript;
+            match less_computer.submit(request).await {
+                Ok(result) => Ok(result),
+                Err(error) => {
+                    let _ = less_computer.abort_capture(session_id);
+                    Err(error)
+                }
+            }
+        })
+    }
+}
+
+impl AudioConsumer for LessComputerVoiceSession {
+    fn consume_pcm_chunk(&self, pcm: &[u8]) {
+        let _ = self.feed_pcm(pcm);
+    }
 }
 
 /// Repository bundle shared by every host-facing facade in one process.
@@ -128,6 +327,7 @@ struct MutableState {
     dictation: DictationStateSnapshot,
     dictation_context: Option<Arc<DictationContext>>,
     credentials: CredentialsStatus,
+    transcript_offsets: HashMap<SessionId, u64>,
 }
 
 struct BackendEngineProgress {
@@ -182,11 +382,19 @@ impl EngineProgressSink for BackendEngineProgress {
                 }
             }
             EngineProgress::TranscriptDelta(delta) => {
-                let state = self.state.read().expect("backend state lock poisoned");
+                let mut state = self.state.write().expect("backend state lock poisoned");
                 ensure_active_session(&state, session_id)?;
+                let next_offset = state.transcript_offsets.entry(session_id).or_default();
+                let offset = delta.offset.max(*next_offset);
+                *next_offset = offset.saturating_add(delta.text.chars().count() as u64);
                 drop(state);
-                self.events
-                    .publish(Some(session_id), BackendEventKind::TranscriptDelta(delta));
+                self.events.publish(
+                    Some(session_id),
+                    BackendEventKind::TranscriptDelta(crate::types::TranscriptDelta {
+                        offset,
+                        ..delta
+                    }),
+                );
             }
             EngineProgress::PolishDelta(delta) => {
                 let state = self.state.read().expect("backend state lock poisoned");
@@ -208,6 +416,7 @@ pub struct OpenLessBackend {
     state: Arc<RwLock<MutableState>>,
     phase_changed: Arc<tokio::sync::Notify>,
     hotkey_press_at: Mutex<Option<std::time::Instant>>,
+    less_computer_hotkey_press_at: Mutex<Option<std::time::Instant>>,
     vocabulary: Arc<DictionaryStore>,
     correction_rules: Arc<CorrectionRuleStore>,
     vocabulary_revision: Arc<AtomicU64>,
@@ -431,9 +640,11 @@ impl OpenLessBackend {
                 dictation: DictationStateSnapshot::default(),
                 dictation_context: None,
                 credentials: CredentialsStatus::default(),
+                transcript_offsets: HashMap::new(),
             })),
             phase_changed: Arc::new(tokio::sync::Notify::new()),
             hotkey_press_at: Mutex::new(None),
+            less_computer_hotkey_press_at: Mutex::new(None),
             vocabulary: repositories.vocabulary,
             correction_rules: repositories.correction_rules,
             vocabulary_revision,
@@ -516,6 +727,168 @@ impl OpenLessBackend {
         self.deps.services.less_computer.abort_capture(session_id)
     }
 
+    /// Start a Core-owned voice session. The host only needs to feed PCM and
+    /// call `finish`/`cancel`; all provider and Agent policy is snapshotted here.
+    pub async fn start_less_computer_voice(
+        &self,
+        session_id: SessionId,
+    ) -> Result<LessComputerVoiceSession, BackendError> {
+        let preferences = self.get_preferences();
+        if !preferences.coding_agent_enabled {
+            return Err(BackendError::new(
+                BackendErrorCode::PermissionDenied,
+                "Less Computer is disabled",
+            )
+            .retryable(false));
+        }
+        if self.snapshot().dictation.phase != DictationPhase::Idle {
+            return Err(BackendError::new(
+                BackendErrorCode::Busy,
+                "dictation is already active",
+            ));
+        }
+        self.deps.services.less_computer.begin_capture(session_id)?;
+        let context = match self
+            .capture_dictation_context(&DictationStartOptions {
+                audio_source: DictationAudioSource::External,
+                ..DictationStartOptions::default()
+            })
+            .await
+        {
+            Ok(mut context) => {
+                // Less Computer is a transcript-to-agent flow; it always uses
+                // the active ASR provider, even when normal dictation is in
+                // multimodal/Omni mode.
+                context.pipeline_mode = crate::shared_types::PipelineMode::Traditional;
+                Arc::new(context)
+            }
+            Err(error) => {
+                let _ = self.deps.services.less_computer.abort_capture(session_id);
+                return Err(error);
+            }
+        };
+        let partials = Arc::new(VoiceTranscriptSink {
+            publisher: self.event_publisher(),
+            session_id,
+            next_offset: AtomicU64::new(0),
+            emitted_text: Mutex::new(String::new()),
+        });
+        let transcription = match self
+            .deps
+            .dictation_engine
+            .start_transcription(
+                session_id,
+                Arc::clone(&context),
+                Arc::clone(&partials) as Arc<dyn TextStreamSink>,
+            )
+            .await
+        {
+            Ok(session) => session,
+            Err(error) => {
+                let _ = self.deps.services.less_computer.abort_capture(session_id);
+                return Err(error);
+            }
+        };
+        if self
+            .deps
+            .services
+            .less_computer
+            .capture_cancelled(session_id)
+        {
+            let _ = transcription.cancel().await;
+            let _ = self.deps.services.less_computer.abort_capture(session_id);
+            return Err(BackendError::new(
+                BackendErrorCode::Cancelled,
+                "Less Computer voice session was cancelled while starting",
+            ));
+        }
+        let request =
+            match self.build_less_computer_request(session_id, String::new(), &preferences) {
+                Ok(request) => request,
+                Err(error) => {
+                    let _ = transcription.cancel().await;
+                    let _ = self.deps.services.less_computer.abort_capture(session_id);
+                    return Err(error);
+                }
+            };
+        Ok(LessComputerVoiceSession {
+            session_id,
+            transcription,
+            less_computer: Arc::clone(&self.deps.services.less_computer),
+            request,
+            partials,
+            received_bytes: AtomicU64::new(0),
+            closed: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
+    /// Interpret Less Computer hotkey edges with the same Hold/Toggle/Auto
+    /// preference used by the other voice entry points.
+    pub fn dispatch_less_computer_hotkey_edge(
+        &self,
+        edge: DictationHotkeyEdge,
+    ) -> LessComputerHotkeyAction {
+        use crate::shared_types::HotkeyMode;
+
+        const AUTO_HOLD_THRESHOLD: std::time::Duration = std::time::Duration::from_millis(350);
+        let mode = self.get_preferences().hotkey.mode;
+        let active = self.less_computer_active_session().is_some();
+        match edge {
+            DictationHotkeyEdge::Combined => {
+                let created_by_press = self
+                    .less_computer_hotkey_press_at
+                    .lock()
+                    .expect("Less Computer hotkey timestamp lock poisoned")
+                    .take()
+                    .is_some();
+                if active && created_by_press {
+                    LessComputerHotkeyAction::Cancel
+                } else {
+                    LessComputerHotkeyAction::Noop
+                }
+            }
+            DictationHotkeyEdge::Pressed { at } if !active => {
+                *self
+                    .less_computer_hotkey_press_at
+                    .lock()
+                    .expect("Less Computer hotkey timestamp lock poisoned") = Some(at);
+                LessComputerHotkeyAction::Start
+            }
+            DictationHotkeyEdge::Pressed { .. } => match mode {
+                HotkeyMode::Toggle | HotkeyMode::DoubleClick | HotkeyMode::Auto => {
+                    *self
+                        .less_computer_hotkey_press_at
+                        .lock()
+                        .expect("Less Computer hotkey timestamp lock poisoned") = None;
+                    LessComputerHotkeyAction::Finish
+                }
+                HotkeyMode::Hold => LessComputerHotkeyAction::Noop,
+            },
+            DictationHotkeyEdge::Released { at } => {
+                let pressed_at = self
+                    .less_computer_hotkey_press_at
+                    .lock()
+                    .expect("Less Computer hotkey timestamp lock poisoned")
+                    .take();
+                match mode {
+                    HotkeyMode::Hold if active => LessComputerHotkeyAction::Finish,
+                    HotkeyMode::Auto
+                        if active
+                            && pressed_at.is_some_and(|pressed| {
+                                at.saturating_duration_since(pressed) >= AUTO_HOLD_THRESHOLD
+                            }) =>
+                    {
+                        LessComputerHotkeyAction::Finish
+                    }
+                    HotkeyMode::Toggle
+                    | HotkeyMode::DoubleClick
+                    | HotkeyMode::Auto
+                    | HotkeyMode::Hold => LessComputerHotkeyAction::Noop,
+                }
+            }
+        }
+    }
+
     /// Run one Less Computer turn using the preferences snapshot owned by
     /// Core. Hosts pass only user text; provider, model, permission, workdir,
     /// continuation and guard policy are resolved here before reaching the
@@ -547,31 +920,38 @@ impl OpenLessBackend {
             )
             .retryable(false));
         }
+        let request = self.build_less_computer_request(session_id, transcript, &preferences)?;
+        self.deps.services.less_computer.submit(request).await
+    }
+
+    fn build_less_computer_request(
+        &self,
+        session_id: SessionId,
+        transcript: String,
+        preferences: &UserPreferences,
+    ) -> Result<LessComputerRunRequest, BackendError> {
         let provider = CodingAgentProvider::from_pref(&preferences.coding_agent_provider);
-        let executable = Some(normalize_coding_agent_executable(
-            provider,
-            preferences.coding_agent_exe.clone(),
-        )?);
-        let workdir = normalize_coding_agent_workdir(
-            preferences.coding_agent_workdir.clone(),
-            self.config.home_dir.clone(),
-        )?;
-        let request = LessComputerRunRequest {
+        Ok(LessComputerRunRequest {
             session_id,
             transcript,
             provider,
-            executable,
+            executable: Some(normalize_coding_agent_executable(
+                provider,
+                preferences.coding_agent_exe.clone(),
+            )?),
             model: resolve_coding_agent_model(provider, preferences.coding_agent_model.clone()),
             permission_mode: normalize_less_computer_permission_mode(
                 provider,
                 &preferences.coding_agent_permission_mode,
             ),
-            workdir,
+            workdir: normalize_coding_agent_workdir(
+                preferences.coding_agent_workdir.clone(),
+                self.config.home_dir.clone(),
+            )?,
             continue_session: false,
             continuation_context: None,
             approved_patterns: Vec::new(),
-        };
-        self.deps.services.less_computer.submit(request).await
+        })
     }
 
     /// Cancel a Less Computer run through its instance-local Core state.
@@ -678,6 +1058,7 @@ impl OpenLessBackend {
             state.running = false;
             state.dictation = DictationStateSnapshot::default();
             state.dictation_context = None;
+            state.transcript_offsets.clear();
             self.phase_changed.notify_waiters();
             active_session
         };
@@ -1964,6 +2345,12 @@ impl OpenLessBackend {
         &self,
         options: DictationStartOptions,
     ) -> Result<SessionId, BackendError> {
+        if self.less_computer_active_session().is_some() {
+            return Err(BackendError::new(
+                BackendErrorCode::Busy,
+                "Less Computer voice session is already active",
+            ));
+        }
         let context = Arc::new(self.capture_dictation_context(&options).await?);
         let session_id = {
             let mut state = self.state.write().expect("backend state lock poisoned");
@@ -2411,6 +2798,7 @@ impl OpenLessBackend {
         let mut state = self.state.write().expect("backend state lock poisoned");
         state.dictation = DictationStateSnapshot::default();
         state.dictation_context = None;
+        state.transcript_offsets.remove(&session_id);
         self.phase_changed.notify_waiters();
         drop(state);
         self.persist_completed_dictation(&context, &result, insert_outcome, &engine_result);
@@ -2559,6 +2947,7 @@ impl OpenLessBackend {
         if state.dictation.session_id == Some(session_id) {
             state.dictation = DictationStateSnapshot::default();
             state.dictation_context = None;
+            state.transcript_offsets.remove(&session_id);
             self.phase_changed.notify_waiters();
         }
     }
@@ -2596,6 +2985,7 @@ impl OpenLessBackend {
             );
             state.dictation = DictationStateSnapshot::default();
             state.dictation_context = None;
+            state.transcript_offsets.remove(&active);
             self.phase_changed.notify_waiters();
             active
         };
@@ -2784,6 +3174,7 @@ mod tests {
     #[test]
     fn backend_is_safe_to_share_between_host_and_ui_tasks() {
         assert_send_sync::<OpenLessBackend>();
+        assert_send_sync::<LessComputerVoiceSession>();
     }
 
     #[derive(Default)]
@@ -3150,6 +3541,194 @@ mod tests {
 
         backend.abort_less_computer_capture(session_id).unwrap();
         assert_eq!(backend.less_computer_active_session(), None);
+    }
+
+    #[test]
+    fn less_computer_hotkey_modes_share_hold_toggle_auto_and_combined_rules() {
+        let (backend, _) = backend();
+        let mut preferences = backend.get_preferences();
+        preferences.coding_agent_enabled = true;
+
+        preferences.hotkey.mode = crate::HotkeyMode::Hold;
+        backend.set_preferences(preferences.clone()).unwrap();
+        let pressed = std::time::Instant::now();
+        assert_eq!(
+            backend
+                .dispatch_less_computer_hotkey_edge(DictationHotkeyEdge::Pressed { at: pressed }),
+            LessComputerHotkeyAction::Start
+        );
+        let hold_session = SessionId::new();
+        backend.begin_less_computer_capture(hold_session).unwrap();
+        assert_eq!(
+            backend.dispatch_less_computer_hotkey_edge(DictationHotkeyEdge::Released {
+                at: pressed + std::time::Duration::from_millis(20),
+            }),
+            LessComputerHotkeyAction::Finish
+        );
+        backend.abort_less_computer_capture(hold_session).unwrap();
+
+        preferences.hotkey.mode = crate::HotkeyMode::Auto;
+        backend.set_preferences(preferences.clone()).unwrap();
+        let pressed = std::time::Instant::now();
+        assert_eq!(
+            backend
+                .dispatch_less_computer_hotkey_edge(DictationHotkeyEdge::Pressed { at: pressed }),
+            LessComputerHotkeyAction::Start
+        );
+        let auto_session = SessionId::new();
+        backend.begin_less_computer_capture(auto_session).unwrap();
+        assert_eq!(
+            backend.dispatch_less_computer_hotkey_edge(DictationHotkeyEdge::Released {
+                at: pressed + std::time::Duration::from_millis(349),
+            }),
+            LessComputerHotkeyAction::Noop
+        );
+        assert_eq!(
+            backend.dispatch_less_computer_hotkey_edge(DictationHotkeyEdge::Pressed {
+                at: pressed + std::time::Duration::from_millis(500),
+            }),
+            LessComputerHotkeyAction::Finish
+        );
+        backend.abort_less_computer_capture(auto_session).unwrap();
+
+        preferences.hotkey.mode = crate::HotkeyMode::Toggle;
+        backend.set_preferences(preferences).unwrap();
+        let pressed = std::time::Instant::now();
+        assert_eq!(
+            backend
+                .dispatch_less_computer_hotkey_edge(DictationHotkeyEdge::Pressed { at: pressed }),
+            LessComputerHotkeyAction::Start
+        );
+        let combined_session = SessionId::new();
+        backend
+            .begin_less_computer_capture(combined_session)
+            .unwrap();
+        assert_eq!(
+            backend.dispatch_less_computer_hotkey_edge(DictationHotkeyEdge::Combined),
+            LessComputerHotkeyAction::Cancel
+        );
+        backend
+            .abort_less_computer_capture(combined_session)
+            .unwrap();
+    }
+
+    #[derive(Default)]
+    struct VoiceTranscription {
+        pcm: Mutex<Vec<u8>>,
+        cancelled: std::sync::atomic::AtomicBool,
+    }
+
+    impl crate::ports::AudioConsumer for VoiceTranscription {
+        fn consume_pcm_chunk(&self, pcm: &[u8]) {
+            self.pcm.lock().unwrap().extend_from_slice(pcm);
+        }
+    }
+
+    impl crate::ports::TranscriptionSession for VoiceTranscription {
+        fn finish(&self) -> BoxFuture<'static, Result<crate::TranscriptOutput, BackendError>> {
+            boxed(async {
+                Ok(crate::TranscriptOutput {
+                    text: "执行语音任务".into(),
+                    duration_ms: 100,
+                })
+            })
+        }
+
+        fn cancel(&self) -> BoxFuture<'static, Result<(), BackendError>> {
+            self.cancelled
+                .store(true, std::sync::atomic::Ordering::Release);
+            boxed(async { Ok(()) })
+        }
+    }
+
+    struct VoiceOnlyEngine(Arc<VoiceTranscription>);
+
+    impl DictationEngine for VoiceOnlyEngine {
+        fn start(
+            &self,
+            _session_id: SessionId,
+            _context: Arc<DictationContext>,
+            _progress: Arc<dyn EngineProgressSink>,
+        ) -> BoxFuture<'static, Result<(), BackendError>> {
+            boxed(async { Ok(()) })
+        }
+
+        fn start_transcription(
+            &self,
+            _session_id: SessionId,
+            _context: Arc<DictationContext>,
+            _partials: Arc<dyn TextStreamSink>,
+        ) -> BoxFuture<'static, Result<Arc<dyn TranscriptionSession>, BackendError>> {
+            let session: Arc<dyn TranscriptionSession> = self.0.clone();
+            boxed(async move { Ok(session) })
+        }
+
+        fn finish(
+            &self,
+            _session_id: SessionId,
+            _progress: Arc<dyn EngineProgressSink>,
+        ) -> BoxFuture<'static, Result<EngineResult, EngineFailure>> {
+            boxed(async { unreachable!("voice-only engine does not run dictation") })
+        }
+
+        fn cancel(&self, _session_id: SessionId) -> BoxFuture<'static, Result<(), BackendError>> {
+            boxed(async { Ok(()) })
+        }
+    }
+
+    #[tokio::test]
+    async fn less_computer_voice_validates_pcm_and_submits_one_final_transcript() {
+        let data_dir = TestDataDir::new("less-computer-voice");
+        let transcription = Arc::new(VoiceTranscription::default());
+        let runtime = Arc::new(LessComputerCaptureRuntime::default());
+        let dependencies = BackendDependencies {
+            dictation_engine: Arc::new(VoiceOnlyEngine(Arc::clone(&transcription))),
+            ..BackendDependencies::unsupported()
+        };
+        dependencies
+            .services
+            .less_computer
+            .bind_runtime(runtime.clone());
+        let backend = OpenLessBackend::new(
+            BackendConfig {
+                data_dir: data_dir.path().to_path_buf(),
+                ..BackendConfig::default()
+            },
+            dependencies,
+        )
+        .unwrap();
+        let mut preferences = backend.get_preferences();
+        preferences.coding_agent_enabled = true;
+        backend.set_preferences(preferences).unwrap();
+        let mut events = backend.subscribe();
+
+        let session_id = SessionId::new();
+        let session = backend.start_less_computer_voice(session_id).await.unwrap();
+        assert_eq!(
+            session.feed_pcm(&[]).unwrap_err().code,
+            BackendErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            session.feed_pcm(&[1]).unwrap_err().code,
+            BackendErrorCode::InvalidArgument
+        );
+        session.feed_pcm(&[1, 0, 2, 0]).unwrap();
+        let result = session.finish().await.unwrap();
+
+        assert_eq!(result.session_id, session_id);
+        assert_eq!(*transcription.pcm.lock().unwrap(), vec![1, 0, 2, 0]);
+        assert_eq!(
+            runtime.request.lock().unwrap().as_ref().unwrap().session_id,
+            session_id.as_uuid().to_string()
+        );
+        let transcript_events = std::iter::from_fn(|| events.try_recv().ok())
+            .filter(|event| matches!(event.kind, BackendEventKind::TranscriptDelta(_)))
+            .collect::<Vec<_>>();
+        assert_eq!(transcript_events.len(), 1);
+        assert!(matches!(
+            transcript_events[0].kind,
+            BackendEventKind::TranscriptDelta(crate::TranscriptDelta { is_final: true, .. })
+        ));
     }
 
     fn backend_with_dictation_engine(

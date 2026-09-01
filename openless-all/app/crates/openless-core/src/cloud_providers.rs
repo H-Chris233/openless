@@ -136,14 +136,18 @@ impl TranscriptionEngine for SharedCloudTranscriptionEngine {
         &self,
         _session_id: SessionId,
         context: Arc<DictationContext>,
-        _partials: Arc<dyn TextStreamSink>,
+        partials: Arc<dyn TextStreamSink>,
     ) -> BoxFuture<'static, Result<Arc<dyn TranscriptionSession>, BackendError>> {
         let credentials = Arc::clone(&self.credentials);
         let task_spawner = Arc::clone(&self.task_spawner);
         Box::pin(async move {
-            let (kind, asr_call_label) =
-                build_cloud_transcription_session(credentials.as_ref(), &context, task_spawner)
-                    .await?;
+            let (kind, asr_call_label) = build_cloud_transcription_session(
+                credentials.as_ref(),
+                &context,
+                task_spawner,
+                partials,
+            )
+            .await?;
             Ok(Arc::new(CloudTranscriptionSession {
                 kind,
                 asr_call_label,
@@ -282,6 +286,7 @@ async fn build_cloud_transcription_session(
     credentials: &dyn CredentialStore,
     context: &DictationContext,
     task_spawner: Arc<dyn TaskSpawner>,
+    partials: Arc<dyn TextStreamSink>,
 ) -> Result<(CloudTranscriptionSessionKind, crate::AsrCallLabel), BackendError> {
     use crate::asr::volcengine::VolcengineAuthMode;
     use crate::provider_rules::{ActiveAsrProviderKind, BailianEndpointProtocol};
@@ -370,6 +375,7 @@ async fn build_cloud_transcription_session(
                 },
                 Arc::clone(&task_spawner),
             ));
+            provider.set_partial_sink(Arc::clone(&partials));
             provider.open_session().await.map_err(map_asr_error)?;
             (
                 CloudTranscriptionSessionKind::Bailian(provider),
@@ -399,6 +405,7 @@ async fn build_cloud_transcription_session(
                 },
                 Arc::clone(&task_spawner),
             ));
+            provider.set_partial_sink(Arc::clone(&partials));
             provider.open_session().await.map_err(map_asr_error)?;
             (
                 CloudTranscriptionSessionKind::QwenRealtime(provider),
@@ -418,6 +425,7 @@ async fn build_cloud_transcription_session(
                 },
                 Arc::clone(&task_spawner),
             ));
+            provider.set_partial_sink(Arc::clone(&partials));
             provider.open_session().await.map_err(map_asr_error)?;
             (
                 CloudTranscriptionSessionKind::StepfunRealtime(provider),
@@ -587,6 +595,7 @@ async fn build_cloud_transcription_session(
                 hotwords,
                 Arc::clone(&task_spawner),
             ));
+            provider.set_partial_sink(Arc::clone(&partials));
             provider.open_session().await.map_err(map_asr_error)?;
             (CloudTranscriptionSessionKind::Volcengine(provider), label)
         }
@@ -613,6 +622,7 @@ async fn build_cloud_transcription_session(
                 XfyunCredentials { app_id, api_key },
                 Arc::clone(&task_spawner),
             ));
+            provider.set_partial_sink(Arc::clone(&partials));
             provider.open_session().await.map_err(map_asr_error)?;
             (CloudTranscriptionSessionKind::Xfyun(provider), None)
         }

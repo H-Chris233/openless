@@ -42,7 +42,7 @@ install -Dm644 "$PLUGIN_ROOT/openless.conf" \
 fpm -s dir -t deb -C "$DEB_ROOT" \
   -n openless -v "$VERSION" -a amd64 \
   --description "OpenLess Linux egui host" \
-  --license AGPL-3.0-or-later \
+  --license AGPL-3.0-only \
   --url https://github.com/Open-Less/openless \
   -d fcitx5 -d fcitx5-module-dbus -d libdbus-1-3 -d libasound2 \
   -p "$OUTPUT/OpenLess-Linux-egui-${VERSION}-${ARCH}.deb" .
@@ -57,7 +57,7 @@ install -Dm644 "$PLUGIN_ROOT/openless.conf" \
 fpm -s dir -t rpm -C "$RPM_ROOT" \
   -n openless -v "$VERSION" -a x86_64 \
   --description "OpenLess Linux egui host" \
-  --license AGPL-3.0-or-later \
+  --license AGPL-3.0-only \
   --url https://github.com/Open-Less/openless \
   -d fcitx5 -d dbus-libs -d alsa-lib \
   -p "$OUTPUT/OpenLess-Linux-egui-${VERSION}-${ARCH}.rpm" .

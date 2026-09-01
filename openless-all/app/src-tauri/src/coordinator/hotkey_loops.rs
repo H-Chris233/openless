@@ -535,9 +535,8 @@ pub(super) fn take_selection_polish_hotkey_on_main_thread(inner: &Arc<Inner>) {
 // ─────────────────────── coding agent hotkey supervisor ───────────────────────
 
 pub(super) fn coding_agent_hotkey_supervisor_loop(inner: Arc<Inner>) {
-    // Less Computer (coding agent) is macOS-only. On Windows/Linux the binding can
-    // never be installed, so do the one-shot take and let the thread exit instead
-    // of waking every 5s for the entire life of the process.
+    // The global-hotkey monitor is a Tauri desktop adapter; Linux egui uses its
+    // fcitx5 listener and the same Core edge interpreter.
     #[cfg(not(target_os = "macos"))]
     {
         update_coding_agent_hotkey_binding_now(&inner);
@@ -565,7 +564,8 @@ static LESS_COMPUTER_HOTKEY_DISABLED_LOGGED: std::sync::atomic::AtomicBool =
 pub(super) fn update_coding_agent_hotkey_binding_now(inner: &Arc<Inner>) {
     #[cfg(not(target_os = "macos"))]
     {
-        // Less Computer is intentionally macOS-only for now; keep Windows/Linux hidden and inert.
+        // This Tauri monitor is unavailable on the current target; the Linux egui
+        // host owns its fcitx5 listener instead of duplicating this adapter.
         take_coding_agent_hotkeys_on_main_thread(inner);
         return;
     }
@@ -747,6 +747,9 @@ fn cancel_less_computer_voice_session(inner: &Arc<Inner>) {
     let _ = inner
         .less_computer_combo_pending_press
         .swap(0, Ordering::SeqCst);
+    let _ = inner
+        .backend
+        .dispatch_less_computer_hotkey_edge(openless_core::DictationHotkeyEdge::Combined);
     log::info!("[less-computer] 触发键与其他键组合按下 —— 取消本次按下开出的会话");
     cancel_session(inner);
     inner.host.hide_less_computer_glow();
@@ -778,6 +781,28 @@ pub(super) fn less_computer_combo_bridge_loop(
 
 pub(super) async fn handle_less_computer_pressed(inner: &Arc<Inner>) {
     if !hotkey_runtime_target(inner).coding_agent_enabled {
+        return;
+    }
+    if !matches!(inner.state.lock().phase, SessionPhase::Idle)
+        && inner.backend.less_computer_active_session().is_none()
+    {
+        log::info!("[less-computer] press ignored: another voice session is active");
+        return;
+    }
+    let action = inner.backend.dispatch_less_computer_hotkey_edge(
+        openless_core::DictationHotkeyEdge::Pressed {
+            at: std::time::Instant::now(),
+        },
+    );
+    if matches!(action, openless_core::LessComputerHotkeyAction::Noop) {
+        return;
+    }
+    if !matches!(action, openless_core::LessComputerHotkeyAction::Start) {
+        if matches!(action, openless_core::LessComputerHotkeyAction::Finish) {
+            let _ = end_session(inner).await;
+        } else if matches!(action, openless_core::LessComputerHotkeyAction::Cancel) {
+            cancel_session(inner);
+        }
         return;
     }
     if !matches!(inner.state.lock().phase, SessionPhase::Idle) {
@@ -817,6 +842,14 @@ pub(super) async fn handle_less_computer_pressed(inner: &Arc<Inner>) {
 }
 
 pub(super) async fn handle_less_computer_released(inner: &Arc<Inner>) {
+    let action = inner.backend.dispatch_less_computer_hotkey_edge(
+        openless_core::DictationHotkeyEdge::Released {
+            at: std::time::Instant::now(),
+        },
+    );
+    if !matches!(action, openless_core::LessComputerHotkeyAction::Finish) {
+        return;
+    }
     let (phase, voice_agent) = {
         let state = inner.state.lock();
         (state.phase, state.voice_agent)

@@ -312,6 +312,19 @@ impl DictationEngine for DictationEngineRouter {
         })
     }
 
+    fn start_transcription(
+        &self,
+        session_id: SessionId,
+        context: Arc<DictationContext>,
+        partials: Arc<dyn TextStreamSink>,
+    ) -> BoxFuture<'static, Result<Arc<dyn TranscriptionSession>, BackendError>> {
+        let engine = match self.resolve(&context) {
+            Ok(engine) => engine,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        engine.start_transcription(session_id, context, partials)
+    }
+
     fn finish(
         &self,
         session_id: SessionId,

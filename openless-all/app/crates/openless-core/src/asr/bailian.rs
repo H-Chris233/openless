@@ -23,6 +23,7 @@ use uuid::Uuid;
 use crate::config::{TaskSpawner, TokioTaskSpawner};
 
 use super::{AudioConsumer, RawTranscript};
+use crate::ports::{TextStreamChunk, TextStreamSink};
 
 pub const PROVIDER_ID: &str = "bailian";
 pub const DEFAULT_ENDPOINT: &str = "wss://dashscope.aliyuncs.com/api-ws/v1/inference/";
@@ -127,6 +128,7 @@ pub struct BailianRealtimeASR {
     writer: SharedWriter,
     final_rx: ParkingMutex<Option<oneshot::Receiver<Result<RawTranscript, BailianASRError>>>>,
     task_started: Arc<Notify>,
+    partial_sink: ParkingMutex<Option<Arc<dyn TextStreamSink>>>,
 }
 
 impl BailianRealtimeASR {
@@ -145,7 +147,12 @@ impl BailianRealtimeASR {
             writer: Arc::new(AsyncMutex::new(None)),
             final_rx: ParkingMutex::new(None),
             task_started: Arc::new(Notify::new()),
+            partial_sink: ParkingMutex::new(None),
         }
+    }
+
+    pub fn set_partial_sink(&self, sink: Arc<dyn TextStreamSink>) {
+        *self.partial_sink.lock() = Some(sink);
     }
 
     pub async fn open_session(self: &Arc<Self>) -> Result<(), BailianASRError> {
@@ -433,18 +440,36 @@ impl BailianRealtimeASR {
             .and_then(Value::as_i64)
             .unwrap_or(0);
 
-        let mut st = self.state.lock();
-        st.last_result_text = trimmed.to_string();
+        let mut delta: Option<String> = None;
+        {
+            let mut st = self.state.lock();
+            st.last_result_text = trimmed.to_string();
 
-        if is_sentence_final {
-            // 所有 final 结果（含 sentence_id == 0）都存入 final_segments。
-            // BTreeMap 覆盖语义保证同一 sentence_id 不会重复追加。
-            st.final_segments.insert(sentence_id, trimmed.to_string());
-            // 清理该句的 interim 缓存
-            st.partial_segments.remove(&sentence_id);
-        } else {
-            // interim 结果暂存 partial，同一 sentence_id 后到覆盖前到
-            st.partial_segments.insert(sentence_id, trimmed.to_string());
+            if is_sentence_final {
+                // 所有 final 结果（含 sentence_id == 0）都存入 final_segments。
+                // BTreeMap 覆盖语义保证同一 sentence_id 不会重复追加。
+                st.final_segments.insert(sentence_id, trimmed.to_string());
+                st.partial_segments.remove(&sentence_id);
+            } else {
+                let previous = st
+                    .partial_segments
+                    .get(&sentence_id)
+                    .map(String::as_str)
+                    .unwrap_or("");
+                delta = trimmed
+                    .strip_prefix(previous)
+                    .filter(|suffix| !suffix.is_empty())
+                    .map(str::to_string);
+                st.partial_segments.insert(sentence_id, trimmed.to_string());
+            }
+        }
+        if let Some(delta) = delta {
+            if let Some(sink) = self.partial_sink.lock().clone() {
+                let _ = sink.publish(TextStreamChunk {
+                    text: delta,
+                    offset: 0,
+                });
+            }
         }
     }
 

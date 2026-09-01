@@ -5,7 +5,7 @@
 <h1 align="center">OpenLess</h1>
 
 <p align="center">
-  <strong>面向 macOS 与 Windows 的开源语音输入工具</strong>
+  <strong>面向 macOS、Windows 与 Linux 的开源语音输入工具</strong>
 </p>
 
 <p align="center">
@@ -33,6 +33,7 @@
 <p align="center">
   <img alt="macOS" src="https://img.shields.io/badge/macOS-12%2B-1f425f?style=flat-square&logo=apple&logoColor=white" />
   <img alt="Windows" src="https://img.shields.io/badge/Windows-10%2B-0078d4?style=flat-square&logo=windows&logoColor=white" />
+  <img alt="Linux" src="https://img.shields.io/badge/Linux-egui-fcc624?style=flat-square&logo=linux&logoColor=black" />
   <img alt="Tauri" src="https://img.shields.io/badge/Tauri-2-24c8db?style=flat-square&logo=tauri&logoColor=white" />
   <img alt="Rust" src="https://img.shields.io/badge/Rust-2021-ce422b?style=flat-square&logo=rust&logoColor=white" />
 </p>
@@ -457,4 +458,5 @@ OpenLess 同样认可并感谢 LinuxDo 社区开放、务实、对开发者友�
 
 ## 许可证
 
-OpenLess 基于 [MIT 许可证](LICENSE) 发布。
+OpenLess 2.0.0-Beta.1 基于 [AGPL-3.0-only 许可证](LICENSE) 发布。
+已发布的 1.x 版本继续沿用原 MIT 许可证。

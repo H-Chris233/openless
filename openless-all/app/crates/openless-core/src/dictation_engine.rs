@@ -211,6 +211,15 @@ impl DictationEngine for PipelineDictationEngine {
         })
     }
 
+    fn start_transcription(
+        &self,
+        session_id: SessionId,
+        context: Arc<DictationContext>,
+        partials: Arc<dyn TextStreamSink>,
+    ) -> BoxFuture<'static, Result<Arc<dyn TranscriptionSession>, BackendError>> {
+        self.transcription.start(session_id, context, partials)
+    }
+
     fn finish(
         &self,
         session_id: SessionId,

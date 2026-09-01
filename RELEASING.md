@@ -47,6 +47,12 @@ with `scripts/bump-version.sh <X.Y.Z>`:
 
 The root `openless-all/app/Cargo.lock` belongs only to the framework-independent core/Linux workspace and is not one of the five Tauri application version locations.
 
+## License boundary
+
+Published 1.x releases remain MIT. `2.0.0-Beta.1` is the effective boundary for
+the repository's `AGPL-3.0-only` license; third-party vendor files retain their
+own MIT, Apache, LGPL, or other upstream terms.
+
 The script takes a plain `X.Y.Z`; for a prerelease version such as
 `X.Y.Z-Beta.N`, edit the files by hand.
 

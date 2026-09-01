@@ -177,7 +177,14 @@ impl LinuxSettingsEffects for Fcitx5SettingsEffects {
             "SetSelectionPolishHotkeyRaw",
             target.selection_polish.as_ref(),
         )?;
-        apply_action_hotkey("SetTranslationHotkeyRaw", Some(&target.translation))
+        apply_action_hotkey("SetTranslationHotkeyRaw", Some(&target.translation))?;
+        let (symbol, states) = target
+            .coding_agent_voice
+            .as_ref()
+            .map(shortcut_to_raw)
+            .transpose()?
+            .unwrap_or((0, 0));
+        crate::fcitx5::set_less_computer_hotkey_raw(symbol, states)
     }
 
     fn set_active_asr_provider(&self, provider_id: &str) -> Result<(), BackendError> {

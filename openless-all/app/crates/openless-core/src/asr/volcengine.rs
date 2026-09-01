@@ -24,6 +24,7 @@ use crate::config::{TaskSpawner, TokioTaskSpawner};
 
 use super::frame::{self, Flags, MessageType, Serialization};
 use super::{AudioConsumer, DictionaryHotword, RawTranscript};
+use crate::ports::{TextStreamChunk, TextStreamSink};
 
 /// 官方「大模型流式语音识别 API」（双向流式·优化版）端点：
 /// https://www.volcengine.com/docs/6561/1354869
@@ -185,6 +186,7 @@ pub struct VolcengineStreamingASR {
     /// 而把后续 chunk 当成「stream 已结束」之后的多余数据丢弃 → 尾句丢失。
     pending_sends: Arc<AtomicUsize>,
     send_done: Arc<Notify>,
+    partial_sink: ParkingMutex<Option<Arc<dyn TextStreamSink>>>,
 }
 
 impl VolcengineStreamingASR {
@@ -207,7 +209,12 @@ impl VolcengineStreamingASR {
             audio_tx: ParkingMutex::new(None),
             pending_sends: Arc::new(AtomicUsize::new(0)),
             send_done: Arc::new(Notify::new()),
+            partial_sink: ParkingMutex::new(None),
         }
+    }
+
+    pub fn set_partial_sink(&self, sink: Arc<dyn TextStreamSink>) {
+        *self.partial_sink.lock() = Some(sink);
     }
 
     pub async fn open_session(self: &Arc<Self>) -> Result<(), VolcengineASRError> {
@@ -697,7 +704,23 @@ impl VolcengineStreamingASR {
         // 缓存最新的 partial transcript：服务端在 final 帧前断连时 fallback 用。
         // 仅在非空且不是 final 时更新（final 走另一条路径）。
         if !has_final && !full_text.is_empty() {
-            self.state.lock().last_partial_text = full_text.clone();
+            let delta = {
+                let mut state = self.state.lock();
+                let delta = full_text
+                    .strip_prefix(&state.last_partial_text)
+                    .unwrap_or("")
+                    .to_string();
+                state.last_partial_text = full_text.clone();
+                delta
+            };
+            if !delta.is_empty() {
+                if let Some(sink) = self.partial_sink.lock().clone() {
+                    let _ = sink.publish(TextStreamChunk {
+                        text: delta,
+                        offset: 0,
+                    });
+                }
+            }
         }
 
         if has_final {

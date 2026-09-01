@@ -35,6 +35,7 @@ use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 use crate::config::{TaskSpawner, TokioTaskSpawner};
 
 use super::{AudioConsumer, RawTranscript};
+use crate::ports::{TextStreamChunk, TextStreamSink};
 
 pub const PROVIDER_ID: &str = "iflytek";
 pub const DEFAULT_ENDPOINT: &str = "wss://rtasr.xfyun.cn/v1/ws";
@@ -120,6 +121,7 @@ pub struct XfyunStreamingASR {
     /// `{"end": true}`，否则末帧先到、尾部音频被服务端当「end 之后的数据」丢弃。
     pending_sends: Arc<AtomicUsize>,
     send_done: Arc<Notify>,
+    partial_sink: ParkingMutex<Option<Arc<dyn TextStreamSink>>>,
 }
 
 impl XfyunStreamingASR {
@@ -141,7 +143,12 @@ impl XfyunStreamingASR {
             audio_tx: ParkingMutex::new(None),
             pending_sends: Arc::new(AtomicUsize::new(0)),
             send_done: Arc::new(Notify::new()),
+            partial_sink: ParkingMutex::new(None),
         }
+    }
+
+    pub fn set_partial_sink(&self, sink: Arc<dyn TextStreamSink>) {
+        *self.partial_sink.lock() = Some(sink);
     }
 
     /// 构建带鉴权参数的 WebSocket 地址：
@@ -442,12 +449,31 @@ impl XfyunStreamingASR {
 
         let mut state = self.state.lock();
         state.last_result_text = trimmed.to_string();
+        let mut delta = None;
         if is_final {
             // 最终结果：以 seg_id 去重覆盖，收尾按 seg_id 顺序拼接。
             state.final_segments.insert(seg_id, trimmed.to_string());
             state.partial_segments.remove(&seg_id);
         } else {
+            let previous = state
+                .partial_segments
+                .get(&seg_id)
+                .map(String::as_str)
+                .unwrap_or("");
+            delta = trimmed
+                .strip_prefix(previous)
+                .filter(|suffix| !suffix.is_empty())
+                .map(str::to_string);
             state.partial_segments.insert(seg_id, trimmed.to_string());
+        }
+        drop(state);
+        if let Some(delta) = delta {
+            if let Some(sink) = self.partial_sink.lock().clone() {
+                let _ = sink.publish(TextStreamChunk {
+                    text: delta,
+                    offset: 0,
+                });
+            }
         }
     }
 

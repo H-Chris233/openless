@@ -133,25 +133,27 @@ pub mod contract {
         EventRecvError, EventSubscription, HistoryChange, HistoryInsertStatus, HistorySource,
         HostAction, HostActions, HotkeyRuntimeTarget, HotkeyStatus, InMemoryCredentialStore,
         InsertFallbackPayload, InsertOutcome, LessComputerEvent, LessComputerEventKind,
-        LocalAsrMirror, LocalAsrModelId, LocalAsrRuntime, LocalAsrTarget, NotificationLevel,
-        NotificationPayload, OpenLessBackend, PendingCorrection, PermissionSnapshot,
-        PermissionState, PlatformCapabilities, PolishDelta, PolishFailurePolicy, PolishMode,
-        PolishOutput, ProviderService, RecordingArchive, RecordingProgressSink, ResourceResolver,
-        RuleSource, SecretValue, SelectionPolishOutputMode, SelectionVoiceIntentMode,
-        SelectionVoiceManualIntent, SessionId, SettingsCollisionPolicy, SettingsEffectFailure,
-        SettingsEffectKind, SettingsEffectPlan, SettingsEffectReceipt, SettingsRuntime,
-        SettingsUpdateOptions, SettingsUpdateOutcome, SettingsValueChange, StartupSnapshot,
-        StylePack, StylePackChange, StylePackExample, StylePackKind, TaskSpawner, TextInserter,
-        TextPolisher, TextStreamChunk, TextStreamSink, TokioTaskSpawner, TranscriptDelta,
-        TranscriptOutput, TranscriptionEngine, TranscriptionSession, VocabPreset, VocabPresetStore,
-        VocabularyChange, BACKEND_CONTRACT_VERSION, DICTATION_SAMPLE_RATE,
+        LessComputerHotkeyAction, LessComputerVoiceSession, LocalAsrMirror, LocalAsrModelId,
+        LocalAsrRuntime, LocalAsrTarget, NotificationLevel, NotificationPayload, OpenLessBackend,
+        PendingCorrection, PermissionSnapshot, PermissionState, PlatformCapabilities, PolishDelta,
+        PolishFailurePolicy, PolishMode, PolishOutput, ProviderService, RecordingArchive,
+        RecordingProgressSink, ResourceResolver, RuleSource, SecretValue,
+        SelectionPolishOutputMode, SelectionVoiceIntentMode, SelectionVoiceManualIntent, SessionId,
+        SettingsCollisionPolicy, SettingsEffectFailure, SettingsEffectKind, SettingsEffectPlan,
+        SettingsEffectReceipt, SettingsRuntime, SettingsUpdateOptions, SettingsUpdateOutcome,
+        SettingsValueChange, StartupSnapshot, StylePack, StylePackChange, StylePackExample,
+        StylePackKind, TaskSpawner, TextInserter, TextPolisher, TextStreamChunk, TextStreamSink,
+        TokioTaskSpawner, TranscriptDelta, TranscriptOutput, TranscriptionEngine,
+        TranscriptionSession, VocabPreset, VocabPresetStore, VocabularyChange,
+        BACKEND_CONTRACT_VERSION, DICTATION_SAMPLE_RATE,
     };
 }
 
 pub use activity::{ActivityDay, ActivityStore, DayStats};
 pub use api::{
     BackendRepositories, BackendSnapshot, CliDispatchOutcome, DictationHotkeyDispatchOptions,
-    DictationHotkeyEdge, OpenLessBackend, StartupSnapshot,
+    DictationHotkeyEdge, LessComputerHotkeyAction, LessComputerVoiceSession, OpenLessBackend,
+    StartupSnapshot,
 };
 pub use audio::{encode_dictation_wav, NormalizedPcmChunk, PcmNormalizer, DICTATION_SAMPLE_RATE};
 pub use auxiliary::{

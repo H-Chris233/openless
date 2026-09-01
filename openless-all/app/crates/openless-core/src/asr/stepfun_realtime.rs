@@ -34,6 +34,7 @@ use crate::config::{TaskSpawner, TokioTaskSpawner};
 
 use super::qwen_realtime::join_segments;
 use super::{AudioConsumer, RawTranscript};
+use crate::ports::{TextStreamChunk, TextStreamSink};
 
 /// 内部 effective id（`resolve_effective_asr_provider` 按模型名从 `stepfun`
 /// 路由到这里），不出现在设置页 preset 列表里。
@@ -189,6 +190,7 @@ pub struct StepfunRealtimeASR {
     final_rx: ParkingMutex<Option<oneshot::Receiver<Result<RawTranscript, StepfunASRError>>>>,
     session_started: Arc<Notify>,
     session_finished: Arc<Notify>,
+    partial_sink: ParkingMutex<Option<Arc<dyn TextStreamSink>>>,
 }
 
 impl StepfunRealtimeASR {
@@ -208,7 +210,12 @@ impl StepfunRealtimeASR {
             final_rx: ParkingMutex::new(None),
             session_started: Arc::new(Notify::new()),
             session_finished: Arc::new(Notify::new()),
+            partial_sink: ParkingMutex::new(None),
         }
+    }
+
+    pub fn set_partial_sink(&self, sink: Arc<dyn TextStreamSink>) {
+        *self.partial_sink.lock() = Some(sink);
     }
 
     pub async fn open_session(self: &Arc<Self>) -> Result<(), StepfunASRError> {
@@ -596,7 +603,23 @@ impl StepfunRealtimeASR {
         let combined = format!("{confirmed}{stash}");
         let combined = combined.trim();
         if !combined.is_empty() {
-            self.state.lock().partial_text = combined.to_string();
+            let delta = {
+                let mut state = self.state.lock();
+                let delta = combined
+                    .strip_prefix(&state.partial_text)
+                    .unwrap_or("")
+                    .to_string();
+                state.partial_text = combined.to_string();
+                delta
+            };
+            if !delta.is_empty() {
+                if let Some(sink) = self.partial_sink.lock().clone() {
+                    let _ = sink.publish(TextStreamChunk {
+                        text: delta,
+                        offset: 0,
+                    });
+                }
+            }
         }
     }
 

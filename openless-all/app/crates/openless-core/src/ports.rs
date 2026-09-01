@@ -198,6 +198,25 @@ pub trait DictationEngine: Send + Sync {
         })
     }
 
+    /// Start only the provider-facing transcription side of a session.
+    ///
+    /// Voice Agent hosts feed canonical PCM themselves and therefore do not
+    /// need the normal recorder/polisher pipeline. Implementations that own a
+    /// transcription router can expose the same session-pinned provider here.
+    fn start_transcription(
+        &self,
+        _session_id: SessionId,
+        _context: Arc<DictationContext>,
+        _partials: Arc<dyn TextStreamSink>,
+    ) -> BoxFuture<'static, Result<Arc<dyn TranscriptionSession>, BackendError>> {
+        Box::pin(async {
+            Err(BackendError::new(
+                BackendErrorCode::Unsupported,
+                "dictation engine does not expose a standalone transcription session",
+            ))
+        })
+    }
+
     /// Feed canonical PCM into an active externally sourced session.
     fn feed_audio(&self, _session_id: SessionId, _pcm: &[u8]) -> Result<(), BackendError> {
         Err(BackendError::new(

@@ -731,3 +731,20 @@ egui 组发现缺少能力时，应提交一个只依赖 facade/DTO/event 的可
 完整验收以主计划第 12 节为准；本契约证明 egui 团队可以在不依赖 Tauri 的前提下基于冻结的
 1.0.0 Interface 开发 view model 和 egui UI。真实 Ubuntu 原生能力、发行包和 UI 验收仍分别由
 Linux runner 与 egui 团队负责。
+
+## Less Computer 语音接口（2.0）
+
+`OpenLessBackend::start_less_computer_voice(session_id)` 返回 Core-owned
+`LessComputerVoiceSession`。Host 必须只发送 16 kHz、mono、signed 16-bit little-endian
+PCM；空帧、奇数长度和累计超过 provider 上限会返回 `InvalidArgument`。`finish` 只允许调用
+一次，ASR 失败或空 transcript 不会启动 Agent，并释放 capture lease；`cancel` 同时取消
+ASR/Agent 并释放尚未提升的 lease。
+
+实时 provider 的 interim 文本通过既有 `BackendEventKind::TranscriptDelta` 发布，使用同一
+`session_id` 且 `offset` 单调递增；批式 provider 只发布一次 `is_final=true`。Agent 阶段继续
+使用 `LessComputerEvent`（approval、stream、completed、cancelled、error），不新增 ASR 事件
+类型，Backend contract 版本仍为 `1.0.0`。
+
+Linux `LinuxHotkeyEvent::{LessComputerPressed,LessComputerReleased,LessComputerCombined}`
+只表达热键边沿；Hold/Toggle/Auto（Auto 长按阈值 350ms）由 Core 解释。三种录音入口与
+`silence_auto_stop_enabled` 共用同一设置，冲突时保留当前会话并返回 `Busy`。

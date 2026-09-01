@@ -26,7 +26,8 @@ pub use credentials::LinuxCredentialStore;
 pub use fcitx5::{
     available as fcitx5_available, commit_text as fcitx5_commit_text,
     ensure_plugin_installed as ensure_fcitx5_plugin_installed,
-    selection_text as fcitx5_selection_text, set_hotkeys as set_fcitx5_hotkeys, Fcitx5TextInserter,
+    selection_text as fcitx5_selection_text, set_hotkeys as set_fcitx5_hotkeys,
+    set_less_computer_hotkey_raw as set_fcitx5_less_computer_hotkey_raw, Fcitx5TextInserter,
     FcitxPluginInstallPlan, FcitxPluginStatus,
 };
 pub use host_actions::LinuxHostActions;
@@ -53,6 +54,7 @@ pub struct LinuxHost {
     backend: std::sync::Arc<OpenLessBackend>,
     settings_runtime: std::sync::Arc<dyn SettingsRuntime>,
     translation_pending: std::sync::atomic::AtomicBool,
+    less_computer_voice: std::sync::Mutex<Option<LessComputerVoiceSession>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +104,7 @@ impl LinuxHost {
             backend,
             settings_runtime,
             translation_pending: std::sync::atomic::AtomicBool::new(false),
+            less_computer_voice: std::sync::Mutex::new(None),
         }
     }
 
@@ -177,6 +180,18 @@ impl LinuxHost {
         event: LinuxHotkeyEvent,
     ) -> Result<Option<CliDispatchOutcome>, BackendError> {
         match event {
+            LinuxHotkeyEvent::LessComputerPressed { at, .. } => {
+                self.dispatch_less_computer_edge(DictationHotkeyEdge::Pressed { at })
+                    .await
+            }
+            LinuxHotkeyEvent::LessComputerReleased { at, .. } => {
+                self.dispatch_less_computer_edge(DictationHotkeyEdge::Released { at })
+                    .await
+            }
+            LinuxHotkeyEvent::LessComputerCombined { .. } => {
+                self.dispatch_less_computer_edge(DictationHotkeyEdge::Combined)
+                    .await
+            }
             LinuxHotkeyEvent::DictationPressed { at, .. } => {
                 let translation_requested = self
                     .translation_pending
@@ -232,6 +247,62 @@ impl LinuxHost {
                 Ok(None)
             }
         }
+    }
+
+    async fn dispatch_less_computer_edge(
+        &self,
+        edge: DictationHotkeyEdge,
+    ) -> Result<Option<CliDispatchOutcome>, BackendError> {
+        match self.backend.dispatch_less_computer_hotkey_edge(edge) {
+            LessComputerHotkeyAction::Start => {
+                let session = self
+                    .backend
+                    .start_less_computer_voice(SessionId::new())
+                    .await?;
+                *self
+                    .less_computer_voice
+                    .lock()
+                    .expect("Linux Less Computer voice lock poisoned") = Some(session);
+            }
+            LessComputerHotkeyAction::Finish => {
+                let session = self
+                    .less_computer_voice
+                    .lock()
+                    .expect("Linux Less Computer voice lock poisoned")
+                    .take();
+                if let Some(session) = session {
+                    session.finish().await?;
+                }
+            }
+            LessComputerHotkeyAction::Cancel => {
+                let session = self
+                    .less_computer_voice
+                    .lock()
+                    .expect("Linux Less Computer voice lock poisoned")
+                    .take();
+                if let Some(session) = session {
+                    session.cancel().await?;
+                }
+            }
+            LessComputerHotkeyAction::Noop => {}
+        }
+        Ok(None)
+    }
+
+    /// Feed one canonical PCM frame from the Linux cpal callback into the
+    /// active Less Computer voice session.
+    pub fn feed_less_computer_pcm(&self, pcm: &[u8]) -> Result<(), BackendError> {
+        self.less_computer_voice
+            .lock()
+            .expect("Linux Less Computer voice lock poisoned")
+            .as_ref()
+            .ok_or_else(|| {
+                BackendError::new(
+                    BackendErrorCode::InvalidState,
+                    "Less Computer voice session is not active",
+                )
+            })?
+            .feed_pcm(pcm)
     }
 
     /// Download a Core-validated Marketplace archive and save it to a user-selected

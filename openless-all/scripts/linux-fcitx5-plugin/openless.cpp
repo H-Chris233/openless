@@ -16,11 +16,14 @@
  *    SetCustomDictationTrigger(s: keyString) — 设置自定义组合键 (Key::parse 格式)
  *    SetQaHotkeyRaw(uu: sym, states)     — 直接设 QA 面板触发 sym+states
  *    SetTranslationHotkeyRaw(uu: sym, states) — 直接设翻译模式触发 sym+states
+ *    SetLessComputerHotkeyRaw(uu: sym, states) — 直接设 Less Computer 触发 sym+states
  *    SetAuxDown(s: text)                 — 在候选词列表下方显示状态文本
  *    ClearAuxDown()                      — 清除候选词列表下方文本
  *    GetSelectionText() -> s             — 读取当前 PRIMARY 选区文本（由 clipboard addon 维护）
  *  信号:
  *    DictationKeyEvent(uub: sym, states, isPress) — 听写热键按下/抬起
+ *    LessComputerKeyEvent(uub: sym, states, isPress) — Less Computer 热键按下/抬起
+ *    LessComputerKeyCombined(uub: sym, states, isPress) — Less Computer 组合键撤销
  *    QaShortcutEvent(uub: sym, states, isPress)   — QA 快捷键按下/抬起
  *    SelectionPolishEvent(uub: sym, states, isPress) — 选区润色快捷键按下/抬起
  *    TranslationModifierEvent(uub: sym, states, isPress) — 翻译修饰键按下/抬起
@@ -75,9 +78,13 @@ public:
           selectionPolishRawStates_(0),
           translationRawSym_(0),
           translationRawStates_(0),
+          lessComputerRawSym_(0),
+          lessComputerRawStates_(0),
           hasCustomDictationKey_(false),
           dictationTriggerHeld_(false),
           dictationTriggerCombined_(false),
+          lessComputerTriggerHeld_(false),
+          lessComputerTriggerCombined_(false),
           savedIc_(nullptr) {
 
         // 1. 读取配置
@@ -118,6 +125,22 @@ public:
                     auto sym = static_cast<uint32_t>(keyEvent.key().sym());
                     auto states = static_cast<uint32_t>(keyEvent.key().states());
                     bool isPress = !keyEvent.isRelease();
+
+                    if (lessComputerRawSym_ != 0 && sym == lessComputerRawSym_ &&
+                        states == lessComputerRawStates_) {
+                        lessComputerTriggerHeld_ = isPress;
+                        if (isPress) {
+                            lessComputerTriggerCombined_ = false;
+                        }
+                        lessComputerKeyEvent(sym, states, isPress);
+                        keyEvent.filterAndAccept();
+                        return;
+                    }
+                    if (isPress && lessComputerTriggerHeld_ && !isModifierKeySym(sym) &&
+                        !lessComputerTriggerCombined_) {
+                        lessComputerTriggerCombined_ = true;
+                        lessComputerKeyCombined(sym, states, true);
+                    }
 
                     // 自定义组合键：Alt 状态下字母 sym 可能大写（A vs a），归一化比较
                     if (hasCustomDictationKey_ && states == static_cast<uint32_t>(customDictationKey_.states()) &&
@@ -462,6 +485,18 @@ public:
             << "SetTranslationHotkeyRaw: sym=" << sym << " states=" << states;
     }
 
+    void setLessComputerHotkeyRaw(uint32_t sym, uint32_t states) {
+        lessComputerRawSym_ = sym;
+        lessComputerRawStates_ = states;
+        lessComputerTriggerHeld_ = false;
+        lessComputerTriggerCombined_ = false;
+        RawConfig raw;
+        readAsIni(raw, configFile());
+        raw.setValueByPath("LessComputerRawSym", std::to_string(sym));
+        raw.setValueByPath("LessComputerRawStates", std::to_string(states));
+        safeSaveAsIni(raw, configFile());
+    }
+
     /// 读取当前 PRIMARY 选区文本。空字符串表示无选区或 clipboard addon 不可用。
     std::string getSelectionText() {
         auto *clipboard = instance_->addonManager().addon("clipboard");
@@ -487,9 +522,12 @@ public:
     FCITX_OBJECT_VTABLE_METHOD(setQaHotkeyRaw, "SetQaHotkeyRaw", "uu", "");
     FCITX_OBJECT_VTABLE_METHOD(setSelectionPolishHotkeyRaw, "SetSelectionPolishHotkeyRaw", "uu", "");
     FCITX_OBJECT_VTABLE_METHOD(setTranslationHotkeyRaw, "SetTranslationHotkeyRaw", "uu", "");
+    FCITX_OBJECT_VTABLE_METHOD(setLessComputerHotkeyRaw, "SetLessComputerHotkeyRaw", "uu", "");
     FCITX_OBJECT_VTABLE_METHOD(getSelectionText, "GetSelectionText", "", "s");
     FCITX_OBJECT_VTABLE_SIGNAL(dictationKeyEvent, "DictationKeyEvent", "uub");
     FCITX_OBJECT_VTABLE_SIGNAL(dictationKeyCombined, "DictationKeyCombined", "uub");
+    FCITX_OBJECT_VTABLE_SIGNAL(lessComputerKeyEvent, "LessComputerKeyEvent", "uub");
+    FCITX_OBJECT_VTABLE_SIGNAL(lessComputerKeyCombined, "LessComputerKeyCombined", "uub");
     FCITX_OBJECT_VTABLE_SIGNAL(qaShortcutEvent, "QaShortcutEvent", "uub");
     FCITX_OBJECT_VTABLE_SIGNAL(selectionPolishEvent, "SelectionPolishEvent", "uub");
     FCITX_OBJECT_VTABLE_SIGNAL(translationModifierEvent, "TranslationModifierEvent", "uub");
@@ -534,6 +572,16 @@ public:
             auto *v = raw.valueByPath("TranslationRawStates");
             translationRawStates_ = v ? std::stoul(*v, nullptr, 0) : 0;
         }
+        {
+            auto *v = raw.valueByPath("LessComputerRawSym");
+            lessComputerRawSym_ = v ? std::stoul(*v, nullptr, 0) : 0;
+        }
+        {
+            auto *v = raw.valueByPath("LessComputerRawStates");
+            lessComputerRawStates_ = v ? std::stoul(*v, nullptr, 0) : 0;
+        }
+        lessComputerTriggerHeld_ = false;
+        lessComputerTriggerCombined_ = false;
         rebuildTriggerKeys();
     }
 
@@ -579,10 +627,14 @@ private:
     uint32_t selectionPolishRawStates_;
     uint32_t translationRawSym_;
     uint32_t translationRawStates_;
+    uint32_t lessComputerRawSym_;
+    uint32_t lessComputerRawStates_;
     Key customDictationKey_;
     bool hasCustomDictationKey_;
     bool dictationTriggerHeld_;
     bool dictationTriggerCombined_;
+    bool lessComputerTriggerHeld_;
+    bool lessComputerTriggerCombined_;
     /// 快捷键按下时保存的输入上下文指针，用于 commitText 在失焦后仍能提交文字。
     /// 事件处理线程和 DBus 处理线程都是 fcitx5 主事件循环，无竞态。
     /// 通过 InputContextDestroyed 事件监听 IC 销毁时自动清空指针。

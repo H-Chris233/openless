@@ -19,6 +19,21 @@ pub enum LinuxHotkeyEvent {
         states: u32,
         at: std::time::Instant,
     },
+    LessComputerPressed {
+        symbol: u32,
+        states: u32,
+        at: std::time::Instant,
+    },
+    LessComputerReleased {
+        symbol: u32,
+        states: u32,
+        at: std::time::Instant,
+    },
+    LessComputerCombined {
+        symbol: u32,
+        states: u32,
+        at: std::time::Instant,
+    },
     QaPressed,
     SelectionPolishPressed,
     TranslationPressed,
@@ -204,6 +219,15 @@ fn event_from_signal(
         ("DictationKeyCombined", true) => {
             Some(LinuxHotkeyEvent::DictationCombined { symbol, states, at })
         }
+        ("LessComputerKeyEvent", true) => {
+            Some(LinuxHotkeyEvent::LessComputerPressed { symbol, states, at })
+        }
+        ("LessComputerKeyEvent", false) => {
+            Some(LinuxHotkeyEvent::LessComputerReleased { symbol, states, at })
+        }
+        ("LessComputerKeyCombined", true) => {
+            Some(LinuxHotkeyEvent::LessComputerCombined { symbol, states, at })
+        }
         ("QaShortcutEvent", true) => Some(LinuxHotkeyEvent::QaPressed),
         ("SelectionPolishEvent", true) => Some(LinuxHotkeyEvent::SelectionPolishPressed),
         ("TranslationModifierEvent", true) => Some(LinuxHotkeyEvent::TranslationPressed),
@@ -246,6 +270,30 @@ mod tests {
             event_from_signal("QaShortcutEvent", 0, 0, true, at),
             Some(LinuxHotkeyEvent::QaPressed)
         );
+        assert!(matches!(
+            event_from_signal("LessComputerKeyEvent", 3, 4, true, at),
+            Some(LinuxHotkeyEvent::LessComputerPressed {
+                symbol: 3,
+                states: 4,
+                ..
+            })
+        ));
+        assert!(matches!(
+            event_from_signal("LessComputerKeyEvent", 3, 4, false, at),
+            Some(LinuxHotkeyEvent::LessComputerReleased {
+                symbol: 3,
+                states: 4,
+                ..
+            })
+        ));
+        assert!(matches!(
+            event_from_signal("LessComputerKeyCombined", 3, 4, true, at),
+            Some(LinuxHotkeyEvent::LessComputerCombined {
+                symbol: 3,
+                states: 4,
+                ..
+            })
+        ));
         assert_eq!(event_from_signal("Unknown", 0, 0, true, at), None);
         assert_eq!(event_from_signal("QaShortcutEvent", 0, 0, false, at), None);
     }
