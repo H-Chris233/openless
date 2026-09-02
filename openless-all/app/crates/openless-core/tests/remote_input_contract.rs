@@ -4,9 +4,9 @@ use std::sync::{Arc, Mutex};
 use futures_util::future::BoxFuture;
 use openless_core::{
     BackendConfig, BackendDependencies, BackendError, BackendErrorCode, BackendEventKind,
-    OpenLessBackend, RemoteInputConfig, RemoteInputRuntimeAdapter, RemoteInputServerBinding,
-    RemoteInputServerConfig, RemoteInputService, SecretValue, SessionId,
-    REMOTE_INPUT_MAX_PCM_FRAME_BYTES,
+    OpenLessBackend, RemoteAuthResult, RemoteInputApi, RemoteInputConfig,
+    RemoteInputRuntimeAdapter, RemoteInputServerBinding, RemoteInputServerConfig,
+    RemoteInputService, SecretValue, SessionId, REMOTE_INPUT_MAX_PCM_FRAME_BYTES,
 };
 
 #[derive(Default)]
@@ -21,6 +21,7 @@ struct FixtureRemoteRuntime {
     audio_stop_count: AtomicUsize,
     audio_cancel_count: AtomicUsize,
     frames: Mutex<Vec<(SessionId, Vec<u8>)>>,
+    insert_preferences: Mutex<Vec<bool>>,
 }
 
 impl RemoteInputRuntimeAdapter for FixtureRemoteRuntime {
@@ -56,10 +57,8 @@ impl RemoteInputRuntimeAdapter for FixtureRemoteRuntime {
         config: RemoteInputServerConfig,
     ) -> BoxFuture<'static, Result<RemoteInputServerBinding, BackendError>> {
         self.start_count.fetch_add(1, Ordering::AcqRel);
-        let pin_valid = config.pairing_pin.expose_secret().len() == 6;
         let fail = self.fail_start.load(Ordering::Acquire);
         Box::pin(async move {
-            assert!(pin_valid);
             if fail {
                 return Err(BackendError::new(BackendErrorCode::Platform, "port-in-use"));
             }
@@ -80,8 +79,12 @@ impl RemoteInputRuntimeAdapter for FixtureRemoteRuntime {
         Box::pin(async { Ok(vec!["192.168.1.2".to_string()]) })
     }
 
-    fn start_audio_session(&self) -> BoxFuture<'static, Result<SessionId, BackendError>> {
+    fn start_audio_session(
+        &self,
+        insert_text: bool,
+    ) -> BoxFuture<'static, Result<SessionId, BackendError>> {
         self.audio_start_count.fetch_add(1, Ordering::AcqRel);
+        self.insert_preferences.lock().unwrap().push(insert_text);
         Box::pin(async { Ok(SessionId::new()) })
     }
 
@@ -128,6 +131,17 @@ fn backend(runtime: Arc<FixtureRemoteRuntime>) -> (OpenLessBackend, std::path::P
     )
     .unwrap();
     (backend, data_dir)
+}
+
+async fn authenticate(remote: &dyn RemoteInputApi, connection_id: SessionId) {
+    let pin = remote.read_pairing_pin().await.unwrap();
+    assert_eq!(
+        remote
+            .authenticate(connection_id, "192.168.1.8".to_string(), pin)
+            .await
+            .unwrap(),
+        RemoteAuthResult::Ok
+    );
 }
 
 #[tokio::test]
@@ -259,7 +273,7 @@ async fn stream_association_validates_frames_and_rejects_duplicates_and_late_pcm
         .await
         .unwrap();
     let connection_id = SessionId::new();
-    remote.connect(connection_id).await.unwrap();
+    authenticate(remote.as_ref(), connection_id).await;
     let session_id = remote.start_stream(connection_id).await.unwrap();
     assert_eq!(
         remote.start_stream(connection_id).await.unwrap_err().code,
@@ -267,7 +281,7 @@ async fn stream_association_validates_frames_and_rejects_duplicates_and_late_pcm
     );
     assert_eq!(
         remote
-            .feed_pcm(connection_id, session_id, vec![0])
+            .feed_pcm(connection_id, session_id, 0, vec![0])
             .await
             .unwrap_err()
             .code,
@@ -278,6 +292,7 @@ async fn stream_association_validates_frames_and_rejects_duplicates_and_late_pcm
             .feed_pcm(
                 connection_id,
                 session_id,
+                0,
                 vec![0; REMOTE_INPUT_MAX_PCM_FRAME_BYTES + 2],
             )
             .await
@@ -286,20 +301,92 @@ async fn stream_association_validates_frames_and_rejects_duplicates_and_late_pcm
         BackendErrorCode::InvalidArgument
     );
     remote
-        .feed_pcm(connection_id, session_id, vec![0, 1, 2, 3])
+        .feed_pcm(connection_id, session_id, 0, vec![0, 1, 2, 3])
+        .await
+        .unwrap();
+    assert_eq!(
+        remote
+            .feed_pcm(connection_id, session_id, 0, vec![0, 1])
+            .await
+            .unwrap_err()
+            .code,
+        BackendErrorCode::InvalidArgument
+    );
+    assert_eq!(
+        remote
+            .feed_pcm(connection_id, session_id, 2, vec![0, 1])
+            .await
+            .unwrap_err()
+            .code,
+        BackendErrorCode::InvalidArgument
+    );
+    remote
+        .feed_pcm(connection_id, session_id, 1, vec![0, 1])
         .await
         .unwrap();
     remote.stop_stream(connection_id, session_id).await.unwrap();
     assert_eq!(runtime.audio_stop_count.load(Ordering::Acquire), 1);
-    assert_eq!(runtime.frames.lock().unwrap().len(), 1);
+    assert_eq!(runtime.frames.lock().unwrap().len(), 2);
     assert_eq!(
         remote
-            .feed_pcm(connection_id, session_id, vec![0, 0])
+            .feed_pcm(connection_id, session_id, 2, vec![0, 0])
             .await
             .unwrap_err()
             .code,
         BackendErrorCode::Cancelled
     );
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
+async fn authentication_lockout_and_insert_preference_are_core_owned() {
+    let runtime = Arc::new(FixtureRemoteRuntime::default());
+    let (backend, data_dir) = backend(Arc::clone(&runtime));
+    let remote = &backend.services().remote_input;
+    remote
+        .configure(RemoteInputConfig {
+            enabled: true,
+            port: 8443,
+        })
+        .await
+        .unwrap();
+
+    for _ in 0..5 {
+        assert_eq!(
+            remote
+                .authenticate(
+                    SessionId::new(),
+                    "192.168.1.9".to_string(),
+                    SecretValue::new("invalid"),
+                )
+                .await
+                .unwrap(),
+            RemoteAuthResult::BadPin
+        );
+    }
+    let valid_pin = remote.read_pairing_pin().await.unwrap();
+    assert_eq!(
+        remote
+            .authenticate(SessionId::new(), "192.168.1.9".to_string(), valid_pin,)
+            .await
+            .unwrap(),
+        RemoteAuthResult::Locked
+    );
+
+    let connection_id = SessionId::new();
+    authenticate(remote.as_ref(), connection_id).await;
+    remote.set_insert(connection_id, false).await.unwrap();
+    remote.start_stream(connection_id).await.unwrap();
+    assert_eq!(*runtime.insert_preferences.lock().unwrap(), vec![false]);
+    assert_eq!(
+        remote
+            .set_insert(connection_id, true)
+            .await
+            .unwrap_err()
+            .code,
+        BackendErrorCode::Busy
+    );
+
     let _ = std::fs::remove_dir_all(data_dir);
 }
 
@@ -316,14 +403,14 @@ async fn disconnect_and_pin_rotation_cancel_active_streams_before_transport_rest
         .await
         .unwrap();
     let first_connection = SessionId::new();
-    remote.connect(first_connection).await.unwrap();
+    authenticate(remote.as_ref(), first_connection).await;
     remote.start_stream(first_connection).await.unwrap();
     remote.disconnect(first_connection).await.unwrap();
     remote.disconnect(first_connection).await.unwrap();
     assert_eq!(runtime.audio_cancel_count.load(Ordering::Acquire), 1);
 
     let second_connection = SessionId::new();
-    remote.connect(second_connection).await.unwrap();
+    authenticate(remote.as_ref(), second_connection).await;
     remote.start_stream(second_connection).await.unwrap();
     remote.regenerate_pairing_pin().await.unwrap();
     assert_eq!(runtime.audio_cancel_count.load(Ordering::Acquire), 2);
@@ -398,7 +485,7 @@ async fn backend_shutdown_stops_transport_and_cancels_active_remote_audio() {
         .await
         .unwrap();
     let connection_id = SessionId::new();
-    remote.connect(connection_id).await.unwrap();
+    authenticate(remote.as_ref(), connection_id).await;
     remote.start_stream(connection_id).await.unwrap();
 
     backend.shutdown().await.unwrap();

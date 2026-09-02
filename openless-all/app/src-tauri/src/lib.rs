@@ -176,6 +176,7 @@ pub fn run() {
 macro_rules! app_invoke_handler_desktop {
     () => {
         tauri::generate_handler![
+            commands::get_startup_snapshot,
             commands::get_settings,
             commands::get_default_style_system_prompts,
             commands::set_settings,
@@ -406,6 +407,7 @@ macro_rules! app_invoke_handler_desktop {
 macro_rules! app_invoke_handler_mobile {
     () => {
         tauri::generate_handler![
+            $crate::commands::get_startup_snapshot,
             $crate::commands::get_settings,
             $crate::commands::get_default_style_system_prompts,
             $crate::commands::set_settings,
@@ -525,7 +527,9 @@ fn run_desktop() {
     let coordinator = Arc::new(coordinator::Coordinator::new());
     let core_backend = coordinator.backend();
     #[cfg(target_os = "windows")]
-    if let Err(error) = coordinator.sync_active_asr_provider_from_preferences() {
+    if let Err(error) = commands::sync_active_asr_provider_to_vault(
+        &core_backend.get_preferences().active_asr_provider,
+    ) {
         log::warn!("[startup] sync active ASR provider from preferences failed: {error}");
     }
     let builder = tauri::Builder::default();

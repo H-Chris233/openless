@@ -4,8 +4,9 @@
 //! mutable preferences while recording, transcribing, polishing or inserting.
 
 use crate::shared_types::{
-    AndroidInsertStrategy, ChineseScriptPreference, OutputLanguagePreference, PasteShortcut,
-    PipelineMode, UserPreferences, WindowsInsertionMode, WindowsSendInputNewlineMode,
+    AndroidInsertStrategy, ChineseScriptPreference, MacosNewlineMode, OutputLanguagePreference,
+    PasteShortcut, PipelineMode, UserPreferences, WindowsInsertionMode,
+    WindowsSendInputNewlineMode,
 };
 use crate::style_packs::{translation_effective, StylePack};
 use crate::types::{DictationSession, PolishMode};
@@ -19,13 +20,27 @@ pub enum DictationAudioSource {
     External,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DictationStartOptions {
     pub translation_requested: bool,
     pub audio_source: DictationAudioSource,
+    pub insert_text: bool,
     pub style_pack_id: Option<String>,
     pub front_app: Option<String>,
     pub cursor_context: Option<String>,
+}
+
+impl Default for DictationStartOptions {
+    fn default() -> Self {
+        Self {
+            translation_requested: false,
+            audio_source: DictationAudioSource::Microphone,
+            insert_text: true,
+            style_pack_id: None,
+            front_app: None,
+            cursor_context: None,
+        }
+    }
 }
 
 /// User intent that is only known when a recording is stopped.
@@ -101,12 +116,14 @@ pub struct PolishHistoryTurn {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DictationInsertionContext {
+    pub enabled: bool,
     pub streaming: bool,
     pub save_streamed_text_to_clipboard: bool,
     pub restore_clipboard_after_paste: bool,
     pub paste_shortcut: PasteShortcut,
     pub windows_insertion_mode: WindowsInsertionMode,
     pub windows_sendinput_newline_mode: WindowsSendInputNewlineMode,
+    pub macos_newline_mode: MacosNewlineMode,
     pub allow_non_tsf_fallback: bool,
     pub android_insert_strategy: AndroidInsertStrategy,
 }
@@ -231,12 +248,14 @@ impl DictationContext {
                 prior_turns,
             },
             insertion: DictationInsertionContext {
+                enabled: options.insert_text,
                 streaming: preferences.streaming_insert,
                 save_streamed_text_to_clipboard: preferences.streaming_insert_save_clipboard,
                 restore_clipboard_after_paste: preferences.restore_clipboard_after_paste,
                 paste_shortcut: preferences.paste_shortcut,
                 windows_insertion_mode: preferences.windows_insertion_mode,
                 windows_sendinput_newline_mode: preferences.windows_sendinput_newline_mode,
+                macos_newline_mode: preferences.macos_newline_mode,
                 allow_non_tsf_fallback: preferences.allow_non_tsf_insertion_fallback,
                 android_insert_strategy: preferences.android_insert_strategy,
             },

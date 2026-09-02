@@ -14,7 +14,7 @@ pub const MODEL_ID: &str = "whisper-large-v3-turbo";
 const QUANTIZED_MODEL_FILE: &str = "ggml-large-v3-turbo-q5_0.bin";
 
 pub fn model_path_for_model(model_id: &str) -> Result<PathBuf> {
-    let id = crate::asr::local::ModelId::from_str(model_id)
+    let id = crate::asr::local::ModelId::from_wire_id(model_id)
         .filter(|id| id.is_whisper())
         .ok_or_else(|| anyhow::anyhow!("未知的本地 Whisper 模型: {model_id}"))?;
     let dir = crate::asr::local::models::model_dir(id)?;

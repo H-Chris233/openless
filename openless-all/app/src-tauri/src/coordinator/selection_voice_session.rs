@@ -5,9 +5,7 @@ use std::sync::{
     Arc,
 };
 
-use super::{
-    emit_capsule, qa_session, schedule_capsule_idle, Coordinator, Inner,
-};
+use super::{emit_capsule, schedule_capsule_idle, Coordinator, Inner};
 use crate::coordinator_state::SessionId;
 use crate::selection::SelectionInsertionTarget;
 use crate::types::{CapsuleState, HotkeyMode, InsertStatus};
@@ -86,8 +84,6 @@ pub(super) struct SelectionVoiceHostState {
     /// preview remain exclusively owned by `openless-core`.
     target_session_id: Option<CoreSessionId>,
     insertion_target: SelectionInsertionTarget,
-    /// Host resource ownership used by synchronous audio callbacks.
-    recorder_session_id: Option<SessionId>,
     /// Host shortcut arbitration state; not part of the business session.
     blocks_recording: bool,
     /// Auto 模式判定短按/长按的按下时刻。
@@ -146,50 +142,8 @@ pub(super) fn bind_selection_voice_target_state(
     let mut host = host_slot.lock();
     host.target_session_id = Some(session_id);
     host.insertion_target = insertion_target;
-    host.recorder_session_id = None;
     host.blocks_recording = false;
     Ok(())
-}
-
-pub(super) fn selection_voice_recording_active(inner: &Arc<Inner>, session_id: SessionId) -> bool {
-    inner.selection_voice_host.lock().recorder_session_id == Some(session_id)
-}
-
-pub(super) fn handle_selection_voice_recorder_error(
-    inner: &Arc<Inner>,
-    recorder_session_id: SessionId,
-    message: String,
-) {
-    let core_session_id = {
-        let mut host = inner.selection_voice_host.lock();
-        if host.recorder_session_id != Some(recorder_session_id) {
-            return;
-        }
-        let core_session_id = host.target_session_id;
-        *host = SelectionVoiceHostState::default();
-        core_session_id
-    };
-    if let Some(core_session_id) = core_session_id {
-        let inner = Arc::clone(inner);
-        let host = inner.host.clone();
-        host.spawn(async move {
-            let _ = inner
-                .backend
-                .services()
-                .selection_voice
-                .cancel(Some(core_session_id))
-                .await;
-        });
-    }
-    emit_selection_voice_end_error(inner, &message);
-}
-
-#[cfg(test)]
-pub(super) fn set_selection_voice_recorder_session_for_test(
-    inner: &Arc<Inner>,
-    session_id: Option<SessionId>,
-) {
-    inner.selection_voice_host.lock().recorder_session_id = session_id;
 }
 
 pub(super) async fn handle_selection_voice_pressed(inner: &Arc<Inner>) {
@@ -302,10 +256,7 @@ pub(super) async fn handle_selection_voice_released(inner: &Arc<Inner>) {
 }
 
 async fn begin_selection_voice_session(inner: &Arc<Inner>) -> Result<(), String> {
-    if !matches!(
-        inner.state.lock().phase,
-        crate::coordinator_state::SessionPhase::Idle
-    ) {
+    if inner.backend.snapshot().dictation.phase != openless_core::DictationPhase::Idle {
         return Err("dictationActive".into());
     }
     if selection_voice_blocks_other_recording(inner) {
@@ -328,26 +279,30 @@ async fn begin_selection_voice_session(inner: &Arc<Inner>) -> Result<(), String>
         })
         .await
         .map_err(core_error)?;
-    let recorder_session_id = session_id.as_uuid();
     {
         let mut host = inner.selection_voice_host.lock();
         host.target_session_id = Some(session_id);
         host.insertion_target = insertion_target;
-        host.recorder_session_id = Some(recorder_session_id);
         host.blocks_recording = true;
     }
 
     emit_capsule(inner, CapsuleState::Recording, 0.0, 0, None, None);
-    if let Err(error) = qa_session::start_selection_voice_recorder(inner, recorder_session_id).await
+    match inner
+        .backend
+        .start_selection_voice_capture(session_id)
+        .await
     {
-        let _ = inner
-            .backend
-            .services()
-            .selection_voice
-            .cancel(Some(session_id))
-            .await;
-        clear_host_session(inner, session_id);
-        return Err(error);
+        Ok(capture) => *inner.selection_voice_capture.lock() = Some(capture),
+        Err(error) => {
+            let _ = inner
+                .backend
+                .services()
+                .selection_voice
+                .cancel(Some(session_id))
+                .await;
+            clear_host_session(inner, session_id);
+            return Err(core_error(error));
+        }
     }
     Ok(())
 }
@@ -377,11 +332,14 @@ async fn end_selection_voice_session(inner: &Arc<Inner>) -> Result<(), String> {
     emit_capsule(inner, CapsuleState::Idle, 0.0, 0, None, None);
     schedule_capsule_idle(inner, 0);
     let workflow: Result<EndWorkflowOutcome, String> = async {
-        let transcript =
-            qa_session::finish_selection_voice_transcript(inner, session_id.as_uuid()).await?;
+        let capture = inner
+            .selection_voice_capture
+            .lock()
+            .take()
+            .ok_or_else(|| "selectionVoiceAsrUnavailable".to_string())?;
+        let transcript = capture.finish().await.map_err(core_error)?;
         {
             let mut host = inner.selection_voice_host.lock();
-            host.recorder_session_id = None;
             host.blocks_recording = false;
         }
         if transcript.trim().is_empty() {
@@ -582,6 +540,13 @@ impl Coordinator {
     }
 
     pub(crate) fn finish_cancelled_selection_voice_host(&self, session_id: Option<CoreSessionId>) {
+        let capture = self.inner.selection_voice_capture.lock().take();
+        let spawner = self.inner.host.clone();
+        spawner.spawn(async move {
+            if let Some(capture) = capture {
+                let _ = capture.cancel().await;
+            }
+        });
         if let Some(session_id) = session_id {
             clear_host_session(&self.inner, session_id);
         }
@@ -673,9 +638,10 @@ impl Coordinator {
         );
         match status {
             InsertStatus::Inserted => Ok(SelectionVoiceApplyOutcome::Inserted),
-            InsertStatus::PasteSent => Ok(SelectionVoiceApplyOutcome::PasteSent),
             InsertStatus::CopiedFallback => Ok(SelectionVoiceApplyOutcome::CopiedFallback),
-            InsertStatus::Failed => Err("selectionVoiceInsertFailed".to_string()),
+            InsertStatus::PasteSent | InsertStatus::Failed | InsertStatus::NotRequested => {
+                Err("selectionVoiceInsertFailed".to_string())
+            }
         }
     }
 

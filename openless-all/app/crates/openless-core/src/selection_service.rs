@@ -407,7 +407,6 @@ impl SelectionServiceInner {
         let insert_status = match outcome {
             crate::ports::InsertOutcome::Inserted => HistoryInsertStatus::Inserted,
             crate::ports::InsertOutcome::CopiedFallback => HistoryInsertStatus::CopiedFallback,
-            crate::ports::InsertOutcome::Unknown => HistoryInsertStatus::PasteSent,
         };
         let preferences = self.preferences.get();
         let final_text_chars = final_text.chars().count() as u64;
@@ -509,7 +508,6 @@ impl SelectionServiceInner {
         if state.snapshot.phase != SelectionPhase::Completed
             || state.reverting
             || state.snapshot.revert_outcome.is_some()
-            || state.snapshot.insert_outcome == Some(crate::ports::InsertOutcome::Unknown)
         {
             return Err(BackendError::new(
                 BackendErrorCode::InvalidState,

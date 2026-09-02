@@ -7,11 +7,4 @@
 
 pub mod local;
 
-pub use openless_core::asr::{
-    bailian, dashscope_multimodal, elevenlabs, mimo, pcm, qwen_realtime, stepfun_realtime,
-    volcengine, wav, whisper, xfyun, AudioConsumer, BailianCredentials, BailianRealtimeASR,
-    DashScopeMultimodalASR, DictionaryHotword, ElevenLabsBatchASR, MimoBatchASR,
-    Qwen3RealtimeASR, Qwen3RealtimeCredentials, RawTranscript, StepfunRealtimeASR,
-    StepfunRealtimeCredentials, VolcengineCredentials, VolcengineStreamingASR, WhisperBatchASR,
-    XfyunCredentials, XfyunStreamingASR,
-};
+pub use openless_core::asr::{bailian, pcm, volcengine, wav, whisper, RawTranscript};

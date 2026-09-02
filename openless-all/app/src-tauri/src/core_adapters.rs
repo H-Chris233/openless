@@ -10,10 +10,10 @@ use futures_util::future::BoxFuture;
 use openless_core::{
     ActiveRecording, AudioConsumer as CoreAudioConsumer, AudioRecorder, AudioRecorderRouter,
     BackendError, BackendErrorCode, DictationContext, DictationEngine, ExternalAudioRecorder,
-    HostAction, HostActions, InsertOutcome, LessComputerApi, RecordingArchive,
-    RecordingProgressSink, SessionId,
-    TextInserter as CoreTextInserter, TextPolisher, TextStreamChunk, TextStreamSink,
-    TranscriptOutput, TranscriptionEngine, TranscriptionSession,
+    HostAction, HostActions, InsertOutcome, InsertWriteResult, RecordingArchive,
+    RecordingProgressSink, SessionId, TextInserter as CoreTextInserter, TextInsertionSession,
+    TextPolisher, TextStreamChunk, TextStreamSink, TranscriptOutput, TranscriptionEngine,
+    TranscriptionSession,
 };
 use parking_lot::Mutex;
 use tauri::{AppHandle, Emitter, Manager};
@@ -30,8 +30,7 @@ pub(crate) fn app_handle_slot() -> AppHandleSlot {
 /// `OpenLessBackend::new` returns. The weak reference keeps Core ownership
 /// explicit without making an adapter query Tauri managed state through
 /// `AppHandle` or creating a backend/adapter reference cycle.
-pub(crate) type BackendSlot =
-    Arc<Mutex<Option<std::sync::Weak<openless_core::OpenLessBackend>>>>;
+pub(crate) type BackendSlot = Arc<Mutex<Option<std::sync::Weak<openless_core::OpenLessBackend>>>>;
 
 pub(crate) fn backend_slot() -> BackendSlot {
     Arc::new(Mutex::new(None))
@@ -158,18 +157,14 @@ pub(crate) fn backend_dependencies(
     }
     let polisher: Arc<dyn TextPolisher> = polisher;
     let auxiliary_transcription: Arc<dyn TranscriptionEngine> = transcription.clone();
-    let auxiliary_polisher: Arc<dyn TextPolisher> = Arc::new(
-        openless_core::SharedAuxiliaryTextPolisher::new(
+    let auxiliary_polisher: Arc<dyn TextPolisher> =
+        Arc::new(openless_core::SharedAuxiliaryTextPolisher::new(
             Arc::clone(&credential_store),
             Arc::clone(&polisher),
-        ),
-    );
-    let qa_transcription: Arc<dyn TranscriptionEngine> = transcription.clone();
+        ));
     let host_recorder: Arc<dyn AudioRecorder> = Arc::new(TauriAudioRecorder);
-    let recorder = AudioRecorderRouter::new(
-        Arc::clone(&host_recorder),
-        ExternalAudioRecorder::default(),
-    );
+    let recorder =
+        AudioRecorderRouter::new(Arc::clone(&host_recorder), ExternalAudioRecorder::default());
     let traditional = Arc::new(openless_core::PipelineDictationEngine::new(
         Arc::new(recorder),
         transcription,
@@ -177,10 +172,7 @@ pub(crate) fn backend_dependencies(
     ));
     let dictation = Arc::new(openless_core::DictationEngineRouter::new(traditional));
     let production_omni: Arc<dyn DictationEngine> = Arc::new(
-        openless_core::SharedOmniDictationEngine::new(
-            Arc::clone(&credential_store),
-            host_recorder,
-        ),
+        openless_core::SharedOmniDictationEngine::new(Arc::clone(&credential_store), host_recorder),
     );
     for provider_type in openless_core::SHARED_OMNI_PROVIDER_TYPES {
         dictation
@@ -191,32 +183,25 @@ pub(crate) fn backend_dependencies(
     if let Ok(root) = crate::persistence::models_root() {
         if let Ok(config) = openless_core::ModelStoreConfig::new(root) {
             if let Ok(store) = openless_core::ModelStore::new(config) {
-                dependencies
-                    .services
-                    .configure_model_store(Arc::new(store));
+                dependencies.services.configure_model_store(Arc::new(store));
             }
         }
     }
     dependencies
         .services
         .configure_auxiliary_runtime(auxiliary_polisher, auxiliary_transcription);
-    let less_computer = Arc::new(openless_core::LessComputerService::new());
     dependencies.services.provider = Arc::new(openless_core::ProviderService::new(
         Arc::clone(&credential_store),
         Arc::clone(&task_spawner),
     ));
-    dependencies.services.less_computer = less_computer.clone();
-    let coding_agent = Arc::new(TauriCodingAgentApi::new(
-        Arc::clone(&app),
-        less_computer.clone(),
-    ));
-    less_computer.bind_runtime(coding_agent.clone());
-    dependencies.services.coding_agent = coding_agent;
+    dependencies
+        .services
+        .configure_coding_agent_process(Arc::new(
+            crate::coding_agent::TauriCodingAgentProcessAdapter,
+        ));
     dependencies.qa_runtime = Some(Arc::new(crate::qa_adapter::TauriQaRuntimeAdapter::new(
         Arc::clone(&app),
         backend,
-        Arc::new(TauriAudioRecorder),
-        qa_transcription,
         Arc::clone(&credential_store),
         Arc::clone(&qa_host_context),
     )));
@@ -228,10 +213,8 @@ pub(crate) fn backend_dependencies(
                 .expect("built-in remote input defaults are valid"),
         );
     }
-    dependencies.services.platform = Arc::new(TauriPlatformApi::new(
-        Arc::clone(&app),
-        hotkey_status,
-    ));
+    dependencies.services.platform =
+        Arc::new(TauriPlatformApi::new(Arc::clone(&app), hotkey_status));
     dependencies.local_asr_runtime = Some(local_asr_runtime);
     #[cfg(not(mobile))]
     {
@@ -239,8 +222,8 @@ pub(crate) fn backend_dependencies(
             Some(Arc::new(TauriSelectionRuntime::new(Arc::clone(&app))));
         dependencies.selection_polisher = Some(polisher);
     }
+    dependencies.text_inserter = Arc::new(TauriTextInserter::new(Arc::clone(&app)));
     dependencies.host_actions = Arc::new(TauriHostActions::new(app, qa_host_context));
-    dependencies.text_inserter = Arc::new(TauriTextInserter::new());
     dependencies.dictation_engine = dictation;
     dependencies.credential_store = credential_store;
     dependencies.task_spawner = task_spawner;
@@ -251,18 +234,10 @@ fn local_asr_backend_error(code: BackendErrorCode, error: impl std::fmt::Display
     BackendError::new(code, error.to_string())
 }
 
-fn native_local_asr_mirror(mirror: openless_core::LocalAsrMirror) -> crate::asr::local::Mirror {
-    match mirror {
-        openless_core::LocalAsrMirror::HfMirror => crate::asr::local::Mirror::HfMirror,
-        openless_core::LocalAsrMirror::Huggingface
-        | openless_core::LocalAsrMirror::GithubRelease => crate::asr::local::Mirror::Huggingface,
-    }
-}
-
 fn native_local_asr_model(
     target: &openless_core::LocalAsrTarget,
 ) -> Result<crate::asr::local::ModelId, BackendError> {
-    crate::asr::local::ModelId::from_str(target.model_id()).ok_or_else(|| {
+    crate::asr::local::ModelId::from_wire_id(target.model_id()).ok_or_else(|| {
         BackendError::new(
             BackendErrorCode::InvalidArgument,
             format!("unknown generic local ASR model: {}", target.model_id()),
@@ -270,30 +245,10 @@ fn native_local_asr_model(
     })
 }
 
-fn local_asr_base_dir_string(path: Option<&std::path::Path>) -> Option<String> {
-    path.map(|path| path.to_string_lossy().into_owned())
-}
-
-fn local_asr_storage_snapshot(
-    base_dir: Option<PathBuf>,
-) -> Result<openless_core::LocalAsrStorageSettings, BackendError> {
-    let root = crate::persistence::models_root_for_base_dir(
-        local_asr_base_dir_string(base_dir.as_deref()).as_deref(),
-    )
-    .map_err(|error| local_asr_backend_error(BackendErrorCode::Platform, format!("{error:#}")))?;
-    Ok(openless_core::LocalAsrStorageSettings {
-        is_default: base_dir.is_none(),
-        models_base_dir: base_dir,
-        models_root_dir: root,
-    })
-}
-
 struct TauriLocalAsrRuntimeAdapter {
     app: AppHandleSlot,
     native: TauriNativeAsrDependencies,
     preferences: Arc<openless_core::PreferencesStore>,
-    qwen_downloads: Arc<crate::asr::local::DownloadManager>,
-    sherpa_downloads: Arc<crate::asr::local::sherpa_download::SherpaDownloadManager>,
 }
 
 impl TauriLocalAsrRuntimeAdapter {
@@ -306,10 +261,6 @@ impl TauriLocalAsrRuntimeAdapter {
             app,
             native,
             preferences,
-            qwen_downloads: Arc::new(crate::asr::local::DownloadManager::new()),
-            sherpa_downloads: Arc::new(
-                crate::asr::local::sherpa_download::SherpaDownloadManager::new(),
-            ),
         }
     }
 
@@ -323,7 +274,7 @@ impl TauriLocalAsrRuntimeAdapter {
     }
 }
 
-impl openless_core::LocalAsrRuntimeAdapter for TauriLocalAsrRuntimeAdapter {
+impl openless_core::ModelRuntimeAdapter for TauriLocalAsrRuntimeAdapter {
     fn engine_available(&self, runtime: openless_core::LocalAsrRuntime) -> bool {
         match runtime {
             openless_core::LocalAsrRuntime::Generic => {
@@ -334,214 +285,10 @@ impl openless_core::LocalAsrRuntimeAdapter for TauriLocalAsrRuntimeAdapter {
         }
     }
 
-    fn storage_settings(
-        &self,
-        base_dir: Option<PathBuf>,
-    ) -> BoxFuture<'static, Result<openless_core::LocalAsrStorageSettings, BackendError>> {
-        Box::pin(async move { local_asr_storage_snapshot(base_dir) })
-    }
-
-    fn relocate_storage(
-        &self,
-        current: Option<PathBuf>,
-        next: Option<PathBuf>,
-    ) -> BoxFuture<'static, Result<openless_core::LocalAsrStorageSettings, BackendError>> {
-        let qwen_downloads = Arc::clone(&self.qwen_downloads);
-        let sherpa_downloads = Arc::clone(&self.sherpa_downloads);
-        let foundry = Arc::clone(&self.native.foundry);
-        let sherpa = Arc::clone(&self.native.sherpa);
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
-        let qwen_cache = Arc::clone(&self.native.qwen_cache);
-        #[cfg(target_os = "macos")]
-        let whisper_cache = Arc::clone(&self.native.whisper_cache);
-        Box::pin(async move {
-            let current_string = local_asr_base_dir_string(current.as_deref());
-            let next_string = local_asr_base_dir_string(next.as_deref());
-            let old_root = crate::persistence::models_root_for_base_dir(current_string.as_deref())
-                .map_err(|error| {
-                    local_asr_backend_error(BackendErrorCode::Platform, format!("{error:#}"))
-                })?;
-            let new_root = crate::persistence::validate_models_base_dir(next_string.as_deref())
-                .map_err(|error| {
-                    local_asr_backend_error(BackendErrorCode::Platform, format!("{error:#}"))
-                })?;
-            let same_root = match (old_root.canonicalize(), new_root.canonicalize()) {
-                (Ok(old_root), Ok(new_root)) => old_root == new_root,
-                _ => false,
-            };
-            if !same_root && foundry.storage_configuration_locked() {
-                return Err(BackendError::new(
-                    BackendErrorCode::Busy,
-                    "Foundry Local has already been initialized; restart OpenLess before changing model storage",
-                ));
-            }
-
-            for model in crate::asr::local::ModelId::all() {
-                qwen_downloads.cancel(*model);
-            }
-            for model in crate::asr::local::sherpa::MODELS {
-                sherpa_downloads.cancel(model.alias);
-            }
-            foundry.request_cancel_prepare();
-            sherpa.request_cancel_prepare();
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
-            qwen_cache.release_now();
-            #[cfg(target_os = "macos")]
-            whisper_cache.release_now();
-            foundry.release_now().await.map_err(|error| {
-                local_asr_backend_error(BackendErrorCode::Platform, format!("{error:#}"))
-            })?;
-            sherpa.release_now().await.map_err(|error| {
-                local_asr_backend_error(BackendErrorCode::Platform, format!("{error:#}"))
-            })?;
-
-            for _ in 0..50 {
-                let qwen_active = crate::asr::local::ModelId::all()
-                    .iter()
-                    .any(|model| qwen_downloads.is_active(*model));
-                let sherpa_active = crate::asr::local::sherpa::MODELS
-                    .iter()
-                    .any(|model| sherpa_downloads.is_active(model.alias));
-                if !qwen_active && !sherpa_active {
-                    crate::persistence::migrate_models_root(&old_root, &new_root).map_err(
-                        |error| {
-                            local_asr_backend_error(
-                                BackendErrorCode::Platform,
-                                format!("{error:#}"),
-                            )
-                        },
-                    )?;
-                    return Ok(openless_core::LocalAsrStorageSettings {
-                        is_default: next.is_none(),
-                        models_base_dir: next,
-                        models_root_dir: new_root,
-                    });
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            }
-            Err(BackendError::new(
-                BackendErrorCode::Busy,
-                "local ASR downloads are still stopping; retry after cancellation finishes",
-            ))
-        })
-    }
-
-    fn list_models(
-        &self,
-        runtime: openless_core::LocalAsrRuntime,
-    ) -> BoxFuture<'static, Result<Vec<openless_core::LocalAsrModel>, BackendError>> {
-        let foundry = Arc::clone(&self.native.foundry);
-        let sherpa = Arc::clone(&self.native.sherpa);
-        Box::pin(async move {
-            match runtime {
-                openless_core::LocalAsrRuntime::Generic => {
-                    Ok(crate::asr::local::models::list_status()
-                        .into_iter()
-                        .map(|model| {
-                            let target = openless_core::LocalAsrTarget::parse(runtime, &model.id)
-                                .expect("native generic catalog uses core model ids");
-                            let native = crate::asr::local::ModelId::from_str(&model.id)
-                                .expect("native generic catalog id");
-                            openless_core::LocalAsrModel {
-                                target,
-                                display_name: model.id,
-                                family: if native.is_whisper() {
-                                    "whisper"
-                                } else {
-                                    "qwen3"
-                                }
-                                .into(),
-                                mode: Some("offline".into()),
-                                repository: Some(native.hf_repo().into()),
-                                languages: Vec::new(),
-                                installed: model.is_downloaded,
-                                downloaded_bytes: model.downloaded_bytes,
-                                size_bytes: None,
-                            }
-                        })
-                        .collect())
-                }
-                openless_core::LocalAsrRuntime::Foundry => foundry
-                    .catalog_snapshot()
-                    .await
-                    .map_err(|error| {
-                        local_asr_backend_error(BackendErrorCode::Platform, format!("{error:#}"))
-                    })
-                    .map(|models| {
-                        models
-                            .into_iter()
-                            .map(|model| openless_core::LocalAsrModel {
-                                target: openless_core::LocalAsrTarget::parse(runtime, &model.alias)
-                                    .expect("native Foundry catalog uses core aliases"),
-                                display_name: model.display_name,
-                                family: "whisper".into(),
-                                mode: Some("offline".into()),
-                                repository: None,
-                                languages: Vec::new(),
-                                installed: model.cached,
-                                downloaded_bytes: 0,
-                                size_bytes: model.file_size_mb.map(|size| size * 1024 * 1024),
-                            })
-                            .collect()
-                    }),
-                openless_core::LocalAsrRuntime::SherpaOnnx => sherpa
-                    .catalog_snapshot()
-                    .await
-                    .map_err(|error| {
-                        local_asr_backend_error(BackendErrorCode::Platform, format!("{error:#}"))
-                    })
-                    .map(|models| {
-                        models
-                            .into_iter()
-                            .map(|model| {
-                                let family = match model.family {
-                                    crate::asr::local::sherpa::SherpaFamily::SenseVoice => {
-                                        "sense_voice"
-                                    }
-                                    crate::asr::local::sherpa::SherpaFamily::Paraformer => {
-                                        "paraformer"
-                                    }
-                                    crate::asr::local::sherpa::SherpaFamily::Whisper => "whisper",
-                                    crate::asr::local::sherpa::SherpaFamily::Qwen3Asr => {
-                                        "qwen3_asr"
-                                    }
-                                    crate::asr::local::sherpa::SherpaFamily::Zipformer => {
-                                        "zipformer"
-                                    }
-                                };
-                                let mode = match model.mode {
-                                    crate::asr::local::sherpa::SherpaMode::Offline => "offline",
-                                    crate::asr::local::sherpa::SherpaMode::Online => "online",
-                                };
-                                openless_core::LocalAsrModel {
-                                    target: openless_core::LocalAsrTarget::parse(
-                                        runtime,
-                                        &model.alias,
-                                    )
-                                    .expect("native Sherpa catalog uses core aliases"),
-                                    display_name: model.display_name,
-                                    family: family.into(),
-                                    mode: Some(mode.into()),
-                                    repository: crate::asr::local::sherpa::hf_repo_for_alias(
-                                        &model.alias,
-                                    )
-                                    .ok()
-                                    .map(str::to_string),
-                                    languages: model.languages,
-                                    installed: model.cached,
-                                    downloaded_bytes: model.downloaded_bytes,
-                                    size_bytes: model.file_size_mb.map(|size| size * 1024 * 1024),
-                                }
-                            })
-                            .collect()
-                    }),
-            }
-        })
-    }
-
     fn runtime_status(
         &self,
         settings: openless_core::LocalAsrSettings,
+        _model_dir: PathBuf,
     ) -> BoxFuture<'static, Result<openless_core::LocalAsrRuntimeStatus, BackendError>> {
         let foundry = Arc::clone(&self.native.foundry);
         let sherpa = Arc::clone(&self.native.sherpa);
@@ -631,169 +378,18 @@ impl openless_core::LocalAsrRuntimeAdapter for TauriLocalAsrRuntimeAdapter {
         })
     }
 
-    fn remote_info(
-        &self,
-        target: openless_core::LocalAsrTarget,
-        mirror: openless_core::LocalAsrMirror,
-    ) -> BoxFuture<'static, Result<openless_core::LocalAsrRemoteInfo, BackendError>> {
-        Box::pin(async move {
-            match target.runtime {
-                openless_core::LocalAsrRuntime::Generic => {
-                    let info = crate::asr::local::download::fetch_remote_info(
-                        native_local_asr_model(&target)?,
-                        native_local_asr_mirror(mirror),
-                    )
-                    .await
-                    .map_err(|error| {
-                        local_asr_backend_error(BackendErrorCode::Provider, format!("{error:#}"))
-                    })?;
-                    Ok(openless_core::LocalAsrRemoteInfo {
-                        target,
-                        mirror: openless_core::LocalAsrMirror::from_legacy(&info.mirror),
-                        files: info
-                            .files
-                            .into_iter()
-                            .map(|file| openless_core::LocalAsrRemoteFile {
-                                path: file.path,
-                                local_path: None,
-                                size_bytes: file.size,
-                                sha256: None,
-                            })
-                            .collect(),
-                        total_bytes: info.total_bytes,
-                    })
-                }
-                openless_core::LocalAsrRuntime::SherpaOnnx => {
-                    let info = crate::asr::local::sherpa_download::fetch_remote_info(
-                        target.model_id(),
-                        native_local_asr_mirror(mirror),
-                    )
-                    .await
-                    .map_err(|error| {
-                        local_asr_backend_error(BackendErrorCode::Provider, format!("{error:#}"))
-                    })?;
-                    Ok(openless_core::LocalAsrRemoteInfo {
-                        target,
-                        mirror: openless_core::LocalAsrMirror::from_legacy(&info.mirror),
-                        files: info
-                            .files
-                            .into_iter()
-                            .map(|file| openless_core::LocalAsrRemoteFile {
-                                path: file.path,
-                                local_path: Some(file.local_path),
-                                size_bytes: file.size,
-                                sha256: file.sha256,
-                            })
-                            .collect(),
-                        total_bytes: info.total_bytes,
-                    })
-                }
-                openless_core::LocalAsrRuntime::Foundry => Err(BackendError::new(
-                    BackendErrorCode::Unsupported,
-                    "Foundry manages its model catalog through the native runtime",
-                )),
-            }
-        })
-    }
-
-    fn model_card(
-        &self,
-        target: openless_core::LocalAsrTarget,
-        mirror: openless_core::LocalAsrMirror,
-    ) -> BoxFuture<'static, Result<openless_core::LocalAsrModelCard, BackendError>> {
-        Box::pin(async move {
-            if target.runtime != openless_core::LocalAsrRuntime::Generic {
-                return Err(BackendError::new(
-                    BackendErrorCode::Unsupported,
-                    "model cards are only available for generic local ASR models",
-                ));
-            }
-            let card = crate::asr::local::download::fetch_hf_card(
-                native_local_asr_model(&target)?,
-                native_local_asr_mirror(mirror),
-            )
-            .await
-            .map_err(|error| {
-                local_asr_backend_error(BackendErrorCode::Provider, format!("{error:#}"))
-            })?;
-            Ok(openless_core::LocalAsrModelCard {
-                target,
-                mirror: openless_core::LocalAsrMirror::from_legacy(&card.mirror),
-                downloads: card.downloads,
-                likes: card.likes,
-                description: card.description,
-            })
-        })
-    }
-
-    fn start_download(
-        &self,
-        target: openless_core::LocalAsrTarget,
-        mirror: openless_core::LocalAsrMirror,
-    ) -> BoxFuture<'static, Result<(), BackendError>> {
-        let app = self.app_handle();
-        let qwen = Arc::clone(&self.qwen_downloads);
-        let sherpa = Arc::clone(&self.sherpa_downloads);
-        Box::pin(async move {
-            let app = app?;
-            match target.runtime {
-                openless_core::LocalAsrRuntime::Generic => {
-                    qwen.start(
-                        app,
-                        native_local_asr_model(&target)?,
-                        native_local_asr_mirror(mirror),
-                    );
-                    Ok(())
-                }
-                openless_core::LocalAsrRuntime::SherpaOnnx => {
-                    sherpa.start(
-                        app,
-                        target.model_id().to_string(),
-                        native_local_asr_mirror(mirror),
-                    );
-                    Ok(())
-                }
-                openless_core::LocalAsrRuntime::Foundry => Err(BackendError::new(
-                    BackendErrorCode::Unsupported,
-                    "Foundry downloads models during prepare",
-                )),
-            }
-        })
-    }
-
-    fn cancel_download(
-        &self,
-        target: openless_core::LocalAsrTarget,
-    ) -> BoxFuture<'static, Result<(), BackendError>> {
-        let result = match target.runtime {
-            openless_core::LocalAsrRuntime::Generic => {
-                native_local_asr_model(&target).map(|model| {
-                    self.qwen_downloads.cancel(model);
-                })
-            }
-            openless_core::LocalAsrRuntime::SherpaOnnx => {
-                self.sherpa_downloads.cancel(target.model_id());
-                Ok(())
-            }
-            openless_core::LocalAsrRuntime::Foundry => Err(BackendError::new(
-                BackendErrorCode::Unsupported,
-                "Foundry downloads are cancelled through prepare cancellation",
-            )),
-        };
-        Box::pin(async move { result })
-    }
-
     fn prepare(
         &self,
         target: openless_core::LocalAsrTarget,
         runtime_source: openless_core::FoundryRuntimeSource,
+        model_dir: PathBuf,
     ) -> BoxFuture<'static, Result<String, BackendError>> {
         let app = self.app_handle();
         let foundry = Arc::clone(&self.native.foundry);
         let sherpa = Arc::clone(&self.native.sherpa);
         Box::pin(async move {
             let app = app?;
-            match target.runtime {
+            let loaded = match target.runtime {
                 openless_core::LocalAsrRuntime::Foundry => {
                     let progress_app = app.clone();
                     foundry
@@ -890,7 +486,15 @@ impl openless_core::LocalAsrRuntimeAdapter for TauriLocalAsrRuntimeAdapter {
                     BackendErrorCode::Unsupported,
                     "generic local ASR uses preload rather than explicit prepare",
                 )),
-            }
+            }?;
+            std::fs::create_dir_all(&model_dir)
+                .map_err(|error| local_asr_backend_error(BackendErrorCode::Platform, error))?;
+            std::fs::write(
+                model_dir.join(openless_core::MODEL_READY_SENTINEL),
+                b"ready\n",
+            )
+            .map_err(|error| local_asr_backend_error(BackendErrorCode::Platform, error))?;
+            Ok(loaded)
         })
     }
 
@@ -950,7 +554,8 @@ impl openless_core::LocalAsrRuntimeAdapter for TauriLocalAsrRuntimeAdapter {
 
     fn preload(
         &self,
-        runtime: openless_core::LocalAsrRuntime,
+        target: openless_core::LocalAsrTarget,
+        model_dir: PathBuf,
     ) -> BoxFuture<'static, Result<(), BackendError>> {
         let preferences = Arc::clone(&self.preferences);
         #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -958,7 +563,7 @@ impl openless_core::LocalAsrRuntimeAdapter for TauriLocalAsrRuntimeAdapter {
         #[cfg(target_os = "macos")]
         let whisper_cache = Arc::clone(&self.native.whisper_cache);
         Box::pin(async move {
-            if runtime != openless_core::LocalAsrRuntime::Generic {
+            if target.runtime != openless_core::LocalAsrRuntime::Generic {
                 return Err(BackendError::new(
                     BackendErrorCode::Unsupported,
                     "Foundry and Sherpa require an explicit model for prepare",
@@ -976,7 +581,7 @@ impl openless_core::LocalAsrRuntimeAdapter for TauriLocalAsrRuntimeAdapter {
                                 format!("Qwen backend is unavailable: {provider}"),
                             )
                         })?;
-                    let model = crate::asr::local::ModelId::from_str(
+                    let model = crate::asr::local::ModelId::from_wire_id(
                         &preferences.local_asr_active_model,
                     )
                     .filter(|model| model.is_qwen())
@@ -987,8 +592,6 @@ impl openless_core::LocalAsrRuntimeAdapter for TauriLocalAsrRuntimeAdapter {
                         )
                     })?;
                     let model_id = model.as_str().to_string();
-                    let model_dir = crate::asr::local::models::model_dir(model)
-                        .map_err(map_native_asr_error)?;
                     tauri::async_runtime::spawn_blocking(move || {
                         qwen_cache.get_or_load(backend, &model_id, &model_dir)
                     })
@@ -1001,8 +604,15 @@ impl openless_core::LocalAsrRuntimeAdapter for TauriLocalAsrRuntimeAdapter {
                 #[cfg(target_os = "macos")]
                 if crate::asr::local::is_local_whisper(provider) {
                     let model_id = preferences.local_whisper_active_model;
-                    let model_path = crate::asr::local::whisper_model_path_for_model(&model_id)
-                        .map_err(map_native_asr_error)?;
+                    let model_path = model_dir.join(match model_id.as_str() {
+                        "whisper-base" => "ggml-base.bin",
+                        "whisper-small" => "ggml-small.bin",
+                        "whisper-medium" => "ggml-medium.bin",
+                        "whisper-large-v3" => "ggml-large-v3.bin",
+                        "whisper-large-v3-turbo" => "ggml-large-v3-turbo.bin",
+                        "whisper-large-v3-turbo-q5" => "ggml-large-v3-turbo-q5_0.bin",
+                        _ => "ggml-large-v3-turbo.bin",
+                    });
                     tauri::async_runtime::spawn_blocking(move || {
                         whisper_cache.get_or_load(&model_id, &model_path)
                     })
@@ -1017,82 +627,10 @@ impl openless_core::LocalAsrRuntimeAdapter for TauriLocalAsrRuntimeAdapter {
         })
     }
 
-    fn delete_model(
-        &self,
-        target: openless_core::LocalAsrTarget,
-    ) -> BoxFuture<'static, Result<(), BackendError>> {
-        let foundry = Arc::clone(&self.native.foundry);
-        let sherpa = Arc::clone(&self.native.sherpa);
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
-        let qwen_cache = Arc::clone(&self.native.qwen_cache);
-        #[cfg(target_os = "macos")]
-        let whisper_cache = Arc::clone(&self.native.whisper_cache);
-        Box::pin(async move {
-            match target.runtime {
-                openless_core::LocalAsrRuntime::Generic => {
-                    let model = native_local_asr_model(&target)?;
-                    #[cfg(any(target_os = "macos", target_os = "linux"))]
-                    if qwen_cache.loaded_model_id().as_deref() == Some(target.model_id()) {
-                        qwen_cache.release_now();
-                    }
-                    #[cfg(target_os = "macos")]
-                    if whisper_cache.loaded_model_id().as_deref() == Some(target.model_id()) {
-                        whisper_cache.release_now();
-                    }
-                    crate::asr::local::models::delete_model(model)
-                        .map_err(|error| local_asr_backend_error(BackendErrorCode::Platform, error))
-                }
-                openless_core::LocalAsrRuntime::Foundry => foundry
-                    .delete_model(target.model_id())
-                    .await
-                    .map_err(|error| {
-                        local_asr_backend_error(BackendErrorCode::Platform, format!("{error:#}"))
-                    }),
-                openless_core::LocalAsrRuntime::SherpaOnnx => sherpa
-                    .delete_model(target.model_id())
-                    .await
-                    .map_err(|error| {
-                        local_asr_backend_error(BackendErrorCode::Platform, format!("{error:#}"))
-                    }),
-            }
-        })
-    }
-
-    fn model_dir(
-        &self,
-        target: openless_core::LocalAsrTarget,
-    ) -> BoxFuture<'static, Result<PathBuf, BackendError>> {
-        let foundry = Arc::clone(&self.native.foundry);
-        Box::pin(async move {
-            match target.runtime {
-                openless_core::LocalAsrRuntime::Generic => crate::asr::local::models::model_dir(
-                    native_local_asr_model(&target)?,
-                )
-                .map_err(|error| {
-                    local_asr_backend_error(BackendErrorCode::Platform, format!("{error:#}"))
-                }),
-                openless_core::LocalAsrRuntime::Foundry => foundry
-                    .model_dir_for_alias(target.model_id())
-                    .await
-                    .map_err(|error| {
-                        local_asr_backend_error(BackendErrorCode::Platform, format!("{error:#}"))
-                    }),
-                openless_core::LocalAsrRuntime::SherpaOnnx => {
-                    crate::asr::local::SherpaOnnxRuntime::model_dir_for_alias(target.model_id())
-                        .map_err(|error| {
-                            local_asr_backend_error(
-                                BackendErrorCode::Platform,
-                                format!("{error:#}"),
-                            )
-                        })
-                }
-            }
-        })
-    }
-
     fn test_model(
         &self,
         target: openless_core::LocalAsrTarget,
+        _model_dir: PathBuf,
     ) -> BoxFuture<'static, Result<openless_core::LocalAsrTestResult, BackendError>> {
         let preferences = Arc::clone(&self.preferences);
         Box::pin(async move {
@@ -1130,497 +668,6 @@ impl openless_core::LocalAsrRuntimeAdapter for TauriLocalAsrRuntimeAdapter {
     }
 }
 
-struct TauriCodingAgentApi {
-    app: AppHandleSlot,
-    less_computer: Arc<dyn openless_core::LessComputerApi>,
-    active_test: Arc<Mutex<Option<Arc<AtomicBool>>>>,
-    request_counter: AtomicU64,
-}
-
-impl TauriCodingAgentApi {
-    fn new(app: AppHandleSlot, less_computer: Arc<dyn openless_core::LessComputerApi>) -> Self {
-        Self {
-            app,
-            less_computer,
-            active_test: Arc::new(Mutex::new(None)),
-            request_counter: AtomicU64::new(0),
-        }
-    }
-
-    fn app_handle(&self) -> Result<AppHandle, BackendError> {
-        self.app.lock().clone().ok_or_else(|| {
-            BackendError::new(
-                BackendErrorCode::InvalidState,
-                "Tauri app handle is not available",
-            )
-        })
-    }
-
-    fn next_request_id(&self) -> String {
-        let counter = self.request_counter.fetch_add(1, Ordering::Relaxed) + 1;
-        format!("console-{counter}")
-    }
-
-    fn clear_active_test(active_test: &Mutex<Option<Arc<AtomicBool>>>, expected: &Arc<AtomicBool>) {
-        let mut active = active_test.lock();
-        if active
-            .as_ref()
-            .is_some_and(|current| Arc::ptr_eq(current, expected))
-        {
-            active.take();
-        }
-    }
-}
-
-struct ActiveCodingAgentTestGuard {
-    active_test: Arc<Mutex<Option<Arc<AtomicBool>>>>,
-    cancel: Arc<AtomicBool>,
-}
-
-impl Drop for ActiveCodingAgentTestGuard {
-    fn drop(&mut self) {
-        self.cancel.store(true, Ordering::Relaxed);
-        TauriCodingAgentApi::clear_active_test(&self.active_test, &self.cancel);
-    }
-}
-
-impl openless_core::CodingAgentApi for TauriCodingAgentApi {
-    fn detect(
-        &self,
-        request: openless_core::CodingAgentDetectRequest,
-    ) -> BoxFuture<'static, Result<openless_core::CodingAgentAvailability, BackendError>> {
-        Box::pin(async move {
-            let executable = openless_core::normalize_coding_agent_executable(
-                request.provider,
-                request.executable,
-            )?;
-            let probe = crate::coding_agent::probe_cli(&executable).await;
-            let mcp_servers = if request.provider
-                == openless_core::CodingAgentProvider::ClaudeCodeCli
-                && probe.installed
-            {
-                crate::coding_agent::claude_mcp_list(&executable).await
-            } else {
-                Vec::new()
-            };
-            let has_computer_use = openless_core::has_computer_use_mcp(&mcp_servers);
-            Ok(openless_core::CodingAgentAvailability {
-                provider: request.provider,
-                installed: probe.installed,
-                executable,
-                version: probe.version,
-                mcp_servers,
-                has_computer_use,
-            })
-        })
-    }
-
-    fn list_models(
-        &self,
-        request: openless_core::CodingAgentModelsRequest,
-    ) -> BoxFuture<'static, Result<Vec<String>, BackendError>> {
-        Box::pin(async move {
-            if request.provider != openless_core::CodingAgentProvider::OpenCodeCli {
-                return Err(BackendError::new(
-                    BackendErrorCode::Unsupported,
-                    "selected coding agent provider does not expose a model-list command",
-                ));
-            }
-            let executable = openless_core::normalize_coding_agent_executable(
-                request.provider,
-                request.executable,
-            )?;
-            crate::coding_agent::opencode::list_opencode_models(&executable, request.refresh)
-                .await
-                .map_err(|message| {
-                    BackendError::new(BackendErrorCode::Provider, message).retryable(true)
-                })
-        })
-    }
-
-    fn command_risk(
-        &self,
-        command: String,
-    ) -> BoxFuture<'static, Result<openless_core::CommandRiskAssessment, BackendError>> {
-        Box::pin(async move { Ok(openless_core::assess_command_risk(&command)) })
-    }
-
-    fn run_test(
-        &self,
-        request: openless_core::CodingAgentTestRequest,
-    ) -> BoxFuture<'static, Result<openless_core::CodingAgentTestStatus, BackendError>> {
-        let app = self.app_handle();
-        let active_test = Arc::clone(&self.active_test);
-        let request_id = self.next_request_id();
-        Box::pin(async move {
-            let app = app?;
-            let request = openless_core::normalize_coding_agent_test_request(request)?;
-            let open_code_guard =
-                if request.provider == openless_core::CodingAgentProvider::OpenCodeCli {
-                    Some(
-                        serde_json::to_string(&openless_core::build_opencode_guard_config(&[]))
-                            .map_err(|error| {
-                                BackendError::new(BackendErrorCode::Internal, error.to_string())
-                            })?,
-                    )
-                } else {
-                    None
-                };
-            let claude_settings =
-                if request.provider == openless_core::CodingAgentProvider::ClaudeCodeCli {
-                    Some(
-                        serde_json::to_vec_pretty(&openless_core::build_guard_settings_json(
-                            request.permission_mode.as_cli_arg(),
-                            &[],
-                        ))
-                        .map_err(|error| {
-                            BackendError::new(BackendErrorCode::Internal, error.to_string())
-                        })?,
-                    )
-                } else {
-                    None
-                };
-            let cancel = Arc::new(AtomicBool::new(false));
-            {
-                let mut active = active_test.lock();
-                if active.is_some() {
-                    return Err(BackendError::new(
-                        BackendErrorCode::Busy,
-                        "a coding agent test is already running",
-                    ));
-                }
-                *active = Some(Arc::clone(&cancel));
-            }
-            let _active_guard = ActiveCodingAgentTestGuard {
-                active_test: Arc::clone(&active_test),
-                cancel: Arc::clone(&cancel),
-            };
-
-            if let Some(workdir) = request.workdir.clone() {
-                match tauri::async_runtime::spawn_blocking(move || {
-                    crate::coding_agent::create_git_snapshot(&workdir)
-                })
-                .await
-                {
-                    Ok(Some(snapshot)) => log::info!(
-                        "[coding-agent] created a recoverable git snapshot {snapshot} before test"
-                    ),
-                    Ok(None) => {}
-                    Err(error) => {
-                        log::warn!("[coding-agent] git snapshot task failed: {error}");
-                    }
-                }
-            }
-
-            let mut runner_request =
-                openless_core::CodingAgentRequest::new(request_id.clone(), request.prompt);
-            runner_request.cwd = request.workdir;
-            runner_request.model = request.model;
-            runner_request.permission_mode = request.permission_mode;
-            runner_request.max_budget_usd = request.max_budget_usd;
-            runner_request.timeout_secs = request.timeout_secs;
-            runner_request.session_persistence = false;
-            runner_request.allowed_tools = vec![
-                "Bash".into(),
-                "Read".into(),
-                "Edit".into(),
-                "Write".into(),
-                "Glob".into(),
-                "Grep".into(),
-                "WebSearch".into(),
-            ];
-
-            let mut settings_path = None;
-            if let Some(encoded) = claude_settings {
-                let path = std::env::temp_dir().join(format!(
-                    "openless-claude-guard-{}.json",
-                    uuid::Uuid::new_v4()
-                ));
-                if let Err(error) = tokio::fs::write(&path, encoded).await {
-                    return Err(BackendError::new(
-                        BackendErrorCode::Platform,
-                        format!("failed to write coding agent guard settings: {error}"),
-                    ));
-                }
-                runner_request.settings_json_path = Some(path.clone());
-                settings_path = Some(path);
-            }
-
-            let executable = request.executable;
-            let provider = request.provider;
-            let (sink, mut events) = tokio::sync::mpsc::unbounded_channel();
-            let cancel_for_runner = Arc::clone(&cancel);
-            let runner = tauri::async_runtime::spawn(async move {
-                match provider {
-                    openless_core::CodingAgentProvider::ClaudeCodeCli => {
-                        crate::coding_agent::run_claude_agent(
-                            &executable,
-                            runner_request,
-                            sink,
-                            cancel_for_runner,
-                        )
-                        .await
-                    }
-                    openless_core::CodingAgentProvider::OpenCodeCli => {
-                        crate::coding_agent::run_opencode_agent(
-                            &executable,
-                            runner_request,
-                            open_code_guard,
-                            sink,
-                            cancel_for_runner,
-                        )
-                        .await
-                    }
-                    openless_core::CodingAgentProvider::CodexCli => {
-                        crate::coding_agent::run_codex_agent(
-                            &executable,
-                            runner_request,
-                            sink,
-                            cancel_for_runner,
-                        )
-                        .await
-                    }
-                    openless_core::CodingAgentProvider::DshCli => {
-                        crate::coding_agent::run_dsh_agent(
-                            &executable,
-                            runner_request,
-                            sink,
-                            cancel_for_runner,
-                        )
-                        .await
-                    }
-                }
-            });
-
-            while let Some(event) = events.recv().await {
-                crate::tauri_events::publish(
-                    &app,
-                    None,
-                    openless_core::BackendEventKind::CodingAgentTest(event.into()),
-                );
-            }
-            let result = runner.await;
-            if let Some(path) = settings_path {
-                let _ = tokio::fs::remove_file(path).await;
-            }
-            match result {
-                Ok(Ok(())) => Ok(openless_core::CodingAgentTestStatus {
-                    running: false,
-                    request_id: Some(request_id),
-                    message: None,
-                }),
-                Ok(Err(error)) => Err(map_coding_agent_error(error)),
-                Err(error) => Err(BackendError::new(
-                    BackendErrorCode::Internal,
-                    format!("coding agent task failed: {error}"),
-                )),
-            }
-        })
-    }
-
-    fn cancel_test(&self) -> BoxFuture<'static, Result<(), BackendError>> {
-        let active_test = Arc::clone(&self.active_test);
-        Box::pin(async move {
-            if let Some(cancel) = active_test.lock().clone() {
-                cancel.store(true, Ordering::Relaxed);
-            }
-            Ok(())
-        })
-    }
-
-    fn approve(
-        &self,
-        token: String,
-        approved: bool,
-    ) -> BoxFuture<'static, Result<(), BackendError>> {
-        self.less_computer.approve(token, approved)
-    }
-}
-
-impl openless_core::LessComputerRuntimeAdapter for TauriCodingAgentApi {
-    fn run(
-        &self,
-        mut request: openless_core::CodingAgentRequest,
-        events: tokio::sync::mpsc::UnboundedSender<openless_core::CodingAgentStreamEvent>,
-        cancel: Arc<AtomicBool>,
-    ) -> BoxFuture<'static, Result<(), BackendError>> {
-        Box::pin(async move {
-            if let Some(workdir) = request.cwd.clone() {
-                match tauri::async_runtime::spawn_blocking(move || {
-                    crate::coding_agent::create_git_snapshot(&workdir)
-                })
-                .await
-                {
-                    Ok(Some(snapshot)) => {
-                        log::info!("[less-computer] created git snapshot {snapshot}")
-                    }
-                    Ok(None) => {}
-                    Err(error) => log::warn!("[less-computer] git snapshot failed: {error}"),
-                }
-            }
-
-            let approved_patterns: Vec<String> = request
-                .approved_patterns
-                .iter()
-                .flat_map(|pattern| {
-                    let group = openless_core::risk_equivalent_patterns(pattern);
-                    if group.is_empty() {
-                        vec![pattern.as_str()]
-                    } else {
-                        group
-                    }
-                })
-                .filter(|pattern| openless_core::deny_rule_for_pattern(pattern).is_some())
-                .map(str::to_string)
-                .collect();
-
-            let mut settings_path = None;
-            let mut opencode_guard = None;
-            match request.provider {
-                openless_core::CodingAgentProvider::ClaudeCodeCli => {
-                    let allow_rules: Vec<String> = approved_patterns
-                        .iter()
-                        .filter_map(|pattern| openless_core::deny_rule_for_pattern(pattern))
-                        .map(str::to_string)
-                        .collect();
-                    let mut deny = openless_core::default_deny_rules();
-                    deny.retain(|candidate| !allow_rules.iter().any(|allowed| allowed == candidate));
-                    let settings = serde_json::json!({
-                        "permissions": {
-                            "defaultMode": request.permission_mode.as_cli_arg(),
-                            "deny": deny,
-                        }
-                    });
-                    let bytes = serde_json::to_vec_pretty(&settings).map_err(|error| {
-                        BackendError::new(BackendErrorCode::Internal, error.to_string())
-                    })?;
-                    let path = std::env::temp_dir().join(format!(
-                        "openless-less-computer-guard-{}.json",
-                        uuid::Uuid::new_v4()
-                    ));
-                    tokio::fs::write(&path, bytes).await.map_err(|error| {
-                        BackendError::new(
-                            BackendErrorCode::Platform,
-                            format!("failed to write Less Computer guard settings: {error}"),
-                        )
-                        .retryable(false)
-                    })?;
-                    request.settings_json_path = Some(path.clone());
-                    settings_path = Some(path);
-                    request.allowed_tools = vec![
-                        "Bash".into(),
-                        "Read".into(),
-                        "Edit".into(),
-                        "Write".into(),
-                        "Glob".into(),
-                        "Grep".into(),
-                        "WebSearch".into(),
-                    ];
-                    request.allowed_tools.extend(allow_rules);
-                }
-                openless_core::CodingAgentProvider::OpenCodeCli => {
-                    opencode_guard = Some(
-                        serde_json::to_string(&openless_core::build_opencode_guard_config(
-                            &approved_patterns,
-                        ))
-                        .map_err(|error| {
-                            BackendError::new(BackendErrorCode::Internal, error.to_string())
-                        })?,
-                    );
-                }
-                openless_core::CodingAgentProvider::CodexCli
-                | openless_core::CodingAgentProvider::DshCli => {}
-            }
-
-            let executable = request
-                .executable
-                .clone()
-                .unwrap_or_else(|| request.provider.default_exe().to_string());
-            let provider = request.provider;
-            let (sink, mut stream) = tokio::sync::mpsc::unbounded_channel();
-            let cancel_for_runner = Arc::clone(&cancel);
-            let runner = tauri::async_runtime::spawn(async move {
-                match provider {
-                    openless_core::CodingAgentProvider::ClaudeCodeCli => {
-                        crate::coding_agent::run_claude_agent(
-                            &executable,
-                            request,
-                            sink,
-                            cancel_for_runner,
-                        )
-                        .await
-                    }
-                    openless_core::CodingAgentProvider::OpenCodeCli => {
-                        crate::coding_agent::run_opencode_agent(
-                            &executable,
-                            request,
-                            opencode_guard,
-                            sink,
-                            cancel_for_runner,
-                        )
-                        .await
-                    }
-                    openless_core::CodingAgentProvider::CodexCli => {
-                        crate::coding_agent::run_codex_agent(
-                            &executable,
-                            request,
-                            sink,
-                            cancel_for_runner,
-                        )
-                        .await
-                    }
-                    openless_core::CodingAgentProvider::DshCli => {
-                        crate::coding_agent::run_dsh_agent(
-                            &executable,
-                            request,
-                            sink,
-                            cancel_for_runner,
-                        )
-                        .await
-                    }
-                }
-            });
-            while let Some(event) = stream.recv().await {
-                let _ = events.send(event.into());
-            }
-            let result = runner.await;
-            if let Some(path) = settings_path {
-                let _ = tokio::fs::remove_file(path).await;
-            }
-            match result {
-                Ok(Ok(())) => Ok(()),
-                Ok(Err(error)) => Err(map_coding_agent_error(error)),
-                Err(error) => Err(BackendError::new(
-                    BackendErrorCode::Internal,
-                    format!("Less Computer runtime task failed: {error}"),
-                )),
-            }
-        })
-    }
-}
-
-fn map_coding_agent_error(error: crate::coding_agent::CodingAgentError) -> BackendError {
-    let code = match &error {
-        crate::coding_agent::CodingAgentError::Cancelled => BackendErrorCode::Cancelled,
-        crate::coding_agent::CodingAgentError::ExecutableNotFound(_) => {
-            BackendErrorCode::InvalidArgument
-        }
-        crate::coding_agent::CodingAgentError::Spawn(_)
-        | crate::coding_agent::CodingAgentError::ProcessExit(_)
-        | crate::coding_agent::CodingAgentError::Protocol(_)
-        | crate::coding_agent::CodingAgentError::Timeout(_)
-        | crate::coding_agent::CodingAgentError::Io(_) => BackendErrorCode::Provider,
-    };
-    let retryable = matches!(
-        error,
-        crate::coding_agent::CodingAgentError::ProcessExit(_)
-            | crate::coding_agent::CodingAgentError::Timeout(_)
-            | crate::coding_agent::CodingAgentError::Io(_)
-    );
-    BackendError::new(code, error.to_string()).retryable(retryable)
-}
-
-#[cfg(not(mobile))]
 #[derive(Clone)]
 struct TauriSelectionTarget {
     target: crate::selection::SelectionInsertionTarget,
@@ -1967,7 +1014,6 @@ impl openless_core::RemoteInputRuntimeAdapter for TauriRemoteInputRuntimeAdapter
                 })?;
             let handle = crate::remote_server::start(crate::remote_server::RemoteServerConfig {
                 port: config.port,
-                pin: config.pairing_pin.into_exposed(),
                 backend,
                 app,
             })
@@ -2004,6 +1050,7 @@ impl openless_core::RemoteInputRuntimeAdapter for TauriRemoteInputRuntimeAdapter
 
     fn start_audio_session(
         &self,
+        insert_text: bool,
     ) -> BoxFuture<'static, Result<openless_core::SessionId, BackendError>> {
         let backend = self.backend();
         Box::pin(async move {
@@ -2011,7 +1058,12 @@ impl openless_core::RemoteInputRuntimeAdapter for TauriRemoteInputRuntimeAdapter
             if !backend.snapshot().running {
                 backend.start().await?;
             }
-            backend.start_external_dictation().await
+            backend
+                .start_external_dictation_with_options(openless_core::DictationStartOptions {
+                    insert_text,
+                    ..openless_core::DictationStartOptions::default()
+                })
+                .await
         })
     }
 
@@ -2052,10 +1104,7 @@ struct TauriPlatformApi {
 }
 
 impl TauriPlatformApi {
-    fn new(
-        app: AppHandleSlot,
-        hotkey_status: Arc<Mutex<openless_core::HotkeyStatus>>,
-    ) -> Self {
+    fn new(app: AppHandleSlot, hotkey_status: Arc<Mutex<openless_core::HotkeyStatus>>) -> Self {
         Self { app, hotkey_status }
     }
 
@@ -2268,79 +1317,92 @@ impl TranscriptionEngine for TauriNativeTranscriptionEngine {
         Box::pin(async move {
             let provider_type = context.asr.provider_type.as_str();
             #[cfg(target_os = "windows")]
-            let (kind, label_model) =
-                if crate::asr::local::foundry::is_foundry_local_whisper(provider_type)
-                    || matches!(provider_type, "foundry-local" | "foundry-whisper")
-                {
-                    let model = context
-                        .asr
-                        .model
-                        .clone()
-                        .filter(|model| crate::asr::local::foundry::model_alias_is_known(model))
-                        .unwrap_or_else(|| {
-                            crate::asr::local::foundry::DEFAULT_MODEL_ALIAS.to_string()
-                        });
-                    (
-                        TauriNativeTranscriptionSessionKind::Foundry {
-                            provider: Arc::new(crate::asr::local::FoundryLocalWhisperAsr::new(
-                                Arc::clone(&foundry),
-                                model.clone(),
-                                context
-                                    .asr
-                                    .runtime
-                                    .clone()
-                                    .unwrap_or_else(|| "auto".to_string()),
-                                context.asr.language.clone(),
-                            )),
-                            runtime: foundry,
-                        },
-                        Some(model),
-                    )
-                } else if crate::asr::local::sherpa::is_sherpa_onnx_local(provider_type)
-                    || provider_type == "sherpa-onnx"
-                {
-                    let model = context
-                        .asr
-                        .model
-                        .clone()
-                        .filter(|model| crate::asr::local::sherpa::model_alias_is_known(model))
-                        .unwrap_or_else(|| {
-                            crate::asr::local::sherpa::DEFAULT_MODEL_ALIAS.to_string()
-                        });
-                    let token_sink = Arc::clone(&partials);
-                    let token_offset = Arc::new(AtomicU64::new(0));
-                    let handler_offset = Arc::clone(&token_offset);
-                    let token_handler = Arc::new(move |piece: String| {
-                        let offset = handler_offset
-                            .fetch_add(piece.chars().count() as u64, Ordering::AcqRel);
-                        if let Err(error) = token_sink.publish(TextStreamChunk {
-                            text: piece,
-                            offset,
-                        }) {
-                            log::warn!("[core-adapter] publish sherpa partial failed: {error}");
-                        }
+            let (kind, label_model) = if provider_type
+                == openless_core::LocalAsrRuntime::Foundry.provider_id()
+            {
+                let model = context
+                    .asr
+                    .model
+                    .clone()
+                    .filter(|model| {
+                        openless_core::LocalAsrTarget::parse(
+                            openless_core::LocalAsrRuntime::Foundry,
+                            model,
+                        )
+                        .is_ok()
+                    })
+                    .unwrap_or_else(|| {
+                        openless_core::LocalAsrRuntime::Foundry
+                            .default_model()
+                            .to_string()
                     });
-                    let provider = crate::asr::local::SherpaOnnxAsr::new_for_model(
-                        Arc::clone(&sherpa),
-                        model.clone(),
-                        context.asr.language.clone(),
-                        Some(token_handler),
-                    )
-                    .await
-                    .map_err(map_native_asr_error)?;
-                    (
-                        TauriNativeTranscriptionSessionKind::Sherpa {
-                            provider: Arc::new(provider),
-                            runtime: sherpa,
-                        },
-                        Some(model),
-                    )
-                } else {
-                    return Err(BackendError::new(
-                        BackendErrorCode::Unsupported,
-                        format!("native ASR provider is unavailable: {provider_type}"),
-                    ));
-                };
+                (
+                    TauriNativeTranscriptionSessionKind::Foundry {
+                        provider: Arc::new(crate::asr::local::FoundryLocalWhisperAsr::new(
+                            Arc::clone(&foundry),
+                            model.clone(),
+                            context
+                                .asr
+                                .runtime
+                                .clone()
+                                .unwrap_or_else(|| "auto".to_string()),
+                            context.asr.language.clone(),
+                        )),
+                        runtime: foundry,
+                    },
+                    Some(model),
+                )
+            } else if provider_type == openless_core::LocalAsrRuntime::SherpaOnnx.provider_id() {
+                let model = context
+                    .asr
+                    .model
+                    .clone()
+                    .filter(|model| {
+                        openless_core::LocalAsrTarget::parse(
+                            openless_core::LocalAsrRuntime::SherpaOnnx,
+                            model,
+                        )
+                        .is_ok()
+                    })
+                    .unwrap_or_else(|| {
+                        openless_core::LocalAsrRuntime::SherpaOnnx
+                            .default_model()
+                            .to_string()
+                    });
+                let token_sink = Arc::clone(&partials);
+                let token_offset = Arc::new(AtomicU64::new(0));
+                let handler_offset = Arc::clone(&token_offset);
+                let token_handler = Arc::new(move |piece: String| {
+                    let offset =
+                        handler_offset.fetch_add(piece.chars().count() as u64, Ordering::AcqRel);
+                    if let Err(error) = token_sink.publish(TextStreamChunk {
+                        text: piece,
+                        offset,
+                    }) {
+                        log::warn!("[core-adapter] publish sherpa partial failed: {error}");
+                    }
+                });
+                let provider = crate::asr::local::SherpaOnnxAsr::new_for_model(
+                    Arc::clone(&sherpa),
+                    model.clone(),
+                    context.asr.language.clone(),
+                    Some(token_handler),
+                )
+                .await
+                .map_err(map_native_asr_error)?;
+                (
+                    TauriNativeTranscriptionSessionKind::Sherpa {
+                        provider: Arc::new(provider),
+                        runtime: sherpa,
+                    },
+                    Some(model),
+                )
+            } else {
+                return Err(BackendError::new(
+                    BackendErrorCode::Unsupported,
+                    format!("native ASR provider is unavailable: {provider_type}"),
+                ));
+            };
 
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             let (kind, label_model) = if crate::asr::local::is_local_qwen3(provider_type) {
@@ -2355,7 +1417,7 @@ impl TranscriptionEngine for TauriNativeTranscriptionEngine {
                     .asr
                     .model
                     .as_deref()
-                    .and_then(crate::asr::local::ModelId::from_str)
+                    .and_then(crate::asr::local::ModelId::from_wire_id)
                     .filter(|model| model.is_qwen())
                     .ok_or_else(|| {
                         BackendError::new(
@@ -2394,7 +1456,7 @@ impl TranscriptionEngine for TauriNativeTranscriptionEngine {
                             .model
                             .clone()
                             .filter(|model| {
-                                crate::asr::local::ModelId::from_str(model)
+                                crate::asr::local::ModelId::from_wire_id(model)
                                     .is_some_and(|model| model.is_whisper())
                             })
                             .unwrap_or_else(|| crate::asr::local::WHISPER_MODEL_ID.to_string());
@@ -2965,44 +2027,37 @@ fn map_recorder_error(error: RecorderError) -> BackendError {
 }
 
 pub(crate) struct TauriTextInserter {
+    app: AppHandleSlot,
     #[cfg(target_os = "windows")]
     windows_ime: Arc<crate::windows_ime_session::WindowsImeSessionController>,
-    #[cfg(target_os = "windows")]
-    prepared: Arc<
-        Mutex<HashMap<SessionId, Option<crate::windows_ime_session::PreparedWindowsImeSession>>>,
-    >,
 }
 
 impl TauriTextInserter {
-    fn new() -> Self {
+    fn new(app: AppHandleSlot) -> Self {
         Self {
+            app,
             #[cfg(target_os = "windows")]
             windows_ime: Arc::new(crate::windows_ime_session::WindowsImeSessionController::new()),
-            #[cfg(target_os = "windows")]
-            prepared: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
 
 impl CoreTextInserter for TauriTextInserter {
-    fn prepare(
+    fn begin(
         &self,
         session_id: SessionId,
         context: Arc<DictationContext>,
-    ) -> BoxFuture<'static, Result<(), BackendError>> {
+    ) -> BoxFuture<'static, Result<Arc<dyn TextInsertionSession>, BackendError>> {
+        let app = Arc::clone(&self.app);
         #[cfg(target_os = "windows")]
-        {
-            if context.insertion.windows_insertion_mode
-                != openless_core::shared_types::WindowsInsertionMode::Tsf
+        let windows_ime = Arc::clone(&self.windows_ime);
+        Box::pin(async move {
+            #[cfg(target_os = "windows")]
+            let prepared = if context.insertion.windows_insertion_mode
+                == openless_core::shared_types::WindowsInsertionMode::Tsf
             {
-                return Box::pin(async { Ok(()) });
-            }
-            let windows_ime = Arc::clone(&self.windows_ime);
-            let prepared = Arc::clone(&self.prepared);
-            prepared.lock().insert(session_id, None);
-            return Box::pin(async move {
                 let controller = Arc::clone(&windows_ime);
-                let session =
+                Some(
                     tauri::async_runtime::spawn_blocking(move || controller.prepare_session())
                         .await
                         .map_err(|error| {
@@ -3010,168 +2065,297 @@ impl CoreTextInserter for TauriTextInserter {
                                 BackendErrorCode::Internal,
                                 format!("join Windows IME prepare task: {error}"),
                             )
-                        })?;
-                let mut session = Some(session);
-                let should_restore = {
-                    let mut slots = prepared.lock();
-                    match slots.get_mut(&session_id) {
-                        Some(slot) => {
-                            *slot = session.take();
-                            false
-                        }
-                        None => true,
-                    }
-                };
-                if should_restore {
-                    windows_ime.restore_session(
-                        session.expect("cancelled prepare must retain the prepared IME session"),
-                    );
-                }
-                Ok(())
-            });
-        }
-        #[cfg(not(target_os = "windows"))]
+                        })?,
+                )
+            } else {
+                None
+            };
+            #[cfg(target_os = "macos")]
+            let (app_handle, previous_input_source) = {
+                let app_handle = app.lock().clone().ok_or_else(|| {
+                    BackendError::new(
+                        BackendErrorCode::InvalidState,
+                        "Tauri AppHandle is not bound yet",
+                    )
+                })?;
+                let previous = crate::unicode_keystroke::switch_to_ascii(&app_handle)
+                    .await
+                    .map_err(|error| {
+                        BackendError::new(BackendErrorCode::Platform, error.to_string())
+                    })?;
+                (app_handle, previous)
+            };
+            #[cfg(not(target_os = "macos"))]
+            let _ = app;
+            Ok(Arc::new(TauriTextInsertionSession {
+                session_id,
+                context,
+                streamed_text: Arc::new(Mutex::new(String::new())),
+                stream_failed: Arc::new(AtomicBool::new(false)),
+                finished: Arc::new(AtomicBool::new(false)),
+                #[cfg(target_os = "windows")]
+                windows_ime,
+                #[cfg(target_os = "windows")]
+                prepared: Arc::new(Mutex::new(prepared)),
+                #[cfg(target_os = "macos")]
+                app: app_handle,
+                #[cfg(target_os = "macos")]
+                previous_input_source: Arc::new(Mutex::new(previous_input_source)),
+            }) as Arc<dyn TextInsertionSession>)
+        })
+    }
+}
+
+#[derive(Clone)]
+struct TauriTextInsertionSession {
+    session_id: SessionId,
+    context: Arc<DictationContext>,
+    streamed_text: Arc<Mutex<String>>,
+    stream_failed: Arc<AtomicBool>,
+    finished: Arc<AtomicBool>,
+    #[cfg(target_os = "windows")]
+    windows_ime: Arc<crate::windows_ime_session::WindowsImeSessionController>,
+    #[cfg(target_os = "windows")]
+    prepared: Arc<Mutex<Option<crate::windows_ime_session::PreparedWindowsImeSession>>>,
+    #[cfg(target_os = "macos")]
+    app: AppHandle,
+    #[cfg(target_os = "macos")]
+    previous_input_source: Arc<Mutex<Option<crate::unicode_keystroke::PreviousInputSource>>>,
+}
+
+impl TauriTextInsertionSession {
+    async fn write_chunk(&self, text: String) -> Result<InsertWriteResult, BackendError> {
+        #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
         {
-            let _ = (session_id, context);
-            Box::pin(async { Ok(()) })
+            let expected = text.chars().count();
+            let chunk = text.clone();
+            #[cfg(target_os = "windows")]
+            let newline_mode = self.context.insertion.windows_sendinput_newline_mode;
+            #[cfg(target_os = "macos")]
+            let newline_mode = self.context.insertion.macos_newline_mode;
+            let finished = Arc::clone(&self.finished);
+            let written = tauri::async_runtime::spawn_blocking(move || {
+                if finished.load(Ordering::Acquire) {
+                    return 0;
+                }
+                #[cfg(target_os = "windows")]
+                let result = crate::unicode_keystroke::type_unicode_chunk_with_options(
+                    &chunk,
+                    crate::unicode_keystroke::WindowsSendInputOptions { newline_mode },
+                );
+                #[cfg(target_os = "macos")]
+                let result =
+                    crate::unicode_keystroke::type_unicode_chunk_with_options(&chunk, newline_mode);
+                #[cfg(target_os = "linux")]
+                let result = crate::unicode_keystroke::type_unicode_chunk(&chunk);
+                match result {
+                    Ok(written) => written,
+                    Err(error) => error.typed_chars(),
+                }
+            })
+            .await
+            .map_err(|error| {
+                BackendError::new(
+                    BackendErrorCode::Internal,
+                    format!("join Tauri streaming insertion task: {error}"),
+                )
+            })?;
+            openless_core::append_typed_prefix(&mut self.streamed_text.lock(), &text, written);
+            if written < expected {
+                self.stream_failed.store(true, Ordering::Release);
+            }
+            Ok(InsertWriteResult {
+                written_chars: written,
+            })
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+        {
+            let _ = text;
+            self.stream_failed.store(true, Ordering::Release);
+            Err(BackendError::new(
+                BackendErrorCode::Unsupported,
+                "streaming insertion is unavailable on this platform",
+            ))
         }
     }
 
-    fn insert(
-        &self,
-        session_id: SessionId,
-        context: Arc<DictationContext>,
-        text: String,
-    ) -> BoxFuture<'static, Result<InsertOutcome, BackendError>> {
+    async fn insert_final(&self, text: String) -> Result<InsertOutcome, BackendError> {
         #[cfg(target_os = "windows")]
         {
-            let windows_ime = Arc::clone(&self.windows_ime);
-            let prepared = Arc::clone(&self.prepared);
-            return Box::pin(async move {
-                let status = match context.insertion.windows_insertion_mode {
-                    openless_core::shared_types::WindowsInsertionMode::Tsf => {
-                        let prepared_session = prepared.lock().remove(&session_id).flatten();
-                        let ime_status = match prepared_session {
-                            Some(prepared_session) => {
-                                let request = crate::windows_ime_ipc::ImeSubmitRequest {
-                                    session_id: session_id.to_string(),
-                                    text: text.clone(),
-                                    created_at: chrono::Utc::now().to_rfc3339(),
-                                    target: crate::windows_ime_target::capture_ime_submit_target(),
-                                };
-                                let status = match windows_ime
-                                    .submit_prepared(&prepared_session, request)
-                                    .await
-                                {
-                                    Ok(status) => status,
-                                    Err(error) if error.is_outcome_unknown() => {
-                                        log::warn!(
-                                            "[core-adapter] TSF outcome is unknown; suppressing fallback: {error}"
-                                        );
-                                        crate::types::InsertStatus::PasteSent
-                                    }
-                                    Err(error) => {
-                                        log::warn!("[core-adapter] TSF submit failed: {error}");
-                                        crate::types::InsertStatus::Failed
-                                    }
-                                };
-                                windows_ime.restore_session(prepared_session);
-                                status
-                            }
-                            None => {
-                                log::warn!(
-                                    "[core-adapter] no prepared TSF session for {session_id}"
-                                );
-                                crate::types::InsertStatus::Failed
-                            }
-                        };
-                        if matches!(
-                            ime_status,
-                            crate::types::InsertStatus::Inserted
-                                | crate::types::InsertStatus::PasteSent
-                        ) {
-                            ime_status
-                        } else if context.insertion.allow_non_tsf_fallback {
-                            windows_unicode_fallback(&context, &text)
-                        } else {
+            let status = match self.context.insertion.windows_insertion_mode {
+                openless_core::shared_types::WindowsInsertionMode::Tsf => {
+                    let prepared = self.prepared.lock().take().ok_or_else(|| {
+                        BackendError::new(
+                            BackendErrorCode::InvalidState,
+                            "prepared Windows IME session is unavailable",
+                        )
+                    })?;
+                    let request = crate::windows_ime_ipc::ImeSubmitRequest {
+                        session_id: self.session_id.to_string(),
+                        text: text.clone(),
+                        created_at: chrono::Utc::now().to_rfc3339(),
+                        target: crate::windows_ime_target::capture_ime_submit_target(),
+                    };
+                    let status = match self.windows_ime.submit_prepared(&prepared, request).await {
+                        Ok(status) => status,
+                        Err(error) if error.is_outcome_unknown() => {
+                            log::warn!("[core-adapter] TSF outcome is unknown: {error}");
+                            crate::types::InsertStatus::PasteSent
+                        }
+                        Err(error) => {
+                            log::warn!("[core-adapter] TSF submit failed: {error}");
                             crate::types::InsertStatus::Failed
                         }
+                    };
+                    self.windows_ime.restore_session(prepared);
+                    if status == crate::types::InsertStatus::Failed
+                        && self.context.insertion.allow_non_tsf_fallback
+                    {
+                        windows_unicode_fallback(&self.context, &text)
+                    } else {
+                        status
                     }
-                    openless_core::shared_types::WindowsInsertionMode::SendInput => {
-                        windows_unicode_fallback(&context, &text)
-                    }
-                    openless_core::shared_types::WindowsInsertionMode::Paste => {
-                        crate::insertion::TextInserter::new().insert(
-                            &text,
-                            context.insertion.restore_clipboard_after_paste,
-                            context.insertion.paste_shortcut,
-                        )
-                    }
-                };
-                map_insert_status(status)
-            });
+                }
+                openless_core::shared_types::WindowsInsertionMode::SendInput => {
+                    windows_unicode_fallback(&self.context, &text)
+                }
+                openless_core::shared_types::WindowsInsertionMode::Paste => {
+                    crate::insertion::TextInserter::new().insert(
+                        &text,
+                        self.context.insertion.restore_clipboard_after_paste,
+                        self.context.insertion.paste_shortcut,
+                    )
+                }
+            };
+            return map_insert_status(status);
         }
         #[cfg(target_os = "android")]
         {
-            return Box::pin(async move {
-                let status = crate::android::android_insert_with_strategy(
-                    &crate::insertion::TextInserter::new(),
-                    &text,
-                    context.insertion.android_insert_strategy,
-                );
-                map_insert_status(status)
-            });
+            return map_insert_status(crate::android::android_insert_with_strategy(
+                &crate::insertion::TextInserter::new(),
+                &text,
+                self.context.insertion.android_insert_strategy,
+            ));
         }
         #[cfg(not(any(target_os = "windows", target_os = "android")))]
         {
-            let _ = session_id;
-            Box::pin(async move {
-                tauri::async_runtime::spawn_blocking(move || {
-                    let inserter = crate::insertion::TextInserter::new();
-                    let status = inserter.insert(
-                        &text,
-                        context.insertion.restore_clipboard_after_paste,
-                        context.insertion.paste_shortcut,
-                    );
-                    map_insert_status(status)
-                })
-                .await
-                .map_err(|error| {
-                    BackendError::new(
-                        BackendErrorCode::Internal,
-                        format!("join Tauri insertion task: {error}"),
-                    )
-                })?
+            let restore = self.context.insertion.restore_clipboard_after_paste;
+            let shortcut = self.context.insertion.paste_shortcut;
+            tauri::async_runtime::spawn_blocking(move || {
+                map_insert_status(
+                    crate::insertion::TextInserter::new().insert(&text, restore, shortcut),
+                )
             })
+            .await
+            .map_err(|error| {
+                BackendError::new(
+                    BackendErrorCode::Internal,
+                    format!("join Tauri insertion task: {error}"),
+                )
+            })?
         }
     }
 
-    fn cancel(&self, session_id: SessionId) -> BoxFuture<'static, Result<(), BackendError>> {
+    async fn copy_fallback(&self, text: String) -> Result<InsertOutcome, BackendError> {
+        tauri::async_runtime::spawn_blocking(move || {
+            map_insert_status(crate::insertion::TextInserter::new().copy_fallback(&text))
+        })
+        .await
+        .map_err(|error| {
+            BackendError::new(
+                BackendErrorCode::Internal,
+                format!("join Tauri clipboard fallback task: {error}"),
+            )
+        })?
+    }
+
+    async fn restore_platform_state(&self) -> Result<(), BackendError> {
         #[cfg(target_os = "windows")]
-        {
-            let windows_ime = Arc::clone(&self.windows_ime);
-            let prepared = self.prepared.lock().remove(&session_id).flatten();
-            return Box::pin(async move {
-                if let Some(prepared) = prepared {
-                    tauri::async_runtime::spawn_blocking(move || {
-                        windows_ime.restore_session(prepared);
-                    })
-                    .await
-                    .map_err(|error| {
-                        BackendError::new(
-                            BackendErrorCode::Internal,
-                            format!("join Windows IME restore task: {error}"),
-                        )
-                    })?;
-                }
-                Ok(())
+        if let Some(prepared) = self.prepared.lock().take() {
+            self.windows_ime.restore_session(prepared);
+        }
+        #[cfg(target_os = "macos")]
+        crate::unicode_keystroke::restore_input_source(
+            &self.app,
+            self.previous_input_source.lock().take(),
+        )
+        .await
+        .map_err(|error| BackendError::new(BackendErrorCode::Platform, error.to_string()))?;
+        Ok(())
+    }
+}
+
+impl TextInsertionSession for TauriTextInsertionSession {
+    fn write(&self, text: String) -> BoxFuture<'static, Result<InsertWriteResult, BackendError>> {
+        if self.finished.load(Ordering::Acquire) {
+            return Box::pin(async {
+                Err(BackendError::new(
+                    BackendErrorCode::Cancelled,
+                    "text insertion session is closed",
+                ))
             });
         }
-        #[cfg(not(target_os = "windows"))]
-        {
-            let _ = session_id;
-            Box::pin(async { Ok(()) })
-        }
+        let session = self.clone();
+        Box::pin(async move { session.write_chunk(text).await })
+    }
+
+    fn finish(
+        &self,
+        final_text: String,
+    ) -> BoxFuture<'static, Result<InsertOutcome, BackendError>> {
+        let session = self.clone();
+        Box::pin(async move {
+            if session.finished.swap(true, Ordering::AcqRel) {
+                return Err(BackendError::new(
+                    BackendErrorCode::InvalidState,
+                    "text insertion session is already closed",
+                ));
+            }
+            let streamed = session.streamed_text.lock().clone();
+            let final_for_clipboard = final_text.clone();
+            let result = if streamed.is_empty() && !session.stream_failed.load(Ordering::Acquire) {
+                session.insert_final(final_text).await
+            } else if session.stream_failed.load(Ordering::Acquire)
+                || !final_text.starts_with(&streamed)
+            {
+                session.copy_fallback(final_text).await
+            } else {
+                let remaining = final_text[streamed.len()..].to_string();
+                if !remaining.is_empty() {
+                    let written = session.write_chunk(remaining.clone()).await?.written_chars;
+                    if written < remaining.chars().count() {
+                        session.copy_fallback(final_text).await
+                    } else {
+                        Ok(InsertOutcome::Inserted)
+                    }
+                } else {
+                    Ok(InsertOutcome::Inserted)
+                }
+            };
+            if !streamed.is_empty()
+                && session.context.insertion.save_streamed_text_to_clipboard
+                && matches!(&result, Ok(InsertOutcome::Inserted))
+            {
+                if let Err(error) = session.copy_fallback(final_for_clipboard).await {
+                    log::warn!("[core-adapter] save streamed text to clipboard failed: {error}");
+                }
+            }
+            let restore = session.restore_platform_state().await;
+            match (result, restore) {
+                (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+                (Ok(outcome), Ok(())) => Ok(outcome),
+            }
+        })
+    }
+
+    fn cancel(&self) -> BoxFuture<'static, Result<(), BackendError>> {
+        let session = self.clone();
+        Box::pin(async move {
+            if session.finished.swap(true, Ordering::AcqRel) {
+                return Ok(());
+            }
+            session.restore_platform_state().await
+        })
     }
 }
 
@@ -3194,12 +2378,14 @@ fn windows_unicode_fallback(context: &DictationContext, text: &str) -> crate::ty
 fn map_insert_status(status: crate::types::InsertStatus) -> Result<InsertOutcome, BackendError> {
     match status {
         crate::types::InsertStatus::Inserted => Ok(InsertOutcome::Inserted),
-        crate::types::InsertStatus::PasteSent => Ok(InsertOutcome::Unknown),
-        crate::types::InsertStatus::CopiedFallback => Ok(InsertOutcome::CopiedFallback),
-        crate::types::InsertStatus::Failed => Err(BackendError::new(
+        crate::types::InsertStatus::PasteSent => Err(BackendError::new(
             BackendErrorCode::Platform,
-            "Tauri text insertion failed",
+            "Tauri text insertion could not confirm the target outcome",
         )),
+        crate::types::InsertStatus::CopiedFallback => Ok(InsertOutcome::CopiedFallback),
+        crate::types::InsertStatus::Failed | crate::types::InsertStatus::NotRequested => Err(
+            BackendError::new(BackendErrorCode::Platform, "Tauri text insertion failed"),
+        ),
     }
 }
 
@@ -3359,10 +2545,7 @@ mod tests {
             map_insert_status(crate::types::InsertStatus::CopiedFallback).unwrap(),
             InsertOutcome::CopiedFallback
         );
-        assert_eq!(
-            map_insert_status(crate::types::InsertStatus::PasteSent).unwrap(),
-            InsertOutcome::Unknown
-        );
+        assert!(map_insert_status(crate::types::InsertStatus::PasteSent).is_err());
         assert_eq!(
             map_insert_status(crate::types::InsertStatus::Failed)
                 .unwrap_err()
@@ -3589,58 +2772,5 @@ mod tests {
 
         assert_eq!(outcome, InsertOutcome::Inserted);
         assert_eq!(*bridge.revert_calls.lock(), 1);
-    }
-
-    #[tokio::test]
-    async fn coding_agent_adapter_exposes_shared_risk_policy() {
-        let api = TauriCodingAgentApi::new(
-            app_handle_slot(),
-            Arc::new(openless_core::LessComputerService::new()),
-        );
-        let safe = openless_core::CodingAgentApi::command_risk(&api, "git status".into())
-            .await
-            .unwrap();
-        assert_eq!(safe.risk, openless_core::CommandRisk::Safe);
-        assert!(safe.reason.is_none());
-
-        let approvable =
-            openless_core::CodingAgentApi::command_risk(&api, "git reset --hard HEAD~1".into())
-                .await
-                .unwrap();
-        assert_eq!(
-            approvable.risk,
-            openless_core::CommandRisk::RequiresApproval
-        );
-        assert!(approvable.reason.is_some());
-
-        let denied = openless_core::CodingAgentApi::command_risk(&api, "sudo reboot".into())
-            .await
-            .unwrap();
-        assert_eq!(denied.risk, openless_core::CommandRisk::Denied);
-    }
-
-    #[tokio::test]
-    async fn coding_agent_cancel_is_idempotent_and_unsupported_model_lists_are_explicit() {
-        let api = TauriCodingAgentApi::new(
-            app_handle_slot(),
-            Arc::new(openless_core::LessComputerService::new()),
-        );
-        openless_core::CodingAgentApi::cancel_test(&api)
-            .await
-            .unwrap();
-        openless_core::CodingAgentApi::cancel_test(&api)
-            .await
-            .unwrap();
-        let error = openless_core::CodingAgentApi::list_models(
-            &api,
-            openless_core::CodingAgentModelsRequest {
-                provider: openless_core::CodingAgentProvider::CodexCli,
-                executable: None,
-                refresh: true,
-            },
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(error.code, BackendErrorCode::Unsupported);
     }
 }

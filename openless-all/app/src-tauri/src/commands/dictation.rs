@@ -1,5 +1,12 @@
 use super::*;
 
+#[tauri::command]
+pub async fn get_startup_snapshot(
+    core: CoreState<'_>,
+) -> Result<openless_core::StartupSnapshot, String> {
+    core.start().await.map_err(|error| error.to_string())
+}
+
 async fn ensure_core_started(core: &openless_core::OpenLessBackend) -> Result<(), String> {
     if !core.snapshot().running {
         core.start().await.map_err(|error| error.to_string())?;

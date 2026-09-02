@@ -244,8 +244,9 @@ Selection Voice 的业务入口是高层 use-case，不是让宿主拼装 prompt
   后续调用以当前 preview 为 draft，只保留一步 revert。`replaced_existing` 是 QA 按钮状态的唯一真相，
   `answer_text()` 是稳定的 assistant message 投影；Adapter 不应重复格式化 summary。
 - 真正替换文本仍是双阶段握手：Core `begin_preview_apply` 返回 ticket，平台 Adapter 用 opaque target
-  校验/插入，再以 `finish_preview_apply(ticket_id, outcome)` 回报。只有 may-have-applied outcome 才会
-  消费 preview 并写 history/activity；`Failed` 保留 preview，`OutcomeUnknown` 绝不自动重试。
+  校验/插入，再以 `finish_preview_apply(ticket_id, outcome)` 回报。只有 `Inserted` 或
+  `CopiedFallback` 才会消费 preview 并写 history/activity；`Failed` 保留 preview。宿主无法确认
+  插入结果时必须返回错误，且不得自动重试。
 
 `resolve_instruction`、`set_preview` 和 `replace_preview` 是 compatibility/headless 测试原语，不是新 UI
 工作流入口。平台仍拥有麦克风、ASR native handle、窗口/热键、焦点恢复和 opaque insertion target；
@@ -493,8 +494,8 @@ session/phase；已取消 session 不得产生插入副作用。shutdown 对活�
 
 Windows TSF Adapter 把失败分成两类：连接/准备阶段的 definite failure 可以按冻结的策略
 尝试 SendInput/clipboard fallback；请求写入 pipe 后的超时、断连或无法判定的响应属于
-outcome-unknown，返回 `InsertOutcome::Unknown` 且不得再次插入。这样即使 TSF 提交迟到，也不会
-与 fallback 形成重复文本。
+outcome-unknown，返回明确的 `BackendError` 且不得再次插入。Core 的公开结果只包含
+`Inserted`、`CopiedFallback` 或错误；这样即使 TSF 提交迟到，也不会与 fallback 形成重复文本。
 
 `DictationEngine::finish` 返回 `Result<EngineResult, EngineFailure>`。`EngineFailure`
 除 `BackendError` 外，还携带 `EngineFailureStage::{Transcribing, Polishing}`、可选原文、
@@ -615,8 +616,8 @@ Toggle/Hold/Auto/DoubleClick。只有存在真实实现差异或测试替身时�
 - `LinuxHost::download_marketplace_archive`：保存 Core 已校验归档；只接受绝对 filesystem path，
   不创建缺失父目录、不覆盖已有文件，失败时不遗留部分文件。
 
-egui 团队只持有 `LinuxHost`、facade/DTO/Interface 和自己的 view model。真实 UI 入口仍为
-`linux-egui/src/main.rs` stub；这不影响 Interface 开发，但阻止正式发布。
+`linux-egui/src/main.rs` 已使用 `eframe::run_native` 接入 `LinuxHost`、Core event、fcitx5
+hotkey 与 Single Instance Adapter；UI 不读取 Core 私有模块，也不复制业务规则。
 
 ## 9. 测试夹具
 
@@ -660,9 +661,10 @@ egui view model 测试应只使用这些 fixture 和 `BackendSnapshot`/事件，
 
 ## 11. 版本与变更流程
 
-当前代码常量为 `openless_core::BACKEND_CONTRACT_VERSION = "2.0.0"`（读取旧持久化
-payload 时保留 `LEGACY_BACKEND_CONTRACT_VERSION = "1.0.0"`）。本文的
-contract version 随破坏性接口变更递增。新增可选 DTO 字段必须有默认
+当前代码常量为 `openless_core::BACKEND_CONTRACT_VERSION = "2.0.0"`。运行时 wire 只接受
+2.0.0；1.x 兼容仅存在于 preferences、history、activity、credentials、model 和 style-pack
+持久化迁移读取器中，不暴露 legacy runtime contract 常量。本文的 contract version 随破坏性
+接口变更递增。新增可选 DTO 字段必须有默认
 值；删除字段、改变枚举值、改变事件顺序或单位必须：
 
 1. 更新 contract version；
@@ -728,24 +730,23 @@ egui 组发现缺少能力时，应提交一个只依赖 facade/DTO/event 的可
 | --- | --- |
 | `openless-core` package 和无 Tauri 依赖门禁 | 已建立 |
 | facade 生命周期、听写状态机、事件 sequence | 已建立 |
-| headless Linux host 示例 | 已完成，位于 `linux-egui/examples/headless_host.rs`；实际执行覆盖生命周期、数据领域、unsupported 能力、Less Computer capture lease/cancel/abort、听写、Selection direct apply、Linux preview/revert `Unsupported`、Selection Voice preview/confirm/cancel/stale/outcome-unknown；binary 入口仍是 UI 团队待替换的 stub |
+| headless Linux host 示例 | 已完成，位于 `linux-egui/examples/headless_host.rs`；实际执行覆盖生命周期、数据领域、unsupported 能力、Less Computer capture lease/cancel/abort、听写、Selection direct apply、Linux preview/revert `Unsupported`、Selection Voice preview/confirm/cancel/stale/copied-fallback |
 | fake host/recorder/transcription/polisher/engine/inserter/selection/remote transport | 已建立；Selection fixture 表达完整宿主动作与 Linux 降级，Remote fixture 记录 lifecycle/PCM 但不绑定 socket |
 | preferences/history/activity/vocabulary/correction/style-pack/credentials 共享实现 | 已建立，并由 Tauri compatibility commands 逐步复用 |
 | Linux validated settings Interface | 已建立；`save_settings`/`update_settings_strict` 强制携带 snapshot revision，Core 统一校验、协调、持久化、事件和补偿，Linux Adapter 只消费显式 target |
 | 全部复杂领域 DTO/Interface 与 unsupported 语义 | 已建立，位于 `domains.rs` / `BackendServices` |
 | 2.0 公共 re-export 边界 | 已冻结；`openless-core`/`openless-linux-egui` 只公开 facade/DTO/event/host Interface/fixture，repository 与内部状态机不属于 UI 契约；`check-linux-public-surface.ps1` 防止边界回退 |
-| Tauri command/event 完整迁移 | 进行中；React/CLI/Android JNI/remote PCM/桌面普通听写热键已切 core，12 个原 migrationRequired event 已 typed 化并集中映射；Selection、QA、Remote Input、Auxiliary 与 Provider 管理面已切共享 Core，Remote/QA React wire、WebSocket lifecycle、Provider wire/source contract 与 Less Computer replay 已覆盖；Coordinator 业务模块的直接 emit 和直接 Tauri runtime 调用已清零，剩余 Tauri-only compatibility host 组织边界见计划 M4–M6 |
-| 复杂领域真实共享 Adapter | 部分完成；云 ASR/LLM/Omni/Auxiliary/Marketplace provider Implementation 已由 Tauri/Linux 共用，Core `ModelStore` 与 Linux Coding Agent process seam 已接入；Foundry/Sherpa/native runtime、真实设备和发布物仍需平台证据 |
+| Tauri command/event 完整迁移 | Core 业务路径已收口；React/CLI/Android JNI/Remote Input/桌面听写使用 2.0 contract，Tauri 仅保留 command/event wire 与平台 Adapter |
+| 复杂领域真实共享 Adapter | Core `ModelStore`、`CodingAgentRunner`、Voice session、Provider policy、Remote Input 与 Style Pack 已接入；Foundry/Sherpa 原生 runtime、真实设备和发布物仍需平台证据 |
 | 会话级 provider router | 已建立；ID/type/model 在 session 开始时固定，Core 持有云 ASR/LLM/Omni 协议 Implementation；Tauri 与 Linux 注册同一共享实现，Tauri 另行追加 native/local ASR |
 | provider 验证/模型列表管理面 | 已建立；Core `ProviderService` 统一 channel-scoped credential、静态/远端模型列表、验证探活和错误脱敏；Tauri command 只做 wire 转换，Linux shared factory 注入同一 service；真实网络/keyring 和平台 runner 仍按主计划 M9/M10 留证 |
 | Linux credentials/resources/fcitx5/capabilities/host-actions | 已建立非 UI Adapter 和 contract tests；WSL Ubuntu 已显式通过真实 Secret Service set/read/remove、fcitx5 plugin/method/listener/signal contract；无焦点输入时 plugin 不抛异常导致 fcitx5 崩溃 |
 | Linux cpal 录音、共享 Pipeline builder、热键 listener、第二实例 intent 转发 | 已建立；selection/translation 已路由到共享 Interface；WSL 当前无 ALSA 设备时 cpal contract 已证明稳定分类错误，真实设备和桌面 runtime 生命周期仍见计划 M8/M9 |
-| Linux 打包 workflow/manifest 契约 | 已建立但只允许手动调用；需真实 Ubuntu 证明，且 UI stub 阻止正式发布 |
-| egui UI | 由另一组负责，不在本交付范围 |
+| Linux 打包 workflow/manifest 契约 | 已建立但正式发布仍需真实 Ubuntu 安装、运行、升级和回滚证明 |
+| egui UI | 已使用真实 `eframe::run_native`，覆盖 startup/error、听写、Less Computer/approval、模型、Provider 状态、history 与 settings；视觉深化不属于 2.0 Core 收口 |
 
-完整验收以主计划第 12 节为准；本契约证明 egui 团队可以在不依赖 Tauri 的前提下基于冻结的
-2.0.0 Interface 开发 view model 和 egui UI。真实 Ubuntu 原生能力、发行包和 UI 验收仍分别由
-Linux runner 与 egui 团队负责。
+完整验收以主计划第 12 节为准；本契约证明 Linux UI 可以在不依赖 Tauri 的前提下使用冻结的
+2.0.0 Interface。真实 Ubuntu 原生能力、发行包与安装升级回滚仍由 Linux runner 门禁证明。
 
 ## Less Computer 语音接口（2.0）
 

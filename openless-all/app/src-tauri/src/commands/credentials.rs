@@ -13,6 +13,13 @@ const MARKETPLACE_GITHUB_TOKEN_ACCOUNT: &str = "github.oauth_token";
 /// redacted status and [`openless_core::SecretValue`].
 pub(crate) struct SystemCredentialStore;
 
+pub(crate) fn sync_active_asr_provider_to_vault(provider: &str) -> Result<(), String> {
+    if CredentialsVault::get_active_asr() == provider {
+        return Ok(());
+    }
+    CredentialsVault::set_active_asr_provider(provider).map_err(|error| error.to_string())
+}
+
 pub(crate) fn active_apple_speech_asr_is_supported(provider: &str) -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -257,7 +264,9 @@ fn write_vault_credential(
         }
         (openless_core::CredentialNamespace::Llm, LLM_TEMPERATURE_ACCOUNT) => {
             match key.provider_id.as_deref() {
-                Some(provider) => CredentialsVault::set_llm_temperature_for_provider(provider, value),
+                Some(provider) => {
+                    CredentialsVault::set_llm_temperature_for_provider(provider, value)
+                }
                 None => CredentialsVault::set_active_llm_temperature(value),
             }
         }
@@ -426,7 +435,7 @@ pub(crate) fn asr_configured_for_provider(provider: &str, snap: &CredentialsSnap
                 .ok()
                 .map(|store| store.get().local_whisper_active_model)
                 .filter(|id| {
-                    crate::asr::local::ModelId::from_str(id)
+                    crate::asr::local::ModelId::from_wire_id(id)
                         .map(|model| model.is_whisper())
                         .unwrap_or(false)
                 })
@@ -646,13 +655,7 @@ pub async fn set_active_asr_provider(core: CoreState<'_>, provider: String) -> R
 
 #[cfg(not(mobile))]
 #[tauri::command]
-pub async fn set_active_asr_provider(
-    core: CoreState<'_>,
-    coord: CoordinatorState<'_>,
-    runtime: State<'_, Arc<FoundryLocalRuntime>>,
-    sherpa_runtime: State<'_, Arc<SherpaOnnxRuntime>>,
-    provider: String,
-) -> Result<(), String> {
+pub async fn set_active_asr_provider(core: CoreState<'_>, provider: String) -> Result<(), String> {
     if crate::asr::local::is_local_qwen3(&provider)
         && crate::asr::local::qwen_backend_for_provider(&provider).is_none()
     {
@@ -686,15 +689,35 @@ pub async fn set_active_asr_provider(
         .await
         .map_err(|error| error.to_string())?;
     let release_plan = local_asr_release_plan_for_provider(&provider);
-    coord.release_inactive_local_asr_engines(release_plan.qwen, release_plan.whisper);
-    release_foundry_runtime_if_inactive(runtime.inner(), release_plan.foundry).await;
-    release_sherpa_runtime_if_inactive(sherpa_runtime.inner(), release_plan.sherpa).await;
-    coord.emit_local_asr_engine_status();
+    if release_plan.qwen || release_plan.whisper {
+        core.services()
+            .local_asr
+            .release(openless_core::LocalAsrRuntime::Generic)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    if release_plan.foundry {
+        core.services()
+            .local_asr
+            .release(openless_core::LocalAsrRuntime::Foundry)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    if release_plan.sherpa {
+        core.services()
+            .local_asr
+            .release(openless_core::LocalAsrRuntime::SherpaOnnx)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
     if crate::asr::local::is_local_qwen3(&provider)
         || crate::asr::local::is_local_whisper(&provider)
     {
-        // 所有非目标本地 runtime 已释放后再预加载，避免切换时两个大模型同时驻留。
-        coord.preload_local_asr_in_background();
+        core.services()
+            .local_asr
+            .preload(openless_core::LocalAsrRuntime::Generic)
+            .await
+            .map_err(|error| error.to_string())?;
     }
     Ok(())
 }

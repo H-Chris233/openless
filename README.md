@@ -230,7 +230,7 @@ Go to [Releases](../../releases) and download:
   - In-app updates (Settings → About) use `latest-android-{arch}.json` manifests; Beta users join Beta in Advanced settings.
   - Debug smoke builds: `OpenLess-android-debug-{abi}-*.apk` from workflow_dispatch artifacts.
   - If unsure, run `adb shell getprop ro.product.cpu.abi` and pick the matching APK.
-- **Linux**: the Tauri/WebView build has been retired. The native egui UI is being developed separately; no production Linux package should be installed until that UI replaces the checked-in host stub and the independent Linux release workflow is enabled.
+- **Linux**: the Tauri/WebView build has been retired. `linux-egui` now contains a native `eframe` UI backed by the shared Core 2.0 services. Production release still requires Linux CI artifacts plus real Ubuntu audio, focus/input, install, upgrade, and rollback evidence.
 - **macOS (Homebrew)**:
   ```bash
   brew tap Open-Less/openless https://github.com/Open-Less/openless
@@ -258,7 +258,7 @@ For the full end-user walkthrough, see [USAGE.md](USAGE.md).
 
 ## Build from source (developers)
 
-The active workspace lives in `openless-all/app/`. `crates/openless-core` is the framework-independent backend, `src-tauri` hosts macOS/Windows/Android, and `linux-egui` contains the non-UI Linux adapters plus the stable interface consumed by the external egui team. The macOS Tauri build links a vendored C ASR engine ([`Open-Less/qwen-asr`](https://github.com/Open-Less/qwen-asr), forked from `antirez/qwen-asr`) under `src-tauri/vendor/qwen-asr/`; initialize submodules for macOS Tauri development. The root core/Linux workspace deliberately excludes `src-tauri`, so Linux core and host checks neither initialize that submodule nor parse the Tauri manifest.
+The active workspace lives in `openless-all/app/`. `crates/openless-core` is the framework-independent backend, `src-tauri` hosts macOS/Windows/Android, and `linux-egui` contains the native Linux UI and its platform adapters. The macOS Tauri build links a vendored C ASR engine ([`Open-Less/qwen-asr`](https://github.com/Open-Less/qwen-asr), forked from `antirez/qwen-asr`) under `src-tauri/vendor/qwen-asr/`; initialize submodules for macOS Tauri development. The root core/Linux workspace deliberately excludes `src-tauri`, so Linux core and host checks neither initialize that submodule nor parse the Tauri manifest.
 
 Rust 1.88 is the minimum supported toolchain for source builds; the latest stable Rust is recommended. CI verifies both Rust 1.88 and stable on macOS, Windows, and Linux.
 
@@ -391,7 +391,7 @@ egui UI  ── Linux Adapter (no Tauri/WebKitGTK) ────┘
 
 `openless-core` owns the stable DTOs, errors, semantic events, repositories, credentials contract, and host-facing use-case Interface. Host-only concerns—IPC, windows, tray, permissions, updater, keyring, fcitx5, and package resource paths—are implemented by Adapters. Legacy React command/event names stay in the Tauri compatibility Adapter; Linux calls the typed Rust Interface in process. See [`docs/linux-egui-backend-contract.md`](docs/linux-egui-backend-contract.md) and the [full migration plan](docs/linux-egui-shared-backend-plan.md).
 
-The `v<version>-tauri` / `v<version>-Beta.N-tauri` workflows publish the macOS, Windows, and Android hosts. Linux deb/rpm/AppImage assets are built by `release-linux-egui.yml` with an independent manifest; the workflow has no automatic tag trigger until the egui team replaces the stub entry point.
+The `v<version>-tauri` / `v<version>-Beta.N-tauri` workflows publish the macOS, Windows, and Android hosts. Linux deb/rpm/AppImage assets are built by `release-linux-egui.yml` with an independent manifest; automatic release remains gated on successful artifacts and real Ubuntu install/runtime/upgrade/rollback evidence.
 
 The dictation pipeline: `hotkey edge → Recorder.start + ASR.openSession → [audio frames] → hotkey edge → Recorder.stop + ASR.sendLastFrame → Polish → Insert → History.save`.
 

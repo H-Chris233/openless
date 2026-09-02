@@ -1,5 +1,9 @@
 # OpenLess Linux egui 与共享后端 lib 拆分实施计划
 
+> 历史说明：本文保留 2026-08-31 至 2026-09-01 的分阶段设计与证据，正文中的“当前”、旧 HEAD、
+> 测试计数和 UI stub 状态不代表 PR #1019 最新实现。当前 2.0.0 接口以
+> `linux-egui-backend-contract.md`、代码中的 canonical fixtures 和 PR #1019 body 为准。
+
 > 文档状态：可执行计划；实施状态：Linux egui Interface 已交付，跨平台 CI runner 门禁已通过，正式原生发布与 egui UI 验收仍在进行。第 1.1 节只记录当前工作树事实，不代表未取得 runner 证据的里程碑已经获得最终验收；完成状态一律以第 12 节的逐项证据为准
 > 更新日期：2026-09-01；Linux 原生证据记录截至 2026-08-29，跨平台 CI 证据截至 2026-08-31
 > 范围：抽取无 Tauri 依赖的共享 Rust 应用核心；保留 macOS / Windows 的 Tauri 前端；为 Linux egui 前端准备公共接口、事件契约、测试适配器和构建契约

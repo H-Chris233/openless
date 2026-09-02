@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use futures_util::future::BoxFuture;
 use openless_core::{
-    BackendError, BackendErrorCode, InsertOutcome, ResourceResolver, TextInserter,
+    BackendError, BackendErrorCode, InsertOutcome, InsertWriteResult, ResourceResolver,
+    TextInserter, TextInsertionSession,
 };
 
 use crate::{LinuxPackageKind, LinuxResourceLayout, FCITX_PLUGIN_CONFIG, FCITX_PLUGIN_LIBRARY};
@@ -211,12 +212,79 @@ impl Fcitx5TextInserter {
 }
 
 impl TextInserter for Fcitx5TextInserter {
-    fn insert(
+    fn begin(
         &self,
         _session_id: openless_core::SessionId,
         _context: std::sync::Arc<openless_core::DictationContext>,
-        text: String,
-    ) -> BoxFuture<'static, Result<InsertOutcome, BackendError>> {
+    ) -> BoxFuture<'static, Result<std::sync::Arc<dyn TextInsertionSession>, BackendError>> {
+        let clipboard_fallback = self.clipboard_fallback;
+        Box::pin(async move {
+            Ok(std::sync::Arc::new(Fcitx5InsertionSession {
+                clipboard_fallback,
+                streamed_text: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
+                stream_failed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                closed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            }) as std::sync::Arc<dyn TextInsertionSession>)
+        })
+    }
+}
+
+#[derive(Clone)]
+struct Fcitx5InsertionSession {
+    clipboard_fallback: bool,
+    streamed_text: std::sync::Arc<std::sync::Mutex<String>>,
+    stream_failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Fcitx5InsertionSession {
+    async fn write_chunk(&self, text: String) -> Result<InsertWriteResult, BackendError> {
+        #[cfg(target_os = "linux")]
+        {
+            let expected = text.chars().count();
+            let insertion_text = text.clone();
+            let closed = std::sync::Arc::clone(&self.closed);
+            let result = tokio::task::spawn_blocking(move || {
+                if closed.load(std::sync::atomic::Ordering::Acquire) {
+                    return Err(BackendError::new(
+                        BackendErrorCode::Cancelled,
+                        "fcitx5 insertion session is closed",
+                    ));
+                }
+                commit_text(&insertion_text)
+            })
+            .await
+            .map_err(|error| {
+                BackendError::new(
+                    BackendErrorCode::Platform,
+                    format!("fcitx5 insertion task failed: {error}"),
+                )
+            })?;
+            let written = if result.is_ok() { expected } else { 0 };
+            if written == 0 {
+                self.stream_failed
+                    .store(true, std::sync::atomic::Ordering::Release);
+            } else {
+                self.streamed_text
+                    .lock()
+                    .expect("fcitx5 streamed text lock poisoned")
+                    .push_str(&text);
+            }
+            Ok(InsertWriteResult {
+                written_chars: written,
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = text;
+            Err(BackendError::new(
+                BackendErrorCode::Unsupported,
+                "fcitx5 insertion is only available on Linux",
+            ))
+        }
+    }
+
+    async fn insert_or_copy(&self, text: String) -> Result<InsertOutcome, BackendError> {
         let clipboard_fallback = self.clipboard_fallback;
         Box::pin(async move {
             #[cfg(target_os = "linux")]
@@ -256,6 +324,100 @@ impl TextInserter for Fcitx5TextInserter {
                 ))
             }
         })
+        .await
+    }
+
+    async fn copy_only(&self, text: String) -> Result<InsertOutcome, BackendError> {
+        #[cfg(target_os = "linux")]
+        {
+            tokio::task::spawn_blocking(move || copy_to_clipboard(&text))
+                .await
+                .map_err(|error| {
+                    BackendError::new(
+                        BackendErrorCode::Platform,
+                        format!("clipboard fallback task failed: {error}"),
+                    )
+                })??;
+            Ok(InsertOutcome::CopiedFallback)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = text;
+            Err(BackendError::new(
+                BackendErrorCode::Unsupported,
+                "fcitx5 clipboard fallback is only available on Linux",
+            ))
+        }
+    }
+}
+
+impl TextInsertionSession for Fcitx5InsertionSession {
+    fn write(&self, text: String) -> BoxFuture<'static, Result<InsertWriteResult, BackendError>> {
+        if self.closed.load(std::sync::atomic::Ordering::Acquire) {
+            return Box::pin(async {
+                Err(BackendError::new(
+                    BackendErrorCode::Cancelled,
+                    "fcitx5 insertion session is closed",
+                ))
+            });
+        }
+        let session = self.clone();
+        Box::pin(async move { session.write_chunk(text).await })
+    }
+
+    fn finish(
+        &self,
+        final_text: String,
+    ) -> BoxFuture<'static, Result<InsertOutcome, BackendError>> {
+        let session = self.clone();
+        Box::pin(async move {
+            if session
+                .closed
+                .swap(true, std::sync::atomic::Ordering::AcqRel)
+            {
+                return Err(BackendError::new(
+                    BackendErrorCode::InvalidState,
+                    "fcitx5 insertion session is already closed",
+                ));
+            }
+            let streamed = session
+                .streamed_text
+                .lock()
+                .expect("fcitx5 streamed text lock poisoned")
+                .clone();
+            if streamed.is_empty()
+                && !session
+                    .stream_failed
+                    .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return session.insert_or_copy(final_text).await;
+            }
+            if session
+                .stream_failed
+                .load(std::sync::atomic::Ordering::Acquire)
+                || !final_text.starts_with(&streamed)
+            {
+                if session.clipboard_fallback {
+                    return session.copy_only(final_text).await;
+                }
+                return Err(BackendError::new(
+                    BackendErrorCode::Platform,
+                    "streamed text no longer matches the final output",
+                ));
+            }
+            let remaining = final_text[streamed.len()..].to_string();
+            if remaining.is_empty() {
+                Ok(InsertOutcome::Inserted)
+            } else {
+                session.insert_or_copy(remaining).await
+            }
+        })
+    }
+
+    fn cancel(&self) -> BoxFuture<'static, Result<(), BackendError>> {
+        self.closed
+            .store(true, std::sync::atomic::Ordering::Release);
+        Box::pin(async { Ok(()) })
     }
 }
 

@@ -5,8 +5,8 @@ use futures_util::future::BoxFuture;
 
 use crate::credentials::SecretValue;
 use crate::domains::{
-    RemoteInputApi, RemoteInputConfig, RemoteInputRuntimeAdapter, RemoteInputServerConfig,
-    RemoteInputStatus,
+    RemoteAuthResult, RemoteInputApi, RemoteInputConfig, RemoteInputRuntimeAdapter,
+    RemoteInputServerConfig, RemoteInputStatus,
 };
 use crate::errors::{BackendError, BackendErrorCode};
 use crate::events::{
@@ -17,6 +17,11 @@ use crate::types::SessionId;
 pub const REMOTE_INPUT_MAX_PCM_FRAME_BYTES: usize = 64 * 1024;
 pub const REMOTE_INPUT_PAIRING_PIN_LEN: usize = 6;
 const SUPPORTED_LOCALES: [&str; 5] = ["zh-CN", "zh-TW", "en", "ja", "ko"];
+const PIN_MAX_FAILS: u32 = 5;
+const PIN_LOCK_SECS: u64 = 60;
+const PIN_FAILS_MAX_ENTRIES: usize = 256;
+const PIN_GLOBAL_MAX_FAILS: u32 = 20;
+const PIN_GLOBAL_WINDOW_SECS: u64 = 60;
 
 pub fn validate_pairing_pin(pin: &str) -> bool {
     pin.len() == REMOTE_INPUT_PAIRING_PIN_LEN && pin.bytes().all(|byte| byte.is_ascii_digit())
@@ -67,7 +72,19 @@ struct RemoteInputState {
     urls_stale: bool,
     locale: String,
     pairing_pin: Option<SecretValue>,
-    connections: HashMap<SessionId, Option<SessionId>>,
+    connections: HashMap<SessionId, RemoteConnectionState>,
+    pin_fails: HashMap<String, (u32, Option<std::time::Instant>)>,
+    global_pin_fails: (u32, std::time::Instant),
+}
+
+struct RemoteConnectionState {
+    insert_text: bool,
+    stream: Option<RemoteStreamState>,
+}
+
+struct RemoteStreamState {
+    session_id: SessionId,
+    sequence: RemoteStreamSequence,
 }
 
 pub struct RemoteInputService {
@@ -100,6 +117,8 @@ impl RemoteInputService {
                 locale,
                 pairing_pin: None,
                 connections: HashMap::new(),
+                pin_fails: HashMap::new(),
+                global_pin_fails: (0, std::time::Instant::now()),
             })),
         })
     }
@@ -144,7 +163,7 @@ impl RemoteInputService {
             let sessions = state
                 .connections
                 .values_mut()
-                .filter_map(Option::take)
+                .filter_map(|connection| connection.stream.take().map(|stream| stream.session_id))
                 .collect::<Vec<_>>();
             state.connections.clear();
             state.running = false;
@@ -170,7 +189,7 @@ impl RemoteInputService {
     }
 
     async fn start_server(&self, port: u16) -> Result<(), BackendError> {
-        let pin = self.ensure_pairing_pin().await?;
+        self.ensure_pairing_pin().await?;
         {
             let mut state = self.state.lock().expect("remote input state lock poisoned");
             state.starting = true;
@@ -181,10 +200,7 @@ impl RemoteInputService {
         self.publish_status();
         match self
             .runtime
-            .start_server(RemoteInputServerConfig {
-                port,
-                pairing_pin: pin,
-            })
+            .start_server(RemoteInputServerConfig { port })
             .await
         {
             Ok(binding) => {
@@ -279,7 +295,13 @@ impl RemoteInputService {
         Ok(())
     }
 
-    async fn connect_inner(&self, connection_id: SessionId) -> Result<(), BackendError> {
+    async fn authenticate_inner(
+        &self,
+        connection_id: SessionId,
+        peer: String,
+        candidate: SecretValue,
+    ) -> Result<RemoteAuthResult, BackendError> {
+        let expected = self.ensure_pairing_pin().await?;
         let _lifecycle = self.lifecycle.lock().await;
         let mut state = self.state.lock().expect("remote input state lock poisoned");
         if !state.running {
@@ -288,10 +310,52 @@ impl RemoteInputService {
                 "remote input server is not running",
             ));
         }
-        state.connections.entry(connection_id).or_insert(None);
-        drop(state);
-        self.publish_status();
-        Ok(())
+        let now = std::time::Instant::now();
+        if now.duration_since(state.global_pin_fails.1).as_secs() >= PIN_GLOBAL_WINDOW_SECS {
+            state.global_pin_fails = (0, now);
+        }
+        if state.global_pin_fails.0 >= PIN_GLOBAL_MAX_FAILS {
+            return Ok(RemoteAuthResult::Locked);
+        }
+        if let Some((_, Some(until))) = state.pin_fails.get(&peer) {
+            if now < *until {
+                return Ok(RemoteAuthResult::Locked);
+            }
+            state.pin_fails.remove(&peer);
+        }
+        let pin_ok = constant_time_eq(
+            candidate.expose_secret().as_bytes(),
+            expected.expose_secret().as_bytes(),
+        );
+        if pin_ok {
+            state.pin_fails.remove(&peer);
+            state.global_pin_fails.0 = 0;
+            state.connections.insert(
+                connection_id,
+                RemoteConnectionState {
+                    insert_text: true,
+                    stream: None,
+                },
+            );
+            drop(state);
+            self.publish_status();
+            return Ok(RemoteAuthResult::Ok);
+        }
+        state.global_pin_fails.0 = state.global_pin_fails.0.saturating_add(1);
+        if state.global_pin_fails.0 >= PIN_GLOBAL_MAX_FAILS {
+            return Ok(RemoteAuthResult::Locked);
+        }
+        if state.pin_fails.len() >= PIN_FAILS_MAX_ENTRIES {
+            state
+                .pin_fails
+                .retain(|_, (_, until)| until.is_some_and(|until| until > now));
+        }
+        let failure = state.pin_fails.entry(peer).or_insert((0, None));
+        failure.0 = failure.0.saturating_add(1);
+        if failure.0 >= PIN_MAX_FAILS {
+            failure.1 = Some(now + std::time::Duration::from_secs(PIN_LOCK_SECS));
+        }
+        Ok(RemoteAuthResult::BadPin)
     }
 
     async fn disconnect_inner(&self, connection_id: SessionId) -> Result<(), BackendError> {
@@ -302,7 +366,7 @@ impl RemoteInputService {
             .expect("remote input state lock poisoned")
             .connections
             .remove(&connection_id)
-            .flatten();
+            .and_then(|connection| connection.stream.map(|stream| stream.session_id));
         if let Some(session_id) = session_id {
             self.runtime
                 .cancel_audio_session(session_id)
@@ -321,8 +385,10 @@ impl RemoteInputService {
         {
             let state = self.state.lock().expect("remote input state lock poisoned");
             match state.connections.get(&connection_id) {
-                Some(None) if state.running => {}
-                Some(Some(_)) => {
+                Some(RemoteConnectionState { stream: None, .. }) if state.running => {}
+                Some(RemoteConnectionState {
+                    stream: Some(_), ..
+                }) => {
                     return Err(BackendError::new(
                         BackendErrorCode::Busy,
                         "remote input connection already has an active stream",
@@ -336,16 +402,45 @@ impl RemoteInputService {
                 }
             }
         }
-        let session_id = self
-            .runtime
-            .start_audio_session()
-            .await
-            .map_err(|error| public_remote_error(&error))?;
-        self.state
+        let insert_text = self
+            .state
             .lock()
             .expect("remote input state lock poisoned")
             .connections
-            .insert(connection_id, Some(session_id));
+            .get(&connection_id)
+            .map(|connection| connection.insert_text)
+            .ok_or_else(|| {
+                BackendError::new(
+                    BackendErrorCode::Cancelled,
+                    "remote input connection is no longer active",
+                )
+            })?;
+        let session_id = self
+            .runtime
+            .start_audio_session(insert_text)
+            .await
+            .map_err(|error| public_remote_error(&error))?;
+        let accepted = {
+            let mut state = self.state.lock().expect("remote input state lock poisoned");
+            let running = state.running;
+            match state.connections.get_mut(&connection_id) {
+                Some(connection) if connection.stream.is_none() && running => {
+                    connection.stream = Some(RemoteStreamState {
+                        session_id,
+                        sequence: RemoteStreamSequence::new(session_id),
+                    });
+                    true
+                }
+                _ => false,
+            }
+        };
+        if !accepted {
+            let _ = self.runtime.cancel_audio_session(session_id).await;
+            return Err(BackendError::new(
+                BackendErrorCode::Cancelled,
+                "remote input connection closed while the stream was starting",
+            ));
+        }
         self.publish_status();
         Ok(session_id)
     }
@@ -354,6 +449,7 @@ impl RemoteInputService {
         &self,
         connection_id: SessionId,
         session_id: SessionId,
+        sequence: u64,
         pcm_s16le: Vec<u8>,
     ) -> Result<(), BackendError> {
         if pcm_s16le.len() < 2
@@ -366,11 +462,11 @@ impl RemoteInputService {
             ));
         }
         let _lifecycle = self.lifecycle.lock().await;
-        ensure_remote_stream(
-            &self.state.lock().expect("remote input state lock poisoned"),
-            connection_id,
-            session_id,
-        )?;
+        {
+            let mut state = self.state.lock().expect("remote input state lock poisoned");
+            let stream = ensure_remote_stream_mut(&mut state, connection_id, session_id)?;
+            stream.sequence.accept(sequence)?;
+        }
         self.runtime
             .feed_audio(session_id, pcm_s16le)
             .await
@@ -387,7 +483,11 @@ impl RemoteInputService {
         {
             let mut state = self.state.lock().expect("remote input state lock poisoned");
             ensure_remote_stream(&state, connection_id, session_id)?;
-            state.connections.insert(connection_id, None);
+            state
+                .connections
+                .get_mut(&connection_id)
+                .expect("validated remote connection must exist")
+                .stream = None;
         }
         let result = if cancel {
             self.runtime.cancel_audio_session(session_id).await
@@ -418,7 +518,10 @@ impl RemoteInputApi for RemoteInputService {
             urls_stale: state.urls_stale,
             locale: state.locale.clone(),
             connection_count: state.connections.len(),
-            active_session_id: state.connections.values().find_map(|session| *session),
+            active_session_id: state
+                .connections
+                .values()
+                .find_map(|connection| connection.stream.as_ref().map(|stream| stream.session_id)),
         })
     }
 
@@ -464,9 +567,14 @@ impl RemoteInputApi for RemoteInputService {
         Box::pin(async move { service.configure_inner(config).await })
     }
 
-    fn connect(&self, connection_id: SessionId) -> BoxFuture<'static, Result<(), BackendError>> {
+    fn authenticate(
+        &self,
+        connection_id: SessionId,
+        peer: String,
+        pin: SecretValue,
+    ) -> BoxFuture<'static, Result<RemoteAuthResult, BackendError>> {
         let service = self.clone();
-        Box::pin(async move { service.connect_inner(connection_id).await })
+        Box::pin(async move { service.authenticate_inner(connection_id, peer, pin).await })
     }
 
     fn disconnect(&self, connection_id: SessionId) -> BoxFuture<'static, Result<(), BackendError>> {
@@ -486,13 +594,39 @@ impl RemoteInputApi for RemoteInputService {
         &self,
         connection_id: SessionId,
         session_id: SessionId,
+        sequence: u64,
         pcm_s16le: Vec<u8>,
     ) -> BoxFuture<'static, Result<(), BackendError>> {
         let service = self.clone();
         Box::pin(async move {
             service
-                .feed_pcm_inner(connection_id, session_id, pcm_s16le)
+                .feed_pcm_inner(connection_id, session_id, sequence, pcm_s16le)
                 .await
+        })
+    }
+
+    fn set_insert(
+        &self,
+        connection_id: SessionId,
+        insert_text: bool,
+    ) -> BoxFuture<'static, Result<(), BackendError>> {
+        let state = Arc::clone(&self.state);
+        Box::pin(async move {
+            let mut state = state.lock().expect("remote input state lock poisoned");
+            let connection = state.connections.get_mut(&connection_id).ok_or_else(|| {
+                BackendError::new(
+                    BackendErrorCode::Cancelled,
+                    "remote input connection is no longer active",
+                )
+            })?;
+            if connection.stream.is_some() {
+                return Err(BackendError::new(
+                    BackendErrorCode::Busy,
+                    "remote insert preference cannot change during an active stream",
+                ));
+            }
+            connection.insert_text = insert_text;
+            Ok(())
         })
     }
 
@@ -540,12 +674,39 @@ fn ensure_remote_stream(
     session_id: SessionId,
 ) -> Result<(), BackendError> {
     match state.connections.get(&connection_id) {
-        Some(Some(active)) if *active == session_id && state.running => Ok(()),
+        Some(RemoteConnectionState {
+            stream: Some(stream),
+            ..
+        }) if stream.session_id == session_id && state.running => Ok(()),
         _ => Err(BackendError::new(
             BackendErrorCode::Cancelled,
             "remote input stream is no longer active",
         )),
     }
+}
+
+fn ensure_remote_stream_mut(
+    state: &mut RemoteInputState,
+    connection_id: SessionId,
+    session_id: SessionId,
+) -> Result<&mut RemoteStreamState, BackendError> {
+    if !state.running {
+        return Err(BackendError::new(
+            BackendErrorCode::Cancelled,
+            "remote input stream is no longer active",
+        ));
+    }
+    state
+        .connections
+        .get_mut(&connection_id)
+        .and_then(|connection| connection.stream.as_mut())
+        .filter(|stream| stream.session_id == session_id)
+        .ok_or_else(|| {
+            BackendError::new(
+                BackendErrorCode::Cancelled,
+                "remote input stream is no longer active",
+            )
+        })
 }
 
 fn validate_remote_port(port: u16) -> Result<(), BackendError> {

@@ -19,8 +19,8 @@ use parking_lot::Mutex;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::asr::local::sherpa::{
-    self, SherpaCatalogModel, SherpaFamily, SherpaMode, SherpaPreparePhase,
-    SherpaPrepareProgressPayload, SherpaRuntimeStatus, PROVIDER_ID,
+    self, SherpaFamily, SherpaMode, SherpaPreparePhase, SherpaPrepareProgressPayload,
+    SherpaRuntimeStatus, PROVIDER_ID,
 };
 
 #[cfg(target_os = "windows")]
@@ -107,27 +107,6 @@ impl SherpaOnnxRuntime {
             last_audio_ms: diagnostics.last_audio_ms,
             last_error: diagnostics.last_error,
         }
-    }
-
-    /// 返回静态 catalog，并合并本地缓存状态与已下载字节数。
-    #[allow(dead_code)]
-    pub async fn catalog_snapshot(&self) -> Result<Vec<SherpaCatalogModel>> {
-        let mut catalog = sherpa::static_catalog_models();
-        for model in &mut catalog {
-            let dir = sherpa::model_dir_for_alias(&model.alias)?;
-            model.cached = sherpa::required_files_for_alias(&model.alias)
-                .map(|files| {
-                    files.iter().all(|file| {
-                        let path = dir.join(file);
-                        sherpa::required_path_is_valid(&model.alias, file, &path)
-                    })
-                })
-                .unwrap_or(false);
-            model.downloaded_bytes =
-                crate::asr::local::sherpa_download::downloaded_bytes(&model.alias);
-            model.file_size_mb = model_dir_size_mb(&dir);
-        }
-        Ok(catalog)
     }
 
     pub async fn ensure_loaded(&self, alias: &str) -> Result<String> {
@@ -456,34 +435,6 @@ fn ensure_required_files(alias: &str, dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn model_dir_size_mb(dir: &Path) -> Option<u64> {
-    if !dir.exists() {
-        return None;
-    }
-    let mut bytes = 0u64;
-    accumulate_dir_size(dir, &mut bytes);
-    Some(bytes / 1024 / 1024)
-}
-
-fn accumulate_dir_size(dir: &Path, bytes: &mut u64) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(_) => return,
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        match entry.file_type() {
-            Ok(file_type) if file_type.is_dir() => accumulate_dir_size(&path, bytes),
-            Ok(file_type) if file_type.is_file() => {
-                if let Ok(meta) = entry.metadata() {
-                    *bytes += meta.len();
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
 fn pcm_duration_ms(pcm: &[u8]) -> u64 {
     crate::asr::pcm::pcm_duration_ms(pcm)
 }
@@ -610,11 +561,14 @@ fn create_online_recognizer(alias: &str, dir: &Path) -> Result<OnlineRecognizer>
 }
 
 fn model_family(alias: &str) -> Result<SherpaFamily> {
-    sherpa::MODELS
-        .iter()
-        .find(|model| model.alias == alias)
-        .map(|model| model.family)
-        .context("unknown sherpa-onnx model family")
+    match alias {
+        "sense-voice-small-zh" => Ok(SherpaFamily::SenseVoice),
+        "paraformer-zh" => Ok(SherpaFamily::Paraformer),
+        "whisper-small-multi" | "whisper-large-v3-multi" => Ok(SherpaFamily::Whisper),
+        "qwen3-asr-0.6b-int8" => Ok(SherpaFamily::Qwen3Asr),
+        sherpa::DEFAULT_ONLINE_MODEL_ALIAS => Ok(SherpaFamily::Zipformer),
+        _ => anyhow::bail!("unknown sherpa-onnx model family: {alias}"),
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -931,23 +885,6 @@ mod tests {
         let message = format!("{:#}", result.unwrap_err());
         assert!(message.contains("model.int8.onnx"));
         assert!(message.contains(&dir.display().to_string()));
-    }
-
-    #[test]
-    fn model_dir_size_mb_counts_nested_files() {
-        let dir = std::env::temp_dir().join(format!(
-            "openless-sherpa-runtime-size-test-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let nested = dir.join("nested");
-        std::fs::create_dir_all(&nested).unwrap();
-        std::fs::write(dir.join("top.bin"), vec![1u8; 1024 * 1024]).unwrap();
-        std::fs::write(nested.join("child.bin"), vec![2u8; 1024 * 1024]).unwrap();
-
-        let size = model_dir_size_mb(&dir);
-
-        std::fs::remove_dir_all(&dir).ok();
-        assert_eq!(size, Some(2));
     }
 
     #[tokio::test]

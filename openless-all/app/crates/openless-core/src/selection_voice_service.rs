@@ -127,6 +127,7 @@ pub(crate) struct SelectionVoiceService {
     events: BackendEventPublisher,
     persistence: Arc<SelectionVoicePersistence>,
     workflow: Arc<SelectionVoiceWorkflow>,
+    voice_sessions: Arc<crate::voice_session::VoiceSessionGate>,
 }
 
 struct SelectionVoiceWorkflow {
@@ -162,6 +163,7 @@ impl SelectionVoiceService {
         activity: Arc<ActivityStore>,
         credential_store: Arc<dyn CredentialStore>,
         polisher: Option<Arc<dyn TextPolisher>>,
+        voice_sessions: Arc<crate::voice_session::VoiceSessionGate>,
     ) -> Self {
         Self {
             state: Arc::new(RwLock::new(SelectionVoiceState::default())),
@@ -183,6 +185,7 @@ impl SelectionVoiceService {
                 credential_store,
                 polisher,
             }),
+            voice_sessions,
         }
     }
 }
@@ -460,9 +463,6 @@ impl SelectionVoicePersistence {
         let front = crate::shared_types::split_front_app_opt(ticket.source_app.as_deref());
         let insert_status = match outcome {
             SelectionVoiceApplyOutcome::Inserted => HistoryInsertStatus::Inserted,
-            SelectionVoiceApplyOutcome::PasteSent | SelectionVoiceApplyOutcome::OutcomeUnknown => {
-                HistoryInsertStatus::PasteSent
-            }
             SelectionVoiceApplyOutcome::CopiedFallback => HistoryInsertStatus::CopiedFallback,
             SelectionVoiceApplyOutcome::Failed => return,
         };
@@ -538,6 +538,7 @@ impl SelectionVoiceApi for SelectionVoiceService {
     ) -> BoxFuture<'static, Result<SessionId, BackendError>> {
         let state = Arc::clone(&self.state);
         let events = self.events.clone();
+        let voice_sessions = Arc::clone(&self.voice_sessions);
         Box::pin(async move {
             if capture.text.trim().is_empty() {
                 return Err(BackendError::new(
@@ -560,6 +561,10 @@ impl SelectionVoiceApi for SelectionVoiceService {
                 ));
             }
             let session_id = SessionId::new();
+            voice_sessions.acquire(
+                session_id,
+                crate::voice_session::VoiceSessionKind::SelectionVoice,
+            )?;
             *state = SelectionVoiceState {
                 phase: SelectionVoicePhase::Recording,
                 session_id: Some(session_id),
@@ -1079,6 +1084,7 @@ impl SelectionVoiceApi for SelectionVoiceService {
         let state = Arc::clone(&self.state);
         let events = self.events.clone();
         let persistence = Arc::clone(&self.persistence);
+        let voice_sessions = Arc::clone(&self.voice_sessions);
         Box::pin(async move {
             let mut state = state.write().expect("selection voice state lock poisoned");
             let ticket = state
@@ -1110,6 +1116,9 @@ impl SelectionVoiceApi for SelectionVoiceService {
             );
             if outcome.may_have_applied() {
                 persistence.persist_completed(ticket, outcome, duration_ms);
+                if let Some(session_id) = session_id {
+                    voice_sessions.release(session_id);
+                }
             }
             Ok(())
         })
@@ -1118,6 +1127,7 @@ impl SelectionVoiceApi for SelectionVoiceService {
     fn complete(&self, session_id: SessionId) -> BoxFuture<'static, Result<(), BackendError>> {
         let state = Arc::clone(&self.state);
         let events = self.events.clone();
+        let voice_sessions = Arc::clone(&self.voice_sessions);
         Box::pin(async move {
             let mut state = state.write().expect("selection voice state lock poisoned");
             state.ensure_session(session_id)?;
@@ -1141,6 +1151,7 @@ impl SelectionVoiceApi for SelectionVoiceService {
                 Some(session_id),
                 BackendEventKind::SelectionVoiceStateChanged(snapshot),
             );
+            voice_sessions.release(session_id);
             Ok(())
         })
     }
@@ -1152,6 +1163,7 @@ impl SelectionVoiceApi for SelectionVoiceService {
         let state = Arc::clone(&self.state);
         let events = self.events.clone();
         let polisher = self.workflow.polisher.clone();
+        let voice_sessions = Arc::clone(&self.voice_sessions);
         Box::pin(async move {
             let (active_session, snapshot) = {
                 let mut state = state.write().expect("selection voice state lock poisoned");
@@ -1174,6 +1186,7 @@ impl SelectionVoiceApi for SelectionVoiceService {
                 Some(active_session),
                 BackendEventKind::SelectionVoiceStateChanged(snapshot),
             );
+            voice_sessions.release(active_session);
             if let Some(polisher) = polisher {
                 if let Err(error) = polisher.cancel(active_session).await {
                     log::warn!("failed to cancel selection voice model request: {error}");

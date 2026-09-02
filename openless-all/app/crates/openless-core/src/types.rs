@@ -67,6 +67,7 @@ pub enum HistoryInsertStatus {
     PasteSent,
     CopiedFallback,
     Failed,
+    NotRequested,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -250,7 +251,7 @@ pub struct DictationResult {
 pub enum InsertStatus {
     Inserted,
     CopiedFallback,
-    Unknown,
+    NotRequested,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

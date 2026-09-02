@@ -9,8 +9,7 @@ use std::sync::Arc;
 use serde::Serialize;
 use tauri::{State, Window};
 
-use super::detect::McpServerStatus;
-use super::CodingAgentPermissionMode;
+use openless_core::{CodingAgentPermissionMode, McpServerStatus};
 
 fn ensure_main_window(window: &Window) -> Result<(), String> {
     if window.label() == "main" {

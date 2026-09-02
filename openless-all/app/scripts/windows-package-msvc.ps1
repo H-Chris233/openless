@@ -323,6 +323,7 @@ try {
 
   $cargoBin = Join-Path $env:USERPROFILE ".cargo\bin"
   Invoke-OpenLessImeBuild
+  . (Join-Path $PSScriptRoot "prepare-windows-sherpa.ps1") -AppRoot $appRoot
   Invoke-MsvcBuild -VsDevCmd $vsDevCmd -CargoBin $cargoBin
   Copy-WindowsArtifacts
 } finally {

@@ -2,7 +2,8 @@
 param(
     [string]$BaselinePath,
     [string]$TauriLibPath,
-    [string]$CoreEventsPath
+    [string]$CoreEventsPath,
+    [string]$ContractFixturePath
 )
 
 $ErrorActionPreference = "Stop"
@@ -16,6 +17,9 @@ if ([string]::IsNullOrWhiteSpace($TauriLibPath)) {
 if ([string]::IsNullOrWhiteSpace($CoreEventsPath)) {
     $CoreEventsPath = Join-Path $scriptRoot "../crates/openless-core/src/events.rs"
 }
+if ([string]::IsNullOrWhiteSpace($ContractFixturePath)) {
+    $ContractFixturePath = Join-Path $scriptRoot "../contract/backend-2.0.json"
+}
 
 if (-not (Test-Path -LiteralPath $BaselinePath)) {
     throw "baseline file not found: $BaselinePath"
@@ -26,8 +30,15 @@ if (-not (Test-Path -LiteralPath $TauriLibPath)) {
 if (-not (Test-Path -LiteralPath $CoreEventsPath)) {
     throw "core events.rs not found: $CoreEventsPath"
 }
+if (-not (Test-Path -LiteralPath $ContractFixturePath)) {
+    throw "contract fixture not found: $ContractFixturePath"
+}
 
 $baseline = Get-Content -LiteralPath $BaselinePath -Raw | ConvertFrom-Json
+$fixture = Get-Content -LiteralPath $ContractFixturePath -Raw | ConvertFrom-Json
+if ($baseline.contractVersion -ne "2.0.0" -or $fixture.contractVersion -ne $baseline.contractVersion) {
+    throw "contract version must be 2.0.0 in baseline and canonical fixture"
+}
 $expected = @($baseline.commands | Sort-Object -Unique)
 $source = Get-Content -LiteralPath $TauriLibPath -Raw
 $actual = @(
@@ -120,4 +131,74 @@ if ($coreMissing.Count -gt 0 -or $coreAdded.Count -gt 0) {
     exit 1
 }
 
-Write-Output "command/event baseline passed ($($expected.Count) commands; $(@($baseline.events).Count) legacy events; $(@($baseline.coreEventKinds).Count) core event kinds)."
+$fixtureKinds = @($fixture.backendEvent.kinds | Sort-Object -Unique)
+$fixtureKindDiff = @(Compare-Object $coreExpected $fixtureKinds)
+if (@($fixture.backendEvent.kinds).Count -ne $fixtureKinds.Count -or $fixtureKindDiff.Count -ne 0) {
+    throw "canonical fixture backend event kinds do not match BackendEventKind"
+}
+$fixtureSampleKinds = @($fixture.backendEvent.samples.PSObject.Properties.Name | Sort-Object -Unique)
+if ((Compare-Object $coreExpected $fixtureSampleKinds).Count -ne 0) {
+    throw "canonical fixture must contain one JSON sample for every BackendEventKind"
+}
+
+$startupFields = @($fixture.startupSnapshot.fields | Sort-Object -Unique)
+if ((Compare-Object @("backend", "contractVersion") $startupFields).Count -ne 0) {
+    throw "canonical StartupSnapshot fields must be backend and contractVersion"
+}
+if ($fixture.startupSnapshot.sample.contractVersion -ne $baseline.contractVersion) {
+    throw "canonical StartupSnapshot sample has the wrong contract version"
+}
+
+$fieldGroups = @(
+    @($fixture.startupSnapshot.fields),
+    @($fixture.command.requestFields),
+    @($fixture.command.responseFields),
+    @($fixture.backendEvent.fields),
+    @($fixture.androidJni.fields),
+    @($fixture.linuxFacade.startupFields),
+    @($fixture.linuxFacade.eventFields)
+)
+foreach ($field in ($fieldGroups | ForEach-Object { $_ })) {
+    if ($field -notmatch '^[a-z][A-Za-z0-9]*$') {
+        throw "canonical field is not camelCase: $field"
+    }
+}
+function Assert-CamelCaseObjectFields {
+    param(
+        [AllowNull()]$Value,
+        [string]$Path = "root"
+    )
+    if ($null -eq $Value) {
+        return
+    }
+    if ($Value -is [System.Management.Automation.PSCustomObject]) {
+        foreach ($property in $Value.PSObject.Properties) {
+            if ($Path -ne "root.backendEvent.samples" -and $property.Name -notmatch '^[a-z][A-Za-z0-9]*$') {
+                throw "canonical field is not camelCase: $Path.$($property.Name)"
+            }
+            Assert-CamelCaseObjectFields -Value $property.Value -Path "$Path.$($property.Name)"
+        }
+    } elseif ($Value -is [System.Collections.IEnumerable] -and $Value -isnot [string]) {
+        foreach ($item in $Value) {
+            Assert-CamelCaseObjectFields -Value $item -Path $Path
+        }
+    }
+}
+Assert-CamelCaseObjectFields -Value $fixture
+if ($fixture.androidJni.sample.contractVersion -ne $baseline.contractVersion) {
+    throw "canonical Android JNI sample has the wrong contract version"
+}
+if ((Compare-Object @($fixture.command.requestFields | Sort-Object) @($fixture.command.sampleRequest.PSObject.Properties.Name | Sort-Object)).Count -ne 0) {
+    throw "canonical command request sample fields do not match requestFields"
+}
+if ((Compare-Object @($fixture.command.responseFields | Sort-Object) @($fixture.command.sampleResponse.PSObject.Properties.Name | Sort-Object)).Count -ne 0) {
+    throw "canonical command response sample fields do not match responseFields"
+}
+if ((Compare-Object @("copiedFallback", "inserted", "notRequested") @($fixture.enums.insertStatus | Sort-Object)).Count -ne 0) {
+    throw "canonical insertStatus enum values changed"
+}
+if ((Compare-Object @("bad_pin", "locked", "ok") @($fixture.enums.remoteAuthResult | Sort-Object)).Count -ne 0) {
+    throw "canonical remoteAuthResult enum values changed"
+}
+
+Write-Output "command/event baseline passed ($($expected.Count) commands; $(@($baseline.events).Count) legacy events; $(@($baseline.coreEventKinds).Count) core event kinds; contract $($fixture.contractVersion))."

@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::coding_agent::{
     CodingAgentAvailability, CodingAgentDetectRequest, CodingAgentModelsRequest,
-    CodingAgentPermissionMode, CodingAgentProvider, CodingAgentRequest, CodingAgentTestRequest,
-    CodingAgentTestStatus, CommandRiskAssessment,
+    CodingAgentPermissionMode, CodingAgentProvider, CodingAgentTestRequest, CodingAgentTestStatus,
+    CommandRiskAssessment,
 };
 use crate::errors::{BackendError, BackendErrorCode};
 use crate::local_asr_catalog::{
@@ -574,10 +574,8 @@ pub struct SelectionVoiceApplyTicket {
 #[serde(rename_all = "snake_case")]
 pub enum SelectionVoiceApplyOutcome {
     Inserted,
-    PasteSent,
     CopiedFallback,
     Failed,
-    OutcomeUnknown,
 }
 
 impl SelectionVoiceApplyOutcome {
@@ -856,9 +854,16 @@ pub struct RemoteInputConfig {
     pub port: u16,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteAuthResult {
+    Ok,
+    BadPin,
+    Locked,
+}
+
 pub struct RemoteInputServerConfig {
     pub port: u16,
-    pub pairing_pin: crate::credentials::SecretValue,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -884,7 +889,10 @@ pub trait RemoteInputRuntimeAdapter: Send + Sync {
     ) -> BoxFuture<'static, Result<RemoteInputServerBinding, BackendError>>;
     fn stop_server(&self) -> BoxFuture<'static, Result<(), BackendError>>;
     fn list_local_ips(&self) -> BoxFuture<'static, Result<Vec<String>, BackendError>>;
-    fn start_audio_session(&self) -> BoxFuture<'static, Result<SessionId, BackendError>>;
+    fn start_audio_session(
+        &self,
+        insert_text: bool,
+    ) -> BoxFuture<'static, Result<SessionId, BackendError>>;
     fn feed_audio(
         &self,
         session_id: SessionId,
@@ -919,7 +927,12 @@ pub trait RemoteInputApi: Send + Sync {
     ) -> BoxFuture<'static, Result<(), BackendError>> {
         unsupported("remote input")
     }
-    fn connect(&self, _connection_id: SessionId) -> BoxFuture<'static, Result<(), BackendError>> {
+    fn authenticate(
+        &self,
+        _connection_id: SessionId,
+        _peer: String,
+        _pin: crate::credentials::SecretValue,
+    ) -> BoxFuture<'static, Result<RemoteAuthResult, BackendError>> {
         unsupported("remote input")
     }
     fn disconnect(
@@ -938,7 +951,15 @@ pub trait RemoteInputApi: Send + Sync {
         &self,
         _connection_id: SessionId,
         _session_id: SessionId,
+        _sequence: u64,
         _pcm_s16le: Vec<u8>,
+    ) -> BoxFuture<'static, Result<(), BackendError>> {
+        unsupported("remote input")
+    }
+    fn set_insert(
+        &self,
+        _connection_id: SessionId,
+        _insert_text: bool,
     ) -> BoxFuture<'static, Result<(), BackendError>> {
         unsupported("remote input")
     }
@@ -1141,22 +1162,6 @@ pub struct LessComputerRunResult {
     pub outcome: LessComputerRunOutcome,
 }
 
-/// Native process/Git/temp-file seam for Less Computer. The Adapter owns
-/// process creation and provider-specific transport; Core owns policy,
-/// continuation, approval and terminal semantics.
-pub trait LessComputerRuntimeAdapter: Send + Sync {
-    fn run(
-        &self,
-        request: CodingAgentRequest,
-        events: tokio::sync::mpsc::UnboundedSender<crate::events::CodingAgentStreamEvent>,
-        cancel: Arc<std::sync::atomic::AtomicBool>,
-    ) -> BoxFuture<'static, Result<(), BackendError>>;
-}
-
-/// Stable name used by hosts that expose the process seam directly.  It is an
-/// alias, so existing Less Computer adapters remain source-compatible.
-pub use LessComputerRuntimeAdapter as CodingAgentProcessAdapter;
-
 /// Instance-scoped Less Computer lifecycle and approval use-cases.
 ///
 /// The service owns continuation and pending approval state. Hosts only render
@@ -1166,7 +1171,7 @@ pub trait LessComputerApi: Send + Sync {
     #[doc(hidden)]
     fn bind_event_publisher(&self, _publisher: crate::events::BackendEventPublisher) {}
     #[doc(hidden)]
-    fn bind_runtime(&self, _runtime: Arc<dyn LessComputerRuntimeAdapter>) {}
+    fn bind_runner(&self, _runner: Arc<crate::coding_agent::CodingAgentRunner>) {}
 
     /// Reserve a host-owned audio capture session before recording starts.
     ///
@@ -1729,12 +1734,15 @@ pub struct BackendServices {
     pub coding_agent: Arc<dyn CodingAgentApi>,
     pub less_computer: Arc<dyn LessComputerApi>,
     pub platform: Arc<dyn PlatformApi>,
+    coding_agent_process: Option<Arc<dyn crate::coding_agent::CodingAgentProcessAdapter>>,
     auxiliary_polisher: Option<Arc<dyn crate::ports::TextPolisher>>,
     auxiliary_transcription: Option<Arc<dyn crate::ports::TranscriptionEngine>>,
+    pub(crate) voice_sessions: Arc<crate::voice_session::VoiceSessionGate>,
 }
 
 impl BackendServices {
     pub fn unsupported() -> Self {
+        let voice_sessions = Arc::new(crate::voice_session::VoiceSessionGate::default());
         Self {
             model_store: None,
             auxiliary: Arc::new(crate::auxiliary::UnsupportedAuxiliaryApi),
@@ -1746,15 +1754,34 @@ impl BackendServices {
             remote_input: Arc::new(UnsupportedDomainServices),
             marketplace: Arc::new(UnsupportedDomainServices),
             coding_agent: Arc::new(UnsupportedDomainServices),
-            less_computer: Arc::new(crate::less_computer::LessComputerService::new()),
+            less_computer: Arc::new(
+                crate::less_computer::LessComputerService::with_voice_sessions(Arc::clone(
+                    &voice_sessions,
+                )),
+            ),
             platform: Arc::new(UnsupportedDomainServices),
+            coding_agent_process: None,
             auxiliary_polisher: None,
             auxiliary_transcription: None,
+            voice_sessions,
         }
     }
 
     pub fn configure_model_store(&mut self, store: Arc<crate::model_store::ModelStore>) {
         self.model_store = Some(store);
+    }
+
+    pub fn configure_coding_agent_process(
+        &mut self,
+        process: Arc<dyn crate::coding_agent::CodingAgentProcessAdapter>,
+    ) {
+        self.coding_agent_process = Some(process);
+    }
+
+    pub(crate) fn take_coding_agent_process(
+        &mut self,
+    ) -> Option<Arc<dyn crate::coding_agent::CodingAgentProcessAdapter>> {
+        self.coding_agent_process.take()
     }
 
     /// Configure host-owned provider adapters used by shared auxiliary

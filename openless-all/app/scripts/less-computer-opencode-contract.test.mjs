@@ -9,8 +9,8 @@ const read = (relativePath) => readFile(join(appRoot, relativePath), 'utf8');
 const [settings, ipc, opencode, dictation, lib, onboarding, lessComputerIpc, qaCommands, credentialCommands, miscCommands, coreAdapters, coordinatorHost, coreApi] = await Promise.all([
   read('src/pages/settings/CodingAgentSection.tsx'),
   read('src/lib/ipc/coding-agent.ts'),
-  read('src-tauri/src/coding_agent/opencode.rs'),
-  read('src-tauri/src/coordinator/dictation.rs'),
+  read('crates/openless-core/src/coding_agent.rs'),
+  read('crates/openless-core/src/api.rs'),
   read('src-tauri/src/lib.rs'),
   read('src/components/Onboarding.tsx'),
   read('src/lib/ipc/less-computer.ts'),

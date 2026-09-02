@@ -347,6 +347,8 @@
   var busy = false;               // PC 端忙,本次禁用
   var mode = readMode();          // 'toggle' | 'hold'
   var lastPin = '';
+  var remoteSessionId = '';
+  var remoteSequence = 0;
 
   // 音频相关
   var audioCtx = null;
@@ -646,6 +648,11 @@
         applyStatusKind(msg);
         break;
 
+      case 'started':
+        remoteSessionId = typeof msg.sessionId === 'string' ? msg.sessionId : '';
+        remoteSequence = 0;
+        break;
+
       case 'level':
         setLevel(msg.value);
         break;
@@ -654,6 +661,7 @@
         busy = true;
         recording = false;
         startSent = false; // 本次会话被服务端拒绝,复位 start 标记
+        remoteSessionId = '';
         teardownAudioCapture(); // 停止采集但保留 ctx
         updateRecordBtnUI();
         setStatus(fmt(L.busy, { reason: msg.reason || L.busyDefault }), 'error');
@@ -955,6 +963,7 @@
     }
     startSent = false;
     wsSendJSON({ type: 'stop' });
+    remoteSessionId = '';
     setStatus(stripLeadingIcon(L.statusTranscribing), 'work');
     if (statusDots) statusDots.hidden = false;
     setLevel(0);
@@ -976,6 +985,7 @@
     // 同 stopRecording:start 未发出就不发孤立 cancel
     if (startSent) wsSendJSON({ type: 'cancel' });
     startSent = false;
+    remoteSessionId = '';
     setStatus(L.cancelled, null);
     setLevel(0);
   }
@@ -1217,10 +1227,26 @@
   // 发送二进制音频帧(仅录音中且连接可用)
   function sendAudio(buf) {
     if (!recording) return;
-    if (ws && ws.readyState === 1 && buf && buf.byteLength) {
-      try { ws.send(buf); } catch (e) {}
+    if (ws && ws.readyState === 1 && buf && buf.byteLength && remoteSessionId) {
+      try { ws.send(buildAudioFrame(remoteSessionId, remoteSequence++, buf)); } catch (e) {}
       updateLocalLevel(buf);
     }
+  }
+
+  function buildAudioFrame(sessionId, sequence, pcm) {
+    var hex = sessionId.replace(/-/g, '');
+    if (!/^[0-9a-fA-F]{32}$/.test(hex)) throw new Error('invalid session id');
+    var frame = new ArrayBuffer(28 + pcm.byteLength);
+    var view = new DataView(frame);
+    view.setUint8(0, 0x4f); view.setUint8(1, 0x4c);
+    view.setUint8(2, 0x32); view.setUint8(3, 0x30);
+    for (var i = 0; i < 16; i++) view.setUint8(4 + i, parseInt(hex.slice(i * 2, i * 2 + 2), 16));
+    var high = Math.floor(sequence / 0x100000000);
+    var low = sequence >>> 0;
+    view.setUint32(20, high, false);
+    view.setUint32(24, low, false);
+    new Uint8Array(frame, 28).set(new Uint8Array(pcm));
+    return frame;
   }
 
   // 本地音量可视化:直接用即将上传的 Int16 PCM 算 RMS。远程模式下 PC 端没有麦克风

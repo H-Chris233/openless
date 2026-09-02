@@ -60,6 +60,7 @@ pub mod style_packs;
 pub mod testing;
 pub mod types;
 pub mod vocabulary;
+mod voice_session;
 
 mod local_asr_catalog;
 mod local_asr_service;
@@ -71,8 +72,17 @@ mod shortcut_types;
 /// major component for a breaking host contract change and document the
 /// migration in `docs/linux-egui-backend-contract.md`.
 pub const BACKEND_CONTRACT_VERSION: &str = "2.0.0";
-/// Legacy wire version accepted when reading persisted 1.x payloads.
-pub const LEGACY_BACKEND_CONTRACT_VERSION: &str = "1.0.0";
+
+pub fn require_backend_contract_version(version: &str) -> Result<(), errors::BackendError> {
+    if version == BACKEND_CONTRACT_VERSION {
+        Ok(())
+    } else {
+        Err(errors::BackendError::new(
+            errors::BackendErrorCode::InvalidArgument,
+            format!("unsupported backend contract version: {version}"),
+        ))
+    }
+}
 
 /// Versioned host-facing contract used by the Linux UI crate.
 ///
@@ -117,11 +127,12 @@ pub mod contract {
     pub use crate::local_asr_service::ModelRuntimeAdapter;
     pub use crate::model_store::{
         extract_archive_safely, merge_hf_tree_pages, merge_hf_tree_pages_with_base,
-        parse_hf_tree_page, validate_model_id, validate_model_path, validate_model_url,
-        DownloadProgressSink, ModelCacheStatus, ModelCard, ModelCatalog, ModelCatalogEntry,
-        ModelDownloadPhase, ModelDownloadProgress, ModelFile, ModelManifest, ModelStore,
-        ModelStoreConfig, ModelTransport, ModelTransportRequest, ModelTransportResponse,
-        ReqwestModelTransport,
+        model_mirror_base, parse_hf_tree_page, validate_model_id, validate_model_path,
+        validate_model_url, DownloadProgressSink, ModelArchiveSpec, ModelCacheStatus, ModelCard,
+        ModelCatalog, ModelCatalogEntry, ModelContentRange, ModelDownloadPhase,
+        ModelDownloadProgress, ModelFile, ModelFileMapping, ModelFileSelector, ModelHttpMetadata,
+        ModelManifest, ModelStore, ModelStoreConfig, ModelTransport, ModelTransportRequest,
+        ModelTransportResponse, ReqwestModelTransport,
     };
     pub use crate::provider_transport::{
         ProviderCancellation, ProviderTransport, ProviderTransportError, ProviderTransportRequest,
@@ -145,30 +156,32 @@ pub mod contract {
         RecordingRemoteInputRuntime,
     };
     pub use crate::{
-        ActivityDay, AudioConsumer, AudioRecorder, BackendConfig, BackendDependencies,
-        BackendError, BackendErrorCode, BackendEvent, BackendEventKind, BackendSnapshot,
-        CliDispatchOutcome, CliIntent, Clock, CorrectionRule, CredentialKey, CredentialMetadata,
-        CredentialNamespace, CredentialStore, CredentialsStatus, DictationContext, DictationEngine,
-        DictationHotkeyDispatchOptions, DictationHotkeyEdge, DictationInsertStatus, DictationPhase,
-        DictationResult, DictationSession, DictationStartOptions, DictationStateSnapshot,
-        DictionaryEntry, DirectoryResourceResolver, DownloadProgress, EngineFailure,
-        EngineFailureStage, EngineProgress, EngineProgressSink, EngineResult, EngineStage,
-        EventRecvError, EventSubscription, HistoryChange, HistoryInsertStatus, HistorySource,
-        HostAction, HostActions, HotkeyRuntimeTarget, HotkeyStatus, InMemoryCredentialStore,
-        InsertFallbackPayload, InsertOutcome, LessComputerEvent, LessComputerEventKind,
-        LessComputerHotkeyAction, LessComputerVoiceSession, LocalAsrMirror, LocalAsrModelId,
-        LocalAsrRuntime, LocalAsrTarget, NotificationLevel, NotificationPayload, OpenLessBackend,
-        PendingCorrection, PermissionSnapshot, PermissionState, PlatformCapabilities, PolishDelta,
-        PolishFailurePolicy, PolishMode, PolishOutput, ProviderService, RecordingArchive,
-        RecordingProgressSink, ResourceResolver, RuleSource, SecretValue,
-        SelectionPolishOutputMode, SelectionVoiceIntentMode, SelectionVoiceManualIntent, SessionId,
-        SettingsCollisionPolicy, SettingsEffectFailure, SettingsEffectKind, SettingsEffectPlan,
-        SettingsEffectReceipt, SettingsRuntime, SettingsUpdateOptions, SettingsUpdateOutcome,
-        SettingsValueChange, StartupSnapshot, StylePack, StylePackChange, StylePackExample,
-        StylePackKind, TaskSpawner, TextInserter, TextPolisher, TextStreamChunk, TextStreamSink,
-        TokioTaskSpawner, TranscriptDelta, TranscriptOutput, TranscriptionEngine,
-        TranscriptionSession, VocabPreset, VocabPresetStore, VocabularyChange,
-        BACKEND_CONTRACT_VERSION, DICTATION_SAMPLE_RATE, LEGACY_BACKEND_CONTRACT_VERSION,
+        require_backend_contract_version, ActivityDay, AudioConsumer, AudioRecorder, BackendConfig,
+        BackendDependencies, BackendError, BackendErrorCode, BackendEvent, BackendEventKind,
+        BackendSnapshot, CliDispatchOutcome, CliIntent, Clock, CorrectionRule, CredentialKey,
+        CredentialMetadata, CredentialNamespace, CredentialStore, CredentialsStatus,
+        DictationContext, DictationEngine, DictationHotkeyDispatchOptions, DictationHotkeyEdge,
+        DictationInsertStatus, DictationPhase, DictationResult, DictationSession,
+        DictationStartOptions, DictationStateSnapshot, DictionaryEntry, DirectoryResourceResolver,
+        DownloadProgress, EngineFailure, EngineFailureStage, EngineProgress, EngineProgressSink,
+        EngineResult, EngineStage, EventRecvError, EventSubscription, HistoryChange,
+        HistoryInsertStatus, HistorySource, HostAction, HostActions, HotkeyRuntimeTarget,
+        HotkeyStatus, InMemoryCredentialStore, InsertFallbackPayload, InsertOutcome,
+        LessComputerEvent, LessComputerEventKind, LessComputerHotkeyAction,
+        LessComputerVoiceSession, LocalAsrMirror, LocalAsrModelId, LocalAsrRuntime, LocalAsrTarget,
+        NotificationLevel, NotificationPayload, OpenLessBackend, PendingCorrection,
+        PermissionSnapshot, PermissionState, PlatformCapabilities, PolishDelta,
+        PolishFailurePolicy, PolishMode, PolishOutput, ProviderService, QaVoiceCaptureResult,
+        QaVoiceCaptureSession, RecordingArchive, RecordingProgressSink, ResourceResolver,
+        RuleSource, SecretValue, SelectionPolishOutputMode, SelectionVoiceIntentMode,
+        SelectionVoiceManualIntent, SessionId, SettingsCollisionPolicy, SettingsEffectFailure,
+        SettingsEffectKind, SettingsEffectPlan, SettingsEffectReceipt, SettingsRuntime,
+        SettingsUpdateOptions, SettingsUpdateOutcome, SettingsValueChange, StartupSnapshot,
+        StylePack, StylePackChange, StylePackExample, StylePackKind, TaskSpawner, TextInserter,
+        TextPolisher, TextStreamChunk, TextStreamSink, TokioTaskSpawner, TranscriptDelta,
+        TranscriptOutput, TranscriptionEngine, TranscriptionSession, VocabPreset, VocabPresetStore,
+        VocabularyChange, VoiceTranscriptionSession, BACKEND_CONTRACT_VERSION,
+        DICTATION_SAMPLE_RATE,
     };
 }
 
@@ -176,7 +189,7 @@ pub use activity::{ActivityDay, ActivityStore, DayStats};
 pub use api::{
     BackendRepositories, BackendSnapshot, CliDispatchOutcome, DictationHotkeyDispatchOptions,
     DictationHotkeyEdge, LessComputerHotkeyAction, LessComputerVoiceSession, OpenLessBackend,
-    StartupSnapshot,
+    QaVoiceCaptureResult, QaVoiceCaptureSession, StartupSnapshot, VoiceTranscriptionSession,
 };
 pub use audio::{encode_dictation_wav, NormalizedPcmChunk, PcmNormalizer, DICTATION_SAMPLE_RATE};
 pub use auxiliary::{
@@ -227,22 +240,24 @@ pub use local_asr_catalog::{
     normalize_foundry_language_hint, normalize_sherpa_language_hint, FoundryRuntimeSource,
     LocalAsrMirror, LocalAsrModelId, LocalAsrRuntime, LocalAsrTarget,
 };
-pub use local_asr_service::{LocalAsrRuntimeAdapter, ModelRuntimeAdapter};
+pub use local_asr_service::ModelRuntimeAdapter;
 pub use marketplace::{MarketplaceConfig, MARKETPLACE_BASE_URL, MARKETPLACE_GITHUB_TOKEN_ACCOUNT};
 pub use model_store::{
-    extract_archive_safely, merge_hf_tree_pages, merge_hf_tree_pages_with_base, parse_hf_tree_page,
-    validate_model_path, validate_model_url, DownloadProgressSink, ModelCacheStatus, ModelCard,
-    ModelCatalog, ModelCatalogEntry, ModelDownloadPhase, ModelDownloadProgress, ModelFile,
-    ModelManifest, ModelStore, ModelStoreConfig, ModelTransport, ModelTransportRequest,
-    ModelTransportResponse, ReqwestModelTransport, MODEL_PARTIAL_INDEX, MODEL_READY_SENTINEL,
+    extract_archive_safely, merge_hf_tree_pages, merge_hf_tree_pages_with_base, model_mirror_base,
+    parse_hf_tree_page, validate_model_path, validate_model_url, DownloadProgressSink,
+    ModelArchiveSpec, ModelCacheStatus, ModelCard, ModelCatalog, ModelCatalogEntry,
+    ModelContentRange, ModelDownloadPhase, ModelDownloadProgress, ModelFile, ModelFileMapping,
+    ModelFileSelector, ModelHttpMetadata, ModelManifest, ModelStore, ModelStoreConfig,
+    ModelTransport, ModelTransportRequest, ModelTransportResponse, ReqwestModelTransport,
+    MODEL_PARTIAL_INDEX, MODEL_READY_SENTINEL,
 };
 pub use ports::{
     ActiveRecording, AudioConsumer, AudioRecorder, DictationEngine, DirectoryResourceResolver,
     EngineFailure, EngineFailureStage, EngineProgress, EngineProgressSink, EngineResult,
-    EngineStage, HostAction, HostActions, InsertOutcome, NoopHostActions, PolishOutput,
-    RecordingArchive, RecordingProgressSink, ResourceResolver, TextInserter, TextPolisher,
-    TextStreamChunk, TextStreamSink, TranscriptOutput, TranscriptionEngine, TranscriptionSession,
-    UnsupportedTextInserter,
+    EngineStage, HostAction, HostActions, InsertOutcome, InsertWriteResult, NoopHostActions,
+    PolishOutput, RecordingArchive, RecordingProgressSink, ResourceResolver, TextInserter,
+    TextInsertionSession, TextPolisher, TextStreamChunk, TextStreamSink, TranscriptOutput,
+    TranscriptionEngine, TranscriptionSession, UnsupportedTextInserter, VoiceCapture,
 };
 pub use preferences::PreferencesStore;
 pub use prompt_compose::{

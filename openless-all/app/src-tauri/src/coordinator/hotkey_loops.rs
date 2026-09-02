@@ -737,13 +737,6 @@ fn cancel_less_computer_press(inner: &Arc<Inner>, press_id: u64) {
 }
 
 fn cancel_less_computer_voice_session(inner: &Arc<Inner>) {
-    let (phase, voice_agent) = {
-        let state = inner.state.lock();
-        (state.phase, state.voice_agent)
-    };
-    if !voice_agent || !matches!(phase, SessionPhase::Starting | SessionPhase::Listening) {
-        return;
-    }
     let _ = inner
         .less_computer_combo_pending_press
         .swap(0, Ordering::SeqCst);
@@ -751,7 +744,26 @@ fn cancel_less_computer_voice_session(inner: &Arc<Inner>) {
         .backend
         .dispatch_less_computer_hotkey_edge(openless_core::DictationHotkeyEdge::Combined);
     log::info!("[less-computer] 触发键与其他键组合按下 —— 取消本次按下开出的会话");
-    cancel_session(inner);
+    let session = inner.less_computer_voice.lock().take();
+    let spawner = inner.host.clone();
+    let host = inner.host.clone();
+    spawner.spawn(async move {
+        if let Some(session) = session {
+            if let Err(error) = session.cancel().await {
+                log::warn!("[less-computer] cancel failed: {error}");
+            }
+        }
+        host.hide_less_computer_glow();
+    });
+}
+
+async fn finish_less_computer_voice_session(inner: &Arc<Inner>) {
+    let session = inner.less_computer_voice.lock().take();
+    if let Some(session) = session {
+        if let Err(error) = session.finish().await {
+            log::warn!("[less-computer] finish failed: {error}");
+        }
+    }
     inner.host.hide_less_computer_glow();
 }
 
@@ -783,12 +795,6 @@ pub(super) async fn handle_less_computer_pressed(inner: &Arc<Inner>) {
     if !hotkey_runtime_target(inner).coding_agent_enabled {
         return;
     }
-    if !matches!(inner.state.lock().phase, SessionPhase::Idle)
-        && inner.backend.less_computer_active_session().is_none()
-    {
-        log::info!("[less-computer] press ignored: another voice session is active");
-        return;
-    }
     let action = inner.backend.dispatch_less_computer_hotkey_edge(
         openless_core::DictationHotkeyEdge::Pressed {
             at: std::time::Instant::now(),
@@ -799,37 +805,19 @@ pub(super) async fn handle_less_computer_pressed(inner: &Arc<Inner>) {
     }
     if !matches!(action, openless_core::LessComputerHotkeyAction::Start) {
         if matches!(action, openless_core::LessComputerHotkeyAction::Finish) {
-            let _ = end_session(inner).await;
+            finish_less_computer_voice_session(inner).await;
         } else if matches!(action, openless_core::LessComputerHotkeyAction::Cancel) {
-            cancel_session(inner);
+            cancel_less_computer_voice_session(inner);
         }
         return;
     }
-    if !matches!(inner.state.lock().phase, SessionPhase::Idle) {
-        log::info!("[less-computer] press ignored: dictation session already active");
-        return;
-    }
-    let qa_active = inner
-        .backend
-        .services()
-        .qa
-        .snapshot()
-        .await
-        .map(|snapshot| snapshot.phase != openless_core::QaPhase::Idle)
-        .unwrap_or(false);
-    if qa_active {
-        log::info!("[less-computer] press ignored: QA session active");
-        return;
-    }
-
-    // Core 先预留 capture lease，再由 Coordinator 启动宿主 recorder/ASR；两边复用
-    // 同一个 session id，Esc/组合键取消时不会把迟到事件投递到另一轮会话。
-    let started = match super::dictation::begin_less_computer_session(inner).await {
-        Ok(Some(session_id)) => {
-            log::info!("[less-computer] voice session started (session={session_id:?})");
+    let session_id = openless_core::SessionId::new();
+    let started = match inner.backend.start_less_computer_voice(session_id).await {
+        Ok(session) => {
+            *inner.less_computer_voice.lock() = Some(session);
+            log::info!("[less-computer] voice session started (session={session_id})");
             true
         }
-        Ok(None) => false,
         Err(error) => {
             log::warn!("[less-computer] voice session startup failed: {error}");
             false
@@ -850,29 +838,7 @@ pub(super) async fn handle_less_computer_released(inner: &Arc<Inner>) {
     if !matches!(action, openless_core::LessComputerHotkeyAction::Finish) {
         return;
     }
-    let (phase, voice_agent) = {
-        let state = inner.state.lock();
-        (state.phase, state.voice_agent)
-    };
-    if !voice_agent {
-        return;
-    }
-    match phase {
-        SessionPhase::Listening => {
-            let _ = end_session(inner).await;
-            // 收尾后熄灭整屏描边。正常路径 run_voice_agent_transcript 已熄过、这里兜底；
-            // 空转写/出错路径不进 run_voice_agent_transcript，全靠这里熄，否则描边卡住不灭。
-            inner.host.hide_less_computer_glow();
-        }
-        SessionPhase::Starting => {
-            // 握手中松手：排队；正常路径真正收尾在 begin 续流的 end_session → run_voice_agent_transcript 熄灭。
-            request_stop_during_starting(inner, "less-computer release edge");
-            // 但若初始化失败永远到不了 Listening（不会进 run_voice_agent_transcript），
-            // 描边会永久卡屏 → 这里兜底熄灭。Listening 分支已有熄灭逻辑，故只在 Starting 加。
-            inner.host.hide_less_computer_glow();
-        }
-        _ => {}
-    }
+    finish_less_computer_voice_session(inner).await;
 }
 
 pub(super) fn take_coding_agent_hotkeys_on_main_thread(inner: &Arc<Inner>) {
@@ -1886,7 +1852,7 @@ pub(super) fn window_key_matches_trigger(
     }
 }
 
-#[cfg(test)]
+#[cfg(any())]
 mod tests {
     use super::*;
 

@@ -19,8 +19,9 @@ use crate::errors::{BackendError, BackendErrorCode};
 use crate::ports::{
     ActiveRecording, AudioConsumer, AudioRecorder, DictationEngine, EngineFailure, EngineProgress,
     EngineProgressSink, EngineResult, EngineStage, HostAction, HostActions, InsertOutcome,
-    RecordingArchive, RecordingProgressSink, TextInserter, TextPolisher, TextStreamChunk,
-    TextStreamSink, TranscriptOutput, TranscriptionEngine, TranscriptionSession,
+    InsertWriteResult, RecordingArchive, RecordingProgressSink, TextInserter, TextInsertionSession,
+    TextPolisher, TextStreamChunk, TextStreamSink, TranscriptOutput, TranscriptionEngine,
+    TranscriptionSession,
 };
 use crate::provider_transport::{
     ProviderTransport, ProviderTransportError, ProviderTransportRequest, ProviderTransportResponse,
@@ -201,7 +202,10 @@ impl RemoteInputRuntimeAdapter for RecordingRemoteInputRuntime {
         Box::pin(async { Ok(vec!["127.0.0.1".to_string()]) })
     }
 
-    fn start_audio_session(&self) -> BoxFuture<'static, Result<SessionId, BackendError>> {
+    fn start_audio_session(
+        &self,
+        _insert_text: bool,
+    ) -> BoxFuture<'static, Result<SessionId, BackendError>> {
         self.audio_starts
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         Box::pin(async { Ok(SessionId::new()) })
@@ -642,6 +646,7 @@ impl TextPolisher for FixtureTextPolisher {
 pub struct FixtureDictationEngine {
     result: Result<EngineResult, EngineFailure>,
     context_update_error: Option<BackendError>,
+    polish_deltas: Vec<PolishDelta>,
     actions: Arc<Mutex<Vec<FixtureEngineAction>>>,
     contexts: Arc<Mutex<Vec<Arc<DictationContext>>>>,
 }
@@ -678,6 +683,7 @@ impl FixtureDictationEngine {
                 has_audio_recording: None,
             }),
             context_update_error: None,
+            polish_deltas: Vec::new(),
             actions: Arc::new(Mutex::new(Vec::new())),
             contexts: Arc::new(Mutex::new(Vec::new())),
         }
@@ -693,10 +699,16 @@ impl FixtureDictationEngine {
         engine
     }
 
+    pub fn with_polish_deltas(mut self, deltas: Vec<PolishDelta>) -> Self {
+        self.polish_deltas = deltas;
+        self
+    }
+
     pub fn failing(error: BackendError) -> Self {
         Self {
             result: Err(EngineFailure::from(error)),
             context_update_error: None,
+            polish_deltas: Vec::new(),
             actions: Arc::new(Mutex::new(Vec::new())),
             contexts: Arc::new(Mutex::new(Vec::new())),
         }
@@ -745,6 +757,7 @@ impl DictationEngine for FixtureDictationEngine {
             .expect("fixture engine lock poisoned")
             .push(FixtureEngineAction::Finish(session_id));
         let result = self.result.clone();
+        let polish_deltas = self.polish_deltas.clone();
         Box::pin(async move {
             progress.publish(session_id, EngineProgress::Stage(EngineStage::Transcribing))?;
             let result = result?;
@@ -757,6 +770,9 @@ impl DictationEngine for FixtureDictationEngine {
                 }),
             )?;
             progress.publish(session_id, EngineProgress::Stage(EngineStage::Polishing))?;
+            for delta in polish_deltas {
+                progress.publish(session_id, EngineProgress::PolishDelta(delta))?;
+            }
             progress.publish(
                 session_id,
                 EngineProgress::PolishDelta(PolishDelta {
@@ -812,6 +828,7 @@ pub struct FixtureTextInserter {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FixtureInsertionAction {
     Prepare(SessionId),
+    Write { session_id: SessionId, text: String },
     Insert { session_id: SessionId, text: String },
     Cancel(SessionId),
 }
@@ -840,37 +857,61 @@ impl FixtureTextInserter {
 }
 
 impl TextInserter for FixtureTextInserter {
-    fn prepare(
+    fn begin(
         &self,
         session_id: SessionId,
         _context: Arc<DictationContext>,
-    ) -> BoxFuture<'static, Result<(), BackendError>> {
+    ) -> BoxFuture<'static, Result<Arc<dyn TextInsertionSession>, BackendError>> {
         self.actions
             .lock()
             .expect("fixture inserter lock poisoned")
             .push(FixtureInsertionAction::Prepare(session_id));
-        Box::pin(async { Ok(()) })
+        let session = FixtureTextInsertionSession {
+            session_id,
+            outcome: self.outcome.clone(),
+            actions: Arc::clone(&self.actions),
+        };
+        Box::pin(async move { Ok(Arc::new(session) as Arc<dyn TextInsertionSession>) })
     }
+}
 
-    fn insert(
-        &self,
-        session_id: SessionId,
-        _context: Arc<DictationContext>,
-        text: String,
-    ) -> BoxFuture<'static, Result<InsertOutcome, BackendError>> {
+#[derive(Clone)]
+struct FixtureTextInsertionSession {
+    session_id: SessionId,
+    outcome: Result<InsertOutcome, BackendError>,
+    actions: Arc<Mutex<Vec<FixtureInsertionAction>>>,
+}
+
+impl TextInsertionSession for FixtureTextInsertionSession {
+    fn write(&self, text: String) -> BoxFuture<'static, Result<InsertWriteResult, BackendError>> {
+        let written_chars = text.chars().count();
         self.actions
             .lock()
             .expect("fixture inserter lock poisoned")
-            .push(FixtureInsertionAction::Insert { session_id, text });
+            .push(FixtureInsertionAction::Write {
+                session_id: self.session_id,
+                text,
+            });
+        Box::pin(async move { Ok(InsertWriteResult { written_chars }) })
+    }
+
+    fn finish(&self, text: String) -> BoxFuture<'static, Result<InsertOutcome, BackendError>> {
+        self.actions
+            .lock()
+            .expect("fixture inserter lock poisoned")
+            .push(FixtureInsertionAction::Insert {
+                session_id: self.session_id,
+                text,
+            });
         let outcome = self.outcome.clone();
         Box::pin(async move { outcome })
     }
 
-    fn cancel(&self, session_id: SessionId) -> BoxFuture<'static, Result<(), BackendError>> {
+    fn cancel(&self) -> BoxFuture<'static, Result<(), BackendError>> {
         self.actions
             .lock()
             .expect("fixture inserter lock poisoned")
-            .push(FixtureInsertionAction::Cancel(session_id));
+            .push(FixtureInsertionAction::Cancel(self.session_id));
         Box::pin(async { Ok(()) })
     }
 }

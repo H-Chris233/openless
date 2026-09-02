@@ -18,7 +18,14 @@ export {
 export { isTauri, invokeOrMock, getPlatformCapabilities } from "./shared"
 
 // settings
-export { getSettings, getDefaultStyleSystemPrompts, setSettings } from "./settings"
+export type { StartupSnapshot } from "./settings"
+export {
+    BACKEND_CONTRACT_VERSION,
+    getStartupSnapshot,
+    getSettings,
+    getDefaultStyleSystemPrompts,
+    setSettings,
+} from "./settings"
 
 // asr-credentials
 export type { ProviderCheckResult, ProviderModelsResult } from "./asr-credentials"

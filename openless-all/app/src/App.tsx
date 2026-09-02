@@ -6,6 +6,7 @@ import {
   checkAccessibilityPermission,
   checkMicrophonePermission,
   getHotkeyStatus,
+  getStartupSnapshot,
   getSettings,
   getPlatformCapabilities,
   handleWindowHotkeyEvent,
@@ -107,7 +108,10 @@ export function App({ isCapsule, isQa, isSelectionPolishPreview, isSelectionVoic
   };
   useEffect(() => {
     if (!isTauri) return;
-    void getPlatformCapabilities().then(setPlatformCaps);
+    void getStartupSnapshot()
+      .then(() => getPlatformCapabilities())
+      .then(setPlatformCaps)
+      .catch(error => console.error('[startup] backend contract handshake failed', error));
   }, []);
 
   useEffect(() => {

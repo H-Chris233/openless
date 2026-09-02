@@ -1,6 +1,4 @@
-//! Tauri Coding Agent Adapter：只负责临时文件与子进程 I/O。
-
-pub mod commands;
+//! Linux Coding Agent Adapter：只负责临时文件与子进程 I/O。
 
 use std::collections::BTreeMap;
 use std::path::{Component, PathBuf};
@@ -15,7 +13,7 @@ use openless_core::{
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 #[derive(Default)]
-pub struct TauriCodingAgentProcessAdapter;
+pub(crate) struct LinuxCodingAgentProcessAdapter;
 
 struct TemporaryWorkspace(PathBuf);
 
@@ -25,7 +23,7 @@ impl Drop for TemporaryWorkspace {
     }
 }
 
-fn materialize_temporary_files(
+fn materialize(
     command: &mut AgentCommand,
 ) -> Result<Option<TemporaryWorkspace>, openless_core::BackendError> {
     if command.temporary_files.is_empty() {
@@ -55,20 +53,19 @@ fn materialize_temporary_files(
     for file in &command.temporary_files {
         let text = std::str::from_utf8(&file.contents)
             .map_err(|_| invalid("temporary file contents must be UTF-8"))?;
-        let contents = replace_path_tokens(text, &paths)?;
         std::fs::write(
             paths.get(&file.name).expect("validated temporary path"),
-            contents,
+            replace_tokens(text, &paths)?,
         )
         .map_err(platform_error)?;
     }
     for argument in &mut command.argv {
-        *argument = replace_path_tokens(argument, &paths)?;
+        *argument = replace_tokens(argument, &paths)?;
     }
     Ok(Some(workspace))
 }
 
-fn replace_path_tokens(
+fn replace_tokens(
     input: &str,
     paths: &BTreeMap<String, PathBuf>,
 ) -> Result<String, openless_core::BackendError> {
@@ -86,31 +83,27 @@ fn replace_path_tokens(
     Ok(output)
 }
 
-async fn augment_path(_command: &mut tokio::process::Command) {
-    #[cfg(unix)]
-    {
-        let command = _command;
-        let current = std::env::var_os("PATH").unwrap_or_default();
-        let mut paths = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .into_iter()
-            .flat_map(|home| {
-                [
-                    home.join(".local/bin"),
-                    home.join(".opencode/bin"),
-                    home.join(".npm-global/bin"),
-                    home.join(".bun/bin"),
-                ]
-            })
-            .collect::<Vec<_>>();
-        paths.extend(std::env::split_paths(&current));
-        if let Ok(path) = std::env::join_paths(paths) {
-            command.env("PATH", path);
-        }
+fn augment_path(command: &mut tokio::process::Command) {
+    let current = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .into_iter()
+        .flat_map(|home| {
+            [
+                home.join(".local/bin"),
+                home.join(".opencode/bin"),
+                home.join(".npm-global/bin"),
+                home.join(".bun/bin"),
+            ]
+        })
+        .collect::<Vec<_>>();
+    paths.extend(std::env::split_paths(&current));
+    if let Ok(path) = std::env::join_paths(paths) {
+        command.env("PATH", path);
     }
 }
 
-impl CodingAgentProcessAdapter for TauriCodingAgentProcessAdapter {
+impl CodingAgentProcessAdapter for LinuxCodingAgentProcessAdapter {
     fn execute(
         &self,
         mut request: AgentCommand,
@@ -118,9 +111,9 @@ impl CodingAgentProcessAdapter for TauriCodingAgentProcessAdapter {
         cancel: CancellationToken,
     ) -> BoxFuture<'static, Result<ProcessExit, openless_core::BackendError>> {
         Box::pin(async move {
-            let _workspace = materialize_temporary_files(&mut request)?;
+            let _workspace = materialize(&mut request)?;
             let mut command = tokio::process::Command::new(&request.executable);
-            augment_path(&mut command).await;
+            augment_path(&mut command);
             command
                 .args(&request.argv)
                 .envs(&request.env)
@@ -135,12 +128,14 @@ impl CodingAgentProcessAdapter for TauriCodingAgentProcessAdapter {
                 command.arg(prompt);
             }
             let mut child = command.spawn().map_err(|error| {
-                let code = if error.kind() == std::io::ErrorKind::NotFound {
-                    openless_core::BackendErrorCode::Unsupported
-                } else {
-                    openless_core::BackendErrorCode::Platform
-                };
-                openless_core::BackendError::new(code, error.to_string())
+                openless_core::BackendError::new(
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        openless_core::BackendErrorCode::Unsupported
+                    } else {
+                        openless_core::BackendErrorCode::Platform
+                    },
+                    error.to_string(),
+                )
             })?;
             if let PromptPayload::Stdin(prompt) = &request.prompt {
                 if let Some(mut stdin) = child.stdin.take() {

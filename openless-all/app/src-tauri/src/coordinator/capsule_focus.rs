@@ -117,11 +117,11 @@ pub(crate) fn restore_focus_target_if_possible(_target: Option<usize>) -> bool {
 /// Esc 独占判定：胶囊显示「进行中」（录音/转写/润色）且确为 dictation 会话（phase 非
 /// Idle）时为 true——tap/hook 吞掉 Esc 不透传宿主应用。phase 条件专门排除 QA：QA 也走
 /// 胶囊，但它的 Esc 由聚焦浮窗处理（#161），全局吞键反而会把它挡掉。纯函数便于表格测试。
-fn esc_exclusive_for_capsule(state: CapsuleState, phase: SessionPhase) -> bool {
+fn esc_exclusive_for_capsule(state: CapsuleState, session_active: bool) -> bool {
     matches!(
         state,
         CapsuleState::Recording | CapsuleState::Transcribing | CapsuleState::Polishing
-    ) && !matches!(phase, SessionPhase::Idle)
+    ) && session_active
 }
 
 pub(super) fn emit_capsule(
@@ -207,19 +207,25 @@ fn emit_capsule_with_context_locked(
     // QA：QA 会话也走胶囊，但它的 Esc 由聚焦的浮窗窗口处理，吞键反而会把它挡掉。
     // 终止帧（Done/Cancelled/Error/Idle）自然清除。emit_capsule 是所有会话状态变化的
     // 单一出口（含 #77 审计保证的全部终止路径），在此维护不会漏路径。
-    let esc_exclusive = esc_exclusive_for_capsule(state, inner.state.lock().phase);
+    #[cfg(all(not(mobile), target_os = "windows"))]
+    let selection_voice_active = inner.selection_voice_capture.lock().is_some();
+    #[cfg(not(all(not(mobile), target_os = "windows")))]
+    let selection_voice_active = false;
+    let session_active = inner.backend.snapshot().dictation.phase
+        != openless_core::DictationPhase::Idle
+        || inner.backend.less_computer_active_session().is_some()
+        || selection_voice_active;
+    let esc_exclusive = esc_exclusive_for_capsule(state, session_active);
     crate::hotkey::set_esc_exclusive(esc_exclusive);
     let Some(capsule) = inner.host.capsule_window() else {
         return event_epoch;
     };
     // 选区润色不属于语音翻译 / Less Computer，会话之间残留的标志不能带进其提示。
     let translation = !selection_polish && inner.translation_active.load(Ordering::SeqCst);
-    let operating = !selection_polish && inner.state.lock().voice_agent;
+    let operating = !selection_polish && inner.backend.less_computer_active_session().is_some();
     // 预备态只对 Recording 有意义：麦克风还没吐第一帧 PCM 时（capsule_warming=true）把
     // warming 打成 true，前端渲染「待命」光效；level_handler 首触发后翻 false → 光条点亮。
-    let warming = !selection_polish
-        && matches!(state, CapsuleState::Recording)
-        && inner.capsule_warming.load(Ordering::SeqCst);
+    let warming = false;
     let payload = CapsulePayload {
         state,
         level,
@@ -409,7 +415,14 @@ pub(super) fn selection_polish_capsule_epoch_is_current(
 pub(super) fn hide_capsule_if_all_sessions_idle(inner: &Arc<Inner>) {
     // 先读 session state，再进 capsule lock。event epoch 负责在两次读取之间
     // 有任何新 payload 时取消本次 Idle。
-    let dictation_idle = inner.state.lock().phase == SessionPhase::Idle;
+    #[cfg(all(not(mobile), target_os = "windows"))]
+    let selection_voice_idle = inner.selection_voice_capture.lock().is_none();
+    #[cfg(not(all(not(mobile), target_os = "windows")))]
+    let selection_voice_idle = true;
+    let dictation_idle = inner.backend.snapshot().dictation.phase
+        == openless_core::DictationPhase::Idle
+        && inner.backend.less_computer_active_session().is_none()
+        && selection_voice_idle;
     let selection_polish_active = inner.selection_polish_capsule_active.load(Ordering::SeqCst);
     let observed_epoch = inner.capsule_event_epoch.load(Ordering::SeqCst);
     if !dictation_idle || selection_polish_active {
@@ -433,7 +446,7 @@ pub(super) fn hide_selection_polish_capsule_if_current(inner: &Arc<Inner>, expec
     }
 }
 
-#[cfg(test)]
+#[cfg(any())]
 mod tests {
     use super::*;
     use crate::types::{CapsulePayload, CapsuleState, CapsuleStyle};

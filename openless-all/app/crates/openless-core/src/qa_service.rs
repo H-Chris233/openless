@@ -30,13 +30,30 @@ pub struct QaService {
     state: Arc<Mutex<QaState>>,
     persistence: Option<Arc<QaPersistence>>,
     selection_voice: Option<Arc<dyn SelectionVoiceApi>>,
+    voice_sessions: Arc<crate::voice_session::VoiceSessionGate>,
 }
 
-struct QaPersistence {
+pub(crate) struct QaPersistence {
     preferences: Arc<PreferencesStore>,
     history: Arc<HistoryStore>,
     history_revision: Arc<AtomicU64>,
     clock: Arc<dyn Clock>,
+}
+
+impl QaPersistence {
+    pub(crate) fn new(
+        preferences: Arc<PreferencesStore>,
+        history: Arc<HistoryStore>,
+        history_revision: Arc<AtomicU64>,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
+        Self {
+            preferences,
+            history,
+            history_revision,
+            clock,
+        }
+    }
 }
 
 impl QaService {
@@ -48,30 +65,25 @@ impl QaService {
             state: Arc::new(Mutex::new(QaState::default())),
             persistence: None,
             selection_voice: None,
+            voice_sessions: Arc::new(crate::voice_session::VoiceSessionGate::default()),
         }
     }
 
     pub(crate) fn new_with_persistence(
         runtime: Arc<dyn QaRuntimeAdapter>,
         host_actions: Arc<dyn HostActions>,
-        preferences: Arc<PreferencesStore>,
-        history: Arc<HistoryStore>,
-        history_revision: Arc<AtomicU64>,
-        clock: Arc<dyn Clock>,
+        persistence: QaPersistence,
         selection_voice: Arc<dyn SelectionVoiceApi>,
+        voice_sessions: Arc<crate::voice_session::VoiceSessionGate>,
     ) -> Self {
         Self {
             runtime,
             host_actions,
             events: Arc::new(Mutex::new(None)),
             state: Arc::new(Mutex::new(QaState::default())),
-            persistence: Some(Arc::new(QaPersistence {
-                preferences,
-                history,
-                history_revision,
-                clock,
-            })),
+            persistence: Some(Arc::new(persistence)),
             selection_voice: Some(selection_voice),
+            voice_sessions,
         }
     }
 
@@ -140,6 +152,8 @@ impl QaService {
         let previous = {
             let mut state = self.state.lock().expect("QA state lock poisoned");
             ensure_qa_idle(&state.snapshot)?;
+            self.voice_sessions
+                .acquire(session_id, crate::voice_session::VoiceSessionKind::Qa)?;
             let previous = state.snapshot.clone();
             let conversation_id = state.snapshot.conversation_id.unwrap_or(session_id);
             state.snapshot.phase = QaPhase::Recording;
@@ -159,6 +173,7 @@ impl QaService {
             {
                 state.snapshot = previous;
             }
+            self.voice_sessions.release(session_id);
             return Err(error);
         }
         self.publish_snapshot(QaStateKind::Recording);
@@ -169,6 +184,7 @@ impl QaService {
         {
             self.fail_if_current(session_id, &error);
             self.cancel_runtime_best_effort(session_id).await;
+            self.voice_sessions.release(session_id);
             return Err(public_qa_backend_error(&error));
         }
         Ok(())
@@ -187,10 +203,13 @@ impl QaService {
             Err(error) => {
                 self.fail_if_current(session_id, &error);
                 self.cancel_runtime_best_effort(session_id).await;
+                self.voice_sessions.release(session_id);
                 return Err(public_qa_backend_error(&error));
             }
         };
-        self.answer_input(session_id, input).await
+        let result = self.answer_input(session_id, input).await;
+        self.voice_sessions.release(session_id);
+        result
     }
 
     async fn submit_text_inner(&self, text: String) -> Result<(), BackendError> {
@@ -440,6 +459,9 @@ impl QaService {
             let conversation_id = state.snapshot.conversation_id.take();
             (runtime_session_id, conversation_id, publish_cancelled)
         };
+        if let Some(session_id) = requested_session_id.or(runtime_session_id) {
+            self.voice_sessions.release(session_id);
+        }
         if publish_cancelled {
             self.publish_snapshot(QaStateKind::Cancelled);
         }

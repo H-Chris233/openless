@@ -13,8 +13,8 @@ use futures_util::future::BoxFuture;
 use crate::dictation_context::DictationContext;
 use crate::errors::{BackendError, BackendErrorCode};
 use crate::ports::{
-    DictationEngine, EngineFailure, EngineProgressSink, EngineResult, TextPolisher, TextStreamSink,
-    TranscriptionEngine, TranscriptionSession,
+    DictationEngine, EngineFailure, EngineProgressSink, EngineResult, RecordingProgressSink,
+    TextPolisher, TextStreamSink, TranscriptionEngine, TranscriptionSession, VoiceCapture,
 };
 use crate::shared_types::PipelineMode;
 use crate::types::SessionId;
@@ -323,6 +323,30 @@ impl DictationEngine for DictationEngineRouter {
             Err(error) => return Box::pin(async move { Err(error) }),
         };
         engine.start_transcription(session_id, context, partials)
+    }
+
+    fn start_voice_capture(
+        &self,
+        session_id: SessionId,
+        context: Arc<DictationContext>,
+        partials: Arc<dyn TextStreamSink>,
+        progress: Arc<dyn RecordingProgressSink>,
+    ) -> BoxFuture<'static, Result<VoiceCapture, BackendError>> {
+        let engine = match self.resolve(&context) {
+            Ok(engine) => engine,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        engine.start_voice_capture(session_id, context, partials, progress)
+    }
+
+    fn start_audio_capture(
+        &self,
+        session_id: SessionId,
+        context: Arc<DictationContext>,
+        progress: Arc<dyn RecordingProgressSink>,
+    ) -> BoxFuture<'static, Result<crate::ports::AudioCapture, BackendError>> {
+        self.traditional
+            .start_audio_capture(session_id, context, progress)
     }
 
     fn finish(

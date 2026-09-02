@@ -17,6 +17,33 @@ static COORDINATOR: OnceLock<Arc<Coordinator>> = OnceLock::new();
 static CORE_BACKEND: OnceLock<Arc<OpenLessBackend>> = OnceLock::new();
 static OVERLAY_VISIBLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AndroidBackendSnapshotResponse {
+    contract_version: &'static str,
+    ok: bool,
+    payload: Option<openless_core::BackendSnapshot>,
+    error: Option<&'static str>,
+}
+
+fn android_backend_snapshot_response(backend: Option<&OpenLessBackend>) -> String {
+    let response = match backend {
+        Some(backend) => AndroidBackendSnapshotResponse {
+            contract_version: openless_core::BACKEND_CONTRACT_VERSION,
+            ok: true,
+            payload: Some(backend.snapshot()),
+            error: None,
+        },
+        None => AndroidBackendSnapshotResponse {
+            contract_version: openless_core::BACKEND_CONTRACT_VERSION,
+            ok: false,
+            payload: None,
+            error: Some("backend unavailable"),
+        },
+    };
+    serde_json::to_string(&response).expect("Android backend snapshot is serializable")
+}
+
 pub fn register_android_coordinator(coordinator: Arc<Coordinator>) {
     let _ = COORDINATOR.set(coordinator);
 }
@@ -363,6 +390,18 @@ mod jni_exports {
     }
 
     #[no_mangle]
+    pub unsafe extern "system" fn Java_com_openless_app_OpenLessNative_nativeBackendSnapshot(
+        env: *mut JNIEnv,
+        _class: JClass,
+    ) -> jstring {
+        let response = android_backend_snapshot_response(CORE_BACKEND.get().map(Arc::as_ref));
+        match JniEnv::from_raw(env) {
+            Ok(mut env) => crate::android::jni::android::export_jstring(&mut env, &response),
+            Err(_) => std::ptr::null_mut(),
+        }
+    }
+
+    #[no_mangle]
     pub unsafe extern "system" fn Java_com_openless_app_OpenLessNative_nativeSwitchStylePack(
         _env: *mut JNIEnv,
         _class: JClass,
@@ -475,6 +514,19 @@ mod tests {
         BackendConfig, BackendDependencies, BackendServices, DictationPhase,
         InMemoryCredentialStore, InsertOutcome, TokioTaskSpawner,
     };
+
+    #[test]
+    fn android_snapshot_envelope_always_carries_contract_version() {
+        let value: serde_json::Value =
+            serde_json::from_str(&android_backend_snapshot_response(None)).unwrap();
+        assert_eq!(
+            value["contractVersion"],
+            openless_core::BACKEND_CONTRACT_VERSION
+        );
+        assert_eq!(value["ok"], false);
+        assert!(value["payload"].is_null());
+        assert_eq!(value["error"], "backend unavailable");
+    }
 
     #[tokio::test]
     async fn android_dictation_bridge_uses_core_and_preserves_stop_time_translation() {

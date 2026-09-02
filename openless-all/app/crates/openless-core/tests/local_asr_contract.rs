@@ -2,8 +2,8 @@ use futures_util::future::BoxFuture;
 use openless_core::{
     normalize_foundry_language_hint, normalize_sherpa_language_hint, BackendConfig,
     BackendDependencies, BackendError, BackendErrorCode, BackendEventKind, FoundryRuntimeSource,
-    LocalAsrMirror, LocalAsrRuntime, LocalAsrRuntimeAdapter, LocalAsrRuntimeStatus,
-    LocalAsrSettings, LocalAsrStorageSettings, LocalAsrTarget, OpenLessBackend,
+    LocalAsrMirror, LocalAsrRuntime, LocalAsrRuntimeStatus, LocalAsrSettings, LocalAsrTarget,
+    ModelRuntimeAdapter, OpenLessBackend,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -55,67 +55,20 @@ fn public_local_asr_preferences_keep_legacy_normalization_semantics() {
 
 #[derive(Default)]
 struct RecordingLocalAsrRuntime {
-    default_root: PathBuf,
     invalidated: Mutex<Vec<LocalAsrRuntime>>,
-    relocations: Mutex<Vec<(Option<PathBuf>, Option<PathBuf>)>>,
-    fail_relocation: std::sync::atomic::AtomicBool,
     fail_release: std::sync::atomic::AtomicBool,
     status: Mutex<Option<LocalAsrRuntimeStatus>>,
 }
 
-impl RecordingLocalAsrRuntime {
-    fn storage_snapshot(&self, base_dir: Option<PathBuf>) -> LocalAsrStorageSettings {
-        let root = base_dir
-            .as_ref()
-            .map(|base| base.join("OpenLess").join("models"))
-            .unwrap_or_else(|| self.default_root.clone());
-        LocalAsrStorageSettings {
-            is_default: base_dir.is_none(),
-            models_base_dir: base_dir,
-            models_root_dir: root,
-        }
-    }
-}
-
-impl LocalAsrRuntimeAdapter for RecordingLocalAsrRuntime {
+impl ModelRuntimeAdapter for RecordingLocalAsrRuntime {
     fn engine_available(&self, _: LocalAsrRuntime) -> bool {
         true
-    }
-
-    fn storage_settings(
-        &self,
-        base_dir: Option<PathBuf>,
-    ) -> BoxFuture<'static, Result<LocalAsrStorageSettings, BackendError>> {
-        let snapshot = self.storage_snapshot(base_dir);
-        Box::pin(async move { Ok(snapshot) })
-    }
-
-    fn relocate_storage(
-        &self,
-        current: Option<PathBuf>,
-        next: Option<PathBuf>,
-    ) -> BoxFuture<'static, Result<LocalAsrStorageSettings, BackendError>> {
-        self.relocations
-            .lock()
-            .unwrap()
-            .push((current, next.clone()));
-        let result = if self
-            .fail_relocation
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
-            Err(BackendError::new(
-                BackendErrorCode::Platform,
-                "runtime is still using the old model root",
-            ))
-        } else {
-            Ok(self.storage_snapshot(next))
-        };
-        Box::pin(async move { result })
     }
 
     fn runtime_status(
         &self,
         settings: LocalAsrSettings,
+        _: PathBuf,
     ) -> BoxFuture<'static, Result<LocalAsrRuntimeStatus, BackendError>> {
         let mut status = self
             .status
@@ -149,6 +102,7 @@ impl LocalAsrRuntimeAdapter for RecordingLocalAsrRuntime {
         &self,
         target: LocalAsrTarget,
         _: FoundryRuntimeSource,
+        _: PathBuf,
     ) -> BoxFuture<'static, Result<String, BackendError>> {
         let model_id = target.model_id().to_string();
         *self.status.lock().unwrap() = Some(LocalAsrRuntimeStatus {
@@ -199,10 +153,7 @@ fn local_asr_backend() -> (PathBuf, Arc<RecordingLocalAsrRuntime>, OpenLessBacke
         uuid::Uuid::new_v4()
     ));
     std::fs::create_dir_all(&data_dir).unwrap();
-    let runtime = Arc::new(RecordingLocalAsrRuntime {
-        default_root: data_dir.join("models"),
-        ..RecordingLocalAsrRuntime::default()
-    });
+    let runtime = Arc::new(RecordingLocalAsrRuntime::default());
     let mut dependencies = BackendDependencies::unsupported();
     dependencies.local_asr_runtime = Some(runtime.clone());
     let backend = OpenLessBackend::new(
@@ -278,7 +229,7 @@ async fn backend_local_asr_storage_change_commits_only_after_runtime_quiesces() 
     let requested = data_dir.join("external-model-volume");
     std::fs::create_dir_all(&requested).unwrap();
     runtime
-        .fail_relocation
+        .fail_release
         .store(true, std::sync::atomic::Ordering::SeqCst);
 
     let error = backend
@@ -294,7 +245,7 @@ async fn backend_local_asr_storage_change_commits_only_after_runtime_quiesces() 
         .is_empty());
 
     runtime
-        .fail_relocation
+        .fail_release
         .store(false, std::sync::atomic::Ordering::SeqCst);
     let storage = backend
         .services()

@@ -31,79 +31,28 @@ fn unsupported<T>(operation: &'static str) -> BoxFuture<'static, Result<T, Backe
     })
 }
 
-/// Host seam for native Local ASR engines, downloads and model-file operations.
+/// Host seam for native Local ASR engines.
 ///
 /// Defaults fail explicitly so a platform can implement only capabilities it
 /// genuinely supports without reporting fake success.
-pub trait LocalAsrRuntimeAdapter: Send + Sync {
+pub trait ModelRuntimeAdapter: Send + Sync {
     fn engine_available(&self, _runtime: LocalAsrRuntime) -> bool {
         false
-    }
-
-    fn storage_settings(
-        &self,
-        _base_dir: Option<PathBuf>,
-    ) -> BoxFuture<'static, Result<LocalAsrStorageSettings, BackendError>> {
-        unsupported("storage settings")
-    }
-
-    fn relocate_storage(
-        &self,
-        _current: Option<PathBuf>,
-        _next: Option<PathBuf>,
-    ) -> BoxFuture<'static, Result<LocalAsrStorageSettings, BackendError>> {
-        unsupported("storage relocation")
-    }
-
-    fn list_models(
-        &self,
-        _runtime: LocalAsrRuntime,
-    ) -> BoxFuture<'static, Result<Vec<LocalAsrModel>, BackendError>> {
-        unsupported("model catalog")
     }
 
     fn runtime_status(
         &self,
         _settings: LocalAsrSettings,
+        _model_dir: PathBuf,
     ) -> BoxFuture<'static, Result<LocalAsrRuntimeStatus, BackendError>> {
         unsupported("runtime status")
-    }
-
-    fn remote_info(
-        &self,
-        _target: LocalAsrTarget,
-        _mirror: LocalAsrMirror,
-    ) -> BoxFuture<'static, Result<LocalAsrRemoteInfo, BackendError>> {
-        unsupported("remote model info")
-    }
-
-    fn model_card(
-        &self,
-        _target: LocalAsrTarget,
-        _mirror: LocalAsrMirror,
-    ) -> BoxFuture<'static, Result<LocalAsrModelCard, BackendError>> {
-        unsupported("model card")
-    }
-
-    fn start_download(
-        &self,
-        _target: LocalAsrTarget,
-        _mirror: LocalAsrMirror,
-    ) -> BoxFuture<'static, Result<(), BackendError>> {
-        unsupported("model download")
-    }
-
-    fn cancel_download(
-        &self,
-        _target: LocalAsrTarget,
-    ) -> BoxFuture<'static, Result<(), BackendError>> {
-        unsupported("download cancellation")
     }
 
     fn prepare(
         &self,
         _target: LocalAsrTarget,
         _runtime_source: FoundryRuntimeSource,
+        _model_dir: PathBuf,
     ) -> BoxFuture<'static, Result<String, BackendError>> {
         unsupported("runtime preparation")
     }
@@ -119,27 +68,18 @@ pub trait LocalAsrRuntimeAdapter: Send + Sync {
         unsupported("runtime release")
     }
 
-    fn preload(&self, _runtime: LocalAsrRuntime) -> BoxFuture<'static, Result<(), BackendError>> {
-        unsupported("runtime preload")
-    }
-
-    fn delete_model(
+    fn preload(
         &self,
         _target: LocalAsrTarget,
+        _model_dir: PathBuf,
     ) -> BoxFuture<'static, Result<(), BackendError>> {
-        unsupported("model deletion")
-    }
-
-    fn model_dir(
-        &self,
-        _target: LocalAsrTarget,
-    ) -> BoxFuture<'static, Result<PathBuf, BackendError>> {
-        unsupported("model directory lookup")
+        unsupported("runtime preload")
     }
 
     fn test_model(
         &self,
         _target: LocalAsrTarget,
+        _model_dir: PathBuf,
     ) -> BoxFuture<'static, Result<LocalAsrTestResult, BackendError>> {
         unsupported("model test")
     }
@@ -147,13 +87,10 @@ pub trait LocalAsrRuntimeAdapter: Send + Sync {
     fn invalidate_route(&self, _runtime: LocalAsrRuntime) {}
 }
 
-/// Stable 2.0 name for the native model runtime seam. Kept as an alias so
-/// existing platform adapters can migrate without a second implementation.
-pub use LocalAsrRuntimeAdapter as ModelRuntimeAdapter;
-
 pub(crate) struct LocalAsrService {
     preferences: Arc<PreferencesStore>,
-    runtime: Arc<dyn LocalAsrRuntimeAdapter>,
+    runtime: Arc<dyn ModelRuntimeAdapter>,
+    model_store: Arc<crate::model_store::ModelStore>,
     events: BackendEventPublisher,
     preferences_revision: Arc<AtomicU64>,
 }
@@ -161,13 +98,15 @@ pub(crate) struct LocalAsrService {
 impl LocalAsrService {
     pub(crate) fn new(
         preferences: Arc<PreferencesStore>,
-        runtime: Arc<dyn LocalAsrRuntimeAdapter>,
+        runtime: Arc<dyn ModelRuntimeAdapter>,
+        model_store: Arc<crate::model_store::ModelStore>,
         events: BackendEventPublisher,
         preferences_revision: Arc<AtomicU64>,
     ) -> Self {
         Self {
             preferences,
             runtime,
+            model_store,
             events,
             preferences_revision,
         }
@@ -215,48 +154,54 @@ impl LocalAsrService {
 
     async fn runtime_status_snapshot(
         preferences: Arc<PreferencesStore>,
-        adapter: Arc<dyn LocalAsrRuntimeAdapter>,
+        adapter: Arc<dyn ModelRuntimeAdapter>,
+        model_store: Arc<crate::model_store::ModelStore>,
         runtime: LocalAsrRuntime,
     ) -> Result<LocalAsrRuntimeStatus, BackendError> {
         let preferences = preferences.get();
-        let storage = adapter
-            .storage_settings(Self::normalized_base_dir(Some(PathBuf::from(
-                preferences.local_asr_models_base_dir.clone(),
-            )))?)
-            .await?;
+        let active_model = Self::active_model(&preferences, runtime);
+        let model_dir = model_store.model_dir(&active_model)?;
         adapter
-            .runtime_status(LocalAsrSettings {
-                runtime,
-                provider_id: runtime.provider_id().to_string(),
-                active_model: Self::active_model(&preferences, runtime),
-                mirror: LocalAsrMirror::from_legacy(&preferences.local_asr_mirror),
-                models_base_dir: storage.models_base_dir,
-                models_root_dir: storage.models_root_dir,
-                engine_available: adapter.engine_available(runtime),
-                language_hint: match runtime {
-                    LocalAsrRuntime::Generic => None,
-                    LocalAsrRuntime::Foundry => {
-                        Some(preferences.foundry_local_asr_language_hint.clone())
-                    }
-                    LocalAsrRuntime::SherpaOnnx => {
-                        Some(preferences.sherpa_onnx_language_hint.clone())
-                    }
+            .runtime_status(
+                LocalAsrSettings {
+                    runtime,
+                    provider_id: runtime.provider_id().to_string(),
+                    active_model,
+                    mirror: LocalAsrMirror::from_legacy(&preferences.local_asr_mirror),
+                    models_base_dir: Self::normalized_base_dir(Some(PathBuf::from(
+                        preferences.local_asr_models_base_dir.clone(),
+                    )))?,
+                    models_root_dir: model_store.models_root_dir(),
+                    engine_available: adapter.engine_available(runtime),
+                    language_hint: match runtime {
+                        LocalAsrRuntime::Generic => None,
+                        LocalAsrRuntime::Foundry => {
+                            Some(preferences.foundry_local_asr_language_hint.clone())
+                        }
+                        LocalAsrRuntime::SherpaOnnx => {
+                            Some(preferences.sherpa_onnx_language_hint.clone())
+                        }
+                    },
+                    runtime_source: (runtime == LocalAsrRuntime::Foundry).then(|| {
+                        FoundryRuntimeSource::from_legacy(&preferences.foundry_local_runtime_source)
+                    }),
+                    keep_loaded_secs: Self::keep_loaded_secs(&preferences, runtime),
                 },
-                runtime_source: (runtime == LocalAsrRuntime::Foundry).then(|| {
-                    FoundryRuntimeSource::from_legacy(&preferences.foundry_local_runtime_source)
-                }),
-                keep_loaded_secs: Self::keep_loaded_secs(&preferences, runtime),
-            })
+                model_dir,
+            )
             .await
     }
 
     async fn publish_runtime_status(
         preferences: Arc<PreferencesStore>,
-        adapter: Arc<dyn LocalAsrRuntimeAdapter>,
+        adapter: Arc<dyn ModelRuntimeAdapter>,
+        model_store: Arc<crate::model_store::ModelStore>,
         events: BackendEventPublisher,
         runtime: LocalAsrRuntime,
     ) {
-        if let Ok(status) = Self::runtime_status_snapshot(preferences, adapter, runtime).await {
+        if let Ok(status) =
+            Self::runtime_status_snapshot(preferences, adapter, model_store, runtime).await
+        {
             events.publish(None, BackendEventKind::LocalAsrEngineChanged(status));
         }
     }
@@ -271,6 +216,17 @@ impl LocalAsrService {
             path => Ok(path),
         }
     }
+
+    fn storage_settings(&self) -> Result<LocalAsrStorageSettings, BackendError> {
+        let base_dir = Self::normalized_base_dir(Some(PathBuf::from(
+            self.preferences.get().local_asr_models_base_dir,
+        )))?;
+        Ok(LocalAsrStorageSettings {
+            is_default: base_dir.is_none(),
+            models_base_dir: base_dir,
+            models_root_dir: self.model_store.models_root_dir(),
+        })
+    }
 }
 
 impl LocalAsrApi for LocalAsrService {
@@ -279,21 +235,20 @@ impl LocalAsrApi for LocalAsrService {
         runtime: LocalAsrRuntime,
     ) -> BoxFuture<'static, Result<LocalAsrSettings, BackendError>> {
         let preferences = self.preferences.get();
-        let adapter = Arc::clone(&self.runtime);
+        let root = self.model_store.models_root_dir();
+        let engine_available = self.runtime.engine_available(runtime);
         Box::pin(async move {
-            let storage = adapter
-                .storage_settings(Self::normalized_base_dir(Some(PathBuf::from(
-                    preferences.local_asr_models_base_dir.clone(),
-                )))?)
-                .await?;
+            let models_base_dir = Self::normalized_base_dir(Some(PathBuf::from(
+                preferences.local_asr_models_base_dir.clone(),
+            )))?;
             Ok(LocalAsrSettings {
                 runtime,
                 provider_id: runtime.provider_id().to_string(),
                 active_model: Self::active_model(&preferences, runtime),
                 mirror: LocalAsrMirror::from_legacy(&preferences.local_asr_mirror),
-                models_base_dir: storage.models_base_dir,
-                models_root_dir: storage.models_root_dir,
-                engine_available: adapter.engine_available(runtime),
+                models_base_dir,
+                models_root_dir: root,
+                engine_available,
                 language_hint: match runtime {
                     LocalAsrRuntime::Generic => None,
                     LocalAsrRuntime::Foundry => {
@@ -314,18 +269,16 @@ impl LocalAsrApi for LocalAsrService {
     fn storage_settings(
         &self,
     ) -> BoxFuture<'static, Result<LocalAsrStorageSettings, BackendError>> {
-        let adapter = Arc::clone(&self.runtime);
-        let current = Self::normalized_base_dir(Some(PathBuf::from(
-            self.preferences.get().local_asr_models_base_dir,
-        )));
-        Box::pin(async move { adapter.storage_settings(current?).await })
+        let result = self.storage_settings();
+        Box::pin(async move { result })
     }
 
     fn list_models(
         &self,
         runtime: LocalAsrRuntime,
     ) -> BoxFuture<'static, Result<Vec<LocalAsrModel>, BackendError>> {
-        self.runtime.list_models(runtime)
+        let result = self.model_store.list_models(runtime);
+        Box::pin(async move { result })
     }
 
     fn runtime_status(
@@ -334,7 +287,13 @@ impl LocalAsrApi for LocalAsrService {
     ) -> BoxFuture<'static, Result<LocalAsrRuntimeStatus, BackendError>> {
         let preferences = Arc::clone(&self.preferences);
         let adapter = Arc::clone(&self.runtime);
-        Box::pin(Self::runtime_status_snapshot(preferences, adapter, runtime))
+        let model_store = Arc::clone(&self.model_store);
+        Box::pin(Self::runtime_status_snapshot(
+            preferences,
+            adapter,
+            model_store,
+            runtime,
+        ))
     }
 
     fn remote_info(
@@ -345,7 +304,8 @@ impl LocalAsrApi for LocalAsrService {
         let mirror = mirror.unwrap_or_else(|| {
             LocalAsrMirror::from_legacy(&self.preferences.get().local_asr_mirror)
         });
-        self.runtime.remote_info(target, mirror)
+        let store = Arc::clone(&self.model_store);
+        Box::pin(async move { store.remote_info(target, mirror).await })
     }
 
     fn model_card(
@@ -356,7 +316,8 @@ impl LocalAsrApi for LocalAsrService {
         let mirror = mirror.unwrap_or_else(|| {
             LocalAsrMirror::from_legacy(&self.preferences.get().local_asr_mirror)
         });
-        self.runtime.model_card(target, mirror)
+        let store = Arc::clone(&self.model_store);
+        Box::pin(async move { store.model_card(target, mirror).await })
     }
 
     fn set_models_base_dir(
@@ -374,15 +335,31 @@ impl LocalAsrApi for LocalAsrService {
             Ok(path) => path,
             Err(error) => return Box::pin(async move { Err(error) }),
         };
-        let adapter = Arc::clone(&self.runtime);
+        let model_store = Arc::clone(&self.model_store);
         let preferences = Arc::clone(&self.preferences);
         let events = self.events.clone();
         let revision = Arc::clone(&self.preferences_revision);
+        let adapter = Arc::clone(&self.runtime);
         Box::pin(async move {
             if current == next {
-                return adapter.storage_settings(next).await;
+                return Ok(LocalAsrStorageSettings {
+                    is_default: next.is_none(),
+                    models_base_dir: next,
+                    models_root_dir: model_store.models_root_dir(),
+                });
             }
-            let storage = adapter.relocate_storage(current, next.clone()).await?;
+            let next_root = next
+                .as_ref()
+                .map(|path| path.join("OpenLess").join("models"))
+                .unwrap_or_else(|| model_store.config().models_root_dir.clone());
+            for runtime in [
+                LocalAsrRuntime::Generic,
+                LocalAsrRuntime::Foundry,
+                LocalAsrRuntime::SherpaOnnx,
+            ] {
+                adapter.release(runtime).await?;
+            }
+            model_store.relocate_root(next_root)?;
             let mut updated = current_preferences;
             updated.local_asr_models_base_dir = next
                 .as_ref()
@@ -394,7 +371,11 @@ impl LocalAsrApi for LocalAsrService {
                 None,
                 BackendEventKind::PreferencesChanged(PreferencesChange { revision }),
             );
-            Ok(storage)
+            Ok(LocalAsrStorageSettings {
+                is_default: next.is_none(),
+                models_base_dir: next,
+                models_root_dir: model_store.models_root_dir(),
+            })
         })
     }
 
@@ -427,10 +408,11 @@ impl LocalAsrApi for LocalAsrService {
         }
         let preferences = Arc::clone(&self.preferences);
         let adapter = Arc::clone(&self.runtime);
+        let model_store = Arc::clone(&self.model_store);
         let events = self.events.clone();
         Box::pin(async move {
             result?;
-            Self::publish_runtime_status(preferences, adapter, events, runtime).await;
+            Self::publish_runtime_status(preferences, adapter, model_store, events, runtime).await;
             Ok(())
         })
     }
@@ -481,11 +463,18 @@ impl LocalAsrApi for LocalAsrService {
         }
         let preferences = Arc::clone(&self.preferences);
         let adapter = Arc::clone(&self.runtime);
+        let model_store = Arc::clone(&self.model_store);
         let events = self.events.clone();
         Box::pin(async move {
             result?;
-            Self::publish_runtime_status(preferences, adapter, events, LocalAsrRuntime::Foundry)
-                .await;
+            Self::publish_runtime_status(
+                preferences,
+                adapter,
+                model_store,
+                events,
+                LocalAsrRuntime::Foundry,
+            )
+            .await;
             Ok(())
         })
     }
@@ -504,10 +493,11 @@ impl LocalAsrApi for LocalAsrService {
         let result = self.publish_preferences(preferences);
         let preferences = Arc::clone(&self.preferences);
         let adapter = Arc::clone(&self.runtime);
+        let model_store = Arc::clone(&self.model_store);
         let events = self.events.clone();
         Box::pin(async move {
             result?;
-            Self::publish_runtime_status(preferences, adapter, events, runtime).await;
+            Self::publish_runtime_status(preferences, adapter, model_store, events, runtime).await;
             Ok(())
         })
     }
@@ -520,14 +510,19 @@ impl LocalAsrApi for LocalAsrService {
         let mirror = mirror.unwrap_or_else(|| {
             LocalAsrMirror::from_legacy(&self.preferences.get().local_asr_mirror)
         });
-        self.runtime.start_download(target, mirror)
+        let store = Arc::clone(&self.model_store);
+        Box::pin(async move { store.download_target(target, mirror).await.map(|_| ()) })
     }
 
     fn cancel_download(
         &self,
         target: LocalAsrTarget,
     ) -> BoxFuture<'static, Result<(), BackendError>> {
-        self.runtime.cancel_download(target)
+        let result = self
+            .model_store
+            .cancel_download(target.model_id())
+            .map(|_| ());
+        Box::pin(async move { result })
     }
 
     fn prepare(&self, target: LocalAsrTarget) -> BoxFuture<'static, Result<String, BackendError>> {
@@ -535,12 +530,17 @@ impl LocalAsrApi for LocalAsrService {
             FoundryRuntimeSource::from_legacy(&self.preferences.get().foundry_local_runtime_source);
         let runtime = target.runtime;
         let adapter = Arc::clone(&self.runtime);
-        let operation = adapter.prepare(target, source);
+        let model_dir = match self.model_store.model_dir(target.model_id()) {
+            Ok(path) => path,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        let operation = adapter.prepare(target, source, model_dir);
         let preferences = Arc::clone(&self.preferences);
+        let model_store = Arc::clone(&self.model_store);
         let events = self.events.clone();
         Box::pin(async move {
             let result = operation.await?;
-            Self::publish_runtime_status(preferences, adapter, events, runtime).await;
+            Self::publish_runtime_status(preferences, adapter, model_store, events, runtime).await;
             Ok(result)
         })
     }
@@ -557,26 +557,41 @@ impl LocalAsrApi for LocalAsrService {
         let operation = adapter.release(runtime);
         let preferences = Arc::clone(&self.preferences);
         let events = self.events.clone();
+        let model_store = Arc::clone(&self.model_store);
         Box::pin(async move {
             operation.await?;
-            Self::publish_runtime_status(preferences, adapter, events, runtime).await;
+            Self::publish_runtime_status(preferences, adapter, model_store, events, runtime).await;
             Ok(())
         })
     }
 
     fn preload(&self, runtime: LocalAsrRuntime) -> BoxFuture<'static, Result<(), BackendError>> {
-        self.runtime.preload(runtime)
+        let preferences = self.preferences.get();
+        let target = match LocalAsrTarget::parse(runtime, Self::active_model(&preferences, runtime))
+        {
+            Ok(target) => target,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        let model_dir = match self.model_store.model_dir(target.model_id()) {
+            Ok(path) => path,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        self.runtime.preload(target, model_dir)
     }
 
     fn delete_model(&self, target: LocalAsrTarget) -> BoxFuture<'static, Result<(), BackendError>> {
         let runtime = target.runtime;
         let adapter = Arc::clone(&self.runtime);
-        let operation = adapter.delete_model(target);
+        let store = Arc::clone(&self.model_store);
+        let model_id = target.model_id().to_string();
+        let operation = adapter.release(runtime);
         let preferences = Arc::clone(&self.preferences);
         let events = self.events.clone();
+        let model_store = Arc::clone(&self.model_store);
         Box::pin(async move {
             operation.await?;
-            Self::publish_runtime_status(preferences, adapter, events, runtime).await;
+            store.delete_model(&model_id)?;
+            Self::publish_runtime_status(preferences, adapter, model_store, events, runtime).await;
             Ok(())
         })
     }
@@ -585,13 +600,18 @@ impl LocalAsrApi for LocalAsrService {
         &self,
         target: LocalAsrTarget,
     ) -> BoxFuture<'static, Result<PathBuf, BackendError>> {
-        self.runtime.model_dir(target)
+        let result = self.model_store.model_dir(target.model_id());
+        Box::pin(async move { result })
     }
 
     fn test_model(
         &self,
         target: LocalAsrTarget,
     ) -> BoxFuture<'static, Result<LocalAsrTestResult, BackendError>> {
-        self.runtime.test_model(target)
+        let model_dir = match self.model_store.model_dir(target.model_id()) {
+            Ok(path) => path,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        self.runtime.test_model(target, model_dir)
     }
 }

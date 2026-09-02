@@ -48,11 +48,6 @@ impl RecordingSelectionRuntime {
         }
     }
 
-    fn with_apply_outcome(mut self, outcome: InsertOutcome) -> Self {
-        self.apply_outcome = outcome;
-        self
-    }
-
     fn with_apply_error(mut self, error: BackendError) -> Self {
         self.apply_error = Some(error);
         self
@@ -614,71 +609,6 @@ async fn selection_state_events_follow_the_public_session_lifecycle() {
             SelectionPhase::Completed,
         ]
     );
-
-    backend.shutdown().await.expect("backend should stop");
-    let _ = std::fs::remove_dir_all(data_dir);
-}
-
-#[tokio::test]
-async fn an_unknown_apply_outcome_is_visible_and_never_retried() {
-    let runtime = RecordingSelectionRuntime::new("uncertain source")
-        .with_apply_outcome(InsertOutcome::Unknown);
-    let (backend, data_dir) = backend_with_selection(runtime.clone());
-    backend.start().await.expect("backend should start");
-
-    let session_id = backend
-        .services()
-        .selection
-        .begin_polish(SelectionPolishRequest {
-            selected_text: None,
-            mode: PolishMode::Light,
-            instruction: None,
-        })
-        .await
-        .expect("unknown platform outcome is not a definite failure");
-    let snapshot = backend
-        .services()
-        .selection
-        .snapshot()
-        .await
-        .expect("selection snapshot should be readable");
-
-    assert_eq!(snapshot.phase, SelectionPhase::Completed);
-    assert_eq!(snapshot.insert_outcome, Some(InsertOutcome::Unknown));
-    assert_eq!(runtime.applied().len(), 1);
-    assert_eq!(snapshot.session_id, Some(session_id));
-
-    backend.shutdown().await.expect("backend should stop");
-    let _ = std::fs::remove_dir_all(data_dir);
-}
-
-#[tokio::test]
-async fn an_unknown_apply_outcome_is_never_reverted() {
-    let runtime = RecordingSelectionRuntime::new("uncertain source")
-        .with_apply_outcome(InsertOutcome::Unknown)
-        .with_revert_outcome(InsertOutcome::Inserted);
-    let (backend, data_dir) = backend_with_selection(runtime.clone());
-    backend.start().await.expect("backend should start");
-    let session_id = backend
-        .services()
-        .selection
-        .begin_polish(SelectionPolishRequest {
-            selected_text: None,
-            mode: PolishMode::Light,
-            instruction: None,
-        })
-        .await
-        .expect("unknown platform outcome is not a definite failure");
-
-    let error = backend
-        .services()
-        .selection
-        .revert(session_id)
-        .await
-        .expect_err("an uncertain insertion must never trigger a blind undo");
-
-    assert_eq!(error.code, BackendErrorCode::InvalidState);
-    assert!(runtime.reverted().is_empty());
 
     backend.shutdown().await.expect("backend should stop");
     let _ = std::fs::remove_dir_all(data_dir);

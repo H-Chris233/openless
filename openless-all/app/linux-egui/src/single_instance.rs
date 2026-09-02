@@ -317,7 +317,7 @@ fn forward_to_primary(socket_path: &Path, intent: LinuxLaunchIntent) -> Result<(
                     .set_read_timeout(Some(Duration::from_secs(2)))
                     .map_err(single_instance_io_error)?;
                 stream
-                    .write_all(encode_launch_intent(intent))
+                    .write_all(&encode_launch_intent(intent))
                     .map_err(single_instance_io_error)?;
                 stream
                     .shutdown(std::net::Shutdown::Write)

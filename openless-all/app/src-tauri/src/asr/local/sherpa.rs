@@ -34,118 +34,22 @@ pub enum SherpaMode {
     Online,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
-pub struct SherpaModel {
-    pub alias: &'static str,
-    pub display_name: &'static str,
-    pub family: SherpaFamily,
-    pub mode: SherpaMode,
-    /// 表征长度，使用 ISO 639-1 / BCP-47 风格小写串。
-    pub languages: &'static [&'static str],
-    pub quality_tier: &'static str,
-}
-
-/// Catalog：默认 SenseVoice，中文专用 Paraformer，多语 Whisper 兜底，
-/// Qwen3-ASR 实验档，以及 Zipformer online streaming 实验档。
-#[allow(dead_code)]
-pub const MODELS: &[SherpaModel] = &[
-    SherpaModel {
-        alias: "sense-voice-small-zh",
-        display_name: "SenseVoice Small (zh/en/ja/ko/yue)",
-        family: SherpaFamily::SenseVoice,
-        mode: SherpaMode::Offline,
-        languages: &["zh", "en", "ja", "ko", "yue"],
-        quality_tier: "balanced",
-    },
-    SherpaModel {
-        alias: "paraformer-zh",
-        display_name: "Paraformer (zh)",
-        family: SherpaFamily::Paraformer,
-        mode: SherpaMode::Offline,
-        languages: &["zh"],
-        quality_tier: "chinese-strong",
-    },
-    SherpaModel {
-        alias: "whisper-small-multi",
-        display_name: "Whisper Small (multilingual)",
-        family: SherpaFamily::Whisper,
-        mode: SherpaMode::Offline,
-        languages: &["multi"],
-        quality_tier: "english-fallback",
-    },
-    // 开源多语通用里效果最好的 Whisper 档：large-v3 int8（HF csukuangfj/
-    // sherpa-onnx-whisper-large-v3，large-v3-* 前缀文件，加载时重命名为
-    // encoder/decoder/tokens —— 与 whisper-small-multi 同一 Whisper 模式）。
-    SherpaModel {
-        alias: "whisper-large-v3-multi",
-        display_name: "Whisper Large V3 (multilingual)",
-        family: SherpaFamily::Whisper,
-        mode: SherpaMode::Offline,
-        languages: &["multi"],
-        quality_tier: "multilingual-strong",
-    },
-    SherpaModel {
-        alias: "qwen3-asr-0.6b-int8",
-        display_name: "Qwen3-ASR 0.6B INT8",
-        family: SherpaFamily::Qwen3Asr,
-        mode: SherpaMode::Offline,
-        languages: &["multi"],
-        quality_tier: "qwen3-balanced",
-    },
-    SherpaModel {
-        alias: DEFAULT_ONLINE_MODEL_ALIAS,
-        display_name: "Zipformer Streaming bilingual (zh/en)",
-        family: SherpaFamily::Zipformer,
-        mode: SherpaMode::Online,
-        languages: &["zh", "en"],
-        quality_tier: "streaming-experimental",
-    },
-];
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SherpaReleaseArchive {
-    pub url: &'static str,
-    pub file_name: &'static str,
-    pub root_dir: &'static str,
-}
-
-#[allow(dead_code)]
-pub fn is_sherpa_onnx_local(id: &str) -> bool {
-    id == PROVIDER_ID
-}
-
-#[allow(dead_code)]
 pub fn model_alias_is_known(alias: &str) -> bool {
-    MODELS.iter().any(|model| model.alias == alias)
+    openless_core::LocalAsrTarget::parse(openless_core::LocalAsrRuntime::SherpaOnnx, alias).is_ok()
 }
 
 pub fn mode_for_alias(alias: &str) -> Result<SherpaMode> {
-    MODELS
-        .iter()
-        .find(|model| model.alias == alias)
-        .map(|model| model.mode)
-        .ok_or_else(|| anyhow::anyhow!("unknown sherpa-onnx model alias: {alias}"))
+    if alias == DEFAULT_ONLINE_MODEL_ALIAS {
+        Ok(SherpaMode::Online)
+    } else if model_alias_is_known(alias) {
+        Ok(SherpaMode::Offline)
+    } else {
+        anyhow::bail!("unknown sherpa-onnx model alias: {alias}")
+    }
 }
 
 pub fn alias_is_online(alias: &str) -> bool {
     matches!(mode_for_alias(alias), Ok(SherpaMode::Online))
-}
-
-pub fn hf_repo_for_alias(alias: &str) -> Result<&'static str> {
-    match alias {
-        "sense-voice-small-zh" => {
-            Ok("csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17")
-        }
-        "paraformer-zh" => Ok("csukuangfj/sherpa-onnx-paraformer-zh-2024-03-09"),
-        "whisper-small-multi" => Ok("csukuangfj/sherpa-onnx-whisper-small"),
-        "whisper-large-v3-multi" => Ok("csukuangfj/sherpa-onnx-whisper-large-v3"),
-        DEFAULT_ONLINE_MODEL_ALIAS => {
-            Ok("csukuangfj/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20")
-        }
-        _ => anyhow::bail!("unknown sherpa-onnx model alias: {alias}"),
-    }
 }
 
 pub fn required_files_for_alias(alias: &str) -> Result<&'static [&'static str]> {
@@ -192,53 +96,6 @@ fn required_dir_is_valid(alias: &str, required: &str, path: &Path) -> bool {
     }
 }
 
-pub fn download_files_for_alias(alias: &str) -> Result<&'static [(&'static str, &'static str)]> {
-    match alias {
-        "sense-voice-small-zh" => Ok(&[
-            ("model.int8.onnx", "model.int8.onnx"),
-            ("tokens.txt", "tokens.txt"),
-        ]),
-        "paraformer-zh" => Ok(&[
-            ("model.int8.onnx", "model.int8.onnx"),
-            ("tokens.txt", "tokens.txt"),
-        ]),
-        "whisper-small-multi" => Ok(&[
-            ("small-encoder.int8.onnx", "encoder.int8.onnx"),
-            ("small-decoder.int8.onnx", "decoder.int8.onnx"),
-            ("small-tokens.txt", "tokens.txt"),
-        ]),
-        "whisper-large-v3-multi" => Ok(&[
-            ("large-v3-encoder.int8.onnx", "encoder.int8.onnx"),
-            ("large-v3-decoder.int8.onnx", "decoder.int8.onnx"),
-            ("large-v3-tokens.txt", "tokens.txt"),
-        ]),
-        DEFAULT_ONLINE_MODEL_ALIAS => Ok(&[
-            (
-                "encoder-epoch-99-avg-1.int8.onnx",
-                "encoder-epoch-99-avg-1.int8.onnx",
-            ),
-            ("decoder-epoch-99-avg-1.onnx", "decoder-epoch-99-avg-1.onnx"),
-            (
-                "joiner-epoch-99-avg-1.int8.onnx",
-                "joiner-epoch-99-avg-1.int8.onnx",
-            ),
-            ("tokens.txt", "tokens.txt"),
-        ]),
-        _ => anyhow::bail!("unknown sherpa-onnx model alias: {alias}"),
-    }
-}
-
-pub fn release_archive_for_alias(alias: &str) -> Option<SherpaReleaseArchive> {
-    match alias {
-        "qwen3-asr-0.6b-int8" => Some(SherpaReleaseArchive {
-            url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25.tar.bz2",
-            file_name: "sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25.tar.bz2",
-            root_dir: "sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25",
-        }),
-        _ => None,
-    }
-}
-
 pub fn model_dir_for_alias(alias: &str) -> Result<PathBuf> {
     if !model_alias_is_known(alias) {
         anyhow::bail!("unknown sherpa-onnx model alias: {alias}");
@@ -253,41 +110,6 @@ pub fn model_dir_for_alias(alias: &str) -> Result<PathBuf> {
             .join("openless-sherpa-onnx")
             .join(alias))
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
-pub struct SherpaCatalogModel {
-    pub alias: String,
-    pub display_name: String,
-    pub family: SherpaFamily,
-    pub mode: SherpaMode,
-    pub languages: Vec<String>,
-    pub cached: bool,
-    pub downloaded_bytes: u64,
-    pub file_size_mb: Option<u64>,
-}
-
-impl SherpaCatalogModel {
-    #[allow(dead_code)]
-    pub fn from_static(model: &SherpaModel) -> Self {
-        Self {
-            alias: model.alias.to_string(),
-            display_name: model.display_name.to_string(),
-            family: model.family,
-            mode: model.mode,
-            languages: model.languages.iter().map(|s| s.to_string()).collect(),
-            cached: false,
-            downloaded_bytes: 0,
-            file_size_mb: None,
-        }
-    }
-}
-
-#[allow(dead_code)]
-pub fn static_catalog_models() -> Vec<SherpaCatalogModel> {
-    MODELS.iter().map(SherpaCatalogModel::from_static).collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -394,46 +216,12 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn provider_id_is_stable() {
-        assert!(is_sherpa_onnx_local("sherpa-onnx-local"));
-        assert!(!is_sherpa_onnx_local("foundry-local-whisper"));
-        assert!(!is_sherpa_onnx_local("local-qwen3"));
-    }
-
-    #[test]
-    fn default_model_is_registered() {
-        assert!(model_alias_is_known(DEFAULT_MODEL_ALIAS));
-    }
-
-    #[test]
-    fn static_catalog_preserves_ui_order() {
-        let catalog = static_catalog_models();
-        assert_eq!(
-            catalog.iter().map(|m| m.alias.as_str()).collect::<Vec<_>>(),
-            vec![
-                "sense-voice-small-zh",
-                "paraformer-zh",
-                "whisper-small-multi",
-                "whisper-large-v3-multi",
-                "qwen3-asr-0.6b-int8",
-                "zipformer-bilingual-zh-en-streaming",
-            ]
-        );
-        assert!(catalog.iter().all(|m| !m.cached));
-        assert_eq!(catalog.last().unwrap().mode, SherpaMode::Online);
-    }
-
-    #[test]
     fn online_zipformer_has_download_and_required_files() {
         assert_eq!(
             mode_for_alias(DEFAULT_ONLINE_MODEL_ALIAS).unwrap(),
             SherpaMode::Online
         );
         assert!(alias_is_online(DEFAULT_ONLINE_MODEL_ALIAS));
-        assert_eq!(
-            hf_repo_for_alias(DEFAULT_ONLINE_MODEL_ALIAS).unwrap(),
-            "csukuangfj/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20"
-        );
         assert_eq!(
             required_files_for_alias(DEFAULT_ONLINE_MODEL_ALIAS).unwrap(),
             &[

@@ -64,7 +64,6 @@ regex = "1"
 bytes = "1"
 url = "2"
 raw-window-handle = "0.6"
-ferrous-opencc = "0.4"
 # Audio capture — shared across desktop and mobile.
 cpal = "0.15"
 

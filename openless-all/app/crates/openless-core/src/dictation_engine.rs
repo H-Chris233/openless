@@ -13,10 +13,10 @@ use futures_util::future::BoxFuture;
 use crate::dictation_context::DictationContext;
 use crate::errors::{BackendError, BackendErrorCode};
 use crate::ports::{
-    ActiveRecording, AudioConsumer, AudioRecorder, DictationEngine, EngineFailure,
-    EngineFailureStage, EngineProgress, EngineProgressSink, EngineResult, EngineStage,
-    RecordingProgressSink, TextPolisher, TextStreamChunk, TextStreamSink, TranscriptionEngine,
-    TranscriptionSession,
+    ActiveRecording, AudioCapture, AudioConsumer, AudioRecorder, CapturedPcm, DictationEngine,
+    EngineFailure, EngineFailureStage, EngineProgress, EngineProgressSink, EngineResult,
+    EngineStage, RecordingProgressSink, TextPolisher, TextStreamChunk, TextStreamSink,
+    TranscriptionEngine, TranscriptionSession, VoiceCapture,
 };
 use crate::types::{PolishDelta, SessionId, TranscriptDelta};
 
@@ -218,6 +218,55 @@ impl DictationEngine for PipelineDictationEngine {
         partials: Arc<dyn TextStreamSink>,
     ) -> BoxFuture<'static, Result<Arc<dyn TranscriptionSession>, BackendError>> {
         self.transcription.start(session_id, context, partials)
+    }
+
+    fn start_voice_capture(
+        &self,
+        session_id: SessionId,
+        context: Arc<DictationContext>,
+        partials: Arc<dyn TextStreamSink>,
+        progress: Arc<dyn RecordingProgressSink>,
+    ) -> BoxFuture<'static, Result<VoiceCapture, BackendError>> {
+        let recorder = Arc::clone(&self.recorder);
+        let transcription_engine = Arc::clone(&self.transcription);
+        Box::pin(async move {
+            let transcription = transcription_engine
+                .start(session_id, Arc::clone(&context), partials)
+                .await?;
+            let consumer: Arc<dyn AudioConsumer> = Arc::new(SessionAudioConsumer {
+                session: Arc::clone(&transcription),
+            });
+            match recorder
+                .start(session_id, context, consumer, progress)
+                .await
+            {
+                Ok(recording) => Ok(VoiceCapture {
+                    recording,
+                    transcription,
+                }),
+                Err(error) => {
+                    let _ = transcription.cancel().await;
+                    Err(error)
+                }
+            }
+        })
+    }
+
+    fn start_audio_capture(
+        &self,
+        session_id: SessionId,
+        context: Arc<DictationContext>,
+        progress: Arc<dyn RecordingProgressSink>,
+    ) -> BoxFuture<'static, Result<AudioCapture, BackendError>> {
+        let recorder = Arc::clone(&self.recorder);
+        Box::pin(async move {
+            let pcm = Arc::new(CapturedPcm::default());
+            let consumer: Arc<dyn AudioConsumer> = pcm.clone();
+            let recording = recorder
+                .start(session_id, context, consumer, progress)
+                .await?;
+            Ok(AudioCapture { recording, pcm })
+        })
     }
 
     fn finish(

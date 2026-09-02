@@ -62,7 +62,7 @@ pub struct BackendDependencies {
     pub task_spawner: Arc<dyn TaskSpawner>,
     pub credential_store: Arc<dyn CredentialStore>,
     pub services: BackendServices,
-    pub local_asr_runtime: Option<Arc<dyn crate::local_asr_service::LocalAsrRuntimeAdapter>>,
+    pub local_asr_runtime: Option<Arc<dyn crate::local_asr_service::ModelRuntimeAdapter>>,
     pub marketplace_config: Option<crate::marketplace::MarketplaceConfig>,
     pub selection_runtime: Option<Arc<dyn crate::domains::SelectionRuntimeAdapter>>,
     pub selection_polisher: Option<Arc<dyn TextPolisher>>,

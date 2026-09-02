@@ -80,7 +80,11 @@ pub struct LocalAsrDownloadProgress {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum CodingAgentStreamEvent {
     Started {
         session_id: String,
@@ -112,7 +116,11 @@ pub enum CodingAgentStreamEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum LessComputerEventKind {
     User {
         text: String,
@@ -169,6 +177,7 @@ pub enum QaStateKind {
 /// Optional fields preserve the existing per-kind wire shape while ensuring
 /// producers cannot publish arbitrary JSON through the shared event stream.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct QaStateEvent {
     pub kind: QaStateKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -631,7 +640,7 @@ mod tests {
         };
         let qa_json = serde_json::to_value(&qa).unwrap();
         assert_eq!(qa_json["kind"], "answer_delta");
-        assert_eq!(qa_json["session_id"], "qa-session");
+        assert_eq!(qa_json["sessionId"], "qa-session");
         assert_eq!(qa_json["chunk"], "hello");
 
         let less_computer = LessComputerEvent {

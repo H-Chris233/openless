@@ -1,8 +1,8 @@
 name: Release Linux egui
 
-# This workflow deliberately has no automatic tag trigger until the egui team
-# replaces linux-egui/src/main.rs with the real UI.  It is already reusable by a
-# release orchestrator: pass release_tag to upload the verified packages.
+# This workflow deliberately has no automatic tag trigger until real Ubuntu
+# audio, focus/input, install, upgrade, and rollback evidence is recorded. It is
+# already reusable by a release orchestrator: pass release_tag to upload verified packages.
 on:
   workflow_dispatch:
     inputs:

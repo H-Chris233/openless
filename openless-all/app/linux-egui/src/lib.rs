@@ -8,6 +8,7 @@
 mod audio;
 mod backend;
 mod capabilities;
+mod coding_agent;
 mod credentials;
 mod fcitx5;
 mod host_actions;

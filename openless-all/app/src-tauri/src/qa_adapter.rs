@@ -2,7 +2,7 @@
 //!
 //! Session phase, cancellation semantics and the message log belong to
 //! `openless-core::QaService`. This module only captures host context, owns the
-//! native recorder/provider handles and translates their results.
+//! selection/focus handles and translates Core results.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -10,11 +10,9 @@ use std::sync::Arc;
 
 use futures_util::future::BoxFuture;
 use openless_core::{
-    ActiveRecording, AudioConsumer, AudioRecorder, BackendError, BackendErrorCode,
-    DictationContext, DictationStartOptions, QaInput, QaProgress, QaProgressSink, QaRuntimeAdapter,
-    QaRuntimeCompletion, QaTurnRequest, QaTurnResult, RecordingProgressSink, SelectionCapture,
-    SelectionVoiceEditRequest, SessionId, TextStreamChunk, TextStreamSink, TranscriptionEngine,
-    TranscriptionSession,
+    BackendError, BackendErrorCode, DictationContext, DictationStartOptions, QaInput, QaProgress,
+    QaProgressSink, QaRuntimeAdapter, QaRuntimeCompletion, QaTurnRequest, QaTurnResult,
+    RecordingProgressSink, SelectionCapture, SelectionVoiceEditRequest, SessionId,
 };
 use parking_lot::Mutex;
 
@@ -73,12 +71,16 @@ impl TauriQaHostContext {
         session_id: openless_core::SessionId,
         insertion_target: crate::selection::SelectionInsertionTarget,
     ) -> Result<(), BackendError> {
-        let binder = self.selection_voice_target_binder.lock().clone().ok_or_else(|| {
-            BackendError::new(
-                BackendErrorCode::Unsupported,
-                "selection voice target binding is unavailable",
-            )
-        })?;
+        let binder = self
+            .selection_voice_target_binder
+            .lock()
+            .clone()
+            .ok_or_else(|| {
+                BackendError::new(
+                    BackendErrorCode::Unsupported,
+                    "selection voice target binding is unavailable",
+                )
+            })?;
         binder(session_id, insertion_target)
             .map_err(|message| BackendError::new(BackendErrorCode::Platform, message))
     }
@@ -113,18 +115,14 @@ struct TauriQaHostCapture {
 pub(crate) struct TauriQaRuntimeAdapter {
     app: AppHandleSlot,
     backend: BackendSlot,
-    recorder: Arc<dyn AudioRecorder>,
-    transcription: Arc<dyn TranscriptionEngine>,
     credentials: Arc<dyn openless_core::CredentialStore>,
     host_context: Arc<TauriQaHostContext>,
     sessions: Arc<Mutex<HashMap<SessionId, Arc<TauriQaRuntimeSession>>>>,
 }
 
 struct TauriQaRuntimeSession {
-    context: Arc<DictationContext>,
-    recording: Mutex<Option<Box<dyn ActiveRecording>>>,
-    transcription: Mutex<Option<Arc<dyn TranscriptionSession>>>,
-    pcm: Arc<TauriQaPcmBuffer>,
+    context: Mutex<Option<Arc<DictationContext>>>,
+    voice_capture: Mutex<Option<openless_core::QaVoiceCaptureSession>>,
     audio_wav: Mutex<Option<Vec<u8>>>,
     selection_text: Option<String>,
     selection_target: Mutex<Option<crate::selection::SelectionInsertionTarget>>,
@@ -136,39 +134,14 @@ struct TauriQaRuntimeSession {
     edit_revert_available: AtomicBool,
 }
 
-#[derive(Default)]
-struct TauriQaPcmBuffer {
-    bytes: Mutex<Vec<u8>>,
-}
-
-impl TauriQaPcmBuffer {
-    fn snapshot(&self) -> Vec<u8> {
-        self.bytes.lock().clone()
-    }
-
-    fn duration_ms(&self) -> u64 {
-        (self.bytes.lock().len() as u64).saturating_mul(1_000)
-            / (u64::from(openless_core::DICTATION_SAMPLE_RATE) * 2)
-    }
-}
-
-impl AudioConsumer for TauriQaPcmBuffer {
-    fn consume_pcm_chunk(&self, pcm: &[u8]) {
-        self.bytes.lock().extend_from_slice(pcm);
-    }
-}
-
-struct TauriQaAudioFanout {
-    transcription: Option<Arc<dyn TranscriptionSession>>,
-    pcm: Arc<TauriQaPcmBuffer>,
-}
-
-impl AudioConsumer for TauriQaAudioFanout {
-    fn consume_pcm_chunk(&self, pcm: &[u8]) {
-        if let Some(transcription) = &self.transcription {
-            transcription.consume_pcm_chunk(pcm);
-        }
-        self.pcm.consume_pcm_chunk(pcm);
+impl TauriQaRuntimeSession {
+    fn context(&self) -> Result<Arc<DictationContext>, BackendError> {
+        self.context.lock().clone().ok_or_else(|| {
+            BackendError::new(
+                BackendErrorCode::InvalidState,
+                "QA session context is not ready",
+            )
+        })
     }
 }
 
@@ -186,28 +159,16 @@ impl RecordingProgressSink for TauriQaRecordingProgress {
     }
 }
 
-struct IgnoreTextStreamSink;
-
-impl TextStreamSink for IgnoreTextStreamSink {
-    fn publish(&self, _chunk: TextStreamChunk) -> Result<(), BackendError> {
-        Ok(())
-    }
-}
-
 impl TauriQaRuntimeAdapter {
     pub(crate) fn new(
         app: AppHandleSlot,
         backend: BackendSlot,
-        recorder: Arc<dyn AudioRecorder>,
-        transcription: Arc<dyn TranscriptionEngine>,
         credentials: Arc<dyn openless_core::CredentialStore>,
         host_context: Arc<TauriQaHostContext>,
     ) -> Self {
         Self {
             app,
             backend,
-            recorder,
-            transcription,
             credentials,
             host_context,
             sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -260,7 +221,6 @@ impl TauriQaRuntimeAdapter {
     async fn capture_session(
         &self,
         session_id: SessionId,
-        voice_turn: bool,
     ) -> Result<Arc<TauriQaRuntimeSession>, BackendError> {
         let capture = self.host_context.capture_turn(&self.app);
         let context = self
@@ -271,16 +231,14 @@ impl TauriQaRuntimeAdapter {
             })
             .await?;
         let session = Arc::new(TauriQaRuntimeSession {
-            context,
-            recording: Mutex::new(None),
-            transcription: Mutex::new(None),
-            pcm: Arc::new(TauriQaPcmBuffer::default()),
+            context: Mutex::new(Some(context)),
+            voice_capture: Mutex::new(None),
             audio_wav: Mutex::new(None),
             selection_text: capture.selection_text,
             selection_target: Mutex::new(Some(capture.selection_target)),
             front_app: capture.front_app,
             duration_ms: AtomicU64::new(0),
-            voice_turn,
+            voice_turn: false,
             cancelled: Arc::new(AtomicBool::new(false)),
             edit_apply_available: AtomicBool::new(false),
             edit_revert_available: AtomicBool::new(false),
@@ -297,25 +255,6 @@ impl TauriQaRuntimeAdapter {
     }
 }
 
-/// QA is ephemeral even when diagnostic recording is enabled for dictation.
-/// Keep the archive handle before consuming the recording so every terminal
-/// path can remove the file, including a recorder stop failure.
-async fn stop_and_discard_recording(
-    recording: Box<dyn ActiveRecording>,
-) -> Result<(), BackendError> {
-    let archive = recording.archive();
-    let stop_result = recording.stop().await;
-    let discard_result = if let Some(archive) = archive.filter(|archive| archive.is_available()) {
-        archive.discard().await
-    } else {
-        Ok(())
-    };
-    match (stop_result, discard_result) {
-        (Err(error), _) | (Ok(()), Err(error)) => Err(error),
-        (Ok(()), Ok(())) => Ok(()),
-    }
-}
-
 impl QaRuntimeAdapter for TauriQaRuntimeAdapter {
     fn prepare_text(
         &self,
@@ -324,7 +263,7 @@ impl QaRuntimeAdapter for TauriQaRuntimeAdapter {
     ) -> BoxFuture<'static, Result<QaInput, BackendError>> {
         let adapter = self.clone();
         Box::pin(async move {
-            let session = adapter.capture_session(session_id, false).await?;
+            let session = adapter.capture_session(session_id).await?;
             Ok(QaInput {
                 text,
                 selection_text: session.selection_text.clone(),
@@ -339,50 +278,42 @@ impl QaRuntimeAdapter for TauriQaRuntimeAdapter {
     ) -> BoxFuture<'static, Result<(), BackendError>> {
         let adapter = self.clone();
         Box::pin(async move {
-            let session = adapter.capture_session(session_id, true).await?;
-            progress.publish(
+            let capture = adapter.host_context.capture_turn(&adapter.app);
+            let session = Arc::new(TauriQaRuntimeSession {
+                context: Mutex::new(None),
+                voice_capture: Mutex::new(None),
+                audio_wav: Mutex::new(None),
+                selection_text: capture.selection_text,
+                selection_target: Mutex::new(Some(capture.selection_target)),
+                front_app: capture.front_app.clone(),
+                duration_ms: AtomicU64::new(0),
+                voice_turn: true,
+                cancelled: Arc::new(AtomicBool::new(false)),
+                edit_apply_available: AtomicBool::new(false),
+                edit_revert_available: AtomicBool::new(false),
+            });
+            Self::insert_session(&adapter.sessions, session_id, Arc::clone(&session))?;
+            if let Err(error) = progress.publish(
                 session_id,
                 QaProgress::SelectionCaptured(session.selection_text.clone()),
-            )?;
-            let multimodal = session.context.pipeline_mode
-                == openless_core::shared_types::PipelineMode::Multimodal;
-            let transcription = if multimodal {
-                None
-            } else {
-                match adapter
-                    .transcription
-                    .start(
-                        session_id,
-                        Arc::clone(&session.context),
-                        Arc::new(IgnoreTextStreamSink),
-                    )
-                    .await
-                {
-                    Ok(transcription) => Some(transcription),
-                    Err(error) => {
-                        Self::remove_if_current(&adapter.sessions, session_id, &session);
-                        return Err(error);
-                    }
+            ) {
+                Self::remove_if_current(&adapter.sessions, session_id, &session);
+                return Err(error);
+            }
+            let backend = match adapter.backend() {
+                Ok(backend) => backend,
+                Err(error) => {
+                    Self::remove_if_current(&adapter.sessions, session_id, &session);
+                    return Err(error);
                 }
             };
-            if session.cancelled.load(Ordering::Acquire) {
-                if let Some(transcription) = transcription {
-                    let _ = transcription.cancel().await;
-                }
-                Self::remove_if_current(&adapter.sessions, session_id, &session);
-                return Err(Self::cancelled_error());
-            }
-            *session.transcription.lock() = transcription.clone();
-            let consumer: Arc<dyn AudioConsumer> = Arc::new(TauriQaAudioFanout {
-                transcription,
-                pcm: Arc::clone(&session.pcm),
-            });
-            let recording = match adapter
-                .recorder
-                .start(
+            let voice_capture = match backend
+                .start_qa_voice_capture(
                     session_id,
-                    Arc::clone(&session.context),
-                    consumer,
+                    DictationStartOptions {
+                        front_app: capture.front_app,
+                        ..DictationStartOptions::default()
+                    },
                     Arc::new(TauriQaRecordingProgress {
                         session_id,
                         progress,
@@ -390,26 +321,22 @@ impl QaRuntimeAdapter for TauriQaRuntimeAdapter {
                 )
                 .await
             {
-                Ok(recording) => recording,
+                Ok(capture) => capture,
                 Err(error) => {
-                    let transcription = session.transcription.lock().take();
-                    if let Some(transcription) = transcription {
-                        let _ = transcription.cancel().await;
-                    }
                     Self::remove_if_current(&adapter.sessions, session_id, &session);
                     return Err(error);
                 }
             };
+            *session.context.lock() = Some(voice_capture.context());
+            *session.voice_capture.lock() = Some(voice_capture);
             if session.cancelled.load(Ordering::Acquire) {
-                let _ = stop_and_discard_recording(recording).await;
-                let transcription = session.transcription.lock().take();
-                if let Some(transcription) = transcription {
-                    let _ = transcription.cancel().await;
+                let voice_capture = session.voice_capture.lock().take();
+                if let Some(voice_capture) = voice_capture {
+                    let _ = voice_capture.cancel().await;
                 }
                 Self::remove_if_current(&adapter.sessions, session_id, &session);
                 return Err(Self::cancelled_error());
             }
-            *session.recording.lock() = Some(recording);
             Ok(())
         })
     }
@@ -426,37 +353,21 @@ impl QaRuntimeAdapter for TauriQaRuntimeAdapter {
                     "QA runtime session is no longer active",
                 )
             })?;
-            let recording = session.recording.lock().take().ok_or_else(|| {
+            let voice_capture = session.voice_capture.lock().take().ok_or_else(|| {
                 BackendError::new(BackendErrorCode::InvalidState, "QA recording is not ready")
             })?;
-            stop_and_discard_recording(recording).await?;
+            let result = voice_capture.finish().await?;
             if session.cancelled.load(Ordering::Acquire) {
                 return Err(Self::cancelled_error());
             }
-            let duration_ms = session.pcm.duration_ms();
-            session.duration_ms.store(duration_ms, Ordering::Release);
-            if session.context.pipeline_mode
-                == openless_core::shared_types::PipelineMode::Multimodal
-            {
-                let wav = openless_core::encode_dictation_wav(&session.pcm.snapshot())?;
-                *session.audio_wav.lock() = Some(wav);
-                return Ok(QaInput {
-                    text: "（语音问题）".to_string(),
-                    selection_text: session.selection_text.clone(),
-                });
-            }
-            let transcription = session.transcription.lock().take().ok_or_else(|| {
-                BackendError::new(
-                    BackendErrorCode::InvalidState,
-                    "QA transcription session is not ready",
-                )
-            })?;
-            let transcript = transcription.finish().await?;
             session
                 .duration_ms
-                .store(transcript.duration_ms.max(duration_ms), Ordering::Release);
+                .store(result.duration_ms, Ordering::Release);
+            *session.audio_wav.lock() = result.audio_wav;
             Ok(QaInput {
-                text: transcript.text,
+                text: result
+                    .transcript
+                    .unwrap_or_else(|| "（语音问题）".to_string()),
                 selection_text: session.selection_text.clone(),
             })
         })
@@ -481,6 +392,7 @@ impl QaRuntimeAdapter for TauriQaRuntimeAdapter {
             if session.cancelled.load(Ordering::Acquire) {
                 return Err(Self::cancelled_error());
             }
+            let context = session.context()?;
             if request.edit_instruction_mode {
                 let selection_text = request
                     .input
@@ -516,13 +428,12 @@ impl QaRuntimeAdapter for TauriQaRuntimeAdapter {
                         owner_session_id: request.conversation_id,
                         capture: SelectionCapture {
                             text: selection_text,
-                            source_app: session.context.polish.front_app.clone(),
+                            source_app: context.polish.front_app.clone(),
                         },
                         instruction: request.input.text,
                     })
                     .await?;
-                host_context
-                    .bind_selection_voice_target(result.preview.session_id, target)?;
+                host_context.bind_selection_voice_target(result.preview.session_id, target)?;
                 session.edit_apply_available.store(true, Ordering::Release);
                 session
                     .edit_revert_available
@@ -534,7 +445,7 @@ impl QaRuntimeAdapter for TauriQaRuntimeAdapter {
             let audio_wav = session.audio_wav.lock().take();
             let answer = openless_core::answer_qa_with_context(
                 credentials,
-                Arc::clone(&session.context),
+                context,
                 request.messages,
                 audio_wav,
                 request.session_id,
@@ -558,13 +469,14 @@ impl QaRuntimeAdapter for TauriQaRuntimeAdapter {
                     "QA runtime session is no longer active",
                 )
             })?;
+            let context = session.context()?;
             Ok(QaRuntimeCompletion {
                 duration_ms: session
                     .voice_turn
                     .then(|| session.duration_ms.load(Ordering::Acquire)),
                 front_app: session.front_app.clone(),
                 raw_transcript_override: (session.voice_turn
-                    && session.context.pipeline_mode
+                    && context.pipeline_mode
                         == openless_core::shared_types::PipelineMode::Multimodal)
                     .then(String::new),
                 edit_apply_available: session.edit_apply_available.load(Ordering::Acquire),
@@ -580,21 +492,9 @@ impl QaRuntimeAdapter for TauriQaRuntimeAdapter {
                 return Ok(());
             };
             session.cancelled.store(true, Ordering::Release);
-            let recording = session.recording.lock().take();
-            let transcription = session.transcription.lock().take();
-            let mut first_error = None;
-            if let Some(recording) = recording {
-                if let Err(error) = stop_and_discard_recording(recording).await {
-                    first_error = Some(error);
-                }
-            }
-            if let Some(transcription) = transcription {
-                if let Err(error) = transcription.cancel().await {
-                    first_error.get_or_insert(error);
-                }
-            }
-            match first_error {
-                Some(error) => Err(error),
+            let voice_capture = session.voice_capture.lock().take();
+            match voice_capture {
+                Some(voice_capture) => voice_capture.cancel().await,
                 None => Ok(()),
             }
         })
@@ -606,8 +506,6 @@ impl Clone for TauriQaRuntimeAdapter {
         Self {
             app: Arc::clone(&self.app),
             backend: Arc::clone(&self.backend),
-            recorder: Arc::clone(&self.recorder),
-            transcription: Arc::clone(&self.transcription),
             credentials: Arc::clone(&self.credentials),
             host_context: Arc::clone(&self.host_context),
             sessions: Arc::clone(&self.sessions),
@@ -618,70 +516,11 @@ impl Clone for TauriQaRuntimeAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openless_core::RecordingArchive;
-    use std::sync::atomic::AtomicUsize;
-
-    struct FixtureArchive {
-        available: AtomicBool,
-        discards: Arc<AtomicUsize>,
-        fail: bool,
-    }
-
-    impl RecordingArchive for FixtureArchive {
-        fn is_available(&self) -> bool {
-            self.available.load(Ordering::Acquire)
-        }
-
-        fn discard(&self) -> BoxFuture<'static, Result<(), BackendError>> {
-            self.discards.fetch_add(1, Ordering::AcqRel);
-            self.available.store(false, Ordering::Release);
-            let fail = self.fail;
-            Box::pin(async move {
-                if fail {
-                    Err(BackendError::new(
-                        BackendErrorCode::Persistence,
-                        "fixture archive discard failed",
-                    ))
-                } else {
-                    Ok(())
-                }
-            })
-        }
-    }
-
-    struct FixtureRecording {
-        archive: Arc<FixtureArchive>,
-        stops: Arc<AtomicUsize>,
-        fail: bool,
-    }
-
-    impl ActiveRecording for FixtureRecording {
-        fn archive(&self) -> Option<Arc<dyn RecordingArchive>> {
-            Some(self.archive.clone())
-        }
-
-        fn stop(self: Box<Self>) -> BoxFuture<'static, Result<(), BackendError>> {
-            self.stops.fetch_add(1, Ordering::AcqRel);
-            let fail = self.fail;
-            Box::pin(async move {
-                if fail {
-                    Err(BackendError::new(
-                        BackendErrorCode::Platform,
-                        "fixture recording stop failed",
-                    ))
-                } else {
-                    Ok(())
-                }
-            })
-        }
-    }
 
     fn runtime_session() -> Arc<TauriQaRuntimeSession> {
         Arc::new(TauriQaRuntimeSession {
-            context: Arc::new(DictationContext::default()),
-            recording: Mutex::new(None),
-            transcription: Mutex::new(None),
-            pcm: Arc::new(TauriQaPcmBuffer::default()),
+            context: Mutex::new(Some(Arc::new(DictationContext::default()))),
+            voice_capture: Mutex::new(None),
             audio_wav: Mutex::new(None),
             selection_text: None,
             selection_target: Mutex::new(Some(Default::default())),
@@ -741,48 +580,5 @@ mod tests {
             .unwrap();
 
         assert_eq!(*calls.lock(), vec![session_id]);
-    }
-
-    #[tokio::test]
-    async fn recording_archive_is_discarded_after_a_successful_stop() {
-        let discards = Arc::new(AtomicUsize::new(0));
-        let stops = Arc::new(AtomicUsize::new(0));
-        let archive = Arc::new(FixtureArchive {
-            available: AtomicBool::new(true),
-            discards: Arc::clone(&discards),
-            fail: false,
-        });
-        let recording: Box<dyn ActiveRecording> = Box::new(FixtureRecording {
-            archive,
-            stops: Arc::clone(&stops),
-            fail: false,
-        });
-
-        stop_and_discard_recording(recording).await.unwrap();
-
-        assert_eq!(stops.load(Ordering::Acquire), 1);
-        assert_eq!(discards.load(Ordering::Acquire), 1);
-    }
-
-    #[tokio::test]
-    async fn recording_archive_is_discarded_even_when_stop_fails() {
-        let discards = Arc::new(AtomicUsize::new(0));
-        let stops = Arc::new(AtomicUsize::new(0));
-        let archive = Arc::new(FixtureArchive {
-            available: AtomicBool::new(true),
-            discards: Arc::clone(&discards),
-            fail: false,
-        });
-        let recording: Box<dyn ActiveRecording> = Box::new(FixtureRecording {
-            archive,
-            stops: Arc::clone(&stops),
-            fail: true,
-        });
-
-        let error = stop_and_discard_recording(recording).await.unwrap_err();
-
-        assert_eq!(error.code, BackendErrorCode::Platform);
-        assert_eq!(stops.load(Ordering::Acquire), 1);
-        assert_eq!(discards.load(Ordering::Acquire), 1);
     }
 }

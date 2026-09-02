@@ -217,6 +217,36 @@ pub trait DictationEngine: Send + Sync {
         })
     }
 
+    fn start_voice_capture(
+        &self,
+        _session_id: SessionId,
+        _context: Arc<DictationContext>,
+        _partials: Arc<dyn TextStreamSink>,
+        _progress: Arc<dyn RecordingProgressSink>,
+    ) -> BoxFuture<'static, Result<VoiceCapture, BackendError>> {
+        Box::pin(async {
+            Err(BackendError::new(
+                BackendErrorCode::Unsupported,
+                "dictation engine does not expose a voice capture session",
+            ))
+        })
+    }
+
+    #[doc(hidden)]
+    fn start_audio_capture(
+        &self,
+        _session_id: SessionId,
+        _context: Arc<DictationContext>,
+        _progress: Arc<dyn RecordingProgressSink>,
+    ) -> BoxFuture<'static, Result<AudioCapture, BackendError>> {
+        Box::pin(async {
+            Err(BackendError::new(
+                BackendErrorCode::Unsupported,
+                "dictation engine does not expose a recorder-only voice capture",
+            ))
+        })
+    }
+
     /// Feed canonical PCM into an active externally sourced session.
     fn feed_audio(&self, _session_id: SessionId, _pcm: &[u8]) -> Result<(), BackendError> {
         Err(BackendError::new(
@@ -226,6 +256,44 @@ pub trait DictationEngine: Send + Sync {
     }
 
     fn cancel(&self, session_id: SessionId) -> BoxFuture<'static, Result<(), BackendError>>;
+}
+
+pub struct VoiceCapture {
+    pub recording: Box<dyn ActiveRecording>,
+    pub transcription: Arc<dyn TranscriptionSession>,
+}
+
+pub struct AudioCapture {
+    pub recording: Box<dyn ActiveRecording>,
+    pub pcm: Arc<CapturedPcm>,
+}
+
+#[derive(Default)]
+pub struct CapturedPcm {
+    bytes: std::sync::Mutex<Vec<u8>>,
+}
+
+impl CapturedPcm {
+    pub fn snapshot(&self) -> Vec<u8> {
+        self.bytes
+            .lock()
+            .expect("captured PCM lock poisoned")
+            .clone()
+    }
+
+    pub fn duration_ms(&self) -> u64 {
+        (self.bytes.lock().expect("captured PCM lock poisoned").len() as u64).saturating_mul(1_000)
+            / (u64::from(crate::DICTATION_SAMPLE_RATE) * 2)
+    }
+}
+
+impl AudioConsumer for CapturedPcm {
+    fn consume_pcm_chunk(&self, pcm: &[u8]) {
+        self.bytes
+            .lock()
+            .expect("captured PCM lock poisoned")
+            .extend_from_slice(pcm);
+    }
 }
 
 /// Sink for canonical 16 kHz / mono / signed 16-bit little-endian PCM chunks.
@@ -332,35 +400,33 @@ pub trait TextPolisher: Send + Sync {
 }
 
 pub trait TextInserter: Send + Sync {
-    fn prepare(
-        &self,
-        _session_id: SessionId,
-        _context: Arc<DictationContext>,
-    ) -> BoxFuture<'static, Result<(), BackendError>> {
-        Box::pin(async { Ok(()) })
-    }
-
-    fn insert(
+    fn begin(
         &self,
         session_id: SessionId,
         context: Arc<DictationContext>,
-        text: String,
-    ) -> BoxFuture<'static, Result<InsertOutcome, BackendError>>;
+    ) -> BoxFuture<'static, Result<Arc<dyn TextInsertionSession>, BackendError>>;
+}
 
-    fn cancel(&self, _session_id: SessionId) -> BoxFuture<'static, Result<(), BackendError>> {
-        Box::pin(async { Ok(()) })
-    }
+pub trait TextInsertionSession: Send + Sync {
+    fn write(&self, text: String) -> BoxFuture<'static, Result<InsertWriteResult, BackendError>>;
+    fn finish(&self, final_text: String)
+        -> BoxFuture<'static, Result<InsertOutcome, BackendError>>;
+    fn cancel(&self) -> BoxFuture<'static, Result<(), BackendError>>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InsertWriteResult {
+    pub written_chars: usize,
 }
 
 pub struct UnsupportedTextInserter;
 
 impl TextInserter for UnsupportedTextInserter {
-    fn insert(
+    fn begin(
         &self,
         _session_id: SessionId,
         _context: Arc<DictationContext>,
-        _text: String,
-    ) -> BoxFuture<'static, Result<InsertOutcome, BackendError>> {
+    ) -> BoxFuture<'static, Result<Arc<dyn TextInsertionSession>, BackendError>> {
         Box::pin(async {
             Err(BackendError::new(
                 crate::errors::BackendErrorCode::Unsupported,
@@ -375,7 +441,6 @@ impl TextInserter for UnsupportedTextInserter {
 pub enum InsertOutcome {
     Inserted,
     CopiedFallback,
-    Unknown,
 }
 
 impl InsertOutcome {
@@ -383,7 +448,6 @@ impl InsertOutcome {
         match self {
             Self::Inserted => InsertStatus::Inserted,
             Self::CopiedFallback => InsertStatus::CopiedFallback,
-            Self::Unknown => InsertStatus::Unknown,
         }
     }
 }

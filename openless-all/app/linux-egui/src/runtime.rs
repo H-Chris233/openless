@@ -18,7 +18,8 @@ pub struct LinuxRuntimePumpResult {
 /// The egui team may keep this beside its app state and schedule `pump()` on
 /// the host Tokio runtime. No egui/eframe type crosses this interface.
 pub struct LinuxNativeRuntime {
-    host: LinuxHost,
+    host: std::sync::Arc<LinuxHost>,
+    startup: openless_core::StartupSnapshot,
     host_actions: std::sync::Arc<LinuxHostActions>,
     broker: Option<SingleInstanceBroker>,
     hotkeys: Option<Fcitx5HotkeyListener>,
@@ -30,9 +31,14 @@ impl LinuxNativeRuntime {
         broker: Option<SingleInstanceBroker>,
         hotkeys: Option<Fcitx5HotkeyListener>,
     ) -> Result<Self, BackendError> {
-        backend.backend.start().await?;
+        let startup = backend.backend.start().await?;
+        openless_core::require_backend_contract_version(&startup.contract_version)?;
         Ok(Self {
-            host: LinuxHost::with_settings_runtime(backend.backend, backend.settings_runtime),
+            host: std::sync::Arc::new(LinuxHost::with_settings_runtime(
+                backend.backend,
+                backend.settings_runtime,
+            )),
+            startup,
             host_actions: backend.host_actions,
             broker,
             hotkeys,
@@ -43,30 +49,51 @@ impl LinuxNativeRuntime {
         &self.host
     }
 
+    pub fn host_arc(&self) -> std::sync::Arc<LinuxHost> {
+        std::sync::Arc::clone(&self.host)
+    }
+
+    pub fn startup_snapshot(&self) -> &openless_core::StartupSnapshot {
+        &self.startup
+    }
+
     pub fn host_actions(&self) -> &std::sync::Arc<LinuxHostActions> {
         &self.host_actions
+    }
+
+    pub fn drain_native_events(
+        &self,
+    ) -> (
+        Vec<crate::LinuxLaunchIntent>,
+        Vec<crate::LinuxHotkeyEvent>,
+        Vec<BackendError>,
+    ) {
+        let mut launch_intents = Vec::new();
+        let mut hotkey_events = Vec::new();
+        let mut errors = Vec::new();
+        if let Some(broker) = &self.broker {
+            broker.drain(|intent| launch_intents.push(intent));
+            if let Some(error) = broker.take_error() {
+                errors.push(BackendError::new(BackendErrorCode::Platform, error));
+            }
+        }
+        if let Some(hotkeys) = &self.hotkeys {
+            hotkeys.drain(|event| hotkey_events.push(event));
+            if let Some(error) = hotkeys.take_error() {
+                errors.push(error);
+            }
+        }
+        (launch_intents, hotkey_events, errors)
     }
 
     /// Drain currently queued native events without blocking on DBus or Unix
     /// sockets, then execute their shared core use-cases asynchronously.
     pub async fn pump(&self) -> LinuxRuntimePumpResult {
         let mut result = LinuxRuntimePumpResult::default();
-        let mut launch_intents = Vec::new();
-        if let Some(broker) = &self.broker {
-            result.launch_intents = broker.drain(|intent| launch_intents.push(intent));
-            if let Some(error) = broker.take_error() {
-                result
-                    .errors
-                    .push(BackendError::new(BackendErrorCode::Platform, error));
-            }
-        }
-        let mut hotkey_events = Vec::new();
-        if let Some(hotkeys) = &self.hotkeys {
-            result.hotkey_events = hotkeys.drain(|event| hotkey_events.push(event));
-            if let Some(error) = hotkeys.take_error() {
-                result.errors.push(error);
-            }
-        }
+        let (launch_intents, hotkey_events, errors) = self.drain_native_events();
+        result.launch_intents = launch_intents.len();
+        result.hotkey_events = hotkey_events.len();
+        result.errors = errors;
 
         for intent in launch_intents {
             match self.host.dispatch_launch_intent(intent).await {
@@ -155,6 +182,10 @@ mod tests {
         .unwrap();
 
         assert!(backend.snapshot().running);
+        assert_eq!(
+            runtime.startup_snapshot().contract_version,
+            openless_core::BACKEND_CONTRACT_VERSION
+        );
         let pump = runtime.pump().await;
         assert_eq!(pump.launch_intents, 0);
         assert_eq!(pump.hotkey_events, 0);

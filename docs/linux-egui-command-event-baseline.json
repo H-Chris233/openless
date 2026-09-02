@@ -77,6 +77,7 @@
     "get_platform_capabilities",
     "get_qa_hotkey_label",
     "get_remote_input_status",
+    "get_startup_snapshot",
     "get_selection_polish_preview",
     "get_selection_voice_intent_prompt",
     "get_selection_voice_preview",
@@ -394,7 +395,7 @@
     "additiveChange": "new optional fields require a default"
   },
   "counts": {
-    "tauriCommandsObserved": 196,
+    "tauriCommandsObserved": 197,
     "legacyEventsObserved": 30,
     "coreEventKindsDefined": 29
   },
@@ -403,7 +404,7 @@
     "sharedCredentialContract": "CredentialStore plus SecretValue and provider channel metadata",
     "complexDomains": "stable interfaces exist; missing adapters return Unsupported",
     "linuxAdapters": "credentials, resources, fcitx5 insertion and hotkeys, capabilities, cpal recording, host actions, provider routing, single-instance intent broker and native runtime lifecycle",
-    "releaseGate": "Linux workflow remains manual until the egui UI replaces the host stub"
+    "releaseGate": "Linux release requires successful artifacts and real Ubuntu audio, focus/input, install, upgrade, and rollback evidence"
   },
-  "status": "all 30 legacy events are classified; compatibility and real-adapter migration remains tracked by M4-M10"
+  "status": "all 30 legacy events and 29 Core events are classified under contract 2.0.0; real-platform release evidence remains gated"
 }

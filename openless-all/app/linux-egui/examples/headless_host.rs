@@ -279,11 +279,11 @@ async fn exercise_selection_voice(services: &BackendServices) -> Result<(), Back
         .begin_preview_apply(Some(unknown), "unknown preview".into())
         .await?;
     voice
-        .finish_preview_apply(ticket.ticket_id, SelectionVoiceApplyOutcome::OutcomeUnknown)
+        .finish_preview_apply(ticket.ticket_id, SelectionVoiceApplyOutcome::CopiedFallback)
         .await?;
     assert_eq!(
         voice.snapshot().await?.apply_outcome,
-        Some(SelectionVoiceApplyOutcome::OutcomeUnknown)
+        Some(SelectionVoiceApplyOutcome::CopiedFallback)
     );
 
     let cancelled = voice

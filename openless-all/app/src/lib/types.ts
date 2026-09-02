@@ -600,23 +600,23 @@ export interface QaChatMessage {
 export interface QaStatePayload {
   kind: QaStateKind;
   /** 后端会话 token；前端用它丢弃关闭/重开后迟到的旧轮事件。 */
-  session_id?: string;
+  sessionId?: string;
   /** 后端权威：当前已有的多轮对话历史（user → assistant 交替）。answer 事件带完整版。 */
   messages?: QaChatMessage[];
   /** recording 状态时附带的选区预览（前 60 字）。 */
-  selection_preview?: string | null;
+  selectionPreview?: string | null;
   /** error 状态时附带的提示。 */
   error?: string;
   /** answer_delta 事件时附带的本帧增量字符串。 */
   chunk?: string;
   /** 选区语音编辑结果可「替换选区」。 */
-  edit_apply_available?: boolean;
+  editApplyAvailable?: boolean;
   /** 可回退到上一轮编辑预览。 */
-  edit_revert_available?: boolean;
+  editRevertAvailable?: boolean;
   /** 划词提问面板「编辑指令」复选框。 */
-  edit_instruction_mode?: boolean;
+  editInstructionMode?: boolean;
   /** 当前轮等待工具审批时的 session-scoped token。 */
-  approval_token?: string;
+  approvalToken?: string;
 }
 
 /**

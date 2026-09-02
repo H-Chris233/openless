@@ -57,6 +57,44 @@ impl LocalAsrModelId {
         }
     }
 
+    pub const fn all() -> &'static [Self] {
+        &[
+            Self::Small06b,
+            Self::Large17b,
+            Self::WhisperBase,
+            Self::WhisperSmall,
+            Self::WhisperMedium,
+            Self::WhisperLargeV3,
+            Self::WhisperLargeV3Turbo,
+            Self::WhisperLargeV3TurboQ5,
+        ]
+    }
+
+    pub fn hf_repo(self) -> &'static str {
+        match self {
+            Self::Small06b => "Qwen/Qwen3-ASR-0.6B",
+            Self::Large17b => "Qwen/Qwen3-ASR-1.7B",
+            Self::WhisperBase
+            | Self::WhisperSmall
+            | Self::WhisperMedium
+            | Self::WhisperLargeV3
+            | Self::WhisperLargeV3Turbo
+            | Self::WhisperLargeV3TurboQ5 => "ggerganov/whisper.cpp",
+        }
+    }
+
+    pub fn file_name(self) -> Option<&'static str> {
+        match self {
+            Self::WhisperBase => Some("ggml-base.bin"),
+            Self::WhisperSmall => Some("ggml-small.bin"),
+            Self::WhisperMedium => Some("ggml-medium.bin"),
+            Self::WhisperLargeV3 => Some("ggml-large-v3.bin"),
+            Self::WhisperLargeV3Turbo => Some("ggml-large-v3-turbo.bin"),
+            Self::WhisperLargeV3TurboQ5 => Some("ggml-large-v3-turbo-q5_0.bin"),
+            Self::Small06b | Self::Large17b => None,
+        }
+    }
+
     pub fn is_whisper(self) -> bool {
         matches!(
             self,

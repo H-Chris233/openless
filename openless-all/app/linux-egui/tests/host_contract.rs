@@ -543,12 +543,12 @@ async fn linux_headless_selection_contract_covers_capability_and_session_edges()
         .await
         .unwrap();
     voice
-        .finish_preview_apply(ticket.ticket_id, SelectionVoiceApplyOutcome::OutcomeUnknown)
+        .finish_preview_apply(ticket.ticket_id, SelectionVoiceApplyOutcome::CopiedFallback)
         .await
         .unwrap();
     assert_eq!(
         voice.snapshot().await.unwrap().apply_outcome,
-        Some(SelectionVoiceApplyOutcome::OutcomeUnknown)
+        Some(SelectionVoiceApplyOutcome::CopiedFallback)
     );
 
     let cancelled = voice

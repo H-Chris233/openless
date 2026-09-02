@@ -640,7 +640,7 @@ fn selection_voice_snapshot_apply_outcome_wire_fixture_is_stable() {
         instruction_polished: None,
         intent_prompt: None,
         preview: None,
-        apply_outcome: Some(SelectionVoiceApplyOutcome::OutcomeUnknown),
+        apply_outcome: Some(SelectionVoiceApplyOutcome::CopiedFallback),
     };
 
     assert_eq!(
@@ -649,7 +649,7 @@ fn selection_voice_snapshot_apply_outcome_wire_fixture_is_stable() {
             "phase": "completed",
             "sessionId": "00000000-0000-0000-0000-000000000000",
             "sourceText": "source",
-            "applyOutcome": "outcome_unknown"
+            "applyOutcome": "copied_fallback"
         })
     );
 }

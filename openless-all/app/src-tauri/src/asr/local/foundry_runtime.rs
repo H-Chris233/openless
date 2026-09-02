@@ -112,7 +112,16 @@ mod imp {
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     };
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    const PROGRESS_EMIT_MIN_INTERVAL_MS: u64 = 100;
+
+    fn now_millis() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or_default()
+    }
 
     use anyhow::{Context, Result};
     use foundry_local_sdk::{DeviceType, FoundryLocalConfig, FoundryLocalManager, Model};
@@ -124,8 +133,7 @@ mod imp {
         FoundryTemporaryCpuFallbackLease, FoundryTranscriptionOutcome,
     };
     use crate::asr::local::foundry::{
-        FoundryCatalogModel, FoundryPrepareProgressPayload, FoundryRuntimeStatus, MODELS,
-        PROVIDER_ID,
+        FoundryPrepareProgressPayload, FoundryRuntimeStatus, PROVIDER_ID,
     };
     use crate::asr::local::foundry_native::{self, RuntimeSource};
 
@@ -751,10 +759,8 @@ mod imp {
             let last_emit = Arc::new(AtomicU64::new(0));
             let progress: FoundryPrepareProgressCallback = Arc::new(move |payload| {
                 if payload.percent.is_some() {
-                    let now = crate::asr::local::download::now_millis();
-                    if now - last_emit.load(Ordering::Relaxed)
-                        < crate::asr::local::download::PROGRESS_EMIT_MIN_INTERVAL_MS
-                    {
+                    let now = now_millis();
+                    if now - last_emit.load(Ordering::Relaxed) < PROGRESS_EMIT_MIN_INTERVAL_MS {
                         return;
                     }
                     last_emit.store(now, Ordering::Relaxed);
@@ -807,34 +813,6 @@ mod imp {
         #[cfg(test)]
         pub(crate) fn cancel_prepare_requested_for_tests(&self) -> bool {
             self.cancel_prepare.load(Ordering::SeqCst)
-        }
-
-        pub async fn catalog_snapshot(&self) -> Result<Vec<FoundryCatalogModel>> {
-            let _lifecycle = self.lifecycle.lock().await;
-            if !foundry_native::runtime_ready() || self.state.lock().manager.is_none() {
-                return Ok(crate::asr::local::foundry::static_catalog_models());
-            }
-            let manager = self.manager()?;
-            let mut catalog = Vec::with_capacity(MODELS.len());
-            for known in MODELS {
-                let model = manager
-                    .catalog()
-                    .get_model(known.alias)
-                    .await
-                    .with_context(|| format!("get Foundry catalog model {}", known.alias))?;
-                let info = model.info();
-                let cached = model.is_cached().await.unwrap_or(info.cached);
-                catalog.push(FoundryCatalogModel {
-                    alias: known.alias.to_string(),
-                    display_name: info
-                        .display_name
-                        .clone()
-                        .unwrap_or_else(|| known.display_name.to_string()),
-                    cached,
-                    file_size_mb: info.file_size_mb,
-                });
-            }
-            Ok(catalog)
         }
 
         /// 整段录音（所有分片 + CPU 回退的首次下载/加载）在单次 lifecycle 锁持有内
@@ -1565,11 +1543,7 @@ mod imp {
     }
 
     fn model_display_label(alias: &str) -> String {
-        MODELS
-            .iter()
-            .find(|model| model.alias == alias)
-            .map(|model| model.display_name.to_string())
-            .unwrap_or_else(|| alias.to_string())
+        alias.to_string()
     }
 
     fn normalized_language_hint(language_hint: Option<&str>) -> Option<String> {
@@ -2351,12 +2325,6 @@ impl FoundryLocalRuntime {
     }
 
     pub fn invalidate_route(&self) {}
-
-    pub async fn catalog_snapshot(
-        &self,
-    ) -> anyhow::Result<Vec<super::foundry::FoundryCatalogModel>> {
-        Ok(super::foundry::static_catalog_models())
-    }
 
     pub(crate) async fn transcribe_audio_files(
         &self,

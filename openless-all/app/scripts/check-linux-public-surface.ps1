@@ -8,6 +8,7 @@ $source = Get-Content -Raw -LiteralPath $surfaceFile
 $linuxManifest = Get-Content -Raw -LiteralPath (Join-Path $appRoot "linux-egui/Cargo.toml")
 $coreManifest = Get-Content -Raw -LiteralPath (Join-Path $appRoot "crates/openless-core/Cargo.toml")
 $coreApi = Get-Content -Raw -LiteralPath (Join-Path $appRoot "crates/openless-core/src/api.rs")
+$mainSource = Get-Content -Raw -LiteralPath (Join-Path $appRoot "linux-egui/src/main.rs")
 
 $forbidden = @(
     'pub use openless_core::domains::\*',
@@ -30,6 +31,17 @@ if ($violations.Count -gt 0) {
 
 if ($linuxManifest -match 'legacy-preferences-write' -or $coreManifest -match 'legacy-preferences-write') {
     Write-Error "The legacy whole-document preferences feature must not exist in Core or Linux manifests"
+    exit 1
+}
+
+if ($mainSource -notmatch 'SingleInstanceBroker::acquire_or_forward' -or
+    $mainSource -notmatch 'Fcitx5HotkeyListener::start' -or
+    $mainSource -notmatch 'drain_native_events()') {
+    Write-Error "Linux eframe production UI must wire single-instance and fcitx5 native events"
+    exit 1
+}
+if ($mainSource -match 'LinuxNativeRuntime::start(backend,s*None,s*None)') {
+    Write-Error "Linux eframe production UI must not disable all native adapters"
     exit 1
 }
 

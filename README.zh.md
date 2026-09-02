@@ -235,7 +235,7 @@ OpenLess 只做一件事:**把语音变成可用的书面文字(尤其是 AI 提
   - 应用内更新（设置 → 关于）读取 `latest-android-{arch}.json`；Beta 用户在高级设置加入 Beta 渠道。
   - 调试包:`OpenLess-android-debug-{abi}-*.apk`（workflow_dispatch 产物）。
   - 不确定时执行 `adb shell getprop ro.product.cpu.abi`，下载对应 ABI 的包。
-- **Linux**:原 Tauri/WebView 构建已退出 Linux 路线。原生 egui UI 由另一组独立开发；在该 UI 替换仓库中的 host stub 且独立 Linux 发布工作流启用前，不应把当前产物当作正式 Linux 应用安装。
+- **Linux**:原 Tauri/WebView 构建已退出 Linux 路线。`linux-egui` 现已包含基于共享 Core 2.0 服务的原生 `eframe` UI；正式发布仍需 Linux CI 产物以及 Ubuntu 真实音频、焦点输入、安装、升级和回滚证据。
 - **macOS(Homebrew)**:
   ```bash
   brew tap Open-Less/openless https://github.com/Open-Less/openless
@@ -263,7 +263,7 @@ OpenLess 只做一件事:**把语音变成可用的书面文字(尤其是 AI 提
 
 ## 从源码构建(开发者)
 
-活跃 workspace 位于 `openless-all/app/`：`crates/openless-core` 是框架无关后端，`src-tauri` 承载 macOS/Windows/Android，`linux-egui` 提供 Linux 非 UI Adapter 与交付给外部 egui 团队的稳定 Interface。macOS Tauri 构建会链接 `src-tauri/vendor/qwen-asr/` 下的 vendored C ASR 引擎([`Open-Less/qwen-asr`](https://github.com/Open-Less/qwen-asr),fork 自 `antirez/qwen-asr`)，因此开发 macOS Tauri 目标时需要初始化子模块。根 core/Linux workspace 显式排除了 `src-tauri`，Linux 的 core/host 检查既不初始化该子模块，也不解析 Tauri manifest。
+活跃 workspace 位于 `openless-all/app/`：`crates/openless-core` 是框架无关后端，`src-tauri` 承载 macOS/Windows/Android，`linux-egui` 包含 Linux 原生 UI 与平台 Adapter。macOS Tauri 构建会链接 `src-tauri/vendor/qwen-asr/` 下的 vendored C ASR 引擎([`Open-Less/qwen-asr`](https://github.com/Open-Less/qwen-asr),fork 自 `antirez/qwen-asr`)，因此开发 macOS Tauri 目标时需要初始化子模块。根 core/Linux workspace 显式排除了 `src-tauri`，Linux 的 core/host 检查既不初始化该子模块，也不解析 Tauri manifest。
 
 Rust 1.88 是从源码构建所支持的最低工具链版本；建议使用最新 stable Rust。CI 会在 macOS、Windows 和 Linux 上同时验证 Rust 1.88 与 stable。
 
@@ -396,7 +396,7 @@ egui UI  ── Linux Adapter（无 Tauri/WebKitGTK）───┘
 
 `openless-core` 负责稳定 DTO、错误、语义事件、repository、凭据契约和面向宿主的 use-case Interface。IPC、窗口、托盘、权限、更新、keyring、fcitx5 与打包资源路径等宿主能力由 Adapter 实现。旧 React command/event 名称只保留在 Tauri 兼容 Adapter；Linux 与 core 同进程，通过类型化 Rust Interface 调用。详细契约见 [`docs/linux-egui-backend-contract.md`](docs/linux-egui-backend-contract.md) 与[完整迁移计划](docs/linux-egui-shared-backend-plan.md)。
 
-`v<version>-tauri` / `v<version>-Beta.N-tauri` 工作流发布 macOS、Windows 与 Android 宿主。Linux deb/rpm/AppImage 由 `release-linux-egui.yml` 使用独立 manifest 构建；在 egui 团队替换 stub 入口前，该工作流不监听自动 tag。
+`v<version>-tauri` / `v<version>-Beta.N-tauri` 工作流发布 macOS、Windows 与 Android 宿主。Linux deb/rpm/AppImage 由 `release-linux-egui.yml` 使用独立 manifest 构建；自动发布仍以产物成功和 Ubuntu 真实安装、运行、升级、回滚证据为门禁。
 
 听写流水线:`hotkey edge → Recorder.start + ASR.openSession → [audio frames] → hotkey edge → Recorder.stop + ASR.sendLastFrame → Polish → Insert → History.save`。
 

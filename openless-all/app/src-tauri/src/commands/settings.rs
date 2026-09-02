@@ -63,10 +63,8 @@ impl openless_core::SettingsRuntime for TauriSettingsRuntime<'_> {
                 .push(openless_core::SettingsEffectKind::WindowsKeyboard);
         }
         if let Some(change) = &plan.active_asr_provider {
-            if let Err(error) = self
-                .coord
-                .sync_active_asr_provider_to_vault(&change.next)
-                .map_err(Self::platform_error)
+            if let Err(error) =
+                sync_active_asr_provider_to_vault(&change.next).map_err(Self::platform_error)
             {
                 return Err(openless_core::SettingsEffectFailure::after_side_effect(
                     error, receipt,
@@ -123,8 +121,7 @@ impl openless_core::SettingsRuntime for TauriSettingsRuntime<'_> {
                     .active_asr_provider
                     .as_ref()
                     .map(|change| {
-                        self.coord
-                            .sync_active_asr_provider_to_vault(&change.previous)
+                        sync_active_asr_provider_to_vault(&change.previous)
                             .map_err(Self::platform_error)
                     })
                     .unwrap_or(Ok(())),
@@ -312,7 +309,6 @@ mod tests {
         );
         assert_eq!(stale_settings_payload.default_mode, PolishMode::Light);
     }
-
 }
 
 // ─────────────────────────── release channel (Beta opt-in) ───────────────────────────

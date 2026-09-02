@@ -21,7 +21,6 @@ use axum::{
     Router,
 };
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use parking_lot::Mutex;
 use serde::Serialize;
 use tauri::{AppHandle, Listener, Manager};
 use tokio::net::TcpListener;
@@ -40,20 +39,6 @@ const HEADER_HTML: &str = "text/html; charset=utf-8";
 const HEADER_JS: &str = "application/javascript; charset=utf-8";
 const HEADER_CSS: &str = "text/css; charset=utf-8";
 
-/// 同一来源 IP 连续输错 PIN 的锁定阈值与时长。按 IP 而非全局计数：全局锁会被
-/// 局域网内多台机器分摊（每台只贡献几次失败就触发全局锁，反而 DoS 正常用户）；
-/// 按 IP 则每个攻击源各自被限到 ~5 次/分钟，10^6 个 PIN 组合在锁定节奏下不可行。
-const PIN_MAX_FAILS: u32 = 5;
-const PIN_LOCK_SECS: u64 = 60;
-/// pin_fails 表的容量上限：超过即清理已过期/已解锁的条目，防止伪造海量源 IP 撑爆内存。
-const PIN_FAILS_MAX_ENTRIES: usize = 256;
-/// 全局（跨 IP）PIN 失败上限和重置窗口。防止局域网内多台设备轮换 IP 绕过按 IP 的限速。
-/// 20 次/分钟 ≈ 0.02% 的 PIN 空间，在 60s 锁定前实际可试到的组合数极少。
-const PIN_GLOBAL_MAX_FAILS: u32 = 20;
-const PIN_GLOBAL_WINDOW_SECS: u64 = 60;
-/// 单个 PCM 二进制帧的上限。16kHz/16bit 实时流正常每帧只有几 KB，64KB ≈ 2 秒音频；
-/// 超限帧直接丢弃，防已配对客户端（或驱动它的恶意网页）推超大帧造成内存压力。
-const MAX_PCM_FRAME_BYTES: usize = 64 * 1024;
 /// 服务端 keepalive：每 KEEPALIVE_PING_SECS 发一次 WS Ping（浏览器自动回 Pong）；
 /// 连续 IDLE_TIMEOUT_SECS 收不到任何上行帧（含 Pong）则视为半开死链断开。
 /// 手机息屏/Wi-Fi 漂移常常不发 TCP FIN，没有探活时 recv() 永久挂起：连接任务、
@@ -65,7 +50,6 @@ const IDLE_TIMEOUT_SECS: u64 = 90;
 
 pub struct RemoteServerConfig {
     pub port: u16,
-    pub pin: String,
     pub backend: Arc<openless_core::OpenLessBackend>,
     pub app: AppHandle,
 }
@@ -79,8 +63,6 @@ pub struct RemoteServerHandle {
     conn_shutdown_tx: tokio::sync::watch::Sender<bool>,
     join: tauri::async_runtime::JoinHandle<()>,
     pub bound_port: u16,
-    #[allow(dead_code)]
-    pub pin: String,
 }
 
 impl RemoteServerHandle {
@@ -288,13 +270,8 @@ fn build_server_config(
 // ───────────────────────── 启动 ─────────────────────────
 
 struct WsState {
-    pin: String,
     backend: Arc<openless_core::OpenLessBackend>,
     app: AppHandle,
-    /// 按源 IP 的 PIN 失败计数 + 锁定截止时刻（防爆破；TLS+6 位 PIN 已是主防线）。
-    pin_fails: Mutex<std::collections::HashMap<IpAddr, (u32, Option<Instant>)>>,
-    /// 全局 PIN 失败计数 + 计数窗口起始时刻（防跨 IP 分布式暴力）。
-    pin_global_fails: Mutex<(u32, Instant)>,
     /// 自签名证书的 DER 原始字节，供 /cert.cer 下载给手机安装信任。
     cert_der: Vec<u8>,
     /// 服务关停广播的接收端，每条 WS 连接 clone 一份并在主循环 select 监听。
@@ -460,11 +437,8 @@ pub async fn start(cfg: RemoteServerConfig) -> Result<RemoteServerHandle, String
 
     let (conn_shutdown_tx, conn_shutdown_rx) = tokio::sync::watch::channel(false);
     let state = Arc::new(WsState {
-        pin: cfg.pin.clone(),
         backend: cfg.backend,
         app: cfg.app,
-        pin_fails: Mutex::new(std::collections::HashMap::new()),
-        pin_global_fails: Mutex::new((0, Instant::now())),
         cert_der,
         conn_shutdown_rx,
     });
@@ -516,7 +490,6 @@ pub async fn start(cfg: RemoteServerConfig) -> Result<RemoteServerHandle, String
         conn_shutdown_tx,
         join,
         bound_port,
-        pin: cfg.pin,
     })
 }
 
@@ -580,18 +553,34 @@ fn capsule_payload_to_phone(payload: &str) -> Vec<String> {
 
 async fn handle_ws(mut socket: WebSocket, state: Arc<WsState>, peer_ip: IpAddr) {
     // 1) 握手：等第一帧 hello + PIN。
+    let connection_id = openless_core::SessionId::new();
     let authed = match tokio::time::timeout(Duration::from_secs(15), socket.recv()).await {
-        Ok(Some(Ok(Message::Text(txt)))) => verify_hello(&txt, &state, peer_ip),
+        Ok(Some(Ok(Message::Text(txt)))) => {
+            let candidate = parse_hello_pin(&txt);
+            match state
+                .backend
+                .services()
+                .remote_input
+                .authenticate(connection_id, peer_ip.to_string(), candidate)
+                .await
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    log::warn!("[remote-input] authentication failed: {error}");
+                    return;
+                }
+            }
+        }
         _ => return, // 超时 / 非文本首帧 / 断开
     };
     match authed {
-        AuthResult::Ok => {
+        openless_core::RemoteAuthResult::Ok => {
             log::info!("[remote-input] 配对成功，进入录音会话");
             let _ = socket
                 .send(send_json(&serde_json::json!({"type":"auth","ok":true})))
                 .await;
         }
-        AuthResult::BadPin => {
+        openless_core::RemoteAuthResult::BadPin => {
             log::warn!("[remote-input] 配对码错误，已拒绝");
             let _ = socket
                 .send(send_json(
@@ -600,7 +589,7 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<WsState>, peer_ip: IpAddr) 
                 .await;
             return;
         }
-        AuthResult::Locked => {
+        openless_core::RemoteAuthResult::Locked => {
             log::warn!("[remote-input] 配对已锁定（连续错误过多），已拒绝");
             let _ = socket
                 .send(send_json(
@@ -609,18 +598,6 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<WsState>, peer_ip: IpAddr) 
                 .await;
             return;
         }
-    }
-
-    let connection_id = openless_core::SessionId::new();
-    if let Err(error) = state
-        .backend
-        .services()
-        .remote_input
-        .connect(connection_id)
-        .await
-    {
-        log::warn!("[remote-input] authenticated connection rejected: {error}");
-        return;
     }
 
     // 2) 订阅 capsule 事件，转发给手机做状态显示。
@@ -662,17 +639,20 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<WsState>, peer_ip: IpAddr) 
                 last_rx = Instant::now();
                 match incoming {
                     Some(Ok(Message::Binary(pcm))) => {
-                        if pcm.len() >= 2 && pcm.len() % 2 == 0 && pcm.len() <= MAX_PCM_FRAME_BYTES {
-                            if let Some(session_id) = remote_session_id {
+                        match parse_audio_frame(&pcm) {
+                            Ok((session_id, sequence, pcm)) => {
                                 if let Err(error) = state
                                     .backend
                                     .services()
                                     .remote_input
-                                    .feed_pcm(connection_id, session_id, pcm.to_vec())
+                                    .feed_pcm(connection_id, session_id, sequence, pcm)
                                     .await
                                 {
                                     log::warn!("[remote-input] PCM frame rejected: {error}");
                                 }
+                            }
+                            Err(error) => {
+                                log::warn!("[remote-input] invalid binary frame: {error}")
                             }
                         }
                     }
@@ -768,7 +748,13 @@ async fn apply_remote_control(
         "start" => {
             log::info!("[remote-input] 收到「开始录音」");
             match remote_input.start_stream(connection_id).await {
-                Ok(session_id) => *remote_session_id = Some(session_id),
+                Ok(session_id) => {
+                    *remote_session_id = Some(session_id);
+                    return Some(serde_json::json!({
+                        "type": "started",
+                        "sessionId": session_id.to_string(),
+                    }));
+                }
                 Err(error) => {
                     if error.code == openless_core::BackendErrorCode::Cancelled {
                         *remote_session_id = None;
@@ -794,76 +780,63 @@ async fn apply_remote_control(
             // 手机端「电脑落字」开关：value=true 表示要落字。no_insert = !value。
             let insert = v.get("value").and_then(|b| b.as_bool()).unwrap_or(true);
             log::info!("[remote-input] 电脑落字开关 = {insert}");
+            if let Err(error) = remote_input.set_insert(connection_id, insert).await {
+                return Some(serde_json::json!({"type":"busy","reason":error.to_string()}));
+            }
         }
         _ => {}
     }
     None
 }
 
-enum AuthResult {
-    Ok,
-    BadPin,
-    Locked,
+fn parse_hello_pin(txt: &str) -> openless_core::SecretValue {
+    let pin = serde_json::from_str::<serde_json::Value>(txt)
+        .ok()
+        .filter(|value| value.get("type").and_then(serde_json::Value::as_str) == Some("hello"))
+        .and_then(|value| {
+            value
+                .get("pin")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_default();
+    openless_core::SecretValue::new(pin)
 }
 
-fn verify_hello(txt: &str, state: &Arc<WsState>, peer_ip: IpAddr) -> AuthResult {
-    // PIN 比较在锁外完成（无共享状态；constant_time_eq 防计时侧信道）。
-    let v: serde_json::Value = match serde_json::from_str(txt) {
-        Ok(v) => v,
-        Err(_) => serde_json::Value::Null, // 非法 JSON 按 BadPin 计数
-    };
-    let pin_ok = v.get("type").and_then(|t| t.as_str()) == Some("hello")
-        && v.get("pin")
-            .and_then(|p| p.as_str())
-            .map(|p| openless_core::constant_time_eq(p.as_bytes(), state.pin.as_bytes()))
-            .unwrap_or(false);
-
-    // 锁定检查与失败累计放同一临界区：之前分两次拿锁，同一 IP 的并发握手可以
-    // 都先通过锁定检查再各自累计失败，让计数越过阈值却不触发锁定。
-    let now = Instant::now();
-
-    // 全局限速：防局域网内多台设备轮换 IP 绕过按 IP 的限速（分布式暴力）。
+fn parse_audio_frame(
+    frame: &[u8],
+) -> Result<(openless_core::SessionId, u64, Vec<u8>), openless_core::BackendError> {
+    const HEADER_BYTES: usize = 4 + 16 + 8;
+    if frame.len() <= HEADER_BYTES
+        || frame.len() > HEADER_BYTES + openless_core::REMOTE_INPUT_MAX_PCM_FRAME_BYTES
+        || &frame[..4] != b"OL20"
     {
-        let mut global = state.pin_global_fails.lock();
-        let window_elapsed = now.duration_since(global.1).as_secs();
-        if window_elapsed >= PIN_GLOBAL_WINDOW_SECS {
-            // 滑动窗口到期，重置计数
-            *global = (0, now);
-        }
-        if !pin_ok {
-            global.0 += 1;
-        }
-        if global.0 >= PIN_GLOBAL_MAX_FAILS {
-            return AuthResult::Locked;
-        }
+        return Err(openless_core::BackendError::new(
+            openless_core::BackendErrorCode::InvalidArgument,
+            "remote binary frame header or size is invalid",
+        ));
     }
-
-    let mut guard = state.pin_fails.lock();
-    if let Some((_, Some(until))) = guard.get(&peer_ip) {
-        if now < *until {
-            return AuthResult::Locked;
-        }
-        // 锁定到期，重置该 IP
-        guard.remove(&peer_ip);
+    let session_id = uuid::Uuid::from_slice(&frame[4..20])
+        .map(openless_core::SessionId::from_uuid)
+        .map_err(|error| {
+            openless_core::BackendError::new(
+                openless_core::BackendErrorCode::InvalidArgument,
+                format!("remote binary frame session UUID is invalid: {error}"),
+            )
+        })?;
+    let sequence = u64::from_be_bytes(
+        frame[20..28]
+            .try_into()
+            .expect("validated remote frame header has a complete sequence"),
+    );
+    let pcm = frame[HEADER_BYTES..].to_vec();
+    if !pcm.len().is_multiple_of(2) {
+        return Err(openless_core::BackendError::new(
+            openless_core::BackendErrorCode::InvalidArgument,
+            "remote PCM payload must contain complete signed Int16LE samples",
+        ));
     }
-    if pin_ok {
-        guard.remove(&peer_ip);
-        // 成功认证后重置全局计数，避免暴力后期合法用户被误锁
-        let mut global = state.pin_global_fails.lock();
-        global.0 = 0;
-        AuthResult::Ok
-    } else {
-        // 容量兜底：先丢已解锁/过期的条目，防伪造海量源 IP 撑爆表。
-        if guard.len() >= PIN_FAILS_MAX_ENTRIES {
-            guard.retain(|_, (_, until)| matches!(until, Some(t) if *t > now));
-        }
-        let entry = guard.entry(peer_ip).or_insert((0, None));
-        entry.0 += 1;
-        if entry.0 >= PIN_MAX_FAILS {
-            entry.1 = Some(now + Duration::from_secs(PIN_LOCK_SECS));
-        }
-        AuthResult::BadPin
-    }
+    Ok((session_id, sequence, pcm))
 }
 
 #[cfg(test)]
@@ -871,11 +844,11 @@ mod tests {
     use std::sync::Arc;
 
     use openless_core::{
-        BackendConfig, BackendDependencies, BackendErrorCode, OpenLessBackend, RemoteInputConfig,
-        RemoteInputService, SessionId,
+        BackendConfig, BackendDependencies, BackendErrorCode, OpenLessBackend, RemoteAuthResult,
+        RemoteInputConfig, RemoteInputService, SessionId,
     };
 
-    use super::apply_remote_control;
+    use super::{apply_remote_control, parse_audio_frame, parse_hello_pin};
 
     fn backend() -> (
         OpenLessBackend,
@@ -915,17 +888,25 @@ mod tests {
             .await
             .unwrap();
         let connection_id = SessionId::new();
-        remote.connect(connection_id).await.unwrap();
+        let pin = remote.read_pairing_pin().await.unwrap();
+        assert_eq!(
+            remote
+                .authenticate(connection_id, "127.0.0.1".to_string(), pin)
+                .await
+                .unwrap(),
+            RemoteAuthResult::Ok
+        );
         let mut session_id = None;
 
-        assert!(apply_remote_control(
+        let started = apply_remote_control(
             r#"{"type":"start"}"#,
             remote.as_ref(),
             connection_id,
             &mut session_id,
         )
         .await
-        .is_none());
+        .expect("start must return its typed session identity");
+        assert_eq!(started["type"], "started");
         let first_session = session_id.expect("start must establish a session lease");
         let duplicate = apply_remote_control(
             r#"{"type":"start"}"#,
@@ -980,5 +961,28 @@ mod tests {
             BackendErrorCode::Cancelled
         );
         let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn websocket_wire_parser_requires_contract_2_frames() {
+        let session = SessionId::new();
+        let mut frame = Vec::from(*b"OL20");
+        frame.extend_from_slice(session.as_uuid().as_bytes());
+        frame.extend_from_slice(&7_u64.to_be_bytes());
+        frame.extend_from_slice(&[1, 0, 2, 0]);
+
+        let parsed = parse_audio_frame(&frame).unwrap();
+        assert_eq!(parsed.0, session);
+        assert_eq!(parsed.1, 7);
+        assert_eq!(parsed.2, vec![1, 0, 2, 0]);
+
+        frame[0] = b'X';
+        assert_eq!(
+            parse_audio_frame(&frame).unwrap_err().code,
+            BackendErrorCode::InvalidArgument
+        );
+        assert!(parse_hello_pin(r#"{"type":"other","pin":"123456"}"#)
+            .expose_secret()
+            .is_empty());
     }
 }

@@ -14,8 +14,8 @@ const [
   lessComputerPanel,
   qaCommand,
   remoteServer,
+  remoteInputCore,
   coordinator,
-  coordinatorAsrWiring,
   coordinatorDictation,
   coordinatorCapsule,
   coordinatorHotkeys,
@@ -26,6 +26,9 @@ const [
   selectionVoiceCoordinator,
   dictionaryCommand,
   stylePacksCommand,
+  androidNativeBridge,
+  androidKotlinBridge,
+  androidOverlayService,
 ] =
   await Promise.all([
     read('src/lib/types.ts'),
@@ -39,9 +42,9 @@ const [
     read('src/pages/LessComputerPanel.tsx'),
     read('src-tauri/src/commands/qa.rs'),
     read('src-tauri/src/remote_server/mod.rs'),
+    read('crates/openless-core/src/remote_input_service.rs'),
     read('src-tauri/src/coordinator.rs'),
-    read('src-tauri/src/coordinator/asr_wiring.rs'),
-    read('src-tauri/src/coordinator/dictation.rs'),
+    read('src-tauri/src/coordinator/dictation_core.rs'),
     read('src-tauri/src/coordinator/capsule_focus.rs'),
     read('src-tauri/src/coordinator/hotkey_loops.rs'),
     read('src-tauri/src/tauri_coordinator_host.rs'),
@@ -51,6 +54,9 @@ const [
     read('src-tauri/src/coordinator/selection_voice_session.rs'),
     read('src-tauri/src/commands/dictionary.rs'),
     read('src-tauri/src/commands/style_packs.rs'),
+    read('src-tauri/src/android/native_bridge.rs'),
+    read('android/kotlin/OpenLessNative.kt'),
+    read('android/kotlin/OpenLessOverlayService.kt'),
   ]);
 
 for (const kind of ['awaiting_approval', 'cancelled', 'error']) {
@@ -58,15 +64,15 @@ for (const kind of ['awaiting_approval', 'cancelled', 'error']) {
   assert.match(qaPanel, new RegExp(`case '${kind}':`), `QaPanel must handle ${kind}`);
 }
 for (const field of [
-  'session_id',
+  'sessionId',
   'messages',
-  'selection_preview',
+  'selectionPreview',
   'chunk',
   'error',
-  'edit_instruction_mode',
-  'edit_apply_available',
-  'edit_revert_available',
-  'approval_token',
+  'editInstructionMode',
+  'editApplyAvailable',
+  'editRevertAvailable',
+  'approvalToken',
 ]) {
   assert.match(types, new RegExp(`\\b${field}\\?`), `QaStatePayload is missing ${field}`);
 }
@@ -136,13 +142,18 @@ assert.match(
 
 assert.match(
   remoteServer,
-  /match authed \{[^]*?AuthResult::BadPin[^]*?return;[^]*?AuthResult::Locked[^]*?return;[^]*?\.connect\(connection_id\)/,
-  'Remote Input must reject an invalid PIN before creating a Core connection',
+  /\.authenticate\(connection_id[^]*?match authed \{[^]*?RemoteAuthResult::BadPin[^]*?return;[^]*?RemoteAuthResult::Locked[^]*?return;/,
+  'Remote Input must delegate authentication to Core and reject invalid results before handling controls',
 );
 assert.match(
+  remoteInputCore,
+  /authenticate_inner[^]*?constant_time_eq\([^]*?candidate\.expose_secret\(\)[^]*?expected\.expose_secret\(\)/,
+  'Remote Input PIN verification must remain constant-time inside Core',
+);
+assert.doesNotMatch(
   remoteServer,
-  /verify_hello[^]*?constant_time_eq\(p\.as_bytes\(\), state\.pin\.as_bytes\(\)\)/,
-  'Remote Input PIN verification must retain constant-time comparison',
+  /constant_time_eq|PIN_(?:MAX_FAILS|LOCK_SECS|GLOBAL_MAX_FAILS)/,
+  'the Tauri WebSocket adapter must not retain authentication or lockout policy',
 );
 assert.match(
   remoteServer,
@@ -157,7 +168,6 @@ assert.match(
 
 const coordinatorBusinessSources = [
   coordinator,
-  coordinatorAsrWiring,
   coordinatorDictation,
   coordinatorCapsule,
   coordinatorHotkeys,
@@ -170,14 +180,14 @@ for (const eventName of ['local-asr-token', 'remote:result']) {
   );
 }
 assert.match(
-  coordinatorBusinessSources,
-  /BackendEventKind::TranscriptDelta/,
-  'legacy Sherpa progress must publish a typed Core transcript delta',
+  coordinatorDictation,
+  /dispatch_dictation_hotkey_edge_with_session_options/,
+  'Tauri dictation hotkeys must delegate the complete session transition to Core',
 );
 assert.match(
-  coordinatorBusinessSources,
-  /BackendEventKind::DictationCompleted/,
-  'legacy completion must publish a typed Core result',
+  coordinatorDictation,
+  /CliDispatchOutcome::DictationCompleted/,
+  'Tauri dictation bookkeeping must consume the typed Core terminal outcome',
 );
 const coordinatorInner = coordinator.match(/struct Inner \{([^]*?)\n\}/)?.[1];
 assert.ok(coordinatorInner, 'Coordinator Inner must remain inspectable by the architecture contract');
@@ -313,6 +323,16 @@ assert.doesNotMatch(
   /parse_edit_plan|apply_edit_plan|generate_edit_plan|voice_edit_system_prompt/,
   'the QA adapter must not recreate the Core selection-edit workflow',
 );
+assert.match(
+  qaAdapter,
+  /\.start_qa_voice_capture\(/,
+  'the QA adapter must use the Core-owned capture and transcription session',
+);
+assert.doesNotMatch(
+  qaAdapter,
+  /\b(?:AudioRecorder|TranscriptionEngine|ActiveRecording|TauriQaPcmBuffer|TauriQaAudioFanout)\b/,
+  'the QA adapter must not own recorder, transcription, or PCM lifecycle implementations',
+);
 assert.doesNotMatch(
   qaAdapter,
   /try_state::<Arc<crate::coordinator::Coordinator>>|Tauri coordinator state is unavailable/,
@@ -374,15 +394,10 @@ assert.doesNotMatch(
   /CoordinatorState/,
   'style-pack commands must not reach back into Coordinator for business diagnostics',
 );
-assert.match(
-  coordinatorBusinessSources,
-  /backend\.asr_vocabulary_phrases\(\)/,
-  'ASR hotword ordering must come from the shared Core vocabulary projection',
-);
 assert.doesNotMatch(
   coordinatorBusinessSources,
-  /(?:fn|const)\s+(?:asr_vocab_phrases|prioritize_vocab_for_asr|FRESH_VOCAB_SEATS)\b/,
-  'Coordinator must not own the Core ASR vocabulary priority rule',
+  /\bActiveAsr\b|CredentialsVault|ProviderScope|build_active_omni_provider|build_tauri_omni_provider|(?:fn|const)\s+(?:asr_vocab_phrases|prioritize_vocab_for_asr|FRESH_VOCAB_SEATS)\b/,
+  'Coordinator must not own ASR provider, credential, active-session, or vocabulary policy',
 );
 for (const legacyDictationFacade of [
   'start_dictation',
@@ -397,5 +412,20 @@ for (const legacyDictationFacade of [
     `Coordinator must not expose the legacy ${legacyDictationFacade} facade; production entry points use openless-core`,
   );
 }
+assert.match(
+  androidNativeBridge,
+  /nativeBackendSnapshot[\s\S]*?android_backend_snapshot_response\(CORE_BACKEND\.get\(\)\.map\(Arc::as_ref\)\)/,
+  'Android JNI must expose the typed Core startup handshake',
+);
+assert.match(
+  androidKotlinBridge,
+  /BACKEND_CONTRACT_VERSION = "2\.0\.0"[\s\S]*?requireBackendContract\(\)[\s\S]*?contractVersion/,
+  'Android Kotlin must reject a backend contract version other than 2.0.0',
+);
+assert.match(
+  androidOverlayService,
+  /onCreate\(\)[\s\S]*?OpenLessNative\.requireBackendContract\(\)[\s\S]*?stopSelf\(\)/,
+  'Android overlay startup must execute the JNI contract handshake before accepting actions',
+);
 
 console.log('shared-backend-wire-contract.test.mjs passed');

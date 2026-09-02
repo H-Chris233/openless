@@ -225,6 +225,13 @@ fn backend_with_selection_voice(
     ));
     let mut dependencies = BackendDependencies::unsupported();
     dependencies.qa_runtime = Some(runtime);
+    dependencies.text_inserter =
+        Arc::new(openless_core::testing::FixtureTextInserter::with_outcome(
+            openless_core::InsertOutcome::Inserted,
+        ));
+    dependencies.dictation_engine = Arc::new(
+        openless_core::testing::FixtureDictationEngine::successful("raw", "final"),
+    );
     let backend = OpenLessBackend::new(
         BackendConfig {
             data_dir: data_dir.clone(),
@@ -234,6 +241,38 @@ fn backend_with_selection_voice(
     )
     .unwrap();
     (Arc::new(backend), data_dir)
+}
+
+#[tokio::test]
+async fn qa_voice_and_dictation_share_the_core_voice_lease() {
+    let runtime = Arc::new(FixtureQaRuntime::responding("answer"));
+    let (backend, data_dir) = backend_with_selection_voice(runtime);
+    backend.start().await.unwrap();
+
+    let dictation = backend.start_dictation().await.unwrap();
+    assert_eq!(
+        backend
+            .services()
+            .qa
+            .toggle_recording()
+            .await
+            .unwrap_err()
+            .code,
+        BackendErrorCode::Busy
+    );
+    backend.cancel_dictation(Some(dictation)).await.unwrap();
+
+    backend.services().qa.toggle_recording().await.unwrap();
+    assert_eq!(
+        backend.start_dictation().await.unwrap_err().code,
+        BackendErrorCode::Busy
+    );
+    let session_id = backend.services().qa.snapshot().await.unwrap().session_id;
+    backend.services().qa.cancel(session_id).await.unwrap();
+    backend.start_dictation().await.unwrap();
+
+    backend.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(data_dir);
 }
 
 #[tokio::test]
@@ -714,8 +753,8 @@ async fn qa_state_wire_payloads_keep_per_kind_optional_fields() {
     let idle_json = serde_json::to_value(idle).unwrap();
     assert_eq!(idle_json["kind"], "idle");
     assert!(idle_json.get("messages").is_some());
-    assert_eq!(idle_json["edit_instruction_mode"], false);
-    assert_eq!(idle_json["edit_apply_available"], false);
+    assert_eq!(idle_json["editInstructionMode"], false);
+    assert_eq!(idle_json["editApplyAvailable"], false);
 
     let delta = states
         .iter()
@@ -724,10 +763,10 @@ async fn qa_state_wire_payloads_keep_per_kind_optional_fields() {
     let delta_json = serde_json::to_value(delta).unwrap();
     assert!(delta_json.get("chunk").is_some());
     assert!(delta_json.get("messages").is_none());
-    assert!(delta_json.get("selection_preview").is_none());
-    assert!(delta_json.get("edit_instruction_mode").is_none());
-    assert!(delta_json.get("edit_apply_available").is_none());
-    assert!(delta_json.get("edit_revert_available").is_none());
+    assert!(delta_json.get("selectionPreview").is_none());
+    assert!(delta_json.get("editInstructionMode").is_none());
+    assert!(delta_json.get("editApplyAvailable").is_none());
+    assert!(delta_json.get("editRevertAvailable").is_none());
 
     let answer = states
         .iter()
@@ -736,10 +775,10 @@ async fn qa_state_wire_payloads_keep_per_kind_optional_fields() {
     let answer_json = serde_json::to_value(answer).unwrap();
     assert!(answer_json.get("messages").is_some());
     assert!(answer_json.get("chunk").is_none());
-    assert!(answer_json.get("selection_preview").is_none());
-    assert!(answer_json.get("edit_instruction_mode").is_none());
-    assert!(answer_json.get("edit_apply_available").is_none());
-    assert!(answer_json.get("edit_revert_available").is_none());
+    assert!(answer_json.get("selectionPreview").is_none());
+    assert!(answer_json.get("editInstructionMode").is_none());
+    assert!(answer_json.get("editApplyAvailable").is_none());
+    assert!(answer_json.get("editRevertAvailable").is_none());
     let _ = std::fs::remove_dir_all(data_dir);
 }
 

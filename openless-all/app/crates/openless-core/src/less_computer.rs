@@ -5,10 +5,11 @@ use std::time::Duration;
 
 use futures_util::future::BoxFuture;
 
-use crate::coding_agent::{autonomous_prompt, CodingAgentProvider, CodingAgentRequest};
+use crate::coding_agent::{
+    autonomous_prompt, CodingAgentProvider, CodingAgentRequest, CodingAgentRunner,
+};
 use crate::domains::{
     LessComputerApi, LessComputerRunOutcome, LessComputerRunRequest, LessComputerRunResult,
-    LessComputerRuntimeAdapter,
 };
 use crate::errors::{BackendError, BackendErrorCode};
 use crate::events::{
@@ -24,10 +25,11 @@ struct LessComputerState {
     conversation_active: AtomicBool,
     approvals: Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>,
     events: Mutex<Option<BackendEventPublisher>>,
-    runtime: Mutex<Option<Arc<dyn LessComputerRuntimeAdapter>>>,
+    runner: Mutex<Option<Arc<CodingAgentRunner>>>,
     active_lease: Mutex<Option<ActiveLease>>,
     completed_turns: Mutex<VecDeque<CompletedTurn>>,
     approval_timeout: Duration,
+    voice_sessions: Arc<crate::voice_session::VoiceSessionGate>,
 }
 
 enum ActiveLease {
@@ -64,15 +66,32 @@ impl LessComputerService {
     }
 
     fn with_approval_timeout(approval_timeout: Duration) -> Self {
+        Self::with_voice_sessions_and_timeout(
+            Arc::new(crate::voice_session::VoiceSessionGate::default()),
+            approval_timeout,
+        )
+    }
+
+    pub(crate) fn with_voice_sessions(
+        voice_sessions: Arc<crate::voice_session::VoiceSessionGate>,
+    ) -> Self {
+        Self::with_voice_sessions_and_timeout(voice_sessions, DEFAULT_APPROVAL_TIMEOUT)
+    }
+
+    fn with_voice_sessions_and_timeout(
+        voice_sessions: Arc<crate::voice_session::VoiceSessionGate>,
+        approval_timeout: Duration,
+    ) -> Self {
         Self {
             state: Arc::new(LessComputerState {
                 conversation_active: AtomicBool::new(false),
                 approvals: Mutex::new(HashMap::new()),
                 events: Mutex::new(None),
-                runtime: Mutex::new(None),
+                runner: Mutex::new(None),
                 active_lease: Mutex::new(None),
                 completed_turns: Mutex::new(VecDeque::new()),
                 approval_timeout,
+                voice_sessions,
             }),
         }
     }
@@ -85,16 +104,16 @@ impl LessComputerService {
             .remove(token);
     }
 
-    fn runtime(&self) -> Result<Arc<dyn LessComputerRuntimeAdapter>, BackendError> {
+    fn runner(&self) -> Result<Arc<CodingAgentRunner>, BackendError> {
         self.state
-            .runtime
+            .runner
             .lock()
-            .expect("Less Computer runtime lock poisoned")
+            .expect("Less Computer runner lock poisoned")
             .clone()
             .ok_or_else(|| {
                 BackendError::new(
                     BackendErrorCode::Unsupported,
-                    "Less Computer runtime is not configured",
+                    "Less Computer runner is not configured",
                 )
             })
     }
@@ -125,6 +144,10 @@ impl LessComputerService {
                 "Less Computer is already running",
             ));
         }
+        self.state.voice_sessions.acquire(
+            session_id,
+            crate::voice_session::VoiceSessionKind::LessComputer,
+        )?;
         *active = Some(ActiveLease::Capture(ActiveCapture {
             session_id,
             cancel: Arc::new(AtomicBool::new(false)),
@@ -141,8 +164,12 @@ impl LessComputerService {
             .active_lease
             .lock()
             .expect("Less Computer active-lease lock poisoned");
-        match active.take() {
+        match active.as_ref() {
             None => {
+                self.state.voice_sessions.acquire(
+                    session_id,
+                    crate::voice_session::VoiceSessionKind::LessComputer,
+                )?;
                 let cancel = Arc::new(AtomicBool::new(false));
                 *active = Some(ActiveLease::Run(ActiveRun {
                     session_id,
@@ -152,19 +179,20 @@ impl LessComputerService {
             }
             Some(ActiveLease::Capture(capture)) if capture.session_id == session_id => {
                 let cancel = Arc::clone(&capture.cancel);
+                self.state.voice_sessions.acquire(
+                    session_id,
+                    crate::voice_session::VoiceSessionKind::LessComputer,
+                )?;
                 *active = Some(ActiveLease::Run(ActiveRun {
                     session_id,
                     cancel: Arc::clone(&cancel),
                 }));
                 Ok(cancel)
             }
-            Some(existing) => {
-                *active = Some(existing);
-                Err(BackendError::new(
-                    BackendErrorCode::Busy,
-                    "Less Computer is already running",
-                ))
-            }
+            Some(_) => Err(BackendError::new(
+                BackendErrorCode::Busy,
+                "Less Computer is already running",
+            )),
         }
     }
 
@@ -181,6 +209,10 @@ impl LessComputerService {
         };
         if matches {
             active.take();
+        }
+        drop(active);
+        if matches {
+            self.state.voice_sessions.release(session_id);
         }
     }
 
@@ -239,6 +271,11 @@ impl LessComputerService {
             Some(ActiveLease::Capture(capture)) if capture.session_id == session_id
         ) {
             active.take();
+        }
+        let released = active.is_none();
+        drop(active);
+        if released {
+            self.state.voice_sessions.release(session_id);
         }
     }
 
@@ -329,12 +366,12 @@ impl LessComputerApi for LessComputerService {
             .expect("Less Computer event lock poisoned") = Some(publisher);
     }
 
-    fn bind_runtime(&self, runtime: Arc<dyn LessComputerRuntimeAdapter>) {
+    fn bind_runner(&self, runner: Arc<CodingAgentRunner>) {
         *self
             .state
-            .runtime
+            .runner
             .lock()
-            .expect("Less Computer runtime lock poisoned") = Some(runtime);
+            .expect("Less Computer runner lock poisoned") = Some(runner);
     }
 
     fn begin_capture(&self, session_id: SessionId) -> Result<(), BackendError> {
@@ -489,14 +526,27 @@ impl LessComputerService {
     ) -> Result<LessComputerRunResult, BackendError> {
         let transcript = request.transcript.trim().to_string();
         if transcript.is_empty() {
+            self.clear_active_lease(request.session_id);
             return Err(BackendError::new(
                 BackendErrorCode::InvalidArgument,
                 "Less Computer transcript cannot be empty",
             ));
         }
-        let runtime = self.runtime()?;
-        let publisher = self.publisher()?;
         let cancel = self.promote_capture_or_start_run(request.session_id)?;
+        let runner = match self.runner() {
+            Ok(runner) => runner,
+            Err(error) => {
+                self.clear_active_lease(request.session_id);
+                return Err(error);
+            }
+        };
+        let publisher = match self.publisher() {
+            Ok(publisher) => publisher,
+            Err(error) => {
+                self.clear_active_lease(request.session_id);
+                return Err(error);
+            }
+        };
 
         let continue_session = self.begin_turn();
         if !continue_session {
@@ -521,7 +571,7 @@ impl LessComputerService {
             }),
         );
 
-        let mut outcome = self.run_once(&runtime, &request, Arc::clone(&cancel)).await;
+        let mut outcome = self.run_once(&runner, &request, Arc::clone(&cancel)).await;
         if request.provider.supports_command_approval() {
             if let Some(pattern) = self.approval_pattern(&outcome) {
                 let approval = self.request_approval(pattern.clone(), approval_reason(&pattern));
@@ -534,7 +584,7 @@ impl LessComputerService {
                 };
                 if approved {
                     request.approved_patterns = equivalent_approved_patterns(&pattern);
-                    outcome = self.run_once(&runtime, &request, Arc::clone(&cancel)).await;
+                    outcome = self.run_once(&runner, &request, Arc::clone(&cancel)).await;
                 }
             }
         }
@@ -578,7 +628,7 @@ impl LessComputerService {
 
     async fn run_once(
         &self,
-        runtime: &Arc<dyn LessComputerRuntimeAdapter>,
+        runner: &Arc<CodingAgentRunner>,
         request: &LessComputerRunRequest,
         cancel: Arc<AtomicBool>,
     ) -> LessComputerRunOutcome {
@@ -597,7 +647,7 @@ impl LessComputerService {
         runner_request.approved_patterns = request.approved_patterns.clone();
 
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        let run_future = runtime.run(runner_request, sender, Arc::clone(&cancel));
+        let run_future = runner.run_streaming(runner_request, Arc::clone(&cancel), Some(sender));
         tokio::pin!(run_future);
         let mut final_text = String::new();
         let mut cost_usd = None;
@@ -787,125 +837,120 @@ async fn wait_for_cancel(cancel: Arc<AtomicBool>) {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::Ordering;
-
     use super::*;
-    use crate::coding_agent::{CodingAgentPermissionMode, CodingAgentProvider};
-    use crate::domains::{
-        LessComputerRunOutcome, LessComputerRunRequest, LessComputerRuntimeAdapter,
+    use crate::coding_agent::{
+        AgentCommand, CancellationToken, CodingAgentPermissionMode, CodingAgentProcessAdapter,
+        CodingAgentProvider, ProcessExit, ProcessOutputLine, ProcessOutputSink, ProcessStream,
     };
-    use crate::events::CodingAgentStreamEvent;
+    use crate::domains::{LessComputerRunOutcome, LessComputerRunRequest};
     use crate::events::EventBus;
 
     #[derive(Default)]
     struct FixtureRuntime {
-        requests: Mutex<Vec<crate::coding_agent::CodingAgentRequest>>,
+        requests: Mutex<Vec<AgentCommand>>,
     }
 
-    impl LessComputerRuntimeAdapter for FixtureRuntime {
-        fn run(
+    impl CodingAgentProcessAdapter for FixtureRuntime {
+        fn execute(
             &self,
-            request: crate::coding_agent::CodingAgentRequest,
-            events: tokio::sync::mpsc::UnboundedSender<CodingAgentStreamEvent>,
-            _cancel: Arc<AtomicBool>,
-        ) -> BoxFuture<'static, Result<(), BackendError>> {
+            command: AgentCommand,
+            output: Arc<dyn ProcessOutputSink>,
+            _cancel: CancellationToken,
+        ) -> BoxFuture<'static, Result<ProcessExit, BackendError>> {
             self.requests
                 .lock()
                 .expect("fixture runtime lock poisoned")
-                .push(request.clone());
+                .push(command);
             Box::pin(async move {
-                let _ = events.send(CodingAgentStreamEvent::Started {
-                    session_id: request.session_id.clone(),
+                output.write(ProcessOutputLine {
+                    stream: ProcessStream::Stdout,
+                    line: r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"答"}}}"#.into(),
                 });
-                let _ = events.send(CodingAgentStreamEvent::Delta {
-                    session_id: request.session_id.clone(),
-                    text: "答".into(),
+                output.write(ProcessOutputLine {
+                    stream: ProcessStream::Stdout,
+                    line:
+                        r#"{"type":"result","result":"答案","total_cost_usd":0.01,"duration_ms":3}"#
+                            .into(),
                 });
-                let _ = events.send(CodingAgentStreamEvent::Completed {
-                    session_id: request.session_id,
-                    text: "答案".into(),
-                    cost_usd: Some(0.01),
-                    duration_ms: Some(3),
-                });
-                Ok(())
+                Ok(ProcessExit {
+                    code: Some(0),
+                    success: true,
+                })
             })
         }
     }
 
     struct BlockingRuntime;
 
-    impl LessComputerRuntimeAdapter for BlockingRuntime {
-        fn run(
+    impl CodingAgentProcessAdapter for BlockingRuntime {
+        fn execute(
             &self,
-            request: crate::coding_agent::CodingAgentRequest,
-            events: tokio::sync::mpsc::UnboundedSender<CodingAgentStreamEvent>,
-            cancel: Arc<AtomicBool>,
-        ) -> BoxFuture<'static, Result<(), BackendError>> {
+            _command: AgentCommand,
+            _output: Arc<dyn ProcessOutputSink>,
+            cancel: CancellationToken,
+        ) -> BoxFuture<'static, Result<ProcessExit, BackendError>> {
             Box::pin(async move {
-                let _ = events.send(CodingAgentStreamEvent::Started {
-                    session_id: request.session_id.clone(),
-                });
-                while !cancel.load(Ordering::Acquire) {
+                while !cancel.is_cancelled() {
                     tokio::time::sleep(Duration::from_millis(5)).await;
                 }
-                let _ = events.send(CodingAgentStreamEvent::Cancelled {
-                    session_id: request.session_id,
-                });
-                Err(BackendError::new(
-                    BackendErrorCode::Cancelled,
-                    "fixture cancelled",
-                ))
+                Ok(ProcessExit {
+                    code: None,
+                    success: false,
+                })
             })
         }
     }
 
     struct StaleRuntime;
 
-    impl LessComputerRuntimeAdapter for StaleRuntime {
-        fn run(
+    impl CodingAgentProcessAdapter for StaleRuntime {
+        fn execute(
             &self,
-            request: crate::coding_agent::CodingAgentRequest,
-            events: tokio::sync::mpsc::UnboundedSender<CodingAgentStreamEvent>,
-            _cancel: Arc<AtomicBool>,
-        ) -> BoxFuture<'static, Result<(), BackendError>> {
+            _command: AgentCommand,
+            output: Arc<dyn ProcessOutputSink>,
+            _cancel: CancellationToken,
+        ) -> BoxFuture<'static, Result<ProcessExit, BackendError>> {
             Box::pin(async move {
-                let stale = format!("{}-stale", request.session_id);
-                let _ = events.send(CodingAgentStreamEvent::Delta {
-                    session_id: stale.clone(),
-                    text: "不应出现".into(),
+                output.write(ProcessOutputLine {
+                    stream: ProcessStream::Stdout,
+                    line: r#"{"type":"unknown","sessionId":"stale"}"#.into(),
                 });
-                let _ = events.send(CodingAgentStreamEvent::Completed {
-                    session_id: stale,
-                    text: "过期结果".into(),
-                    cost_usd: None,
-                    duration_ms: None,
-                });
-                Ok(())
+                Ok(ProcessExit {
+                    code: Some(0),
+                    success: true,
+                })
             })
         }
     }
 
     struct PartialErrorRuntime;
 
-    impl LessComputerRuntimeAdapter for PartialErrorRuntime {
-        fn run(
+    impl CodingAgentProcessAdapter for PartialErrorRuntime {
+        fn execute(
             &self,
-            request: crate::coding_agent::CodingAgentRequest,
-            events: tokio::sync::mpsc::UnboundedSender<CodingAgentStreamEvent>,
-            _cancel: Arc<AtomicBool>,
-        ) -> BoxFuture<'static, Result<(), BackendError>> {
+            _command: AgentCommand,
+            output: Arc<dyn ProcessOutputSink>,
+            _cancel: CancellationToken,
+        ) -> BoxFuture<'static, Result<ProcessExit, BackendError>> {
             Box::pin(async move {
-                let _ = events.send(CodingAgentStreamEvent::Delta {
-                    session_id: request.session_id.clone(),
-                    text: "部分输出".into(),
+                output.write(ProcessOutputLine {
+                    stream: ProcessStream::Stdout,
+                    line: r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"部分输出"}}}"#.into(),
                 });
-                let _ = events.send(CodingAgentStreamEvent::Error {
-                    session_id: request.session_id,
-                    message: "协议错误".into(),
+                output.write(ProcessOutputLine {
+                    stream: ProcessStream::Stdout,
+                    line: r#"{"type":"result","is_error":true,"result":"协议错误"}"#.into(),
                 });
-                Ok(())
+                Ok(ProcessExit {
+                    code: Some(0),
+                    success: true,
+                })
             })
         }
+    }
+
+    fn runner(adapter: Arc<dyn CodingAgentProcessAdapter>) -> Arc<CodingAgentRunner> {
+        Arc::new(CodingAgentRunner::new(adapter))
     }
 
     fn service_with_events() -> (LessComputerService, crate::events::EventSubscription) {
@@ -1007,7 +1052,7 @@ mod tests {
     #[tokio::test]
     async fn fresh_turn_clears_previous_continuation_history() {
         let (service, mut events) = service_with_events();
-        service.bind_runtime(Arc::new(FixtureRuntime::default()));
+        service.bind_runner(runner(Arc::new(FixtureRuntime::default())));
         service.submit(request(SessionId::new())).await.unwrap();
         while events.try_recv().is_ok() {}
 
@@ -1096,7 +1141,7 @@ mod tests {
         let service = LessComputerService::new();
         let runtime = Arc::new(FixtureRuntime::default());
         service.bind_event_publisher(BackendEventPublisher::new(bus));
-        service.bind_runtime(runtime.clone());
+        service.bind_runner(runner(runtime.clone()));
         let session_id = crate::types::SessionId::new();
 
         let result = service
@@ -1123,7 +1168,10 @@ mod tests {
             }
         );
         let request = runtime.requests.lock().unwrap().first().cloned().unwrap();
-        assert!(request.prompt.contains("执行任务"));
+        assert!(matches!(
+            request.prompt,
+            crate::coding_agent::PromptPayload::Stdin(ref prompt) if prompt.contains("执行任务")
+        ));
 
         let mut kinds = Vec::new();
         for _ in 0..4 {
@@ -1190,7 +1238,7 @@ mod tests {
     #[tokio::test]
     async fn matching_capture_is_promoted_to_the_agent_run_and_cleared_on_terminal() {
         let (service, _events) = service_with_events();
-        service.bind_runtime(Arc::new(FixtureRuntime::default()));
+        service.bind_runner(runner(Arc::new(FixtureRuntime::default())));
         let session_id = SessionId::new();
         service.begin_capture(session_id).unwrap();
 
@@ -1207,7 +1255,7 @@ mod tests {
     #[tokio::test]
     async fn duplicate_submit_is_busy_and_cancel_forces_cancelled_terminal_state() {
         let (service, mut events) = service_with_events();
-        service.bind_runtime(Arc::new(BlockingRuntime));
+        service.bind_runner(runner(Arc::new(BlockingRuntime)));
         let first_id = SessionId::new();
         let first = {
             let service = service.clone();
@@ -1257,7 +1305,7 @@ mod tests {
     #[tokio::test]
     async fn stale_stream_events_are_dropped_and_still_have_one_terminal_failure() {
         let (service, mut events) = service_with_events();
-        service.bind_runtime(Arc::new(StaleRuntime));
+        service.bind_runner(runner(Arc::new(StaleRuntime)));
         let result = service.submit(request(SessionId::new())).await.unwrap();
         assert!(matches!(
             result.outcome,
@@ -1289,7 +1337,7 @@ mod tests {
     #[tokio::test]
     async fn runtime_error_wins_over_partial_output() {
         let (service, mut events) = service_with_events();
-        service.bind_runtime(Arc::new(PartialErrorRuntime));
+        service.bind_runner(runner(Arc::new(PartialErrorRuntime)));
         let result = service.submit(request(SessionId::new())).await.unwrap();
         assert_eq!(
             result.outcome,
@@ -1316,7 +1364,7 @@ mod tests {
     #[tokio::test]
     async fn dismiss_clears_continuation_and_shutdown_path_can_be_reused() {
         let (service, mut events) = service_with_events();
-        service.bind_runtime(Arc::new(FixtureRuntime::default()));
+        service.bind_runner(runner(Arc::new(FixtureRuntime::default())));
         let first = service.submit(request(SessionId::new())).await.unwrap();
         assert!(matches!(
             first.outcome,
