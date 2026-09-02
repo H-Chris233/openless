@@ -268,11 +268,6 @@ jobs:
         if: runner.os != 'macOS'
         run: node scripts/ci-disable-macos-qwen3.mjs
 
-      - name: Prepare Windows Sherpa static libraries
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: ./scripts/prepare-windows-sherpa.ps1
-
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -287,6 +282,11 @@ jobs:
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: 'openless-all/app/src-tauri -> target'
+
+      - name: Prepare Windows Sherpa static libraries
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/prepare-windows-sherpa.ps1
 
       - name: Install frontend dependencies
         run: npm ci

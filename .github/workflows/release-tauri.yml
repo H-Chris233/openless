@@ -69,12 +69,6 @@ jobs:
         if: ${{ !startsWith(matrix.platform, 'macos') }}
         run: node openless-all/app/scripts/ci-disable-macos-qwen3.mjs
 
-      - name: Prepare Windows Sherpa static libraries
-        if: matrix.platform == 'windows-latest'
-        working-directory: 'openless-all/app'
-        shell: pwsh
-        run: ./scripts/prepare-windows-sherpa.ps1
-
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -89,6 +83,12 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           workspaces: 'openless-all/app/src-tauri -> target'
+
+      - name: Prepare Windows Sherpa static libraries
+        if: matrix.platform == 'windows-latest'
+        working-directory: 'openless-all/app'
+        shell: pwsh
+        run: ./scripts/prepare-windows-sherpa.ps1
 
       - name: Install npm deps
         working-directory: 'openless-all/app'
