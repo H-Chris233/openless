@@ -27,10 +27,10 @@ use core_foundation::runloop::{
     kCFRunLoopDefaultMode, CFRunLoop, CFRunLoopRunResult, CFRunLoopSource, CFRunLoopSourceRef,
 };
 
-use super::diff::{edit_is_within_typed_text, is_vocab_worthy, minimal_edit};
 use super::{
-    evaluate_gate, plan_window, utf16_offset_to_char_offset, window_around_cursor, EditPair,
-    GateInputs, ReadOutcome, AX_MESSAGING_TIMEOUT_SECS, EDIT_WATCH_MAX_LIFETIME,
+    edit_is_within_typed_text, evaluate_gate, is_vocab_worthy, minimal_edit, plan_window,
+    utf16_offset_to_char_offset, window_around_cursor, EditPair, GateInputs, ReadOutcome,
+    AX_MESSAGING_TIMEOUT_SECS, EDIT_WATCH_MAX_LIFETIME,
 };
 
 /// 超过这个 UTF-16 长度就不整篇 `AXValue` 读回来，改走 `AXStringForRange` 只取光标附近。
@@ -90,7 +90,7 @@ const CARET_MOVE_QUIET: Duration = Duration::from_millis(300);
 /// ```
 ///
 /// 结果要么超长/跨句被拒（这次纠正白做），要么变成一条被污染的建议。这跟「改完按回车
-/// 撑成整句」是同一个根：[`minimal_edit`](super::diff::minimal_edit) 只能表达**一处
+/// 撑成整句」是同一个根：[`minimal_edit`](super::minimal_edit) 只能表达**一处
 /// 连续**差异，用户做两处改动时中间的字必然被卷进来。
 ///
 /// **没有在这里收紧**，因为两个方向都会退化掉更重要的东西：

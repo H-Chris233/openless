@@ -91,8 +91,14 @@ pub(crate) fn backend_dependencies(
     // runtime during cancellation or background cleanup.
     let task_spawner: Arc<dyn openless_core::TaskSpawner> =
         Arc::new(openless_core::TokioTaskSpawner);
-    let credential_store: Arc<dyn openless_core::CredentialStore> =
-        Arc::new(crate::commands::SystemCredentialStore);
+    let model_store = crate::persistence::models_root()
+        .ok()
+        .and_then(|root| openless_core::ModelStoreConfig::new(root).ok())
+        .and_then(|config| openless_core::ModelStore::new(config).ok())
+        .map(Arc::new);
+    let credential_store: Arc<dyn openless_core::CredentialStore> = Arc::new(
+        crate::commands::SystemCredentialStore::new(model_store.clone()),
+    );
     let local_asr_runtime = Arc::new(TauriLocalAsrRuntimeAdapter::new(
         Arc::clone(&app),
         native_asr_dependencies.clone(),
@@ -111,8 +117,10 @@ pub(crate) fn backend_dependencies(
             .expect("built-in ASR provider ids are non-empty");
     }
     #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
-    let native_asr: Arc<dyn TranscriptionEngine> =
-        Arc::new(TauriNativeTranscriptionEngine::new(native_asr_dependencies));
+    let native_asr: Arc<dyn TranscriptionEngine> = Arc::new(TauriNativeTranscriptionEngine::new(
+        native_asr_dependencies,
+        model_store.clone(),
+    ));
     #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     let _ = native_asr_dependencies;
     #[cfg(target_os = "windows")]
@@ -180,12 +188,8 @@ pub(crate) fn backend_dependencies(
             .expect("built-in Omni provider ids are non-empty");
     }
     let mut dependencies = openless_core::BackendDependencies::unsupported();
-    if let Ok(root) = crate::persistence::models_root() {
-        if let Ok(config) = openless_core::ModelStoreConfig::new(root) {
-            if let Ok(store) = openless_core::ModelStore::new(config) {
-                dependencies.services.configure_model_store(Arc::new(store));
-            }
-        }
+    if let Some(model_store) = model_store {
+        dependencies.services.configure_model_store(model_store);
     }
     dependencies
         .services
@@ -630,7 +634,7 @@ impl openless_core::ModelRuntimeAdapter for TauriLocalAsrRuntimeAdapter {
     fn test_model(
         &self,
         target: openless_core::LocalAsrTarget,
-        _model_dir: PathBuf,
+        model_dir: PathBuf,
     ) -> BoxFuture<'static, Result<openless_core::LocalAsrTestResult, BackendError>> {
         let preferences = Arc::clone(&self.preferences);
         Box::pin(async move {
@@ -643,12 +647,15 @@ impl openless_core::ModelRuntimeAdapter for TauriLocalAsrRuntimeAdapter {
             let backend = crate::asr::local::qwen_backend_for_provider(
                 &preferences.get().active_asr_provider,
             );
-            let result =
-                crate::asr::local::test_run::run_test(native_local_asr_model(&target)?, backend)
-                    .await
-                    .map_err(|error| {
-                        local_asr_backend_error(BackendErrorCode::Platform, format!("{error:#}"))
-                    })?;
+            let result = crate::asr::local::test_run::run_test(
+                native_local_asr_model(&target)?,
+                backend,
+                model_dir,
+            )
+            .await
+            .map_err(|error| {
+                local_asr_backend_error(BackendErrorCode::Platform, format!("{error:#}"))
+            })?;
             Ok(openless_core::LocalAsrTestResult {
                 target,
                 backend: result.backend,
@@ -1234,14 +1241,19 @@ impl openless_core::PlatformApi for TauriPlatformApi {
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 struct TauriNativeTranscriptionEngine {
     dependencies: TauriNativeAsrDependencies,
+    model_store: Option<Arc<openless_core::ModelStore>>,
     generation: Arc<AtomicU64>,
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 impl TauriNativeTranscriptionEngine {
-    fn new(dependencies: TauriNativeAsrDependencies) -> Self {
+    fn new(
+        dependencies: TauriNativeAsrDependencies,
+        model_store: Option<Arc<openless_core::ModelStore>>,
+    ) -> Self {
         Self {
             dependencies,
+            model_store,
             generation: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -1313,6 +1325,8 @@ impl TranscriptionEngine for TauriNativeTranscriptionEngine {
         let qwen_cache = Arc::clone(&self.dependencies.qwen_cache);
         #[cfg(target_os = "macos")]
         let whisper_cache = Arc::clone(&self.dependencies.whisper_cache);
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        let model_store = self.model_store.clone();
 
         Box::pin(async move {
             let provider_type = context.asr.provider_type.as_str();
@@ -1426,8 +1440,15 @@ impl TranscriptionEngine for TauriNativeTranscriptionEngine {
                         )
                     })?;
                 let model_id = model.as_str().to_string();
-                let model_dir =
-                    crate::asr::local::models::model_dir(model).map_err(map_native_asr_error)?;
+                let model_dir = model_store
+                    .as_ref()
+                    .ok_or_else(|| {
+                        BackendError::new(
+                            BackendErrorCode::Unsupported,
+                            "Core model store is unavailable",
+                        )
+                    })?
+                    .model_dir(model.as_str())?;
                 let cache = Arc::clone(&qwen_cache);
                 let load_cache = Arc::clone(&cache);
                 let load_model_id = model_id.clone();
@@ -1460,8 +1481,18 @@ impl TranscriptionEngine for TauriNativeTranscriptionEngine {
                                     .is_some_and(|model| model.is_whisper())
                             })
                             .unwrap_or_else(|| crate::asr::local::WHISPER_MODEL_ID.to_string());
-                        let model_path = crate::asr::local::whisper_model_path_for_model(&model_id)
-                            .map_err(map_native_asr_error)?;
+                        let model_dir = model_store
+                            .as_ref()
+                            .ok_or_else(|| {
+                                BackendError::new(
+                                    BackendErrorCode::Unsupported,
+                                    "Core model store is unavailable",
+                                )
+                            })?
+                            .model_dir(&model_id)?;
+                        let model_path =
+                            crate::asr::local::whisper_model_path_for_model(&model_id, &model_dir)
+                                .map_err(map_native_asr_error)?;
                         let cache = Arc::clone(&whisper_cache);
                         let load_cache = Arc::clone(&cache);
                         let load_model_id = model_id.clone();

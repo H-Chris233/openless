@@ -11,7 +11,15 @@ const MARKETPLACE_GITHUB_TOKEN_ACCOUNT: &str = "github.oauth_token";
 /// The implementation deliberately keeps the existing system vault format and
 /// provider-channel lookup rules in this host. Core only sees typed keys,
 /// redacted status and [`openless_core::SecretValue`].
-pub(crate) struct SystemCredentialStore;
+pub(crate) struct SystemCredentialStore {
+    model_store: Option<std::sync::Arc<openless_core::ModelStore>>,
+}
+
+impl SystemCredentialStore {
+    pub(crate) fn new(model_store: Option<std::sync::Arc<openless_core::ModelStore>>) -> Self {
+        Self { model_store }
+    }
+}
 
 pub(crate) fn sync_active_asr_provider_to_vault(provider: &str) -> Result<(), String> {
     if CredentialsVault::get_active_asr() == provider {
@@ -64,7 +72,8 @@ impl openless_core::CredentialStore for SystemCredentialStore {
         'static,
         Result<CredentialsStatus, openless_core::BackendError>,
     > {
-        run_credential_task(move || Ok(credentials_status(preferences)))
+        let model_store = self.model_store.clone();
+        run_credential_task(move || Ok(credentials_status(preferences, model_store.as_deref())))
     }
 
     fn read(
@@ -164,12 +173,16 @@ fn run_credential_task<T: Send + 'static>(
     })
 }
 
-fn credentials_status(preferences: UserPreferences) -> CredentialsStatus {
+fn credentials_status(
+    preferences: UserPreferences,
+    model_store: Option<&openless_core::ModelStore>,
+) -> CredentialsStatus {
     let snap = CredentialsVault::snapshot();
     let active_asr_provider = CredentialsVault::get_active_asr();
     let active_llm_provider = CredentialsVault::get_active_llm();
     let volcengine_configured = volcengine_configured(&snap);
-    let asr_configured = asr_configured_for_provider(&active_asr_provider, &snap);
+    let asr_configured =
+        asr_configured_for_provider_with_model_store(&active_asr_provider, &snap, model_store);
     let llm_configured = llm_configured_for_provider(&active_llm_provider, &snap);
     let omni_configured = omni_configured_for_active_provider(&snap);
     CredentialsStatus {
@@ -428,6 +441,14 @@ fn volcengine_configured(snap: &CredentialsSnapshot) -> bool {
 }
 
 pub(crate) fn asr_configured_for_provider(provider: &str, snap: &CredentialsSnapshot) -> bool {
+    asr_configured_for_provider_with_model_store(provider, snap, None)
+}
+
+fn asr_configured_for_provider_with_model_store(
+    provider: &str,
+    snap: &CredentialsSnapshot,
+    model_store: Option<&openless_core::ModelStore>,
+) -> bool {
     if crate::asr::local::is_local_whisper(provider) {
         #[cfg(target_os = "macos")]
         {
@@ -440,7 +461,9 @@ pub(crate) fn asr_configured_for_provider(provider: &str, snap: &CredentialsSnap
                         .unwrap_or(false)
                 })
                 .unwrap_or_else(|| crate::asr::local::WHISPER_MODEL_ID.to_string());
-            return crate::asr::local::whisper_model_ready_for_model(&model_id);
+            return model_store.is_some_and(|store| {
+                crate::asr::local::whisper_model_ready_for_model(store, &model_id)
+            });
         }
         #[cfg(not(target_os = "macos"))]
         {

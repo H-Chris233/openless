@@ -13,15 +13,14 @@ use crate::asr::RawTranscript;
 pub const MODEL_ID: &str = "whisper-large-v3-turbo";
 const QUANTIZED_MODEL_FILE: &str = "ggml-large-v3-turbo-q5_0.bin";
 
-pub fn model_path_for_model(model_id: &str) -> Result<PathBuf> {
+pub fn model_path_for_model(model_id: &str, model_dir: &Path) -> Result<PathBuf> {
     let id = crate::asr::local::ModelId::from_wire_id(model_id)
         .filter(|id| id.is_whisper())
         .ok_or_else(|| anyhow::anyhow!("未知的本地 Whisper 模型: {model_id}"))?;
-    let dir = crate::asr::local::models::model_dir(id)?;
     let file_name = id
         .file_name()
         .ok_or_else(|| anyhow::anyhow!("本地 Whisper 模型没有文件名: {model_id}"))?;
-    let path = model_path_in_dir(id, &dir, file_name);
+    let path = model_path_in_dir(id, model_dir, file_name);
     Ok(path)
 }
 
@@ -36,10 +35,14 @@ fn model_path_in_dir(id: crate::asr::local::ModelId, dir: &Path, file_name: &str
     path
 }
 
-pub fn model_ready_for_model(model_id: &str) -> bool {
-    model_path_for_model(model_id)
-        .map(|path| path.is_file())
-        .unwrap_or(false)
+pub fn model_ready_for_model(store: &openless_core::ModelStore, model_id: &str) -> bool {
+    store
+        .list(openless_core::LocalAsrRuntime::Generic)
+        .is_ok_and(|models| {
+            models
+                .iter()
+                .any(|model| model.target.model_id() == model_id && model.installed)
+        })
 }
 
 pub struct LocalWhisperCache {
