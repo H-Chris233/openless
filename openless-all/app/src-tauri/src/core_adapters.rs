@@ -2306,12 +2306,14 @@ impl TauriTextInsertionSession {
             self.windows_ime.restore_session(prepared);
         }
         #[cfg(target_os = "macos")]
-        crate::unicode_keystroke::restore_input_source(
-            &self.app,
-            self.previous_input_source.lock().take(),
-        )
-        .await
-        .map_err(|error| BackendError::new(BackendErrorCode::Platform, error.to_string()))?;
+        {
+            let previous_input_source = self.previous_input_source.lock().take();
+            crate::unicode_keystroke::restore_input_source(&self.app, previous_input_source)
+                .await
+                .map_err(|error| {
+                    BackendError::new(BackendErrorCode::Platform, error.to_string())
+                })?;
+        }
         Ok(())
     }
 }
