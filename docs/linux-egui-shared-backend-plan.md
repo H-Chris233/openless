@@ -39,7 +39,7 @@ egui UI  ── Linux 适配器 ──┘
 | 共享后端/架构组 | `openless-core` facade、领域实现、状态机、平台 Interface、事件/错误/能力契约、fake/headless fixture、Tauri/Linux Adapter 接线、兼容测试、CI/打包门禁和接口文档 | egui 页面、控件布局、视觉样式、交互动画、UI 自动化和最终视觉验收 |
 | Tauri 组 | React IPC 薄 wrapper、Tauri event mapping、窗口/托盘/plugin、macOS/Windows/Android 原生能力和对应 runner 证据 | 在 command 中重新实现 provider、prompt、session、设置事务或其他 core 业务规则 |
 | Linux host 组 | Linux `HostActions`、Secret Service、fcitx5、cpal、单实例、资源布局、非 UI runtime 和 Ubuntu 原生 runner 证据 | `eframe::App`、egui view、布局、视觉、UI 交互和 UI 测试 |
-| egui 组 | 基于 1.0.0 contract 实现 `eframe::App`、view-model、页面交互、视觉和 UI 验收；发现缺口时提交可复现接口需求 | 读取 core 私有模块、include Tauri 源码、复制业务规则、直接处理凭据/HTTP/provider router 或绕过 LinuxHost 事务 |
+| egui 组 | 基于 2.0.0 contract 实现 `eframe::App`、view-model、页面交互、视觉和 UI 验收；发现缺口时提交可复现接口需求 | 读取 core 私有模块、include Tauri 源码、复制业务规则、直接处理凭据/HTTP/provider router 或绕过 LinuxHost 事务 |
 
 **移交门（M7）**：只有当公开 re-export、`linux-egui-backend-contract.md`、headless example、fake/fixture、能力矩阵、事件映射表和 Linux host contract 全部可运行时，才把接口交给 egui 组。移交后 egui 可以并行开发；未完成的真实平台能力必须以 `Unsupported` 或明确 capability 状态表达，不得用 UI stub 或 fake 成功结果代替原生验收。
 
@@ -1212,7 +1212,7 @@ command/remote server 不再拥有业务 session、PIN 或 locale 的第二份�
    覆盖宿主 helper，生产 React/CLI/Android/热键入口统一调用 Core。style-pack prompt 诊断和
    ASR vocabulary priority 同样已移入 Core，source contract 防止这些业务规则回流。
 
-#### 8.3.8 1.x Interface 冻结与 egui 移交
+#### 8.3.8 2.0 Interface 冻结与 egui 移交
 
 1. **已完成**：只 re-export facade、DTO、errors、events、capabilities、fake/headless fixtures；core 私有
    repositories、transport 和状态机实现不进入 egui 可依赖面。
@@ -1226,7 +1226,7 @@ command/remote server 不再拥有业务 session、PIN 或 locale 的第二份�
    用 fake 成功状态冒充生产支持。
 5. **本地已完成，原生 runner 待完成**：以固定审查基线
    `a569a8749188e7843d426f159523193c8d5363ce` 运行第 12 节 Windows 本地门禁并记录命令与测试数。
-   当前冻结版本保持 `BACKEND_CONTRACT_VERSION = "1.0.0"`；只有后续破坏性变更才升级并附迁移说明。
+   当前冻结版本为 `BACKEND_CONTRACT_VERSION = "2.0.0"`；破坏性变更必须附迁移说明。
    Android/macOS/Ubuntu 与发行包证据继续由 12.4 的未勾选项约束。
 
 #### 8.3.9 Provider 验证与模型列表迁入 Core（核心迁移已完成；发布前收口进行中）

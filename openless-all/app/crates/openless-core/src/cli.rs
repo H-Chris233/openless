@@ -1,11 +1,53 @@
 //! Framework-independent parsing of launcher and single-instance intents.
 
 /// One semantic action requested through desktop launcher arguments.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CliIntent {
     ToggleDictation,
     ToggleQa,
     CancelDictation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LaunchIntent {
+    ShowMain,
+    Cli { intent: CliIntent },
+}
+
+pub fn encode_launch_intent(intent: LaunchIntent) -> Vec<u8> {
+    let value = match intent {
+        LaunchIntent::ShowMain => "show_main\n".to_string(),
+        LaunchIntent::Cli {
+            intent: CliIntent::ToggleDictation,
+        } => "toggle_dictation\n".to_string(),
+        LaunchIntent::Cli {
+            intent: CliIntent::ToggleQa,
+        } => "toggle_qa\n".to_string(),
+        LaunchIntent::Cli {
+            intent: CliIntent::CancelDictation,
+        } => "cancel_dictation\n".to_string(),
+    };
+    value.into_bytes()
+}
+
+pub fn decode_launch_intent(message: &[u8]) -> Option<LaunchIntent> {
+    match message {
+        b"show_main\n" => Some(LaunchIntent::ShowMain),
+        b"toggle_dictation\n" => Some(LaunchIntent::Cli {
+            intent: CliIntent::ToggleDictation,
+        }),
+        b"toggle_qa\n" => Some(LaunchIntent::Cli {
+            intent: CliIntent::ToggleQa,
+        }),
+        b"cancel_dictation\n" => Some(LaunchIntent::Cli {
+            intent: CliIntent::CancelDictation,
+        }),
+        _ => None,
+    }
 }
 
 /// Return the first recognised intent and ignore all unrelated launcher args.
@@ -75,5 +117,27 @@ mod tests {
     #[test]
     fn never_treats_argv0_as_an_intent() {
         assert_eq!(parse_cli_intent(&["--toggle-dictation"]), None);
+    }
+
+    #[test]
+    fn launch_intent_wire_round_trips_core_protocol() {
+        for intent in [
+            LaunchIntent::ShowMain,
+            LaunchIntent::Cli {
+                intent: CliIntent::ToggleDictation,
+            },
+            LaunchIntent::Cli {
+                intent: CliIntent::ToggleQa,
+            },
+            LaunchIntent::Cli {
+                intent: CliIntent::CancelDictation,
+            },
+        ] {
+            assert_eq!(
+                decode_launch_intent(&encode_launch_intent(intent)),
+                Some(intent)
+            );
+        }
+        assert_eq!(decode_launch_intent(b"unknown\n"), None);
     }
 }

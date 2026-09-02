@@ -4,10 +4,15 @@
 //! 必须共享的规则，避免 Tauri 与 Linux 各维护一份 provider/权限/模型语义。
 
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
+use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 
+use crate::coding_agent_guard::{deny_rule_for_pattern, HIGH_RISK_PATTERNS};
 use crate::errors::{BackendError, BackendErrorCode};
+use crate::events::CodingAgentStreamEvent;
 
 /// Coding Agent provider，对应持久化偏好中的稳定字符串。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -270,6 +275,448 @@ pub fn build_claude_args(request: &CodingAgentRequest) -> Vec<String> {
         args.push("--continue".into());
     }
     args
+}
+
+/// Codex 的沙箱模式。权限只能收紧，遗留的宽权限值统一降级为只读。
+pub fn codex_sandbox_mode(mode: CodingAgentPermissionMode) -> &'static str {
+    match mode {
+        CodingAgentPermissionMode::AcceptEdits => "workspace-write",
+        CodingAgentPermissionMode::Plan
+        | CodingAgentPermissionMode::Default
+        | CodingAgentPermissionMode::BypassPermissions => "read-only",
+    }
+}
+
+/// 构造 OpenCode 无头参数；prompt 必须由宿主追加在 `--` 之后。
+pub fn build_opencode_args(request: &CodingAgentRequest) -> Vec<String> {
+    let mut args = vec!["run".into(), "--format".into(), "json".into()];
+    if let Some(model) = &request.model {
+        args.extend(["--model".into(), model.clone()]);
+    }
+    if let Some(cwd) = &request.cwd {
+        args.extend(["--dir".into(), cwd.to_string_lossy().into_owned()]);
+    }
+    if request.permission_mode != CodingAgentPermissionMode::Plan {
+        args.push("--auto".into());
+    }
+    if request.continue_session {
+        args.push("--continue".into());
+    }
+    args.push("--".into());
+    args
+}
+
+/// 构造 Codex 参数；prompt 由 stdin 提供，避免 argv 泄漏和注入。
+pub fn build_codex_args(request: &CodingAgentRequest) -> Vec<String> {
+    let mut args = vec![
+        "exec".into(),
+        "--json".into(),
+        "--color".into(),
+        "never".into(),
+        "--skip-git-repo-check".into(),
+        "--sandbox".into(),
+        codex_sandbox_mode(request.permission_mode).into(),
+        "-c".into(),
+        "sandbox_workspace_write.exclude_tmpdir_env_var=true".into(),
+        "-c".into(),
+        "sandbox_workspace_write.exclude_slash_tmp=true".into(),
+    ];
+    if let Some(model) = &request.model {
+        args.extend(["--model".into(), model.clone()]);
+    }
+    if let Some(cwd) = &request.cwd {
+        args.extend(["--cd".into(), cwd.to_string_lossy().into_owned()]);
+    }
+    if request.continue_session {
+        args.extend(["resume".into(), "--last".into()]);
+    }
+    args.push("-".into());
+    args
+}
+
+/// dsh 只允许通过 profile 启动；prompt 由宿主写入 stdin/patch。
+pub fn build_dsh_args(request: &CodingAgentRequest) -> Vec<String> {
+    let _ = request;
+    vec!["--profile".into(), "headless".into()]
+}
+
+pub const DSH_TASK_PLACEHOLDER: &str = "openless-task";
+
+pub fn build_dsh_args_with_patch(patch_path: &Path) -> Vec<String> {
+    vec![
+        "--profile".into(),
+        "headless".into(),
+        "--patch".into(),
+        patch_path.to_string_lossy().into_owned(),
+        DSH_TASK_PLACEHOLDER.into(),
+    ]
+}
+
+pub fn build_dsh_patch_yaml(patch_path: &Path, prompt: &str) -> Result<String, BackendError> {
+    let path = serde_json::to_string(&patch_path.to_string_lossy())
+        .map_err(|error| BackendError::new(BackendErrorCode::Internal, error.to_string()))?;
+    let task = serde_json::to_string(prompt)
+        .map_err(|error| BackendError::new(BackendErrorCode::Internal, error.to_string()))?;
+    Ok(format!(
+        "- id: headless-runner\n  config:\n    task: {task}\n# plugin path: {path}\n"
+    ))
+}
+
+/// 解析 Claude stream-json 的共享事件。
+pub fn parse_claude_stream_line(session_id: &str, line: &str) -> Option<CodingAgentStreamEvent> {
+    let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    match value.get("type")?.as_str()? {
+        "stream_event" => {
+            let event = value.get("event")?;
+            if event.get("type")?.as_str()? != "content_block_delta"
+                || event.get("delta")?.get("type")?.as_str()? != "text_delta"
+            {
+                return None;
+            }
+            Some(CodingAgentStreamEvent::Delta {
+                session_id: session_id.into(),
+                text: event.get("delta")?.get("text")?.as_str()?.into(),
+            })
+        }
+        "assistant" => {
+            let content = value.get("message")?.get("content")?.as_array()?;
+            for block in content {
+                if block.get("type").and_then(|v| v.as_str()) == Some("tool_use") {
+                    if let Some(name) = block.get("name").and_then(|v| v.as_str()) {
+                        return Some(CodingAgentStreamEvent::ToolUse {
+                            session_id: session_id.into(),
+                            name: name.into(),
+                        });
+                    }
+                }
+            }
+            None
+        }
+        "system" if value.get("subtype").and_then(|v| v.as_str()) == Some("compact_boundary") => {
+            Some(CodingAgentStreamEvent::Compaction {
+                session_id: session_id.into(),
+            })
+        }
+        "result" => {
+            let text = value
+                .get("result")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            if value
+                .get("is_error")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                Some(CodingAgentStreamEvent::Error {
+                    session_id: session_id.into(),
+                    message: if text.is_empty() {
+                        "agent 返回错误".into()
+                    } else {
+                        text
+                    },
+                })
+            } else {
+                Some(CodingAgentStreamEvent::Completed {
+                    session_id: session_id.into(),
+                    text,
+                    cost_usd: value.get("total_cost_usd").and_then(|v| v.as_f64()),
+                    duration_ms: value.get("duration_ms").and_then(|v| v.as_u64()),
+                })
+            }
+        }
+        _ => None,
+    }
+}
+
+pub fn parse_opencode_stream_line(session_id: &str, line: &str) -> Option<CodingAgentStreamEvent> {
+    let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    match value.get("type")?.as_str()? {
+        "text" => {
+            let text = value.get("part")?.get("text")?.as_str()?;
+            (!text.is_empty()).then(|| CodingAgentStreamEvent::Delta {
+                session_id: session_id.into(),
+                text: text.into(),
+            })
+        }
+        "tool_use" => Some(CodingAgentStreamEvent::ToolUse {
+            session_id: session_id.into(),
+            name: value.get("part")?.get("tool")?.as_str()?.into(),
+        }),
+        "error" => Some(CodingAgentStreamEvent::Error {
+            session_id: session_id.into(),
+            message: value
+                .pointer("/error/data/message")
+                .or_else(|| value.pointer("/error/message"))
+                .or_else(|| value.get("error"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("OpenCode 返回了未知错误")
+                .into(),
+        }),
+        _ => None,
+    }
+}
+
+pub fn parse_codex_stream_line(session_id: &str, line: &str) -> Option<CodingAgentStreamEvent> {
+    let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    match value.get("type")?.as_str()? {
+        "item.completed"
+            if value.pointer("/item/type").and_then(|v| v.as_str()) == Some("agent_message") =>
+        {
+            let text = value.pointer("/item/text")?.as_str()?;
+            if text.is_empty() {
+                return None;
+            }
+            Some(CodingAgentStreamEvent::Delta {
+                session_id: session_id.into(),
+                text: text.into(),
+            })
+        }
+        "item.started"
+            if value.pointer("/item/type").and_then(|v| v.as_str())
+                == Some("command_execution") =>
+        {
+            Some(CodingAgentStreamEvent::ToolUse {
+                session_id: session_id.into(),
+                name: value
+                    .pointer("/item/command")?
+                    .as_str()?
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("command")
+                    .into(),
+            })
+        }
+        "turn.failed" | "error" => Some(CodingAgentStreamEvent::Error {
+            session_id: session_id.into(),
+            message: value
+                .pointer("/error/message")
+                .or_else(|| value.get("message"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("Codex 协议错误")
+                .into(),
+        }),
+        _ => None,
+    }
+}
+
+pub fn parse_dsh_stream_line(session_id: &str, line: &str) -> Option<CodingAgentStreamEvent> {
+    let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    match value.get("type")?.as_str()? {
+        "text.delta" => {
+            let text = value.get("text")?.as_str()?;
+            (!text.is_empty()).then(|| CodingAgentStreamEvent::Delta {
+                session_id: session_id.into(),
+                text: text.into(),
+            })
+        }
+        "tool.call" => Some(CodingAgentStreamEvent::ToolUse {
+            session_id: session_id.into(),
+            name: value.get("name")?.as_str()?.into(),
+        }),
+        "turn.end" if value.get("ok").and_then(|v| v.as_bool()) == Some(false) => {
+            Some(CodingAgentStreamEvent::Error {
+                session_id: session_id.into(),
+                message: value
+                    .pointer("/error/message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("dsh 本轮执行失败")
+                    .into(),
+            })
+        }
+        _ => None,
+    }
+}
+
+pub fn parse_coding_agent_models(output: &str) -> Vec<String> {
+    let mut clean = String::with_capacity(output.len());
+    let mut chars = output.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' && chars.peek() == Some(&'[') {
+            let _ = chars.next();
+            for code in chars.by_ref() {
+                if ('@'..='~').contains(&code) {
+                    break;
+                }
+            }
+        } else {
+            clean.push(ch);
+        }
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    clean
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            !line.is_empty() && line.contains('/') && !line.chars().any(char::is_whitespace)
+        })
+        .filter(|line| seen.insert((*line).to_string()))
+        .map(str::to_string)
+        .collect()
+}
+
+pub fn assess_command_risk(command: &str) -> CommandRiskAssessment {
+    let lowered = command.to_lowercase();
+    let Some((pattern, reason)) = HIGH_RISK_PATTERNS
+        .iter()
+        .find(|(pattern, _)| lowered.contains(pattern))
+    else {
+        return CommandRiskAssessment {
+            risk: CommandRisk::Safe,
+            reason: None,
+        };
+    };
+    CommandRiskAssessment {
+        risk: if deny_rule_for_pattern(pattern).is_some() {
+            CommandRisk::RequiresApproval
+        } else {
+            CommandRisk::Denied
+        },
+        reason: Some((*reason).into()),
+    }
+}
+
+/// Core-owned Coding Agent runner. The host only implements process I/O through
+/// [`crate::domains::CodingAgentProcessAdapter`]; this type owns stream
+/// filtering, aggregation and the single terminal outcome.
+pub struct CodingAgentRunner {
+    process: Arc<dyn crate::domains::CodingAgentProcessAdapter>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CodingAgentRunOutcome {
+    Completed {
+        text: String,
+        cost_usd: Option<f64>,
+        duration_ms: Option<u64>,
+    },
+    Failed(String),
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodingAgentRunResult {
+    pub session_id: String,
+    pub outcome: CodingAgentRunOutcome,
+}
+
+impl CodingAgentRunner {
+    pub fn new(process: Arc<dyn crate::domains::CodingAgentProcessAdapter>) -> Self {
+        Self { process }
+    }
+
+    pub fn run(
+        &self,
+        request: CodingAgentRequest,
+        cancel: Arc<AtomicBool>,
+    ) -> BoxFuture<'static, Result<CodingAgentRunResult, BackendError>> {
+        let process = Arc::clone(&self.process);
+        Box::pin(async move {
+            if request.session_id.trim().is_empty() {
+                return Err(invalid_argument("coding agent session id cannot be empty"));
+            }
+            let expected = request.session_id.clone();
+            let timeout_secs = request.timeout_secs.max(1);
+            let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+            let operation = process.run(request, sender, Arc::clone(&cancel));
+            tokio::pin!(operation);
+            let timeout = tokio::time::sleep(std::time::Duration::from_secs(timeout_secs));
+            tokio::pin!(timeout);
+            let mut text = String::new();
+            let mut cost_usd = None;
+            let mut duration_ms = None;
+            let mut terminal = None;
+            loop {
+                tokio::select! {
+                    result = &mut operation => {
+                        result?;
+                        break;
+                    }
+                    _ = &mut timeout => {
+                        cancel.store(true, std::sync::atomic::Ordering::Release);
+                        terminal = Some(CodingAgentRunOutcome::Failed("coding agent timed out".into()));
+                        break;
+                    }
+                    event = receiver.recv() => {
+                        let Some(event) = event else { break; };
+                        consume_runner_event(&expected, event, &mut text, &mut cost_usd, &mut duration_ms, &mut terminal);
+                    }
+                }
+            }
+            if terminal.is_none() {
+                while let Ok(event) = receiver.try_recv() {
+                    consume_runner_event(
+                        &expected,
+                        event,
+                        &mut text,
+                        &mut cost_usd,
+                        &mut duration_ms,
+                        &mut terminal,
+                    );
+                }
+            }
+            let outcome = terminal.unwrap_or_else(|| {
+                if cancel.load(std::sync::atomic::Ordering::Acquire) {
+                    CodingAgentRunOutcome::Cancelled
+                } else if text.trim().is_empty() {
+                    CodingAgentRunOutcome::Failed("coding agent returned no result".into())
+                } else {
+                    CodingAgentRunOutcome::Completed {
+                        text: text.trim().into(),
+                        cost_usd,
+                        duration_ms,
+                    }
+                }
+            });
+            Ok(CodingAgentRunResult {
+                session_id: expected,
+                outcome,
+            })
+        })
+    }
+}
+
+fn consume_runner_event(
+    expected: &str,
+    event: CodingAgentStreamEvent,
+    text: &mut String,
+    cost_usd: &mut Option<f64>,
+    duration_ms: &mut Option<u64>,
+    terminal: &mut Option<CodingAgentRunOutcome>,
+) {
+    match event {
+        CodingAgentStreamEvent::Delta {
+            session_id,
+            text: delta,
+        } if session_id == expected => text.push_str(&delta),
+        CodingAgentStreamEvent::Completed {
+            session_id,
+            text: value,
+            cost_usd: cost,
+            duration_ms: duration,
+        } if session_id == expected => {
+            *text = value;
+            *cost_usd = cost;
+            *duration_ms = duration;
+            *terminal = Some(if text.trim().is_empty() {
+                CodingAgentRunOutcome::Failed("coding agent returned no result".into())
+            } else {
+                CodingAgentRunOutcome::Completed {
+                    text: text.trim().into(),
+                    cost_usd: cost,
+                    duration_ms: duration,
+                }
+            });
+        }
+        CodingAgentStreamEvent::Error {
+            session_id,
+            message,
+        } if session_id == expected => *terminal = Some(CodingAgentRunOutcome::Failed(message)),
+        CodingAgentStreamEvent::Cancelled { session_id } if session_id == expected => {
+            *terminal = Some(CodingAgentRunOutcome::Cancelled)
+        }
+        _ => {}
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -662,6 +1109,69 @@ mod tests {
         assert!(args.contains(&"--no-session-persistence".into()));
         assert!(args.contains(&"--continue".into()));
         assert!(!args.iter().any(|arg| arg.contains("secret prompt")));
+    }
+
+    #[test]
+    fn every_provider_has_a_distinct_headless_command_shape() {
+        let mut request = CodingAgentRequest::new("session", "prompt");
+        request.permission_mode = CodingAgentPermissionMode::AcceptEdits;
+        assert_eq!(build_opencode_args(&request)[0], "run");
+        assert_eq!(
+            build_opencode_args(&request).last().map(String::as_str),
+            Some("--")
+        );
+        assert_eq!(
+            build_codex_args(&request).first().map(String::as_str),
+            Some("exec")
+        );
+        assert_eq!(
+            build_codex_args(&request).last().map(String::as_str),
+            Some("-")
+        );
+        assert_eq!(build_dsh_args(&request), vec!["--profile", "headless"]);
+        assert_ne!(build_opencode_args(&request), vec!["-p"]);
+        assert_ne!(build_codex_args(&request), vec!["-p"]);
+        assert_ne!(build_dsh_args(&request), vec!["-p"]);
+    }
+
+    #[test]
+    fn shared_stream_parsers_cover_all_provider_protocols() {
+        assert!(matches!(
+            parse_claude_stream_line(
+                "s",
+                r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"ok"}}}"#
+            ),
+            Some(CodingAgentStreamEvent::Delta { .. })
+        ));
+        assert!(matches!(
+            parse_opencode_stream_line("s", r#"{"type":"text","part":{"text":"ok"}}"#),
+            Some(CodingAgentStreamEvent::Delta { .. })
+        ));
+        assert!(matches!(
+            parse_codex_stream_line(
+                "s",
+                r#"{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}"#
+            ),
+            Some(CodingAgentStreamEvent::Delta { .. })
+        ));
+        assert!(matches!(
+            parse_dsh_stream_line("s", r#"{"v":1,"type":"text.delta","text":"ok"}"#),
+            Some(CodingAgentStreamEvent::Delta { .. })
+        ));
+        assert_eq!(
+            parse_coding_agent_models("\u{1b}[32mopenai/gpt-5\u{1b}[0m\nopenai/gpt-5\n"),
+            vec!["openai/gpt-5"]
+        );
+    }
+
+    #[test]
+    fn command_risk_is_fail_closed_and_never_unknown() {
+        assert_eq!(assess_command_risk("git status").risk, CommandRisk::Safe);
+        assert_eq!(
+            assess_command_risk("git push --force origin main").risk,
+            CommandRisk::RequiresApproval
+        );
+        assert_eq!(assess_command_risk("sudo reboot").risk, CommandRisk::Denied);
     }
 
     #[test]

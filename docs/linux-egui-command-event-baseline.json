@@ -1,6 +1,6 @@
 {
   "schemaVersion": "1.0",
-  "contractVersion": "1.0.0",
+  "contractVersion": "2.0.0",
   "observedAt": "2026-08-29",
   "purpose": "M0 compatibility baseline for the Tauri adapter and the Linux egui host",
   "sourceOfTruth": {

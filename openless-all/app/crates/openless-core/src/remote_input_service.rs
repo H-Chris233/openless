@@ -15,7 +15,48 @@ use crate::events::{
 use crate::types::SessionId;
 
 pub const REMOTE_INPUT_MAX_PCM_FRAME_BYTES: usize = 64 * 1024;
+pub const REMOTE_INPUT_PAIRING_PIN_LEN: usize = 6;
 const SUPPORTED_LOCALES: [&str; 5] = ["zh-CN", "zh-TW", "en", "ja", "ko"];
+
+pub fn validate_pairing_pin(pin: &str) -> bool {
+    pin.len() == REMOTE_INPUT_PAIRING_PIN_LEN && pin.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// Constant-time comparison for PINs and other short authentication tokens.
+pub fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    let mut diff = u8::from(left.len() != right.len());
+    let max = left.len().max(right.len());
+    for index in 0..max {
+        diff |= left.get(index).copied().unwrap_or(0) ^ right.get(index).copied().unwrap_or(0);
+    }
+    diff == 0
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteStreamSequence {
+    pub session_id: SessionId,
+    next: u64,
+}
+
+impl RemoteStreamSequence {
+    pub fn new(session_id: SessionId) -> Self {
+        Self {
+            session_id,
+            next: 0,
+        }
+    }
+
+    pub fn accept(&mut self, sequence: u64) -> Result<(), BackendError> {
+        if sequence != self.next {
+            return Err(BackendError::new(
+                BackendErrorCode::InvalidArgument,
+                "remote frame sequence is out of order or replayed",
+            ));
+        }
+        self.next = self.next.saturating_add(1);
+        Ok(())
+    }
+}
 
 struct RemoteInputState {
     enabled: bool,
@@ -529,7 +570,7 @@ fn validate_remote_locale(locale: &str) -> Result<(), BackendError> {
 
 fn is_valid_pin(pin: &SecretValue) -> bool {
     let value = pin.expose_secret();
-    value.len() == 6 && value.bytes().all(|byte| byte.is_ascii_digit())
+    validate_pairing_pin(value)
 }
 
 fn generate_pairing_pin() -> String {
@@ -555,4 +596,28 @@ fn public_remote_error(error: &BackendError) -> BackendError {
         }
     };
     BackendError::new(error.code, message).retryable(error.retryable)
+}
+
+#[cfg(test)]
+mod protocol_tests {
+    use super::*;
+
+    #[test]
+    fn pairing_validation_and_comparison_are_constant_time_safe() {
+        assert!(validate_pairing_pin("123456"));
+        assert!(!validate_pairing_pin("12345"));
+        assert!(!validate_pairing_pin("12345x"));
+        assert!(constant_time_eq(b"123456", b"123456"));
+        assert!(!constant_time_eq(b"123456", b"123457"));
+        assert!(!constant_time_eq(b"123456", b"123"));
+    }
+
+    #[test]
+    fn sequence_guard_rejects_replay_and_out_of_order_frames() {
+        let mut guard = RemoteStreamSequence::new(SessionId::new());
+        assert!(guard.accept(0).is_ok());
+        assert!(guard.accept(0).is_err());
+        assert!(guard.accept(2).is_err());
+        assert!(guard.accept(1).is_ok());
+    }
 }

@@ -188,6 +188,15 @@ pub(crate) fn backend_dependencies(
             .expect("built-in Omni provider ids are non-empty");
     }
     let mut dependencies = openless_core::BackendDependencies::unsupported();
+    if let Ok(root) = crate::persistence::models_root() {
+        if let Ok(config) = openless_core::ModelStoreConfig::new(root) {
+            if let Ok(store) = openless_core::ModelStore::new(config) {
+                dependencies
+                    .services
+                    .configure_model_store(Arc::new(store));
+            }
+        }
+    }
     dependencies
         .services
         .configure_auxiliary_runtime(auxiliary_polisher, auxiliary_transcription);
@@ -1233,26 +1242,7 @@ impl openless_core::CodingAgentApi for TauriCodingAgentApi {
         &self,
         command: String,
     ) -> BoxFuture<'static, Result<openless_core::CommandRiskAssessment, BackendError>> {
-        Box::pin(async move {
-            let lowered = command.to_lowercase();
-            let matched = openless_core::HIGH_RISK_PATTERNS
-                .iter()
-                .find(|(pattern, _)| lowered.contains(pattern));
-            Ok(match matched {
-                Some((pattern, reason)) => openless_core::CommandRiskAssessment {
-                    risk: if openless_core::deny_rule_for_pattern(pattern).is_some() {
-                        openless_core::CommandRisk::RequiresApproval
-                    } else {
-                        openless_core::CommandRisk::Denied
-                    },
-                    reason: Some((*reason).to_string()),
-                },
-                None => openless_core::CommandRiskAssessment {
-                    risk: openless_core::CommandRisk::Safe,
-                    reason: None,
-                },
-            })
-        })
+        Box::pin(async move { Ok(openless_core::assess_command_risk(&command)) })
     }
 
     fn run_test(

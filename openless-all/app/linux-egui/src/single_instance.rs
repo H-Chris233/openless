@@ -15,6 +15,8 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use fs2::FileExt;
+#[cfg(any(target_os = "linux", test))]
+use openless_core::LaunchIntent;
 use openless_core::{parse_cli_intent, BackendError, BackendErrorCode, CliIntent};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,23 +32,18 @@ impl LinuxLaunchIntent {
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn encode_launch_intent(intent: LinuxLaunchIntent) -> &'static [u8] {
-    match intent {
-        LinuxLaunchIntent::ShowMain => b"show_main\n",
-        LinuxLaunchIntent::Cli(CliIntent::ToggleDictation) => b"toggle_dictation\n",
-        LinuxLaunchIntent::Cli(CliIntent::ToggleQa) => b"toggle_qa\n",
-        LinuxLaunchIntent::Cli(CliIntent::CancelDictation) => b"cancel_dictation\n",
-    }
+fn encode_launch_intent(intent: LinuxLaunchIntent) -> Vec<u8> {
+    openless_core::encode_launch_intent(match intent {
+        LinuxLaunchIntent::ShowMain => LaunchIntent::ShowMain,
+        LinuxLaunchIntent::Cli(intent) => LaunchIntent::Cli { intent },
+    })
 }
 
 #[cfg(any(target_os = "linux", test))]
 fn decode_launch_intent(message: &[u8]) -> Option<LinuxLaunchIntent> {
-    match message {
-        b"show_main\n" => Some(LinuxLaunchIntent::ShowMain),
-        b"toggle_dictation\n" => Some(LinuxLaunchIntent::Cli(CliIntent::ToggleDictation)),
-        b"toggle_qa\n" => Some(LinuxLaunchIntent::Cli(CliIntent::ToggleQa)),
-        b"cancel_dictation\n" => Some(LinuxLaunchIntent::Cli(CliIntent::CancelDictation)),
-        _ => None,
+    match openless_core::decode_launch_intent(message)? {
+        LaunchIntent::ShowMain => Some(LinuxLaunchIntent::ShowMain),
+        LaunchIntent::Cli { intent } => Some(LinuxLaunchIntent::Cli(intent)),
     }
 }
 
@@ -391,7 +388,7 @@ mod tests {
         ];
         for intent in cases {
             assert_eq!(
-                decode_launch_intent(encode_launch_intent(intent)),
+                decode_launch_intent(&encode_launch_intent(intent)),
                 Some(intent)
             );
         }

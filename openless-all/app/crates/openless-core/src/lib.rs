@@ -26,9 +26,11 @@ pub mod errors;
 pub mod events;
 pub mod external_audio;
 pub mod history;
+pub mod host_document;
 mod less_computer;
 pub mod llm_gemini;
 mod marketplace;
+pub mod model_store;
 pub mod net;
 pub mod omni;
 pub mod output_cleaning;
@@ -51,6 +53,7 @@ pub mod selection_voice_intent;
 mod selection_voice_service;
 pub mod settings;
 pub mod shared_types;
+pub mod streaming_insert;
 mod style_pack_archive;
 pub mod style_pack_store;
 pub mod style_packs;
@@ -67,7 +70,9 @@ mod shortcut_types;
 /// This is independent from the application release version.  Increment the
 /// major component for a breaking host contract change and document the
 /// migration in `docs/linux-egui-backend-contract.md`.
-pub const BACKEND_CONTRACT_VERSION: &str = "1.0.0";
+pub const BACKEND_CONTRACT_VERSION: &str = "2.0.0";
+/// Legacy wire version accepted when reading persisted 1.x payloads.
+pub const LEGACY_BACKEND_CONTRACT_VERSION: &str = "1.0.0";
 
 /// Versioned host-facing contract used by the Linux UI crate.
 ///
@@ -84,8 +89,9 @@ pub mod contract {
     };
     pub use crate::coding_agent::{
         CodingAgentAvailability, CodingAgentDetectRequest, CodingAgentModelsRequest,
-        CodingAgentPermissionMode, CodingAgentProvider, CodingAgentRequest, CodingAgentTestRequest,
-        CodingAgentTestStatus, CommandRisk, CommandRiskAssessment, McpHealth, McpServerStatus,
+        CodingAgentPermissionMode, CodingAgentProvider, CodingAgentRequest, CodingAgentRunOutcome,
+        CodingAgentRunResult, CodingAgentRunner, CodingAgentTestRequest, CodingAgentTestStatus,
+        CommandRisk, CommandRiskAssessment, McpHealth, McpServerStatus,
     };
     pub use crate::domains::{
         BackendServices, CodingAgentApi, LessComputerApi, LocalAsrApi, LocalAsrModel,
@@ -103,9 +109,26 @@ pub mod contract {
         SelectionVoicePhase, SelectionVoicePreview, SelectionVoicePreviewUpdate,
         SelectionVoiceSnapshot,
     };
+    pub use crate::host_document::{
+        edit_is_within_typed_text, is_vocab_worthy, learned_rule, minimal_edit, plan_window,
+        utf16_offset_to_char_offset, window_around_cursor, DocumentWindow, EditPair, LearnedRule,
+        WindowSpan,
+    };
+    pub use crate::local_asr_service::ModelRuntimeAdapter;
+    pub use crate::model_store::{
+        extract_archive_safely, merge_hf_tree_pages, merge_hf_tree_pages_with_base,
+        parse_hf_tree_page, validate_model_id, validate_model_path, validate_model_url,
+        DownloadProgressSink, ModelCacheStatus, ModelCard, ModelCatalog, ModelCatalogEntry,
+        ModelDownloadPhase, ModelDownloadProgress, ModelFile, ModelManifest, ModelStore,
+        ModelStoreConfig, ModelTransport, ModelTransportRequest, ModelTransportResponse,
+        ReqwestModelTransport,
+    };
     pub use crate::provider_transport::{
         ProviderCancellation, ProviderTransport, ProviderTransportError, ProviderTransportRequest,
         ProviderTransportResponse, ReqwestProviderTransport,
+    };
+    pub use crate::remote_input_service::{
+        constant_time_eq, validate_pairing_pin, RemoteStreamSequence, REMOTE_INPUT_PAIRING_PIN_LEN,
     };
     pub use crate::shared_types::{
         ChineseScriptPreference, ComboBinding, HotkeyBinding, HotkeyMode, HotkeyTrigger,
@@ -145,7 +168,7 @@ pub mod contract {
         StylePackKind, TaskSpawner, TextInserter, TextPolisher, TextStreamChunk, TextStreamSink,
         TokioTaskSpawner, TranscriptDelta, TranscriptOutput, TranscriptionEngine,
         TranscriptionSession, VocabPreset, VocabPresetStore, VocabularyChange,
-        BACKEND_CONTRACT_VERSION, DICTATION_SAMPLE_RATE,
+        BACKEND_CONTRACT_VERSION, DICTATION_SAMPLE_RATE, LEGACY_BACKEND_CONTRACT_VERSION,
     };
 }
 
@@ -159,7 +182,9 @@ pub use audio::{encode_dictation_wav, NormalizedPcmChunk, PcmNormalizer, DICTATI
 pub use auxiliary::{
     AsrCallLabel, AuxiliaryApi, RepolishRequest, RetranscriptionFailure, RetranscriptionResult,
 };
-pub use cli::{parse_cli_intent, CliIntent};
+pub use cli::{
+    decode_launch_intent, encode_launch_intent, parse_cli_intent, CliIntent, LaunchIntent,
+};
 pub use cloud_providers::{
     answer_qa_with_context, SharedAuxiliaryTextPolisher, SharedCloudTextPolisher,
     SharedCloudTranscriptionEngine, SharedOmniDictationEngine, SHARED_CLOUD_ASR_PROVIDER_TYPES,
@@ -202,8 +227,15 @@ pub use local_asr_catalog::{
     normalize_foundry_language_hint, normalize_sherpa_language_hint, FoundryRuntimeSource,
     LocalAsrMirror, LocalAsrModelId, LocalAsrRuntime, LocalAsrTarget,
 };
-pub use local_asr_service::LocalAsrRuntimeAdapter;
+pub use local_asr_service::{LocalAsrRuntimeAdapter, ModelRuntimeAdapter};
 pub use marketplace::{MarketplaceConfig, MARKETPLACE_BASE_URL, MARKETPLACE_GITHUB_TOKEN_ACCOUNT};
+pub use model_store::{
+    extract_archive_safely, merge_hf_tree_pages, merge_hf_tree_pages_with_base, parse_hf_tree_page,
+    validate_model_path, validate_model_url, DownloadProgressSink, ModelCacheStatus, ModelCard,
+    ModelCatalog, ModelCatalogEntry, ModelDownloadPhase, ModelDownloadProgress, ModelFile,
+    ModelManifest, ModelStore, ModelStoreConfig, ModelTransport, ModelTransportRequest,
+    ModelTransportResponse, ReqwestModelTransport, MODEL_PARTIAL_INDEX, MODEL_READY_SENTINEL,
+};
 pub use ports::{
     ActiveRecording, AudioConsumer, AudioRecorder, DictationEngine, DirectoryResourceResolver,
     EngineFailure, EngineFailureStage, EngineProgress, EngineProgressSink, EngineResult,
@@ -231,7 +263,10 @@ pub use providers::{
     OpenAiTranscriptionConfig,
 };
 pub use qa_service::QaService;
-pub use remote_input_service::{RemoteInputService, REMOTE_INPUT_MAX_PCM_FRAME_BYTES};
+pub use remote_input_service::{
+    constant_time_eq, validate_pairing_pin, RemoteInputService, RemoteStreamSequence,
+    REMOTE_INPUT_MAX_PCM_FRAME_BYTES, REMOTE_INPUT_PAIRING_PIN_LEN,
+};
 pub use selection_voice_intent::SelectionVoiceIntent;
 pub use settings::*;
 pub use shared_types::{
@@ -250,6 +285,10 @@ pub use shortcut_types::{
     reject_side_specific_non_dictation, reject_style_pack_hotkey_conflicts,
     sync_dictation_hotkey_legacy_fields, validate_shortcut_binding, ShortcutBindingError,
     SIDE_SPECIFIC_NON_DICTATION_MSG,
+};
+pub use streaming_insert::{
+    append_typed_prefix, streaming_insert_eligible, StreamingInsertState,
+    STREAMING_FLUSH_INTERVAL_MS,
 };
 pub use style_pack_archive::{
     validate_style_pack_archive_bytes, STYLE_PACK_ARCHIVE_MAX_COMPRESSED_BYTES,

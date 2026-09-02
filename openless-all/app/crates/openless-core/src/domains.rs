@@ -1153,6 +1153,10 @@ pub trait LessComputerRuntimeAdapter: Send + Sync {
     ) -> BoxFuture<'static, Result<(), BackendError>>;
 }
 
+/// Stable name used by hosts that expose the process seam directly.  It is an
+/// alias, so existing Less Computer adapters remain source-compatible.
+pub use LessComputerRuntimeAdapter as CodingAgentProcessAdapter;
+
 /// Instance-scoped Less Computer lifecycle and approval use-cases.
 ///
 /// The service owns continuation and pending approval state. Hosts only render
@@ -1711,6 +1715,9 @@ impl PlatformApi for UnsupportedDomainServices {
 
 #[derive(Clone)]
 pub struct BackendServices {
+    /// Shared Core model store. Host adapters may leave it unset when model
+    /// downloads are unavailable; they must then return `Unsupported`.
+    pub model_store: Option<Arc<crate::model_store::ModelStore>>,
     pub auxiliary: Arc<dyn crate::auxiliary::AuxiliaryApi>,
     pub provider: Arc<dyn ProviderApi>,
     pub local_asr: Arc<dyn LocalAsrApi>,
@@ -1729,6 +1736,7 @@ pub struct BackendServices {
 impl BackendServices {
     pub fn unsupported() -> Self {
         Self {
+            model_store: None,
             auxiliary: Arc::new(crate::auxiliary::UnsupportedAuxiliaryApi),
             provider: Arc::new(UnsupportedDomainServices),
             local_asr: Arc::new(UnsupportedDomainServices),
@@ -1743,6 +1751,10 @@ impl BackendServices {
             auxiliary_polisher: None,
             auxiliary_transcription: None,
         }
+    }
+
+    pub fn configure_model_store(&mut self, store: Arc<crate::model_store::ModelStore>) {
+        self.model_store = Some(store);
     }
 
     /// Configure host-owned provider adapters used by shared auxiliary

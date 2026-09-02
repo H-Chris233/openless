@@ -3,17 +3,20 @@ use std::sync::Arc;
 use futures_util::future::BoxFuture;
 
 use openless_core::{
-    normalize_coding_agent_executable, AudioConsumer, AudioRecorder, BackendConfig,
-    BackendDependencies, BackendError, BackendErrorCode, BackendRepositories, BackendServices,
-    CodingAgentApi, CodingAgentAvailability, CodingAgentDetectRequest, CodingAgentModelsRequest,
+    assess_command_risk, build_codex_args, build_opencode_args, normalize_coding_agent_executable,
+    parse_claude_stream_line, parse_cli_version, parse_codex_stream_line, parse_dsh_stream_line,
+    parse_opencode_stream_line, AudioConsumer, AudioRecorder, BackendConfig, BackendDependencies,
+    BackendError, BackendErrorCode, BackendRepositories, BackendServices, CodingAgentApi,
+    CodingAgentAvailability, CodingAgentDetectRequest, CodingAgentModelsRequest,
     CodingAgentProvider, CodingAgentRequest, CodingAgentTestRequest, CodingAgentTestStatus,
-    CommandRisk, CommandRiskAssessment, CredentialStore, DictationEngine, DictationEngineRouter,
-    LessComputerRuntimeAdapter, MarketplaceConfig, OpenLessBackend, PipelineDictationEngine,
-    PolishFailurePolicy, ProviderService, SettingsRuntime, SharedAuxiliaryTextPolisher,
-    SharedCloudTextPolisher, SharedCloudTranscriptionEngine, SharedOmniDictationEngine,
-    TextInserter, TextPolisher, TextPolisherRouter, TextStreamSink, TokioTaskSpawner,
-    TranscriptOutput, TranscriptionEngine, TranscriptionRouter, TranscriptionSession,
-    SHARED_CLOUD_ASR_PROVIDER_TYPES, SHARED_CLOUD_LLM_PROVIDER_TYPES, SHARED_OMNI_PROVIDER_TYPES,
+    CommandRiskAssessment, CredentialStore, DictationEngine, DictationEngineRouter,
+    LessComputerRuntimeAdapter, MarketplaceConfig, ModelStore, ModelStoreConfig, OpenLessBackend,
+    PipelineDictationEngine, PolishFailurePolicy, ProviderService, SettingsRuntime,
+    SharedAuxiliaryTextPolisher, SharedCloudTextPolisher, SharedCloudTranscriptionEngine,
+    SharedOmniDictationEngine, TextInserter, TextPolisher, TextPolisherRouter, TextStreamSink,
+    TokioTaskSpawner, TranscriptOutput, TranscriptionEngine, TranscriptionRouter,
+    TranscriptionSession, SHARED_CLOUD_ASR_PROVIDER_TYPES, SHARED_CLOUD_LLM_PROVIDER_TYPES,
+    SHARED_OMNI_PROVIDER_TYPES,
 };
 
 use crate::{
@@ -33,6 +36,36 @@ pub struct LinuxBackendRuntime {
 #[derive(Default)]
 struct LinuxCodingAgentRuntime;
 
+fn augment_linux_path(command: &mut std::process::Command) {
+    let Some(home) = std::env::var_os("HOME") else {
+        return;
+    };
+    let mut paths = vec![
+        std::path::PathBuf::from(&home).join(".local/bin"),
+        std::path::PathBuf::from(&home).join(".npm-global/bin"),
+        std::path::PathBuf::from(&home).join(".bun/bin"),
+    ];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    if let Ok(path) = std::env::join_paths(paths) {
+        command.env("PATH", path);
+    }
+}
+
+fn linux_model_mirror_base(
+    mirror: openless_core::LocalAsrMirror,
+) -> Result<&'static str, BackendError> {
+    match mirror {
+        openless_core::LocalAsrMirror::Huggingface => Ok("https://huggingface.co"),
+        openless_core::LocalAsrMirror::HfMirror => Ok("https://hf-mirror.com"),
+        openless_core::LocalAsrMirror::GithubRelease => Err(BackendError::new(
+            BackendErrorCode::Unsupported,
+            "GitHub release mirror is not a Hugging Face tree source",
+        )),
+    }
+}
+
 impl LessComputerRuntimeAdapter for LinuxCodingAgentRuntime {
     fn run(
         &self,
@@ -46,82 +79,301 @@ impl LessComputerRuntimeAdapter for LinuxCodingAgentRuntime {
                 session_id: session_id.clone(),
             });
             let result = tokio::task::spawn_blocking(move || {
+                let mut request = request;
                 if cancel.load(std::sync::atomic::Ordering::Acquire) {
-                    return Err(BackendError::new(
-                        BackendErrorCode::Cancelled,
-                        "Less Computer cancelled",
-                    ));
+                    let _ = events.send(openless_core::CodingAgentStreamEvent::Cancelled {
+                        session_id: session_id.clone(),
+                    });
+                    return Ok(());
                 }
                 let executable = normalize_coding_agent_executable(
                     request.provider,
                     request.executable.clone(),
                 )?;
-                let mut command = std::process::Command::new(&executable);
-                command.current_dir(
-                    request
-                        .cwd
-                        .clone()
-                        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default()),
-                );
+                let mut guard_path = None;
+                let mut dsh_patch_path = None;
+                if request.provider == CodingAgentProvider::ClaudeCodeCli
+                    && request.settings_json_path.is_none()
+                {
+                    let approved: std::collections::HashSet<&str> = request
+                        .approved_patterns
+                        .iter()
+                        .flat_map(|pattern| openless_core::risk_equivalent_patterns(pattern))
+                        .filter_map(openless_core::deny_rule_for_pattern)
+                        .collect();
+                    let mut deny = openless_core::default_deny_rules();
+                    deny.retain(|rule| !approved.contains(rule.as_str()));
+                    let settings = serde_json::json!({
+                        "permissions": {
+                            "defaultMode": request.permission_mode.as_cli_arg(),
+                            "deny": deny,
+                        }
+                    });
+                    let path = std::env::temp_dir().join(format!(
+                        "openless-linux-coding-agent-{}-{}.json",
+                        std::process::id(),
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|duration| duration.as_nanos())
+                            .unwrap_or_default()
+                    ));
+                    std::fs::write(
+                        &path,
+                        serde_json::to_vec(&settings).map_err(|error| {
+                            BackendError::new(BackendErrorCode::Internal, error.to_string())
+                        })?,
+                    )
+                    .map_err(|error| {
+                        BackendError::new(BackendErrorCode::Platform, error.to_string())
+                    })?;
+                    request.settings_json_path = Some(path.clone());
+                    guard_path = Some(path);
+                }
                 let args = match request.provider {
                     CodingAgentProvider::ClaudeCodeCli => {
                         openless_core::build_claude_args(&request)
                     }
-                    _ => vec!["-p".to_string()],
+                    CodingAgentProvider::OpenCodeCli => build_opencode_args(&request),
+                    CodingAgentProvider::CodexCli => build_codex_args(&request),
+                    CodingAgentProvider::DshCli => {
+                        let path = std::env::temp_dir().join(format!(
+                            "openless-linux-dsh-{}-{}.yml",
+                            std::process::id(),
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|duration| duration.as_nanos())
+                                .unwrap_or_default()
+                        ));
+                        let yaml = openless_core::build_dsh_patch_yaml(&path, &request.prompt)?;
+                        std::fs::write(&path, yaml).map_err(|error| {
+                            BackendError::new(BackendErrorCode::Platform, error.to_string())
+                        })?;
+                        dsh_patch_path = Some(path.clone());
+                        openless_core::build_dsh_args_with_patch(&path)
+                    }
                 };
+                let mut command = std::process::Command::new(&executable);
+                if let Some(cwd) = &request.cwd {
+                    command.current_dir(cwd);
+                }
+                augment_linux_path(&mut command);
                 command
-                    .args(args)
+                    .args(&args)
                     .stdin(std::process::Stdio::piped())
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped());
-                let mut child = command.spawn().map_err(|error| {
-                    BackendError::new(
-                        BackendErrorCode::Unsupported,
-                        format!("failed to start {executable}: {error}"),
+                if request.provider == CodingAgentProvider::OpenCodeCli {
+                    command.arg(&request.prompt);
+                }
+                if request.provider == CodingAgentProvider::OpenCodeCli {
+                    let config = serde_json::to_string(
+                        &openless_core::build_opencode_guard_config(&request.approved_patterns),
                     )
-                })?;
-                if let Some(mut stdin) = child.stdin.take() {
-                    use std::io::Write;
-                    stdin
-                        .write_all(request.prompt.as_bytes())
-                        .map_err(|error| {
-                            BackendError::new(BackendErrorCode::Provider, error.to_string())
-                        })?;
+                    .map_err(|error| {
+                        BackendError::new(BackendErrorCode::Internal, error.to_string())
+                    })?;
+                    command.env("OPENCODE_CONFIG_CONTENT", config);
                 }
-                let output = child.wait_with_output().map_err(|error| {
-                    BackendError::new(BackendErrorCode::Provider, error.to_string())
-                })?;
-                if cancel.load(std::sync::atomic::Ordering::Acquire) {
-                    return Err(BackendError::new(
-                        BackendErrorCode::Cancelled,
-                        "Less Computer cancelled",
-                    ));
+                if request.provider == CodingAgentProvider::DshCli {
+                    command.env(
+                        "DSH_PERMISSION_MODE",
+                        if request.permission_mode
+                            == openless_core::CodingAgentPermissionMode::AcceptEdits
+                        {
+                            "workspace-write"
+                        } else {
+                            "read-only"
+                        },
+                    );
+                    command.env("DSH_EVENTS_OUT", "stderr");
                 }
-                let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !text.is_empty() {
-                    let _ = events.send(openless_core::CodingAgentStreamEvent::Delta {
-                        session_id: session_id.clone(),
-                        text: text.clone(),
+                let mut child = match command.spawn() {
+                    Ok(child) => child,
+                    Err(error) => {
+                        if let Some(path) = guard_path.take() {
+                            let _ = std::fs::remove_file(path);
+                        }
+                        if let Some(path) = dsh_patch_path.take() {
+                            let _ = std::fs::remove_file(path);
+                        }
+                        let code = if error.kind() == std::io::ErrorKind::NotFound {
+                            BackendErrorCode::Unsupported
+                        } else {
+                            BackendErrorCode::Provider
+                        };
+                        return Err(BackendError::new(
+                            code,
+                            format!("failed to start {executable}: {error}"),
+                        ));
+                    }
+                };
+                if request.provider != CodingAgentProvider::DshCli
+                    && request.provider != CodingAgentProvider::OpenCodeCli
+                {
+                    if let Some(mut stdin) = child.stdin.take() {
+                        use std::io::Write;
+                        stdin
+                            .write_all(request.prompt.as_bytes())
+                            .map_err(|error| {
+                                BackendError::new(BackendErrorCode::Provider, error.to_string())
+                            })?;
+                    }
+                } else {
+                    drop(child.stdin.take());
+                }
+                let deadline = std::time::Instant::now()
+                    + std::time::Duration::from_secs(request.timeout_secs.max(1));
+                let mut completed = false;
+                let mut final_text = String::new();
+                let (line_tx, line_rx) = std::sync::mpsc::channel::<String>();
+                if let Some(stdout) = child.stdout.take() {
+                    let tx = line_tx.clone();
+                    std::thread::spawn(move || {
+                        use std::io::BufRead;
+                        for line in std::io::BufReader::new(stdout)
+                            .lines()
+                            .map_while(Result::ok)
+                        {
+                            let _ = tx.send(line);
+                        }
                     });
                 }
-                if !output.status.success() {
-                    let message = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                let (stderr_tx, stderr_rx) = std::sync::mpsc::channel::<String>();
+                if let Some(stderr) = child.stderr.take() {
+                    std::thread::spawn(move || {
+                        use std::io::Read;
+                        let mut text = String::new();
+                        let _ = std::io::BufReader::new(stderr).read_to_string(&mut text);
+                        let _ = stderr_tx.send(text);
+                    });
+                }
+                drop(line_tx);
+                let mut handle_line = |line: String| {
+                    let event = match request.provider {
+                        CodingAgentProvider::ClaudeCodeCli => {
+                            parse_claude_stream_line(&session_id, &line)
+                        }
+                        CodingAgentProvider::OpenCodeCli => {
+                            parse_opencode_stream_line(&session_id, &line)
+                        }
+                        CodingAgentProvider::CodexCli => {
+                            parse_codex_stream_line(&session_id, &line)
+                        }
+                        CodingAgentProvider::DshCli => parse_dsh_stream_line(&session_id, &line),
+                    };
+                    if let Some(event) = event {
+                        if let openless_core::CodingAgentStreamEvent::Completed { text, .. } =
+                            &event
+                        {
+                            completed = true;
+                            final_text = text.clone();
+                        }
+                        if let openless_core::CodingAgentStreamEvent::Delta { text, .. } = &event {
+                            final_text.push_str(text);
+                        }
+                        let _ = events.send(event);
+                    } else if !line.trim().is_empty()
+                        && matches!(request.provider, CodingAgentProvider::DshCli)
+                    {
+                        final_text.push_str(line.trim());
+                    }
+                };
+                loop {
+                    if cancel.load(std::sync::atomic::Ordering::Acquire) {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        let _ = events.send(openless_core::CodingAgentStreamEvent::Cancelled {
+                            session_id: session_id.clone(),
+                        });
+                        if let Some(path) = guard_path.take() {
+                            let _ = std::fs::remove_file(path);
+                        }
+                        if let Some(path) = dsh_patch_path.take() {
+                            let _ = std::fs::remove_file(path);
+                        }
+                        return Ok(());
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        let _ = events.send(openless_core::CodingAgentStreamEvent::Error {
+                            session_id: session_id.clone(),
+                            message: format!(
+                                "coding agent timed out after {}s",
+                                request.timeout_secs
+                            ),
+                        });
+                        if let Some(path) = guard_path.take() {
+                            let _ = std::fs::remove_file(path);
+                        }
+                        if let Some(path) = dsh_patch_path.take() {
+                            let _ = std::fs::remove_file(path);
+                        }
+                        return Ok(());
+                    }
+                    if let Ok(line) = line_rx.recv_timeout(std::time::Duration::from_millis(20)) {
+                        handle_line(line);
+                    }
+                    if child
+                        .try_wait()
+                        .map_err(|error| {
+                            BackendError::new(BackendErrorCode::Provider, error.to_string())
+                        })?
+                        .is_some()
+                    {
+                        break;
+                    }
+                }
+                while let Ok(line) = line_rx.try_recv() {
+                    handle_line(line);
+                }
+                let status = child.wait().map_err(|error| {
+                    BackendError::new(BackendErrorCode::Provider, error.to_string())
+                })?;
+                let stderr = stderr_rx.recv().unwrap_or_default();
+                if request.provider == CodingAgentProvider::DshCli {
+                    for line in stderr.lines() {
+                        if let Some(event) = parse_dsh_stream_line(&session_id, line) {
+                            let _ = events.send(event);
+                        }
+                    }
+                }
+                if let Some(path) = guard_path.take() {
+                    let _ = std::fs::remove_file(path);
+                }
+                if let Some(path) = dsh_patch_path.take() {
+                    let _ = std::fs::remove_file(path);
+                }
+                if !status.success() {
+                    let message = if request.provider == CodingAgentProvider::DshCli {
+                        stderr
+                            .lines()
+                            .rfind(|line| {
+                                !line.trim().is_empty()
+                                    && parse_dsh_stream_line(&session_id, line).is_none()
+                            })
+                            .map(str::trim)
+                            .unwrap_or_default()
+                            .to_string()
+                    } else {
+                        stderr.trim().to_string()
+                    };
                     let _ = events.send(openless_core::CodingAgentStreamEvent::Error {
-                        session_id,
+                        session_id: session_id.clone(),
                         message: if message.is_empty() {
-                            "coding agent exited with an error".into()
+                            format!("{executable} exited with status {status}")
                         } else {
                             message
                         },
                     });
-                    return Ok(());
+                } else if !completed {
+                    let _ = events.send(openless_core::CodingAgentStreamEvent::Completed {
+                        session_id: session_id.clone(),
+                        text: final_text.trim().to_string(),
+                        cost_usd: None,
+                        duration_ms: None,
+                    });
                 }
-                let _ = events.send(openless_core::CodingAgentStreamEvent::Completed {
-                    session_id,
-                    text,
-                    cost_usd: None,
-                    duration_ms: None,
-                });
                 Ok(())
             })
             .await
@@ -133,11 +385,20 @@ impl LessComputerRuntimeAdapter for LinuxCodingAgentRuntime {
 
 struct LinuxCodingAgentApi {
     less_computer: std::sync::Arc<dyn openless_core::LessComputerApi>,
+    runtime: std::sync::Arc<LinuxCodingAgentRuntime>,
+    test_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl LinuxCodingAgentApi {
-    fn new(less_computer: std::sync::Arc<dyn openless_core::LessComputerApi>) -> Self {
-        Self { less_computer }
+    fn new(
+        less_computer: std::sync::Arc<dyn openless_core::LessComputerApi>,
+        runtime: std::sync::Arc<LinuxCodingAgentRuntime>,
+    ) -> Self {
+        Self {
+            less_computer,
+            runtime,
+            test_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
     }
 }
 
@@ -152,15 +413,22 @@ impl CodingAgentApi for LinuxCodingAgentApi {
                 Err(error) => return Box::pin(async move { Err(error) }),
             };
         Box::pin(async move {
-            let installed = std::process::Command::new(&executable)
-                .arg("--version")
-                .output()
-                .is_ok();
+            let mut probe = std::process::Command::new(&executable);
+            augment_linux_path(&mut probe);
+            let probe_output = probe.arg("--version").output().ok();
+            let installed = probe_output
+                .as_ref()
+                .map(|output| output.status.success())
+                .unwrap_or(false);
+            let version = probe_output.and_then(|output| {
+                parse_cli_version(&String::from_utf8_lossy(&output.stdout))
+                    .or_else(|| parse_cli_version(&String::from_utf8_lossy(&output.stderr)))
+            });
             Ok(CodingAgentAvailability {
                 provider: request.provider,
                 installed,
                 executable,
-                version: None,
+                version,
                 mcp_servers: Vec::new(),
                 has_computer_use: false,
             })
@@ -169,47 +437,120 @@ impl CodingAgentApi for LinuxCodingAgentApi {
 
     fn list_models(
         &self,
-        _request: CodingAgentModelsRequest,
+        request: CodingAgentModelsRequest,
     ) -> BoxFuture<'static, Result<Vec<String>, BackendError>> {
-        Box::pin(async { Ok(Vec::new()) })
+        let executable =
+            match normalize_coding_agent_executable(request.provider, request.executable) {
+                Ok(value) => value,
+                Err(error) => return Box::pin(async move { Err(error) }),
+            };
+        Box::pin(async move {
+            if request.provider == CodingAgentProvider::DshCli {
+                return Err(BackendError::new(
+                    BackendErrorCode::Unsupported,
+                    "dsh does not expose a model catalog",
+                ));
+            }
+            if request.provider == CodingAgentProvider::ClaudeCodeCli {
+                // ponytail: Claude/Codex expose no stable list command; refresh from provider metadata when one exists.
+                return Ok(vec!["sonnet".into(), "opus".into(), "haiku".into()]);
+            }
+            if request.provider == CodingAgentProvider::CodexCli {
+                return Ok(vec!["gpt-5".into()]);
+            }
+            let args: Vec<String> = if request.provider == CodingAgentProvider::OpenCodeCli {
+                let mut args = vec!["models".into()];
+                if request.refresh {
+                    args.push("--refresh".into());
+                }
+                args
+            } else {
+                vec!["--models".into()]
+            };
+            let mut command = std::process::Command::new(&executable);
+            augment_linux_path(&mut command);
+            let output = command.args(args).output().map_err(|error| {
+                BackendError::new(BackendErrorCode::Unsupported, error.to_string())
+            })?;
+            if !output.status.success() {
+                return Err(BackendError::new(
+                    BackendErrorCode::Provider,
+                    String::from_utf8_lossy(&output.stderr).trim().to_string(),
+                ));
+            }
+            let models =
+                openless_core::parse_coding_agent_models(&String::from_utf8_lossy(&output.stdout));
+            if models.is_empty() {
+                return Err(BackendError::new(
+                    BackendErrorCode::Provider,
+                    "coding agent returned no models",
+                ));
+            }
+            Ok(models)
+        })
     }
 
     fn command_risk(
         &self,
-        _command: String,
+        command: String,
     ) -> BoxFuture<'static, Result<CommandRiskAssessment, BackendError>> {
-        Box::pin(async {
-            Ok(CommandRiskAssessment {
-                risk: CommandRisk::Unknown,
-                reason: None,
-            })
-        })
+        Box::pin(async move { Ok(assess_command_risk(&command)) })
     }
 
     fn run_test(
         &self,
         request: CodingAgentTestRequest,
     ) -> BoxFuture<'static, Result<CodingAgentTestStatus, BackendError>> {
+        let runtime = Arc::clone(&self.runtime);
+        let cancel = Arc::clone(&self.test_cancel);
         Box::pin(async move {
-            let executable =
-                normalize_coding_agent_executable(request.provider, request.executable)?;
-            let installed = std::process::Command::new(&executable)
+            let normalized = openless_core::normalize_coding_agent_test_request(request)?;
+            let mut probe = std::process::Command::new(&normalized.executable);
+            augment_linux_path(&mut probe);
+            if !probe
                 .arg("--version")
                 .output()
-                .is_ok();
+                .map(|output| output.status.success())
+                .unwrap_or(false)
+            {
+                return Err(BackendError::new(
+                    BackendErrorCode::Unsupported,
+                    format!(
+                        "{} is not installed or cannot be executed",
+                        normalized.executable
+                    ),
+                ));
+            }
+            cancel.store(false, std::sync::atomic::Ordering::Release);
+            let mut run = CodingAgentRequest::new("coding-agent-test", normalized.prompt);
+            run.provider = normalized.provider;
+            run.executable = Some(normalized.executable);
+            run.cwd = normalized.workdir;
+            run.model = normalized.model;
+            run.permission_mode = normalized.permission_mode;
+            run.max_budget_usd = normalized.max_budget_usd;
+            run.timeout_secs = normalized.timeout_secs;
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let operation = runtime.run(run, tx, Arc::clone(&cancel));
+            tokio::pin!(operation);
+            let mut message = None;
+            while let Some(event) = rx.recv().await {
+                if let openless_core::CodingAgentStreamEvent::Error { message: error, .. } = event {
+                    message = Some(error);
+                }
+            }
+            operation.await?;
             Ok(CodingAgentTestStatus {
                 running: false,
                 request_id: None,
-                message: Some(if installed {
-                    format!("{executable} is available")
-                } else {
-                    format!("{executable} is not installed")
-                }),
+                message,
             })
         })
     }
 
     fn cancel_test(&self) -> BoxFuture<'static, Result<(), BackendError>> {
+        self.test_cancel
+            .store(true, std::sync::atomic::Ordering::Release);
         Box::pin(async { Ok(()) })
     }
 
@@ -222,11 +563,92 @@ impl CodingAgentApi for LinuxCodingAgentApi {
     }
 }
 
-#[derive(Default)]
-struct LinuxGenericAsrEngine;
+struct LinuxGenericAsrEngine {
+    root: std::sync::Arc<std::sync::Mutex<std::path::PathBuf>>,
+}
 
-#[derive(Default)]
-struct LinuxGenericLocalAsrRuntime;
+struct LinuxGenericLocalAsrRuntime {
+    root: std::sync::Arc<std::sync::Mutex<std::path::PathBuf>>,
+    loaded_model: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    // ponytail: one shared cancellation flag serializes model operations; per-model tokens if parallel downloads are needed.
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Default for LinuxGenericLocalAsrRuntime {
+    fn default() -> Self {
+        Self {
+            root: std::sync::Arc::new(std::sync::Mutex::new(Self::default_root())),
+            loaded_model: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+}
+
+impl LinuxGenericLocalAsrRuntime {
+    const READY_SENTINEL: &'static str = openless_core::MODEL_READY_SENTINEL;
+
+    fn default_root() -> std::path::PathBuf {
+        if let Some(data) = std::env::var_os("XDG_DATA_HOME") {
+            return std::path::PathBuf::from(data)
+                .join("OpenLess")
+                .join("models");
+        }
+        std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join(".local")
+            .join("share")
+            .join("OpenLess")
+            .join("models")
+    }
+
+    fn root_for(base: Option<&std::path::Path>) -> std::path::PathBuf {
+        base.map(|path| path.join("OpenLess").join("models"))
+            .unwrap_or_else(Self::default_root)
+    }
+
+    fn model_dir_for(
+        &self,
+        target: &openless_core::LocalAsrTarget,
+    ) -> Result<std::path::PathBuf, BackendError> {
+        if target.runtime != openless_core::LocalAsrRuntime::Generic {
+            return Err(BackendError::new(
+                BackendErrorCode::Unsupported,
+                "Linux Generic/Qwen runtime only supports generic models",
+            ));
+        }
+        Ok(self
+            .root
+            .lock()
+            .expect("Linux ASR root lock poisoned")
+            .join(target.model_id()))
+    }
+
+    fn executable() -> String {
+        std::env::var("OPENLESS_QWEN_ASR_BIN").unwrap_or_else(|_| "qwen_asr".into())
+    }
+
+    fn bytes_in(dir: &std::path::Path) -> u64 {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return 0;
+        };
+        entries
+            .flatten()
+            .map(|entry| {
+                let path = entry.path();
+                if path.is_dir() {
+                    Self::bytes_in(&path)
+                } else {
+                    entry.metadata().map(|m| m.len()).unwrap_or(0)
+                }
+            })
+            .sum()
+    }
+
+    fn is_ready_dir(dir: &std::path::Path) -> bool {
+        dir.join(Self::READY_SENTINEL).is_file() || dir.join(".openless-asr-ready").is_file()
+    }
+}
 
 impl openless_core::LocalAsrRuntimeAdapter for LinuxGenericLocalAsrRuntime {
     fn engine_available(&self, runtime: openless_core::LocalAsrRuntime) -> bool {
@@ -256,11 +678,13 @@ impl openless_core::LocalAsrRuntimeAdapter for LinuxGenericLocalAsrRuntime {
         &self,
         base_dir: Option<std::path::PathBuf>,
     ) -> BoxFuture<'static, Result<openless_core::LocalAsrStorageSettings, BackendError>> {
+        let is_default = base_dir.is_none();
+        let requested_base = base_dir.clone();
+        let root = Self::root_for(base_dir.as_deref());
+        *self.root.lock().expect("Linux ASR root lock poisoned") = root.clone();
         Box::pin(async move {
-            let is_default = base_dir.is_none();
-            let root = base_dir.unwrap_or_else(|| std::env::temp_dir().join("openless-models"));
             Ok(openless_core::LocalAsrStorageSettings {
-                models_base_dir: Some(root.clone()),
+                models_base_dir: if is_default { None } else { requested_base },
                 models_root_dir: root,
                 is_default,
             })
@@ -271,26 +695,37 @@ impl openless_core::LocalAsrRuntimeAdapter for LinuxGenericLocalAsrRuntime {
         &self,
         runtime: openless_core::LocalAsrRuntime,
     ) -> BoxFuture<'static, Result<Vec<openless_core::LocalAsrModel>, BackendError>> {
+        let root = std::sync::Arc::clone(&self.root);
         Box::pin(async move {
             if runtime != openless_core::LocalAsrRuntime::Generic {
-                return Ok(Vec::new());
+                return Err(BackendError::new(
+                    BackendErrorCode::Unsupported,
+                    "Linux Generic/Qwen runtime does not provide Foundry or Sherpa models",
+                ));
             }
-            Ok(["qwen3-asr-0.6b", "qwen3-asr-1.7b"]
-                .into_iter()
-                .filter_map(|model_id| {
-                    openless_core::LocalAsrTarget::parse(runtime, model_id)
-                        .ok()
-                        .map(|target| openless_core::LocalAsrModel {
-                            target,
-                            display_name: model_id.to_string(),
-                            family: "Qwen3-ASR".to_string(),
-                            mode: Some("streaming".to_string()),
-                            repository: None,
-                            languages: Vec::new(),
-                            installed: false,
-                            downloaded_bytes: 0,
-                            size_bytes: None,
-                        })
+            let root = root.lock().expect("Linux ASR root lock poisoned").clone();
+            Ok(openless_core::ModelCatalog::standard()
+                .entries()
+                .iter()
+                .filter(|entry| entry.target.runtime == runtime)
+                .map(|entry| {
+                    let model_id = entry.target.model_id();
+                    openless_core::LocalAsrModel {
+                        target: entry.target.clone(),
+                        display_name: entry.display_name.clone(),
+                        family: if model_id.starts_with("qwen3") {
+                            "qwen3"
+                        } else {
+                            "whisper"
+                        }
+                        .into(),
+                        mode: Some("offline".into()),
+                        repository: Some(entry.repository.clone()),
+                        languages: Vec::new(),
+                        installed: Self::is_ready_dir(&root.join(model_id)),
+                        downloaded_bytes: Self::bytes_in(&root.join(model_id)),
+                        size_bytes: None,
+                    }
                 })
                 .collect())
         })
@@ -301,14 +736,19 @@ impl openless_core::LocalAsrRuntimeAdapter for LinuxGenericLocalAsrRuntime {
         settings: openless_core::LocalAsrSettings,
     ) -> BoxFuture<'static, Result<openless_core::LocalAsrRuntimeStatus, BackendError>> {
         let available = self.engine_available(settings.runtime);
+        let loaded_model = std::sync::Arc::clone(&self.loaded_model);
         Box::pin(async move {
+            let loaded = loaded_model
+                .lock()
+                .expect("Linux ASR loaded lock poisoned")
+                .clone();
             Ok(openless_core::LocalAsrRuntimeStatus {
                 runtime: settings.runtime,
                 provider_id: settings.provider_id,
                 available,
-                loaded: false,
+                loaded: loaded.is_some(),
                 active_model: settings.active_model.clone(),
-                model_id: Some(settings.active_model),
+                model_id: loaded,
                 keep_loaded_secs: settings.keep_loaded_secs,
                 runtime_source: settings.runtime_source,
                 endpoint: None,
@@ -326,16 +766,349 @@ impl openless_core::LocalAsrRuntimeAdapter for LinuxGenericLocalAsrRuntime {
         &self,
         target: openless_core::LocalAsrTarget,
     ) -> BoxFuture<'static, Result<std::path::PathBuf, BackendError>> {
+        let result = self.model_dir_for(&target);
+        Box::pin(async move { result })
+    }
+
+    fn relocate_storage(
+        &self,
+        current: Option<std::path::PathBuf>,
+        next: Option<std::path::PathBuf>,
+    ) -> BoxFuture<'static, Result<openless_core::LocalAsrStorageSettings, BackendError>> {
+        let root = Self::root_for(next.as_deref());
+        let old = Self::root_for(current.as_deref());
+        let result = (|| {
+            if old != root && old.exists() {
+                std::fs::create_dir_all(&root)
+                    .map_err(|e| BackendError::new(BackendErrorCode::Platform, e.to_string()))?;
+                for entry in std::fs::read_dir(&old)
+                    .map_err(|e| BackendError::new(BackendErrorCode::Platform, e.to_string()))?
+                    .flatten()
+                {
+                    let destination = root.join(entry.file_name());
+                    if destination.exists() {
+                        continue;
+                    }
+                    std::fs::rename(entry.path(), destination).map_err(|e| {
+                        BackendError::new(BackendErrorCode::Platform, e.to_string())
+                    })?;
+                }
+            }
+            *self.root.lock().expect("Linux ASR root lock poisoned") = root.clone();
+            let is_default = next.is_none();
+            Ok(openless_core::LocalAsrStorageSettings {
+                models_base_dir: next,
+                models_root_dir: root,
+                is_default,
+            })
+        })();
+        Box::pin(async move { result })
+    }
+
+    fn prepare(
+        &self,
+        target: openless_core::LocalAsrTarget,
+        _source: openless_core::FoundryRuntimeSource,
+    ) -> BoxFuture<'static, Result<String, BackendError>> {
+        let dir = match self.model_dir_for(&target) {
+            Ok(dir) => dir,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        let loaded = std::sync::Arc::clone(&self.loaded_model);
+        let cancelled = std::sync::Arc::clone(&self.cancelled);
         Box::pin(async move {
-            Ok(std::env::temp_dir()
-                .join("openless-models")
-                .join(target.model_id()))
+            cancelled.store(false, std::sync::atomic::Ordering::Release);
+            if !Self::is_ready_dir(&dir) {
+                return Err(BackendError::new(
+                    BackendErrorCode::InvalidState,
+                    format!("local ASR model is not downloaded: {}", target.model_id()),
+                ));
+            }
+            if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                return Err(BackendError::new(
+                    BackendErrorCode::Cancelled,
+                    "local ASR prepare cancelled",
+                ));
+            }
+            *loaded.lock().expect("Linux ASR loaded lock poisoned") =
+                Some(target.model_id().to_string());
+            Ok(target.model_id().to_string())
+        })
+    }
+
+    fn release(
+        &self,
+        runtime: openless_core::LocalAsrRuntime,
+    ) -> BoxFuture<'static, Result<(), BackendError>> {
+        let loaded = std::sync::Arc::clone(&self.loaded_model);
+        Box::pin(async move {
+            if runtime != openless_core::LocalAsrRuntime::Generic {
+                return Err(BackendError::new(
+                    BackendErrorCode::Unsupported,
+                    "Linux Generic/Qwen runtime only supports generic models",
+                ));
+            }
+            *loaded.lock().expect("Linux ASR loaded lock poisoned") = None;
+            Ok(())
+        })
+    }
+
+    fn preload(
+        &self,
+        runtime: openless_core::LocalAsrRuntime,
+    ) -> BoxFuture<'static, Result<(), BackendError>> {
+        if runtime != openless_core::LocalAsrRuntime::Generic {
+            return Box::pin(async {
+                Err(BackendError::new(
+                    BackendErrorCode::Unsupported,
+                    "Linux Generic/Qwen runtime only supports generic models",
+                ))
+            });
+        }
+        let loaded = std::sync::Arc::clone(&self.loaded_model);
+        Box::pin(async move {
+            if loaded
+                .lock()
+                .expect("Linux ASR loaded lock poisoned")
+                .is_none()
+            {
+                return Err(BackendError::new(
+                    BackendErrorCode::InvalidState,
+                    "prepare a local ASR model before preloading",
+                ));
+            }
+            Ok(())
+        })
+    }
+
+    fn cancel_prepare(
+        &self,
+        runtime: openless_core::LocalAsrRuntime,
+    ) -> BoxFuture<'static, Result<(), BackendError>> {
+        if runtime != openless_core::LocalAsrRuntime::Generic {
+            return Box::pin(async {
+                Err(BackendError::new(
+                    BackendErrorCode::Unsupported,
+                    "Linux Generic/Qwen runtime only supports generic models",
+                ))
+            });
+        }
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::Release);
+        Box::pin(async { Ok(()) })
+    }
+
+    fn delete_model(
+        &self,
+        target: openless_core::LocalAsrTarget,
+    ) -> BoxFuture<'static, Result<(), BackendError>> {
+        let loaded = std::sync::Arc::clone(&self.loaded_model);
+        let model_id = target.model_id().to_string();
+        let result = self.model_dir_for(&target).and_then(|dir| {
+            std::fs::remove_dir_all(dir)
+                .map_err(|e| BackendError::new(BackendErrorCode::Platform, e.to_string()))
+                .map(|_| {
+                    if loaded
+                        .lock()
+                        .expect("Linux ASR loaded lock poisoned")
+                        .as_deref()
+                        == Some(model_id.as_str())
+                    {
+                        *loaded.lock().expect("Linux ASR loaded lock poisoned") = None;
+                    }
+                })
+        });
+        Box::pin(async move { result })
+    }
+
+    fn remote_info(
+        &self,
+        target: openless_core::LocalAsrTarget,
+        mirror: openless_core::LocalAsrMirror,
+    ) -> BoxFuture<'static, Result<openless_core::LocalAsrRemoteInfo, BackendError>> {
+        let root = self
+            .root
+            .lock()
+            .expect("Linux ASR root lock poisoned")
+            .clone();
+        let target_for_lookup = target.clone();
+        Box::pin(async move {
+            let repository = openless_core::ModelCatalog::standard()
+                .find(target_for_lookup.runtime, target_for_lookup.model_id())
+                .map(|entry| entry.repository.clone())
+                .ok_or_else(|| {
+                    BackendError::new(
+                        BackendErrorCode::InvalidArgument,
+                        "unknown Linux local ASR model",
+                    )
+                })?;
+            let base = linux_model_mirror_base(mirror)?;
+            let store = ModelStore::new(ModelStoreConfig::new(root)?)?;
+            let manifest = store
+                .fetch_hf_manifest(target.model_id(), &repository, base)
+                .await?;
+            Ok(openless_core::LocalAsrRemoteInfo {
+                target,
+                mirror,
+                total_bytes: manifest.total_bytes,
+                files: manifest
+                    .files
+                    .into_iter()
+                    .map(|file| openless_core::LocalAsrRemoteFile {
+                        path: file.url,
+                        local_path: Some(file.path),
+                        size_bytes: file.size_bytes,
+                        sha256: file.sha256,
+                    })
+                    .collect(),
+            })
+        })
+    }
+
+    fn model_card(
+        &self,
+        target: openless_core::LocalAsrTarget,
+        mirror: openless_core::LocalAsrMirror,
+    ) -> BoxFuture<'static, Result<openless_core::LocalAsrModelCard, BackendError>> {
+        let root = self
+            .root
+            .lock()
+            .expect("Linux ASR root lock poisoned")
+            .clone();
+        let target_for_lookup = target.clone();
+        Box::pin(async move {
+            let repository = openless_core::ModelCatalog::standard()
+                .find(target_for_lookup.runtime, target_for_lookup.model_id())
+                .map(|entry| entry.repository.clone())
+                .ok_or_else(|| {
+                    BackendError::new(
+                        BackendErrorCode::InvalidArgument,
+                        "unknown Linux local ASR model",
+                    )
+                })?;
+            let base = linux_model_mirror_base(mirror)?;
+            let store = ModelStore::new(ModelStoreConfig::new(root)?)?;
+            let card = store
+                .fetch_hf_model_card(target.model_id(), &repository, base)
+                .await?;
+            Ok(openless_core::LocalAsrModelCard {
+                target,
+                mirror,
+                downloads: card.downloads,
+                likes: card.likes,
+                description: card.description,
+            })
+        })
+    }
+
+    fn start_download(
+        &self,
+        target: openless_core::LocalAsrTarget,
+        mirror: openless_core::LocalAsrMirror,
+    ) -> BoxFuture<'static, Result<(), BackendError>> {
+        let root = self
+            .root
+            .lock()
+            .expect("Linux ASR root lock poisoned")
+            .clone();
+        let target_for_lookup = target.clone();
+        let cancelled = std::sync::Arc::clone(&self.cancelled);
+        cancelled.store(false, std::sync::atomic::Ordering::Release);
+        Box::pin(async move {
+            let repository = openless_core::ModelCatalog::standard()
+                .find(target_for_lookup.runtime, target_for_lookup.model_id())
+                .map(|entry| entry.repository.clone())
+                .ok_or_else(|| {
+                    BackendError::new(
+                        BackendErrorCode::InvalidArgument,
+                        "unknown Linux local ASR model",
+                    )
+                })?;
+            let base = linux_model_mirror_base(mirror)?;
+            let store = ModelStore::new(ModelStoreConfig::new(root)?)?;
+            let manifest = store
+                .fetch_hf_manifest(target.model_id(), &repository, base)
+                .await?;
+            store.download(manifest, cancelled).await.map(|_| ())
+        })
+    }
+
+    fn cancel_download(
+        &self,
+        target: openless_core::LocalAsrTarget,
+    ) -> BoxFuture<'static, Result<(), BackendError>> {
+        if let Err(error) = self.model_dir_for(&target) {
+            return Box::pin(async move { Err(error) });
+        }
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::Release);
+        Box::pin(async { Ok(()) })
+    }
+
+    fn test_model(
+        &self,
+        target: openless_core::LocalAsrTarget,
+    ) -> BoxFuture<'static, Result<openless_core::LocalAsrTestResult, BackendError>> {
+        let dir = match self.model_dir_for(&target) {
+            Ok(dir) => dir,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        Box::pin(async move {
+            if !Self::is_ready_dir(&dir) {
+                return Err(BackendError::new(
+                    BackendErrorCode::InvalidState,
+                    "local ASR model is not downloaded",
+                ));
+            }
+            let audio = std::env::var_os("OPENLESS_QWEN_ASR_TEST_AUDIO")
+                .map(std::path::PathBuf::from)
+                .filter(|path| path.is_file())
+                .ok_or_else(|| {
+                    BackendError::new(
+                        BackendErrorCode::Unsupported,
+                        "set OPENLESS_QWEN_ASR_TEST_AUDIO to an audio fixture for model testing",
+                    )
+                })?;
+            let executable = Self::executable();
+            let started = std::time::Instant::now();
+            let output = tokio::task::spawn_blocking({
+                let executable = executable.clone();
+                move || {
+                    let mut command = std::process::Command::new(&executable);
+                    augment_linux_path(&mut command);
+                    command
+                        .args(["-d", dir.to_string_lossy().as_ref()])
+                        .arg(audio)
+                        .output()
+                        .map_err(|error| {
+                            BackendError::new(BackendErrorCode::Unsupported, error.to_string())
+                        })
+                }
+            })
+            .await
+            .map_err(|error| BackendError::new(BackendErrorCode::Internal, error.to_string()))??;
+            if !output.status.success() {
+                return Err(BackendError::new(
+                    BackendErrorCode::Provider,
+                    String::from_utf8_lossy(&output.stderr).trim().to_string(),
+                ));
+            }
+            Ok(openless_core::LocalAsrTestResult {
+                target,
+                backend: executable,
+                expected_text: std::env::var("OPENLESS_QWEN_ASR_TEST_EXPECTED").unwrap_or_default(),
+                transcribed_text: String::from_utf8_lossy(&output.stdout).trim().to_string(),
+                audio_ms: 0,
+                load_ms: 0,
+                transcribe_ms: started.elapsed().as_millis() as u64,
+            })
         })
     }
 }
 
 struct LinuxGenericAsrSession {
     model: Option<String>,
+    root: std::sync::Arc<std::sync::Mutex<std::path::PathBuf>>,
     pcm: std::sync::Mutex<Vec<u8>>,
     cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
@@ -350,6 +1123,7 @@ impl TranscriptionEngine for LinuxGenericAsrEngine {
         let session: std::sync::Arc<dyn TranscriptionSession> =
             std::sync::Arc::new(LinuxGenericAsrSession {
                 model: context.asr.model.clone(),
+                root: std::sync::Arc::clone(&self.root),
                 pcm: std::sync::Mutex::new(Vec::new()),
                 cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             });
@@ -377,6 +1151,7 @@ impl TranscriptionSession for LinuxGenericAsrSession {
                 .expect("Linux generic ASR PCM lock poisoned"),
         );
         let model = self.model.clone();
+        let root = std::sync::Arc::clone(&self.root);
         let cancelled = std::sync::Arc::clone(&self.cancelled);
         Box::pin(async move {
             if cancelled.load(std::sync::atomic::Ordering::Acquire) {
@@ -396,9 +1171,20 @@ impl TranscriptionSession for LinuxGenericAsrSession {
                 let executable = std::env::var("OPENLESS_QWEN_ASR_BIN")
                     .unwrap_or_else(|_| "qwen_asr".to_string());
                 let mut command = std::process::Command::new(&executable);
+                augment_linux_path(&mut command);
                 command.args(["--stdin", "--silent"]);
                 if let Some(model) = model.filter(|model| !model.trim().is_empty()) {
-                    command.args(["-d", model.as_str()]);
+                    let model_dir = root
+                        .lock()
+                        .expect("Linux ASR root lock poisoned")
+                        .join(&model);
+                    if !LinuxGenericLocalAsrRuntime::is_ready_dir(&model_dir) {
+                        return Err(BackendError::new(
+                            BackendErrorCode::InvalidState,
+                            format!("Linux local ASR model is not prepared: {model}"),
+                        ));
+                    }
+                    command.args(["-d", model_dir.to_string_lossy().as_ref()]);
                 }
                 let mut child = command
                     .stdin(std::process::Stdio::piped())
@@ -501,11 +1287,13 @@ impl LinuxBackendBuilder {
         for provider_type in SHARED_CLOUD_ASR_PROVIDER_TYPES {
             transcription.register(*provider_type, Arc::clone(&cloud_transcription))?;
         }
-        let linux_local_asr: Arc<dyn TranscriptionEngine> = Arc::new(LinuxGenericAsrEngine);
+        let linux_local_runtime = Arc::new(LinuxGenericLocalAsrRuntime::default());
+        let linux_local_asr: Arc<dyn TranscriptionEngine> = Arc::new(LinuxGenericAsrEngine {
+            root: Arc::clone(&linux_local_runtime.root),
+        });
         for provider_id in ["local-qwen3", "local-qwen3-c"] {
             transcription.register(provider_id, Arc::clone(&linux_local_asr))?;
         }
-
         let polisher = Arc::new(TextPolisherRouter::default());
         let cloud_polisher: Arc<dyn TextPolisher> =
             Arc::new(SharedCloudTextPolisher::new(Arc::clone(&credential_store)));
@@ -519,6 +1307,17 @@ impl LinuxBackendBuilder {
         ));
 
         let mut services = BackendServices::unsupported();
+        if let Ok(model_config) = ModelStoreConfig::new(
+            linux_local_runtime
+                .root
+                .lock()
+                .expect("Linux ASR root lock poisoned")
+                .clone(),
+        ) {
+            if let Ok(model_store) = ModelStore::new(model_config) {
+                services.configure_model_store(Arc::new(model_store));
+            }
+        }
         services.provider = Arc::new(ProviderService::new(
             Arc::clone(&credential_store),
             Arc::clone(&task_spawner),
@@ -527,15 +1326,17 @@ impl LinuxBackendBuilder {
         services
             .less_computer
             .bind_runtime(coding_agent_runtime.clone());
-        services.coding_agent = Arc::new(LinuxCodingAgentApi::new(Arc::clone(
-            &services.less_computer,
-        )));
+        services.coding_agent = Arc::new(LinuxCodingAgentApi::new(
+            Arc::clone(&services.less_computer),
+            Arc::clone(&coding_agent_runtime),
+        ));
 
         Ok(Self::new(config, transcription, polisher)
             .with_task_spawner(task_spawner)
             .with_auxiliary_polisher(auxiliary_polisher)
             .with_credential_store(credential_store)
             .with_services(services)
+            .with_local_asr_runtime(linux_local_runtime)
             .with_marketplace_config(MarketplaceConfig::production())
             .with_settings_runtime(Arc::new(LinuxSettingsRuntime::new(store))))
     }
@@ -678,7 +1479,7 @@ impl LinuxBackendBuilder {
                 services,
                 local_asr_runtime: Some(
                     self.local_asr_runtime
-                        .unwrap_or_else(|| Arc::new(LinuxGenericLocalAsrRuntime)),
+                        .unwrap_or_else(|| Arc::new(LinuxGenericLocalAsrRuntime::default())),
                 ),
                 marketplace_config: self.marketplace_config,
                 selection_runtime: Some(Arc::new(LinuxSelectionRuntime::new())),
@@ -701,7 +1502,8 @@ mod tests {
         FixtureAudioRecorder, FixtureTextInserter, FixtureTextPolisher, FixtureTranscriptionEngine,
     };
     use openless_core::{
-        BackendErrorCode, InMemoryCredentialStore, InsertOutcome, ProviderKind, ProviderRequest,
+        BackendErrorCode, InMemoryCredentialStore, InsertOutcome, LocalAsrRuntimeAdapter,
+        ProviderKind, ProviderRequest,
     };
 
     use super::*;
@@ -808,6 +1610,109 @@ mod tests {
         assert_eq!(transcription.pcm(), vec![1, 0, 2, 0]);
         assert_eq!(recorder.stop_count(), 1);
         runtime.backend.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn generic_local_asr_runtime_tracks_real_model_files_and_lifecycle() {
+        let root = std::env::temp_dir().join(format!(
+            "openless-linux-local-asr-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let runtime = LinuxGenericLocalAsrRuntime::default();
+        let storage =
+            openless_core::LocalAsrRuntimeAdapter::storage_settings(&runtime, Some(root.clone()))
+                .await
+                .unwrap();
+        let target = openless_core::LocalAsrTarget::parse(
+            openless_core::LocalAsrRuntime::Generic,
+            "qwen3-asr-0.6b",
+        )
+        .unwrap();
+        let model_dir = storage.models_root_dir.join(target.model_id());
+        std::fs::create_dir_all(&model_dir).unwrap();
+        std::fs::write(
+            model_dir.join(LinuxGenericLocalAsrRuntime::READY_SENTINEL),
+            b"ready",
+        )
+        .unwrap();
+        std::fs::write(model_dir.join("weights.bin"), [1_u8, 2, 3]).unwrap();
+
+        let models = runtime
+            .list_models(openless_core::LocalAsrRuntime::Generic)
+            .await
+            .unwrap();
+        let model = models
+            .iter()
+            .find(|model| model.target.model_id() == target.model_id())
+            .unwrap();
+        assert!(model.installed);
+        assert!(model.downloaded_bytes >= 3);
+        assert_eq!(
+            runtime
+                .prepare(target.clone(), openless_core::FoundryRuntimeSource::Auto)
+                .await
+                .unwrap(),
+            target.model_id()
+        );
+        assert!(
+            runtime
+                .runtime_status(openless_core::LocalAsrSettings {
+                    runtime: openless_core::LocalAsrRuntime::Generic,
+                    provider_id: "local-qwen3".into(),
+                    active_model: target.model_id().into(),
+                    mirror: openless_core::LocalAsrMirror::Huggingface,
+                    models_base_dir: Some(root.clone()),
+                    models_root_dir: storage.models_root_dir.clone(),
+                    engine_available: false,
+                    language_hint: None,
+                    runtime_source: None,
+                    keep_loaded_secs: 0,
+                })
+                .await
+                .unwrap()
+                .loaded
+        );
+        runtime
+            .release(openless_core::LocalAsrRuntime::Generic)
+            .await
+            .unwrap();
+        runtime.delete_model(target).await.unwrap();
+        assert!(!model_dir.exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn coding_agent_runtime_reports_unavailable_cli_without_fake_success() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "openless-linux-coding-agent-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let runtime = LinuxBackendBuilder::from_shared_providers(BackendConfig {
+            data_dir: data_dir.clone(),
+            ..BackendConfig::default()
+        })
+        .unwrap()
+        .build()
+        .unwrap();
+        let error = runtime
+            .backend
+            .services()
+            .coding_agent
+            .run_test(CodingAgentTestRequest {
+                provider: CodingAgentProvider::ClaudeCodeCli,
+                executable: Some("openless-command-that-does-not-exist".into()),
+                prompt: "test".into(),
+                permission_mode: openless_core::CodingAgentPermissionMode::Plan,
+                workdir: None,
+                model: None,
+                max_budget_usd: Some(0.5),
+                timeout_secs: 5,
+            })
+            .await
+            .expect_err("missing coding agent executable must be explicit");
+        assert_eq!(error.code, BackendErrorCode::Unsupported);
         let _ = std::fs::remove_dir_all(data_dir);
     }
 }

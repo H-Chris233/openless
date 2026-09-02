@@ -1,4 +1,4 @@
-# Linux egui 后端接口契约（1.0.0）
+# Linux egui 后端接口契约（2.0.0）
 
 > 本文是 Linux egui 组与共享 Rust 后端之间的交付契约。egui 组负责
 > `eframe::App`、布局、控件、绘制和 UI 测试；本文不规定视觉实现。
@@ -11,7 +11,7 @@
 > QA 生产构造已使用 `QaService + TauriQaRuntimeAdapter`；Remote WebSocket lifecycle、Less Computer
 > replay/resync 和完整 frontend/Tauri 本地门禁已覆盖，其余协议迁移、旧 Coordinator 宿主耦合与
 > Linux 原生证明仍按 [`linux-egui-shared-backend-plan.md`](./linux-egui-shared-backend-plan.md) 的 M4–M8 收口；
-> 1.0.0 Interface 已完成移交，Selection/Selection Voice 的完整 headless 场景、Linux
+> 2.0.0 Interface 已完成移交，Selection/Selection Voice 的完整 headless 场景、Linux
 > preview/revert `Unsupported`、Marketplace production factory/filesystem sink 与当前公共面门禁均已覆盖。
 > Provider 的运行时请求以及验证连通性/模型列表管理面均由 Core `ProviderService` 提供；Tauri
 > 与 Linux factory 注入同一实现。未注入的其他领域仍稳定返回 `Unsupported`，UI 不得据此显示为可用。
@@ -111,6 +111,7 @@ let current: BackendSnapshot = backend.snapshot();
 | --- | --- |
 | `ProviderApi` | validate、list models，按 ASR/LLM/Omni 和可选 channel 选择 |
 | `LocalAsrApi` | settings/catalog/status/remote info、目录/模型/镜像/keep-loaded 设置、download/prepare/preload/release/delete/test |
+| `ModelStore` | Core 统一 catalog、HF tree 分页、文件过滤、Range/断点下载、SHA-256、staging/ready sentinel、归档解压与 1.x 模型目录迁移 |
 | `SelectionApi` | snapshot、begin polish、confirm、cancel、revert |
 | `SelectionVoiceApi` | begin/mark processing、Core-owned transcript 处理、intent confirm、edit delivery、QA preview create/revise、preview apply ticket/finish、cancel/revert |
 | `QaApi` | snapshot、toggle recording、submit text、edit-instruction mode、session cancel、dismiss |
@@ -156,7 +157,7 @@ Core、Tauri wire 和 Linux factory contract 覆盖 channel 隔离、Omni 拒绝
 无 redirect、显式 timeout 和 2 MiB 响应上限，`FakeProviderTransport` 已覆盖 HTTP 状态、超时、取消、
 无效 JSON、响应过大和 redirect 拒绝，并验证秘密不会出现在请求 `Debug`、错误或 fixture 输出。Core
 静态模型清单已按迁移前 Tauri 顺序完成 provider parity 与去重测试；LLM extra headers/temperature
-写入已按显式 `provider_id` 定位并有 A/B channel 回归测试。上述 Interface 收口不改变 1.0.0 公共调用面，
+写入已按显式 `provider_id` 定位并有 A/B channel 回归测试。上述 Interface 收口升级为 2.0.0 公共调用面，
 但真实 provider 网络、keyring/Secret Service、取消/超时和各平台 runner 仍需在 M9/M10 留下独立证据，
 不能用 fake、WSL 或本地 parser/unit 测试代替。
 
@@ -659,7 +660,8 @@ egui view model 测试应只使用这些 fixture 和 `BackendSnapshot`/事件，
 
 ## 11. 版本与变更流程
 
-当前代码常量为 `openless_core::BACKEND_CONTRACT_VERSION = "1.0.0"`。本文的
+当前代码常量为 `openless_core::BACKEND_CONTRACT_VERSION = "2.0.0"`（读取旧持久化
+payload 时保留 `LEGACY_BACKEND_CONTRACT_VERSION = "1.0.0"`）。本文的
 contract version 随破坏性接口变更递增。新增可选 DTO 字段必须有默认
 值；删除字段、改变枚举值、改变事件顺序或单位必须：
 
@@ -707,6 +709,19 @@ egui 组发现缺少能力时，应提交一个只依赖 facade/DTO/event 的可
 - `DictationInsertionContext` 额外冻结 `windows_sendinput_newline_mode` 与
   `android_insert_strategy`，平台 Adapter 不得在会话执行中重新读取偏好。
 
+### 11.3 从 1.0.0 迁移到 2.0.0
+
+2.0.0 将跨平台业务 Implementation 收口到 `openless-core`：
+
+- 模型清单、Range 下载、断点索引、SHA-256、staging/ready sentinel 和旧目录迁移统一由
+  `ModelStore` 提供；宿主只注入模型根目录、原生 runtime 和 typed progress sink；
+- Coding Agent 由 Core `CodingAgentRunner` 统一构造四种 provider 的请求、解析 stream、过滤
+  `session_id` 并产生唯一终态，宿主只实现进程创建、stdio、kill/wait 和临时文件；
+- 文档窗口、最小差异/词汇学习和其它协议纯函数位于 Core，Tauri/Linux 仅保留 AX、窗口、
+  输入法、socket、keyring 等 Adapter；
+- 1.x preferences/history/activity、凭据元数据、旧模型根目录/mirror/sentinel 与 style-pack
+  origin 字段继续按迁移规则读取，不因 contract 升级丢失。
+
 ## 12. 当前交付状态
 
 | 交付物 | 状态 |
@@ -718,9 +733,9 @@ egui 组发现缺少能力时，应提交一个只依赖 facade/DTO/event 的可
 | preferences/history/activity/vocabulary/correction/style-pack/credentials 共享实现 | 已建立，并由 Tauri compatibility commands 逐步复用 |
 | Linux validated settings Interface | 已建立；`save_settings`/`update_settings_strict` 强制携带 snapshot revision，Core 统一校验、协调、持久化、事件和补偿，Linux Adapter 只消费显式 target |
 | 全部复杂领域 DTO/Interface 与 unsupported 语义 | 已建立，位于 `domains.rs` / `BackendServices` |
-| 1.0 公共 re-export 边界 | 已冻结；`openless-core`/`openless-linux-egui` 只公开 facade/DTO/event/host Interface/fixture，repository 与内部状态机不属于 UI 契约；`check-linux-public-surface.ps1` 防止边界回退 |
+| 2.0 公共 re-export 边界 | 已冻结；`openless-core`/`openless-linux-egui` 只公开 facade/DTO/event/host Interface/fixture，repository 与内部状态机不属于 UI 契约；`check-linux-public-surface.ps1` 防止边界回退 |
 | Tauri command/event 完整迁移 | 进行中；React/CLI/Android JNI/remote PCM/桌面普通听写热键已切 core，12 个原 migrationRequired event 已 typed 化并集中映射；Selection、QA、Remote Input、Auxiliary 与 Provider 管理面已切共享 Core，Remote/QA React wire、WebSocket lifecycle、Provider wire/source contract 与 Less Computer replay 已覆盖；Coordinator 业务模块的直接 emit 和直接 Tauri runtime 调用已清零，剩余 Tauri-only compatibility host 组织边界见计划 M4–M6 |
-| 复杂领域真实共享 Adapter | 部分完成；云 ASR/LLM/Omni/Auxiliary/Marketplace provider Implementation 已由 Tauri/Linux 共用，Marketplace 已有安全 filesystem sink；local ASR、Selection retained preview/revert、QA、Remote Input、Coding Agent 的未实现 Linux 能力稳定返回 `Unsupported` |
+| 复杂领域真实共享 Adapter | 部分完成；云 ASR/LLM/Omni/Auxiliary/Marketplace provider Implementation 已由 Tauri/Linux 共用，Core `ModelStore` 与 Linux Coding Agent process seam 已接入；Foundry/Sherpa/native runtime、真实设备和发布物仍需平台证据 |
 | 会话级 provider router | 已建立；ID/type/model 在 session 开始时固定，Core 持有云 ASR/LLM/Omni 协议 Implementation；Tauri 与 Linux 注册同一共享实现，Tauri 另行追加 native/local ASR |
 | provider 验证/模型列表管理面 | 已建立；Core `ProviderService` 统一 channel-scoped credential、静态/远端模型列表、验证探活和错误脱敏；Tauri command 只做 wire 转换，Linux shared factory 注入同一 service；真实网络/keyring 和平台 runner 仍按主计划 M9/M10 留证 |
 | Linux credentials/resources/fcitx5/capabilities/host-actions | 已建立非 UI Adapter 和 contract tests；WSL Ubuntu 已显式通过真实 Secret Service set/read/remove、fcitx5 plugin/method/listener/signal contract；无焦点输入时 plugin 不抛异常导致 fcitx5 崩溃 |
@@ -729,7 +744,7 @@ egui 组发现缺少能力时，应提交一个只依赖 facade/DTO/event 的可
 | egui UI | 由另一组负责，不在本交付范围 |
 
 完整验收以主计划第 12 节为准；本契约证明 egui 团队可以在不依赖 Tauri 的前提下基于冻结的
-1.0.0 Interface 开发 view model 和 egui UI。真实 Ubuntu 原生能力、发行包和 UI 验收仍分别由
+2.0.0 Interface 开发 view model 和 egui UI。真实 Ubuntu 原生能力、发行包和 UI 验收仍分别由
 Linux runner 与 egui 团队负责。
 
 ## Less Computer 语音接口（2.0）
@@ -743,7 +758,7 @@ ASR/Agent 并释放尚未提升的 lease。
 实时 provider 的 interim 文本通过既有 `BackendEventKind::TranscriptDelta` 发布，使用同一
 `session_id` 且 `offset` 单调递增；批式 provider 只发布一次 `is_final=true`。Agent 阶段继续
 使用 `LessComputerEvent`（approval、stream、completed、cancelled、error），不新增 ASR 事件
-类型，Backend contract 版本仍为 `1.0.0`。
+类型，Backend contract 版本为 `2.0.0`。
 
 Linux `LinuxHotkeyEvent::{LessComputerPressed,LessComputerReleased,LessComputerCombined}`
 只表达热键边沿；Hold/Toggle/Auto（Auto 长按阈值 350ms）由 Core 解释。三种录音入口与

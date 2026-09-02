@@ -147,6 +147,10 @@ pub trait LocalAsrRuntimeAdapter: Send + Sync {
     fn invalidate_route(&self, _runtime: LocalAsrRuntime) {}
 }
 
+/// Stable 2.0 name for the native model runtime seam. Kept as an alias so
+/// existing platform adapters can migrate without a second implementation.
+pub use LocalAsrRuntimeAdapter as ModelRuntimeAdapter;
+
 pub(crate) struct LocalAsrService {
     preferences: Arc<PreferencesStore>,
     runtime: Arc<dyn LocalAsrRuntimeAdapter>,

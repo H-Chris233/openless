@@ -815,7 +815,7 @@ fn verify_hello(txt: &str, state: &Arc<WsState>, peer_ip: IpAddr) -> AuthResult 
     let pin_ok = v.get("type").and_then(|t| t.as_str()) == Some("hello")
         && v.get("pin")
             .and_then(|p| p.as_str())
-            .map(|p| constant_time_eq(p.as_bytes(), state.pin.as_bytes()))
+            .map(|p| openless_core::constant_time_eq(p.as_bytes(), state.pin.as_bytes()))
             .unwrap_or(false);
 
     // 锁定检查与失败累计放同一临界区：之前分两次拿锁，同一 IP 的并发握手可以
@@ -864,18 +864,6 @@ fn verify_hello(txt: &str, state: &Arc<WsState>, peer_ip: IpAddr) -> AuthResult 
         }
         AuthResult::BadPin
     }
-}
-
-/// 等长常量时间比较，避免 PIN 计时侧信道。
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
 }
 
 #[cfg(test)]
