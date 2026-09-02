@@ -37,7 +37,7 @@ fn model_path_in_dir(id: crate::asr::local::ModelId, dir: &Path, file_name: &str
 
 pub fn model_ready_for_model(store: &openless_core::ModelStore, model_id: &str) -> bool {
     store
-        .list(openless_core::LocalAsrRuntime::Generic)
+        .list_models(openless_core::LocalAsrRuntime::Generic)
         .is_ok_and(|models| {
             models
                 .iter()
