@@ -18,10 +18,11 @@ const result = spawnSync(
 );
 
 const output = `${result.stdout ?? ''}${result.stderr ?? ''}`;
-process.stdout.write(result.stdout ?? '');
-process.stderr.write(result.stderr ?? '');
+for (const chunk of (result.stdout ?? '').match(/[\s\S]{1,8192}/g) ?? []) process.stdout.write(chunk);
+for (const chunk of (result.stderr ?? '').match(/[\s\S]{1,8192}/g) ?? []) process.stderr.write(chunk);
 
 if (result.status !== 0) {
+  if (result.error) console.error(result.error);
   process.exit(result.status ?? 1);
 }
 
