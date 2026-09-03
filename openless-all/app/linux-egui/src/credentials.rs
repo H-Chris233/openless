@@ -2,6 +2,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use futures_util::future::BoxFuture;
+use openless_core::credentials::{
+    ASR_API_KEY_ACCOUNT, ASR_ENDPOINT_ACCOUNT, ASR_MODEL_ACCOUNT, LLM_API_KEY_ACCOUNT,
+    LLM_ENDPOINT_ACCOUNT, LLM_MODEL_ACCOUNT, OMNI_API_KEY_ACCOUNT, OMNI_ENDPOINT_ACCOUNT,
+    OMNI_MODEL_ACCOUNT, VOLCENGINE_ACCESS_KEY_ACCOUNT, VOLCENGINE_API_KEY_ACCOUNT,
+    VOLCENGINE_APP_KEY_ACCOUNT, VOLCENGINE_AUTH_MODE_ACCOUNT, VOLCENGINE_RESOURCE_ID_ACCOUNT,
+    XFYUN_API_KEY_ACCOUNT, XFYUN_APP_ID_ACCOUNT,
+};
 use openless_core::{
     BackendError, BackendErrorCode, ChannelKind, ChannelMutation, ChannelMutationResult,
     ChannelSummary, CredentialKey, CredentialMetadata, CredentialNamespace, CredentialStore,
@@ -97,24 +104,191 @@ impl CredentialStore for LinuxCredentialStore {
                 .unwrap_or(preferences.active_asr_provider);
             let active_llm_provider = non_empty(state.metadata.active_provider(ProviderSlot::Llm))
                 .unwrap_or(preferences.active_llm_provider);
-            let has = |namespace, provider: &str| {
+            let active_omni_provider =
+                non_empty(state.metadata.active_provider(ProviderSlot::Omni))
+                    .unwrap_or(preferences.active_omni_provider);
+            let provider_type = |kind, active: &str| {
+                state
+                    .metadata
+                    .list_channels(kind)
+                    .into_iter()
+                    .find(|channel| channel.id == active)
+                    .map(|channel| channel.provider_type)
+                    .unwrap_or_else(|| active.to_string())
+            };
+            let asr_provider_type = provider_type(ChannelKind::Asr, &active_asr_provider);
+            let llm_provider_type = provider_type(ChannelKind::Llm, &active_llm_provider);
+            let has = |namespace, provider: &str, account: &str| {
                 state.keys.iter().any(|key| {
                     key.namespace == namespace
                         && key.provider_id.as_deref().is_none_or(|id| id == provider)
+                        && key.account == account
                 })
             };
+            let volcengine_provider = if asr_provider_type == "volcengine" {
+                active_asr_provider.as_str()
+            } else {
+                "volcengine"
+            };
+            let endpoint_key = CredentialKey::new(
+                CredentialNamespace::Llm,
+                Some(active_llm_provider.clone()),
+                LLM_ENDPOINT_ACCOUNT,
+            )?;
+            #[cfg(target_os = "linux")]
+            let llm_endpoint = if has(
+                CredentialNamespace::Llm,
+                &active_llm_provider,
+                LLM_ENDPOINT_ACCOUNT,
+            ) {
+                tokio::task::spawn_blocking(move || read_secret(&endpoint_key))
+                    .await
+                    .map_err(join_error)??
+                    .map(SecretValue::into_exposed)
+            } else {
+                None
+            };
+            #[cfg(not(target_os = "linux"))]
+            let llm_endpoint: Option<String> = {
+                let _ = endpoint_key;
+                None
+            };
+            let auth_mode_key = CredentialKey::new(
+                CredentialNamespace::Asr,
+                Some(volcengine_provider.to_string()),
+                VOLCENGINE_AUTH_MODE_ACCOUNT,
+            )?;
+            #[cfg(target_os = "linux")]
+            let volcengine_auth_mode = if has(
+                CredentialNamespace::Asr,
+                volcengine_provider,
+                VOLCENGINE_AUTH_MODE_ACCOUNT,
+            ) {
+                tokio::task::spawn_blocking(move || read_secret(&auth_mode_key))
+                    .await
+                    .map_err(join_error)??
+                    .map(SecretValue::into_exposed)
+            } else {
+                None
+            };
+            #[cfg(not(target_os = "linux"))]
+            let volcengine_auth_mode = {
+                let _ = auth_mode_key;
+                None
+            };
+            let configuration = openless_core::provider_rules::CredentialConfiguration {
+                asr_api_key: has(
+                    CredentialNamespace::Asr,
+                    &active_asr_provider,
+                    ASR_API_KEY_ACCOUNT,
+                ),
+                asr_endpoint: has(
+                    CredentialNamespace::Asr,
+                    &active_asr_provider,
+                    ASR_ENDPOINT_ACCOUNT,
+                ),
+                asr_model: has(
+                    CredentialNamespace::Asr,
+                    &active_asr_provider,
+                    ASR_MODEL_ACCOUNT,
+                ),
+                volcengine_auth_mode,
+                volcengine_app_key: has(
+                    CredentialNamespace::Asr,
+                    volcengine_provider,
+                    VOLCENGINE_APP_KEY_ACCOUNT,
+                ),
+                volcengine_access_key: has(
+                    CredentialNamespace::Asr,
+                    volcengine_provider,
+                    VOLCENGINE_ACCESS_KEY_ACCOUNT,
+                ),
+                volcengine_api_key: has(
+                    CredentialNamespace::Asr,
+                    volcengine_provider,
+                    VOLCENGINE_API_KEY_ACCOUNT,
+                ),
+                volcengine_resource_id: has(
+                    CredentialNamespace::Asr,
+                    volcengine_provider,
+                    VOLCENGINE_RESOURCE_ID_ACCOUNT,
+                ),
+                xfyun_app_id: has(
+                    CredentialNamespace::Asr,
+                    &active_asr_provider,
+                    XFYUN_APP_ID_ACCOUNT,
+                ),
+                xfyun_api_key: has(
+                    CredentialNamespace::Asr,
+                    &active_asr_provider,
+                    XFYUN_API_KEY_ACCOUNT,
+                ),
+                llm_api_key: has(
+                    CredentialNamespace::Llm,
+                    &active_llm_provider,
+                    LLM_API_KEY_ACCOUNT,
+                ),
+                llm_endpoint: llm_endpoint
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty()),
+                llm_endpoint_matches_default: llm_endpoint.as_deref().is_some_and(|endpoint| {
+                    openless_core::provider_rules::default_llm_endpoint(&llm_provider_type)
+                        .is_some_and(|default| {
+                            openless_core::provider_rules::equivalent_endpoint(endpoint, default)
+                        })
+                }),
+                llm_model: has(
+                    CredentialNamespace::Llm,
+                    &active_llm_provider,
+                    LLM_MODEL_ACCOUNT,
+                ),
+                codex_oauth: false,
+                omni_api_key: has(
+                    CredentialNamespace::Omni,
+                    &active_omni_provider,
+                    OMNI_API_KEY_ACCOUNT,
+                ),
+                omni_endpoint: has(
+                    CredentialNamespace::Omni,
+                    &active_omni_provider,
+                    OMNI_ENDPOINT_ACCOUNT,
+                ),
+                omni_model: has(
+                    CredentialNamespace::Omni,
+                    &active_omni_provider,
+                    OMNI_MODEL_ACCOUNT,
+                ),
+            };
+            let local_asr_configured = match asr_provider_type.as_str() {
+                "local-qwen3" | "local-qwen3-c" => Some(crate::backend::qwen_engine_available()),
+                "local-qwen3-mlx"
+                | "local-whisper"
+                | "apple-speech"
+                | "foundry-local-whisper"
+                | "sherpa-onnx-local" => Some(false),
+                _ => None,
+            };
+            let asr_configured = openless_core::provider_rules::asr_configured(
+                &asr_provider_type,
+                &configuration,
+                local_asr_configured,
+            );
+            let llm_configured =
+                openless_core::provider_rules::llm_configured(&llm_provider_type, &configuration);
             Ok(CredentialsStatus {
-                active_asr_provider: active_asr_provider.clone(),
-                active_llm_provider: active_llm_provider.clone(),
+                active_asr_provider,
+                active_llm_provider,
                 pipeline_mode: preferences.pipeline_mode,
-                asr_configured: has(CredentialNamespace::Asr, &active_asr_provider),
-                llm_configured: has(CredentialNamespace::Llm, &active_llm_provider),
-                omni_configured: state
-                    .keys
-                    .iter()
-                    .any(|key| key.namespace == CredentialNamespace::Omni),
-                volcengine_configured: has(CredentialNamespace::Asr, "volcengine"),
-                ark_configured: has(CredentialNamespace::Llm, "ark"),
+                asr_configured,
+                llm_configured,
+                omni_configured: openless_core::provider_rules::omni_configured(
+                    &active_omni_provider,
+                    &configuration,
+                ),
+                volcengine_configured: openless_core::provider_rules::volcengine_configured(
+                    &configuration,
+                ),
+                ark_configured: llm_configured,
             })
         })
     }
@@ -147,14 +321,23 @@ impl CredentialStore for LinuxCredentialStore {
         Box::pin(async move {
             #[cfg(target_os = "linux")]
             {
+                let remove = value.expose_secret().trim().is_empty();
                 tokio::task::spawn_blocking({
                     let key = key.clone();
-                    move || write_secret(&key, &value)
+                    move || {
+                        if remove {
+                            remove_secret(&key)
+                        } else {
+                            write_secret(&key, &value)
+                        }
+                    }
                 })
                 .await
                 .map_err(join_error)??;
                 store.update_metadata(|state| {
-                    if !state.keys.contains(&key) {
+                    if remove {
+                        state.keys.retain(|candidate| candidate != &key);
+                    } else if !state.keys.contains(&key) {
                         state.keys.push(key);
                     }
                     Ok(())

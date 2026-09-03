@@ -19,7 +19,15 @@ use crate::asr::{
     WhisperBatchASR, XfyunCredentials, XfyunStreamingASR,
 };
 use crate::config::{TaskSpawner, TokioTaskSpawner};
-use crate::credentials::{CredentialKey, CredentialNamespace, CredentialStore};
+use crate::credentials::{
+    CredentialKey, CredentialNamespace, CredentialStore, ASR_ADVANCED_CONFIG_ACCOUNT,
+    ASR_API_KEY_ACCOUNT, ASR_ENDPOINT_ACCOUNT, ASR_MODEL_ACCOUNT, ASR_VOCABULARY_ID_ACCOUNT,
+    LLM_API_KEY_ACCOUNT, LLM_ENDPOINT_ACCOUNT, LLM_EXTRA_HEADERS_ACCOUNT, LLM_TEMPERATURE_ACCOUNT,
+    OMNI_API_KEY_ACCOUNT, OMNI_ENDPOINT_ACCOUNT, OMNI_EXTRA_HEADERS_ACCOUNT, OMNI_MODEL_ACCOUNT,
+    OMNI_TEMPERATURE_ACCOUNT, VOLCENGINE_ACCESS_KEY_ACCOUNT, VOLCENGINE_API_KEY_ACCOUNT,
+    VOLCENGINE_APP_KEY_ACCOUNT, VOLCENGINE_AUTH_MODE_ACCOUNT, VOLCENGINE_RESOURCE_ID_ACCOUNT,
+    XFYUN_API_KEY_ACCOUNT, XFYUN_APP_ID_ACCOUNT,
+};
 use crate::dictation_context::{DictationAudioSource, DictationContext};
 use crate::errors::{BackendError, BackendErrorCode};
 use crate::ports::{
@@ -27,6 +35,9 @@ use crate::ports::{
     EngineFailureStage, EngineProgress, EngineProgressSink, EngineResult, EngineStage,
     PolishOutput, RecordingProgressSink, TextPolisher, TextStreamChunk, TextStreamSink,
     TranscriptOutput, TranscriptionEngine, TranscriptionSession,
+};
+use crate::provider_rules::{
+    default_llm_endpoint, default_llm_model, default_omni_endpoint, parse_extra_headers,
 };
 use crate::types::SessionId;
 
@@ -67,28 +78,6 @@ pub const SHARED_CLOUD_LLM_PROVIDER_TYPES: &[&str] = &[
 ];
 
 pub const SHARED_OMNI_PROVIDER_TYPES: &[&str] = &["openai", "gemini", "dashscope-omni", "custom"];
-
-const ASR_API_KEY_ACCOUNT: &str = "asr.api_key";
-const ASR_ENDPOINT_ACCOUNT: &str = "asr.endpoint";
-const ASR_MODEL_ACCOUNT: &str = "asr.model";
-const ASR_VOCABULARY_ID_ACCOUNT: &str = "asr.vocabulary_id";
-const ASR_ADVANCED_CONFIG_ACCOUNT: &str = "asr.advanced_config";
-const VOLCENGINE_APP_KEY_ACCOUNT: &str = "volcengine.app_key";
-const VOLCENGINE_ACCESS_KEY_ACCOUNT: &str = "volcengine.access_key";
-const VOLCENGINE_RESOURCE_ID_ACCOUNT: &str = "volcengine.resource_id";
-const VOLCENGINE_AUTH_MODE_ACCOUNT: &str = "volcengine.auth_mode";
-const VOLCENGINE_API_KEY_ACCOUNT: &str = "volcengine.api_key";
-const XFYUN_APP_ID_ACCOUNT: &str = "xfyun.app_id";
-const XFYUN_API_KEY_ACCOUNT: &str = "xfyun.api_key";
-const LLM_API_KEY_ACCOUNT: &str = "ark.api_key";
-const LLM_ENDPOINT_ACCOUNT: &str = "ark.endpoint";
-const LLM_EXTRA_HEADERS_ACCOUNT: &str = "ark.extra_headers";
-const LLM_TEMPERATURE_ACCOUNT: &str = "ark.temperature";
-const OMNI_API_KEY_ACCOUNT: &str = "omni.api_key";
-const OMNI_ENDPOINT_ACCOUNT: &str = "omni.endpoint";
-const OMNI_MODEL_ACCOUNT: &str = "omni.model";
-const OMNI_EXTRA_HEADERS_ACCOUNT: &str = "omni.extra_headers";
-const OMNI_TEMPERATURE_ACCOUNT: &str = "omni.temperature";
 
 #[derive(Clone)]
 pub struct SharedCloudTranscriptionEngine {
@@ -1082,69 +1071,6 @@ fn parse_temperature(value: &str) -> Result<Option<f32>, BackendError> {
     Ok(Some(temperature))
 }
 
-fn parse_extra_headers(value: &str) -> Result<HashMap<String, String>, BackendError> {
-    let value = value.trim();
-    if value.is_empty() {
-        return Ok(HashMap::new());
-    }
-    let headers: HashMap<String, String> = serde_json::from_str(value).map_err(|_| {
-        BackendError::new(
-            BackendErrorCode::InvalidArgument,
-            "LLM extra headers must be a JSON object with string values",
-        )
-    })?;
-    for name in headers.keys() {
-        if matches!(
-            name.to_ascii_lowercase().as_str(),
-            "authorization" | "content-type" | "accept" | "host" | "content-length"
-        ) {
-            return Err(BackendError::new(
-                BackendErrorCode::InvalidArgument,
-                "LLM extra headers contain a reserved header name",
-            ));
-        }
-    }
-    Ok(headers)
-}
-
-fn default_llm_endpoint(provider_type: &str) -> Option<&'static str> {
-    match provider_type {
-        "ark" => Some("https://ark.cn-beijing.volces.com/api/v3"),
-        "deepseek" => Some("https://api.deepseek.com/v1"),
-        "siliconflow" => Some("https://api.siliconflow.cn/v1"),
-        "atlascloud" => Some("https://api.atlascloud.ai/v1"),
-        "openai" => Some("https://api.openai.com/v1"),
-        "gemini" => Some("https://generativelanguage.googleapis.com/v1beta"),
-        "mimo" => Some("https://api.xiaomimimo.com/v1"),
-        "cometapi" => Some("https://api.cometapi.com/v1"),
-        "openrouterFree" => Some("https://openrouter.ai/api/v1"),
-        "alibabaCoding" => Some("https://coding-intl.dashscope.aliyuncs.com/v1"),
-        "codingPlanX" => Some("https://api.codingplanx.ai/v1"),
-        "minimax" => Some("https://api.minimaxi.com/v1"),
-        "stepfun" => Some("https://api.stepfun.com/v1"),
-        _ => None,
-    }
-}
-
-fn default_llm_model(provider_type: &str) -> Option<&'static str> {
-    match provider_type {
-        "ark" => Some("deepseek-v3-2"),
-        "deepseek" => Some("deepseek-v4-flash"),
-        "siliconflow" => Some("Qwen/Qwen2.5-7B-Instruct"),
-        "atlascloud" => Some("qwen/qwen3.5-flash"),
-        "openai" | "cometapi" => Some("gpt-4o"),
-        "gemini" => Some("gemini-2.5-flash"),
-        crate::polish::CODEX_OAUTH_PROVIDER_ID => Some(crate::polish::CODEX_DEFAULT_MODEL),
-        "mimo" => Some("xiaomi/mimo-v2-flash"),
-        "openrouterFree" => Some("qwen/qwen3-coder:free"),
-        "alibabaCoding" => Some("qwen3-coder-plus"),
-        "codingPlanX" => Some("gpt-5-mini"),
-        "minimax" => Some("MiniMax-M3"),
-        "stepfun" => Some("step-1o-turbo-vision"),
-        _ => None,
-    }
-}
-
 fn cancelled_provider_error() -> BackendError {
     BackendError::new(BackendErrorCode::Cancelled, "LLM polish request cancelled")
 }
@@ -1466,15 +1392,6 @@ pub async fn validate_shared_omni_provider(
     }
 
     Ok(())
-}
-
-fn default_omni_endpoint(provider_type: &str) -> Option<&'static str> {
-    match provider_type {
-        "openai" => Some("https://api.openai.com/v1"),
-        "gemini" => Some("https://generativelanguage.googleapis.com/v1beta"),
-        "dashscope-omni" => Some("https://dashscope.aliyuncs.com/compatible-mode/v1"),
-        _ => None,
-    }
 }
 
 fn cancelled_omni_error() -> BackendError {

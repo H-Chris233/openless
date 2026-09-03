@@ -128,6 +128,8 @@ impl CodingAgentProcessAdapter for TauriCodingAgentProcessAdapter {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .kill_on_drop(true);
+            #[cfg(unix)]
+            command.process_group(0);
             if let Some(cwd) = &request.cwd {
                 command.current_dir(cwd);
             }
@@ -183,9 +185,20 @@ impl CodingAgentProcessAdapter for TauriCodingAgentProcessAdapter {
             let status = loop {
                 tokio::select! {
                     status = child.wait() => break status.map_err(platform_error)?,
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(20)), if cancel.is_cancelled() => {
-                        child.kill().await.map_err(platform_error)?;
-                        break child.wait().await.map_err(platform_error)?;
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {
+                        if cancel.is_cancelled() {
+                            #[cfg(unix)]
+                            let killed_group = child.id().is_some_and(|pid| {
+                                // SAFETY: the child was started as process-group leader above.
+                                unsafe { libc::kill(-(pid as i32), libc::SIGKILL) == 0 }
+                            });
+                            #[cfg(not(unix))]
+                            let killed_group = false;
+                            if !killed_group {
+                                child.start_kill().map_err(platform_error)?;
+                            }
+                            break child.wait().await.map_err(platform_error)?;
+                        }
                     }
                 }
             };

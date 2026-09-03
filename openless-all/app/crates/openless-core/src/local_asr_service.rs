@@ -1,7 +1,7 @@
 //! Shared Local ASR orchestration.
 //!
-//! Model/runtime policy and preference transactions live here. Native engines,
-//! download transports and model-file operations are supplied by a host Adapter.
+//! Model/runtime policy and preference transactions live here. `ModelStore`
+//! owns downloads and model files; the host Adapter only supplies native engines.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};

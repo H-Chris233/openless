@@ -4,7 +4,10 @@
 //! authorization. This module owns the deterministic decisions that every host
 //! must make identically once configuration values have been supplied.
 
+use std::collections::HashMap;
 use std::time::Duration;
+
+use crate::errors::{BackendError, BackendErrorCode};
 
 pub const OPENAI_COMPATIBLE_ASR_PROVIDER_ID: &str = "openai-compatible";
 pub const ZENMUX_ASR_PROVIDER_ID: &str = "zenmux";
@@ -51,6 +54,171 @@ pub enum AsrConfiguredFields {
     EndpointModelOnly,
     VolcAppKey,
     XfyunAppKey,
+}
+
+/// Non-secret facts read by a platform credential adapter. Core evaluates
+/// configured state so every host applies the same provider requirements.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CredentialConfiguration {
+    pub asr_api_key: bool,
+    pub asr_endpoint: bool,
+    pub asr_model: bool,
+    pub volcengine_auth_mode: Option<String>,
+    pub volcengine_app_key: bool,
+    pub volcengine_access_key: bool,
+    pub volcengine_api_key: bool,
+    pub volcengine_resource_id: bool,
+    pub xfyun_app_id: bool,
+    pub xfyun_api_key: bool,
+    pub llm_api_key: bool,
+    pub llm_endpoint: bool,
+    pub llm_endpoint_matches_default: bool,
+    pub llm_model: bool,
+    pub codex_oauth: bool,
+    pub omni_api_key: bool,
+    pub omni_endpoint: bool,
+    pub omni_model: bool,
+}
+
+pub fn volcengine_configured(configuration: &CredentialConfiguration) -> bool {
+    use crate::asr::volcengine::VolcengineAuthMode;
+
+    let credentials_ready = match configuration
+        .volcengine_auth_mode
+        .as_deref()
+        .map(VolcengineAuthMode::parse)
+        .unwrap_or(VolcengineAuthMode::AppIdToken)
+    {
+        VolcengineAuthMode::AppIdToken => {
+            configuration.volcengine_app_key && configuration.volcengine_access_key
+        }
+        VolcengineAuthMode::ApiKey => configuration.volcengine_api_key,
+    };
+    credentials_ready && configuration.volcengine_resource_id
+}
+
+pub fn asr_configured(
+    provider_id: &str,
+    configuration: &CredentialConfiguration,
+    local_runtime_configured: Option<bool>,
+) -> bool {
+    if let Some(configured) = local_runtime_configured {
+        return configured;
+    }
+    match active_asr_provider_kind(provider_id).configured_fields() {
+        AsrConfiguredFields::ApiKeyOnly => configuration.asr_api_key,
+        AsrConfiguredFields::ApiKeyEndpointModel => {
+            configuration.asr_api_key && configuration.asr_endpoint && configuration.asr_model
+        }
+        AsrConfiguredFields::EndpointModelOnly => {
+            configuration.asr_endpoint && configuration.asr_model
+        }
+        AsrConfiguredFields::VolcAppKey => volcengine_configured(configuration),
+        AsrConfiguredFields::XfyunAppKey => {
+            configuration.xfyun_app_id && configuration.xfyun_api_key
+        }
+    }
+}
+
+pub fn llm_configured(provider_id: &str, configuration: &CredentialConfiguration) -> bool {
+    if provider_id == crate::polish::CODEX_OAUTH_PROVIDER_ID {
+        return configuration.codex_oauth;
+    }
+    if !configuration.llm_endpoint {
+        return false;
+    }
+    if !configuration.llm_model {
+        return false;
+    }
+    !configuration.llm_endpoint_matches_default || configuration.llm_api_key
+}
+
+pub fn omni_configured(provider_id: &str, configuration: &CredentialConfiguration) -> bool {
+    configuration.omni_api_key
+        && configuration.omni_model
+        && (provider_id == "gemini" || configuration.omni_endpoint)
+}
+
+pub fn equivalent_endpoint(left: &str, right: &str) -> bool {
+    fn normalize(value: &str) -> &str {
+        value
+            .trim()
+            .trim_end_matches('/')
+            .trim_end_matches("/chat/completions")
+            .trim_end_matches('/')
+    }
+    normalize(left).eq_ignore_ascii_case(normalize(right))
+}
+
+pub fn default_llm_endpoint(provider_type: &str) -> Option<&'static str> {
+    match provider_type {
+        "ark" => Some("https://ark.cn-beijing.volces.com/api/v3"),
+        "deepseek" => Some("https://api.deepseek.com/v1"),
+        "siliconflow" => Some("https://api.siliconflow.cn/v1"),
+        "atlascloud" => Some("https://api.atlascloud.ai/v1"),
+        "openai" => Some("https://api.openai.com/v1"),
+        "gemini" => Some("https://generativelanguage.googleapis.com/v1beta"),
+        "mimo" => Some("https://api.xiaomimimo.com/v1"),
+        "cometapi" => Some("https://api.cometapi.com/v1"),
+        "openrouterFree" => Some("https://openrouter.ai/api/v1"),
+        "alibabaCoding" => Some("https://coding-intl.dashscope.aliyuncs.com/v1"),
+        "codingPlanX" => Some("https://api.codingplanx.ai/v1"),
+        "minimax" => Some("https://api.minimaxi.com/v1"),
+        "stepfun" => Some("https://api.stepfun.com/v1"),
+        _ => None,
+    }
+}
+
+pub fn default_llm_model(provider_type: &str) -> Option<&'static str> {
+    match provider_type {
+        "ark" => Some("deepseek-v3-2"),
+        "deepseek" => Some("deepseek-v4-flash"),
+        "siliconflow" => Some("Qwen/Qwen2.5-7B-Instruct"),
+        "atlascloud" => Some("qwen/qwen3.5-flash"),
+        "openai" | "cometapi" => Some("gpt-4o"),
+        "gemini" => Some("gemini-2.5-flash"),
+        crate::polish::CODEX_OAUTH_PROVIDER_ID => Some(crate::polish::CODEX_DEFAULT_MODEL),
+        "mimo" => Some("xiaomi/mimo-v2-flash"),
+        "openrouterFree" => Some("qwen/qwen3-coder:free"),
+        "alibabaCoding" => Some("qwen3-coder-plus"),
+        "codingPlanX" => Some("gpt-5-mini"),
+        "minimax" => Some("MiniMax-M3"),
+        "stepfun" => Some("step-1o-turbo-vision"),
+        _ => None,
+    }
+}
+
+pub fn default_omni_endpoint(provider_type: &str) -> Option<&'static str> {
+    match provider_type {
+        "openai" => Some("https://api.openai.com/v1"),
+        "gemini" => Some("https://generativelanguage.googleapis.com/v1beta"),
+        "dashscope-omni" => Some("https://dashscope.aliyuncs.com/compatible-mode/v1"),
+        _ => None,
+    }
+}
+
+pub fn parse_extra_headers(value: &str) -> Result<HashMap<String, String>, BackendError> {
+    if value.trim().is_empty() {
+        return Ok(HashMap::new());
+    }
+    let headers: HashMap<String, String> = serde_json::from_str(value).map_err(|_| {
+        BackendError::new(
+            BackendErrorCode::InvalidArgument,
+            "provider extra headers must be a JSON object with string values",
+        )
+    })?;
+    for name in headers.keys() {
+        if matches!(
+            name.to_ascii_lowercase().as_str(),
+            "authorization" | "content-type" | "accept" | "host" | "content-length"
+        ) {
+            return Err(BackendError::new(
+                BackendErrorCode::InvalidArgument,
+                "provider extra headers contain a reserved header name",
+            ));
+        }
+    }
+    Ok(headers)
 }
 
 impl ActiveAsrProviderKind {
@@ -452,6 +620,48 @@ mod tests {
         );
         assert_eq!(whisper_transcribe_timeout(10.0), Duration::from_secs(30));
         assert_eq!(whisper_transcribe_timeout(60.0), Duration::from_secs(50));
+    }
+
+    #[test]
+    fn configured_state_uses_one_cross_host_provider_policy() {
+        let mut configuration = CredentialConfiguration {
+            asr_api_key: true,
+            llm_endpoint: true,
+            llm_endpoint_matches_default: true,
+            llm_model: true,
+            omni_api_key: true,
+            omni_model: true,
+            ..CredentialConfiguration::default()
+        };
+        assert!(asr_configured(BAILIAN_PROVIDER_ID, &configuration, None));
+        assert!(!llm_configured("openrouterFree", &configuration));
+        configuration.llm_api_key = true;
+        assert!(llm_configured("openrouterFree", &configuration));
+        configuration.llm_api_key = false;
+        configuration.llm_endpoint_matches_default = false;
+        assert!(llm_configured("openrouterFree", &configuration));
+        assert!(omni_configured("gemini", &configuration));
+
+        configuration.volcengine_auth_mode = Some("api_key".into());
+        configuration.volcengine_api_key = true;
+        configuration.volcengine_resource_id = true;
+        assert!(volcengine_configured(&configuration));
+        assert!(!asr_configured(
+            "foundry-local-whisper",
+            &configuration,
+            Some(false)
+        ));
+        assert!(equivalent_endpoint(
+            "https://api.openai.com/v1/chat/completions/",
+            default_llm_endpoint("openai").unwrap()
+        ));
+        assert_eq!(default_llm_model("gemini"), Some("gemini-2.5-flash"));
+        assert_eq!(
+            default_omni_endpoint("dashscope-omni"),
+            Some("https://dashscope.aliyuncs.com/compatible-mode/v1")
+        );
+        assert!(parse_extra_headers(r#"{"x-trace":"enabled"}"#).is_ok());
+        assert!(parse_extra_headers(r#"{"authorization":"secret"}"#).is_err());
     }
 
     #[test]

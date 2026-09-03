@@ -1,7 +1,7 @@
 //! 跨平台模型清单、下载和缓存状态。
 //!
-//! 该模块只接收宿主已经解析好的目录；网络、文件系统和进度事件均通过窄
-//! Adapter 注入，因此 Tauri/Linux 不需要再维护一套 Range/校验实现。
+//! 该模块拥有文件系统、Range/校验和进度状态；仅网络请求通过窄 Transport
+//! 注入，因此 Tauri/Linux 不需要再维护第二套模型存储实现。
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{Read, Seek, Write};
@@ -1001,7 +1001,25 @@ impl ModelStore {
         &self,
         manifest: ModelManifest,
     ) -> Result<ModelCacheStatus, BackendError> {
-        self.download_with_manifest(manifest).await
+        let progress_manifest = manifest.clone();
+        let result = self.download_with_manifest(manifest).await;
+        if let Err(error) = &result {
+            if error.code != BackendErrorCode::Busy {
+                self.emit(
+                    &progress_manifest,
+                    "",
+                    progress_manifest.files.len(),
+                    if error.code == BackendErrorCode::Cancelled {
+                        ModelDownloadPhase::Cancelled
+                    } else {
+                        ModelDownloadPhase::Failed
+                    },
+                    None,
+                    Some(error.message.clone()),
+                );
+            }
+        }
+        result
     }
 
     async fn download_with_manifest(
@@ -1051,14 +1069,6 @@ impl ModelStore {
         let mut downloaded_before: u64 = partial.files.values().copied().sum();
         for (file_index, file) in manifest.files.iter().enumerate() {
             if cancelled.load(Ordering::Acquire) {
-                self.emit(
-                    &manifest,
-                    &file.path,
-                    file_index,
-                    ModelDownloadPhase::Cancelled,
-                    None,
-                    None,
-                );
                 return Err(cancelled_error());
             }
             let path = staging.join(&file.path);
@@ -1080,14 +1090,6 @@ impl ModelStore {
             }
             while offset < file.size_bytes {
                 if cancelled.load(Ordering::Acquire) {
-                    self.emit(
-                        &manifest,
-                        &file.path,
-                        file_index,
-                        ModelDownloadPhase::Cancelled,
-                        None,
-                        None,
-                    );
                     return Err(cancelled_error());
                 }
                 let end = (offset + self.config.chunk_size_bytes.max(1)).min(file.size_bytes) - 1;
@@ -1125,28 +1127,12 @@ impl ModelStore {
                     Some(response) => response,
                     None => {
                         let message = last_error.unwrap_or_else(|| "model download failed".into());
-                        let error = BackendError::new(BackendErrorCode::Provider, message.clone())
-                            .retryable(true);
-                        self.emit(
-                            &manifest,
-                            &file.path,
-                            file_index,
-                            ModelDownloadPhase::Failed,
-                            None,
-                            Some(message),
+                        return Err(
+                            BackendError::new(BackendErrorCode::Provider, message).retryable(true)
                         );
-                        return Err(error);
                     }
                 };
                 if cancelled.load(Ordering::Acquire) {
-                    self.emit(
-                        &manifest,
-                        &file.path,
-                        file_index,
-                        ModelDownloadPhase::Cancelled,
-                        None,
-                        None,
-                    );
                     return Err(cancelled_error());
                 }
                 output.write_all(&response.bytes).map_err(platform_error)?;
@@ -1169,14 +1155,6 @@ impl ModelStore {
                 let actual = sha256_file(&path)?;
                 if !actual.eq_ignore_ascii_case(expected) {
                     let _ = std::fs::remove_file(&path);
-                    self.emit(
-                        &manifest,
-                        &file.path,
-                        file_index,
-                        ModelDownloadPhase::Failed,
-                        None,
-                        Some(format!("checksum mismatch for {}", file.path)),
-                    );
                     return Err(BackendError::new(
                         BackendErrorCode::Provider,
                         format!("checksum mismatch for {}", file.path),
@@ -2365,6 +2343,11 @@ mod tests {
                 ignore_range: false,
             }),
         );
+        let progress = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&progress);
+        store.set_progress_sink(Arc::new(move |event| {
+            captured.lock().unwrap().push(event);
+        }));
         let manifest = ModelManifest::new(
             "checksum",
             "org/checksum",
@@ -2384,6 +2367,9 @@ mod tests {
             .message
             .contains("checksum"));
         assert!(!root.join("checksum").exists());
+        let terminal = progress.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(terminal.phase, ModelDownloadPhase::Failed);
+        assert!(terminal.error.unwrap().contains("checksum"));
         let _ = std::fs::remove_dir_all(root);
     }
 

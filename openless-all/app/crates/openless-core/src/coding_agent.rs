@@ -845,6 +845,11 @@ impl CodingAgentRunner {
                     _ = &mut timeout => {
                         cancel.store(true, std::sync::atomic::Ordering::Release);
                         terminal = Some(CodingAgentRunOutcome::Failed("coding agent timed out".into()));
+                        let _ = tokio::time::timeout(
+                            std::time::Duration::from_secs(5),
+                            &mut operation,
+                        )
+                        .await;
                         break;
                     }
                     event = receiver.recv() => {
@@ -937,62 +942,76 @@ async fn run_process(
     let command = build_agent_command(&request)?;
     let (line_sender, mut lines) = tokio::sync::mpsc::unbounded_channel();
     let output: Arc<dyn ProcessOutputSink> = Arc::new(ProcessLineSink(line_sender));
-    let result = process
-        .execute(
-            command,
-            output,
-            CancellationToken::from_flag(cancel.clone()),
-        )
-        .await;
+    let execution = process.execute(
+        command,
+        output,
+        CancellationToken::from_flag(cancel.clone()),
+    );
+    tokio::pin!(execution);
     let mut accumulated = String::new();
     let mut stdout = String::new();
     let mut stderr = String::new();
     let mut terminal = false;
-    while let Ok(line) = lines.try_recv() {
-        match line.stream {
-            ProcessStream::Stdout => {
-                if !stdout.is_empty() {
-                    stdout.push('\n');
+    let result = {
+        let mut consume_line = |line: ProcessOutputLine| {
+            match line.stream {
+                ProcessStream::Stdout => {
+                    if !stdout.is_empty() {
+                        stdout.push('\n');
+                    }
+                    stdout.push_str(&line.line);
                 }
-                stdout.push_str(&line.line);
-            }
-            ProcessStream::Stderr if stderr.len() < 16 * 1024 => {
-                if !stderr.is_empty() {
-                    stderr.push('\n');
+                ProcessStream::Stderr if stderr.len() < 16 * 1024 => {
+                    if !stderr.is_empty() {
+                        stderr.push('\n');
+                    }
+                    stderr.push_str(&line.line);
                 }
-                stderr.push_str(&line.line);
+                ProcessStream::Stderr => {}
             }
-            ProcessStream::Stderr => {}
-        }
-        if terminal {
-            continue;
-        }
-        let event = match (request.provider, line.stream) {
-            (CodingAgentProvider::ClaudeCodeCli, ProcessStream::Stdout) => {
-                parse_claude_stream_line(&request.session_id, &line.line)
+            if terminal {
+                return;
             }
-            (CodingAgentProvider::OpenCodeCli, ProcessStream::Stdout) => {
-                parse_opencode_stream_line(&request.session_id, &line.line)
+            let event = match (request.provider, line.stream) {
+                (CodingAgentProvider::ClaudeCodeCli, ProcessStream::Stdout) => {
+                    parse_claude_stream_line(&request.session_id, &line.line)
+                }
+                (CodingAgentProvider::OpenCodeCli, ProcessStream::Stdout) => {
+                    parse_opencode_stream_line(&request.session_id, &line.line)
+                }
+                (CodingAgentProvider::CodexCli, ProcessStream::Stdout) => {
+                    parse_codex_stream_line(&request.session_id, &line.line)
+                }
+                (CodingAgentProvider::DshCli, ProcessStream::Stderr) => {
+                    parse_dsh_stream_line(&request.session_id, &line.line)
+                }
+                _ => None,
+            };
+            if let Some(event) = event {
+                match &event {
+                    CodingAgentStreamEvent::Delta { text, .. } => accumulated.push_str(text),
+                    CodingAgentStreamEvent::Completed { .. }
+                    | CodingAgentStreamEvent::Error { .. }
+                    | CodingAgentStreamEvent::Cancelled { .. } => terminal = true,
+                    _ => {}
+                }
+                let _ = events.send(event);
             }
-            (CodingAgentProvider::CodexCli, ProcessStream::Stdout) => {
-                parse_codex_stream_line(&request.session_id, &line.line)
-            }
-            (CodingAgentProvider::DshCli, ProcessStream::Stderr) => {
-                parse_dsh_stream_line(&request.session_id, &line.line)
-            }
-            _ => None,
         };
-        if let Some(event) = event {
-            match &event {
-                CodingAgentStreamEvent::Delta { text, .. } => accumulated.push_str(text),
-                CodingAgentStreamEvent::Completed { .. }
-                | CodingAgentStreamEvent::Error { .. }
-                | CodingAgentStreamEvent::Cancelled { .. } => terminal = true,
-                _ => {}
+        let result = loop {
+            tokio::select! {
+                result = &mut execution => break result,
+                line = lines.recv() => match line {
+                    Some(line) => consume_line(line),
+                    None => break execution.await,
+                },
             }
-            let _ = events.send(event);
+        };
+        while let Ok(line) = lines.try_recv() {
+            consume_line(line);
         }
-    }
+        result
+    };
     if terminal {
         return Ok(());
     }
@@ -1677,6 +1696,57 @@ mod tests {
         }
     }
 
+    struct StreamingProcess {
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    impl CodingAgentProcessAdapter for StreamingProcess {
+        fn execute(
+            &self,
+            _command: AgentCommand,
+            output: Arc<dyn ProcessOutputSink>,
+            _cancel: CancellationToken,
+        ) -> BoxFuture<'static, Result<ProcessExit, BackendError>> {
+            let release = Arc::clone(&self.release);
+            Box::pin(async move {
+                output.write(ProcessOutputLine {
+                    stream: ProcessStream::Stdout,
+                    line: r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"live"}}}"#.into(),
+                });
+                release.notified().await;
+                output.write(ProcessOutputLine {
+                    stream: ProcessStream::Stdout,
+                    line: r#"{"type":"result","result":"done"}"#.into(),
+                });
+                Ok(ProcessExit {
+                    code: Some(0),
+                    success: true,
+                })
+            })
+        }
+    }
+
+    struct CancelAwareProcess;
+
+    impl CodingAgentProcessAdapter for CancelAwareProcess {
+        fn execute(
+            &self,
+            _command: AgentCommand,
+            _output: Arc<dyn ProcessOutputSink>,
+            cancel: CancellationToken,
+        ) -> BoxFuture<'static, Result<ProcessExit, BackendError>> {
+            Box::pin(async move {
+                while !cancel.is_cancelled() {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+                Ok(ProcessExit {
+                    code: None,
+                    success: false,
+                })
+            })
+        }
+    }
+
     fn arg_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
         args.iter()
             .position(|arg| arg == flag)
@@ -1880,6 +1950,102 @@ mod tests {
                 cost_usd: None,
                 duration_ms: None,
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn runner_forwards_delta_before_process_exit() {
+        let release = Arc::new(tokio::sync::Notify::new());
+        let runner = CodingAgentRunner::new(Arc::new(StreamingProcess {
+            release: Arc::clone(&release),
+        }));
+        let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let running = tokio::spawn(async move {
+            runner
+                .run_streaming(
+                    CodingAgentRequest::new("session", "task"),
+                    Arc::new(AtomicBool::new(false)),
+                    Some(events),
+                )
+                .await
+        });
+
+        assert!(matches!(
+            received.recv().await,
+            Some(CodingAgentStreamEvent::Started { .. })
+        ));
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), received.recv())
+                .await
+                .expect("delta must arrive while the process is still running"),
+            Some(CodingAgentStreamEvent::Delta { text, .. }) if text == "live"
+        ));
+        release.notify_one();
+        let result = running.await.unwrap().unwrap();
+        assert_eq!(
+            result.outcome,
+            CodingAgentRunOutcome::Completed {
+                text: "done".into(),
+                cost_usd: None,
+                duration_ms: None,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn runner_maps_empty_cancel_timeout_and_abnormal_exit() {
+        let success = ProcessExit {
+            code: Some(0),
+            success: true,
+        };
+        let empty = CodingAgentRunner::new(Arc::new(ScriptedProcess(Vec::new(), Ok(success))))
+            .run(
+                CodingAgentRequest::new("empty", "task"),
+                Arc::new(AtomicBool::new(false)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            empty.outcome,
+            CodingAgentRunOutcome::Failed("coding agent returned no result".into())
+        );
+
+        let cancelled = CodingAgentRunner::new(Arc::new(ScriptedProcess(Vec::new(), Ok(success))))
+            .run(
+                CodingAgentRequest::new("cancelled", "task"),
+                Arc::new(AtomicBool::new(true)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cancelled.outcome, CodingAgentRunOutcome::Cancelled);
+
+        let abnormal = CodingAgentRunner::new(Arc::new(ScriptedProcess(
+            Vec::new(),
+            Ok(ProcessExit {
+                code: Some(9),
+                success: false,
+            }),
+        )))
+        .run(
+            CodingAgentRequest::new("abnormal", "task"),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            abnormal.outcome,
+            CodingAgentRunOutcome::Failed("coding agent exited with code Some(9)".into())
+        );
+
+        let mut request = CodingAgentRequest::new("timeout", "task");
+        request.timeout_secs = 1;
+        let timed_out = CodingAgentRunner::new(Arc::new(CancelAwareProcess))
+            .run(request, Arc::new(AtomicBool::new(false)))
+            .await
+            .unwrap();
+        assert_eq!(
+            timed_out.outcome,
+            CodingAgentRunOutcome::Failed("coding agent timed out".into())
         );
     }
 

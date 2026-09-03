@@ -1,9 +1,9 @@
 use super::*;
 
-const LLM_EXTRA_HEADERS_ACCOUNT: &str = "ark.extra_headers";
-const LLM_TEMPERATURE_ACCOUNT: &str = "ark.temperature";
-const OMNI_EXTRA_HEADERS_ACCOUNT: &str = "omni.extra_headers";
-const OMNI_TEMPERATURE_ACCOUNT: &str = "omni.temperature";
+const LLM_EXTRA_HEADERS_ACCOUNT: &str = openless_core::credentials::LLM_EXTRA_HEADERS_ACCOUNT;
+const LLM_TEMPERATURE_ACCOUNT: &str = openless_core::credentials::LLM_TEMPERATURE_ACCOUNT;
+const OMNI_EXTRA_HEADERS_ACCOUNT: &str = openless_core::credentials::OMNI_EXTRA_HEADERS_ACCOUNT;
+const OMNI_TEMPERATURE_ACCOUNT: &str = openless_core::credentials::OMNI_TEMPERATURE_ACCOUNT;
 const MARKETPLACE_GITHUB_TOKEN_ACCOUNT: &str = "github.oauth_token";
 
 /// Tauri host adapter for the framework-independent core credential port.
@@ -180,11 +180,22 @@ fn credentials_status(
     let snap = CredentialsVault::snapshot();
     let active_asr_provider = CredentialsVault::get_active_asr();
     let active_llm_provider = CredentialsVault::get_active_llm();
-    let volcengine_configured = volcengine_configured(&snap);
-    let asr_configured =
-        asr_configured_for_provider_with_model_store(&active_asr_provider, &snap, model_store);
-    let llm_configured = llm_configured_for_provider(&active_llm_provider, &snap);
-    let omni_configured = omni_configured_for_active_provider(&snap);
+    let configuration = credential_configuration(
+        &snap,
+        &active_llm_provider,
+        CodexOAuthCredentials::load_default().is_ok(),
+    );
+    let volcengine_configured =
+        openless_core::provider_rules::volcengine_configured(&configuration);
+    let asr_configured = openless_core::provider_rules::asr_configured(
+        &active_asr_provider,
+        &configuration,
+        local_asr_configured(&active_asr_provider, model_store),
+    );
+    let llm_configured =
+        openless_core::provider_rules::llm_configured(&active_llm_provider, &configuration);
+    let omni_configured =
+        openless_core::provider_rules::omni_configured(&snap.active_omni_provider, &configuration);
     CredentialsStatus {
         active_asr_provider,
         active_llm_provider,
@@ -422,24 +433,6 @@ pub async fn get_credentials(core: CoreState<'_>) -> Result<CredentialsStatus, S
         .map_err(|error| error.to_string())
 }
 
-fn volcengine_configured(snap: &CredentialsSnapshot) -> bool {
-    use crate::asr::volcengine::VolcengineAuthMode;
-    let mode = snap
-        .volcengine_auth_mode
-        .as_deref()
-        .map(VolcengineAuthMode::parse)
-        .unwrap_or(VolcengineAuthMode::AppIdToken);
-    // 两种模式的密钥来源不同：AppIdToken 读 Access Token 槽，ApiKey 读独立的 API Key 槽。
-    let (app_id, secret) = match mode {
-        VolcengineAuthMode::AppIdToken => (
-            snap.volcengine_app_key.as_deref().unwrap_or(""),
-            snap.volcengine_access_key.as_deref().unwrap_or(""),
-        ),
-        VolcengineAuthMode::ApiKey => ("", snap.volcengine_api_key.as_deref().unwrap_or("")),
-    };
-    mode.auth_ok(app_id, secret) && configured(&snap.volcengine_resource_id)
-}
-
 pub(crate) fn asr_configured_for_provider(provider: &str, snap: &CredentialsSnapshot) -> bool {
     asr_configured_for_provider_with_model_store(provider, snap, None)
 }
@@ -449,6 +442,17 @@ fn asr_configured_for_provider_with_model_store(
     snap: &CredentialsSnapshot,
     model_store: Option<&openless_core::ModelStore>,
 ) -> bool {
+    openless_core::provider_rules::asr_configured(
+        provider,
+        &credential_configuration(snap, "", false),
+        local_asr_configured(provider, model_store),
+    )
+}
+
+fn local_asr_configured(
+    provider: &str,
+    model_store: Option<&openless_core::ModelStore>,
+) -> Option<bool> {
     if crate::asr::local::is_local_whisper(provider) {
         #[cfg(target_os = "macos")]
         {
@@ -461,108 +465,46 @@ fn asr_configured_for_provider_with_model_store(
                         .unwrap_or(false)
                 })
                 .unwrap_or_else(|| crate::asr::local::WHISPER_MODEL_ID.to_string());
-            return model_store.is_some_and(|store| {
+            return Some(model_store.is_some_and(|store| {
                 crate::asr::local::whisper_model_ready_for_model(store, &model_id)
-            });
+            }));
         }
         #[cfg(not(target_os = "macos"))]
         {
-            return false;
+            return Some(false);
         }
-    }
-    // 本地 / 无凭据引擎不属于云端分类枚举（ActiveAsrProviderKind），由平台 cfg 门
-    // 在此单独判定；移动端上这些引擎不可用直接判未配置。
-    if cfg!(mobile)
-        && (crate::asr::local::is_local_qwen3(provider)
-            || crate::asr::local::is_local_whisper(provider)
-            || provider == crate::asr::local::sherpa::PROVIDER_ID
-            || provider == crate::asr::local::foundry::PROVIDER_ID
-            || provider == crate::asr::local::APPLE_SPEECH_PROVIDER_ID)
-    {
-        return false;
     }
     if crate::asr::local::is_local_qwen3(provider) {
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
-            return crate::asr::local::qwen_backend_for_provider(provider).is_some();
+            return Some(crate::asr::local::qwen_backend_for_provider(provider).is_some());
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
-            return false;
+            return Some(false);
         }
     }
-    if active_apple_speech_asr_is_supported(provider)
-        || active_foundry_asr_is_supported(provider)
-        || active_sherpa_asr_is_supported(provider)
-    {
-        // 本地 ASR 不依赖云端凭据。
-        return true;
+    if provider == crate::asr::local::APPLE_SPEECH_PROVIDER_ID {
+        return Some(active_apple_speech_asr_is_supported(provider));
     }
-    // 云端 provider：所需字段由 ActiveAsrProviderKind 统一判定（穷尽 match，新增
-    // kind 编译器强制补齐）。volcengine 亦经此路（VolcAppKey）。
-    use openless_core::provider_rules::{active_asr_provider_kind, AsrConfiguredFields};
-    match active_asr_provider_kind(provider).configured_fields() {
-        AsrConfiguredFields::ApiKeyOnly => configured(&snap.asr_api_key),
-        AsrConfiguredFields::ApiKeyEndpointModel => {
-            configured(&snap.asr_api_key)
-                && configured(&snap.asr_endpoint)
-                && configured(&snap.asr_model)
-        }
-        AsrConfiguredFields::EndpointModelOnly => {
-            configured(&snap.asr_endpoint) && configured(&snap.asr_model)
-        }
-        AsrConfiguredFields::VolcAppKey => volcengine_configured(snap),
-        AsrConfiguredFields::XfyunAppKey => {
-            configured(&snap.xfyun_app_id) && configured(&snap.xfyun_api_key)
-        }
+    if provider == crate::asr::local::foundry::PROVIDER_ID {
+        return Some(active_foundry_asr_is_supported(provider));
     }
+    if provider == crate::asr::local::sherpa::PROVIDER_ID {
+        return Some(active_sherpa_asr_is_supported(provider));
+    }
+    None
 }
 
 pub(crate) fn llm_configured_for_provider(provider: &str, snap: &CredentialsSnapshot) -> bool {
-    if provider == CODEX_OAUTH_PROVIDER_ID {
-        return CodexOAuthCredentials::load_default().is_ok();
-    }
-    let endpoint = snap.ark_endpoint.as_deref().unwrap_or_default();
-    let endpoint_and_model = configured(&snap.ark_endpoint) && configured(&snap.ark_model_id);
-    if endpoint_and_model
-        && llm_provider_default_endpoint(provider)
-            .map(|default| same_llm_endpoint(endpoint, default))
-            .unwrap_or(false)
-    {
-        return configured(&snap.ark_api_key);
-    }
-    endpoint_and_model
-}
-
-fn llm_provider_default_endpoint(provider: &str) -> Option<&'static str> {
-    match provider {
-        "ark" => Some("https://ark.cn-beijing.volces.com/api/v3"),
-        "deepseek" => Some("https://api.deepseek.com/v1"),
-        "siliconflow" => Some("https://api.siliconflow.cn/v1"),
-        "atlascloud" => Some("https://api.atlascloud.ai/v1"),
-        "openai" => Some("https://api.openai.com/v1"),
-        // 谷歌 Gemini 原生 API（v1beta）。后端 llm_gemini.rs 会拼成
-        // `{baseUrl}/models/{model}:generateContent`，认证用 x-goog-api-key 头。
-        "gemini" => Some("https://generativelanguage.googleapis.com/v1beta"),
-        "mimo" => Some("https://api.xiaomimimo.com/v1"),
-        "cometapi" => Some("https://api.cometapi.com/v1"),
-        "openrouterFree" => Some("https://openrouter.ai/api/v1"),
-        "alibabaCoding" => Some("https://coding-intl.dashscope.aliyuncs.com/v1"),
-        "codingPlanX" => Some("https://api.codingplanx.ai/v1"),
-        "stepfun" => Some("https://api.stepfun.com/v1"),
-        _ => None,
-    }
-}
-
-fn same_llm_endpoint(a: &str, b: &str) -> bool {
-    fn normalize(value: &str) -> &str {
-        value
-            .trim()
-            .trim_end_matches('/')
-            .trim_end_matches("/chat/completions")
-            .trim_end_matches('/')
-    }
-    normalize(a).eq_ignore_ascii_case(normalize(b))
+    openless_core::provider_rules::llm_configured(
+        provider,
+        &credential_configuration(
+            snap,
+            provider,
+            CodexOAuthCredentials::load_default().is_ok(),
+        ),
+    )
 }
 
 fn configured(field: &Option<String>) -> bool {
@@ -575,13 +517,45 @@ fn configured(field: &Option<String>) -> bool {
 /// 多模态（Omni）模型是否已配置：OpenAI 兼容通道要求 API Key + Base URL + Model；
 /// Gemini 通道要求 API Key + Model（Base URL 为空时后端走官方默认）。
 pub(crate) fn omni_configured_for_active_provider(snap: &CredentialsSnapshot) -> bool {
-    let provider = &snap.active_omni_provider;
-    let has_api_key = configured(&snap.omni_api_key);
-    let has_model = configured(&snap.omni_model);
-    if provider == "gemini" {
-        return has_api_key && has_model;
+    openless_core::provider_rules::omni_configured(
+        &snap.active_omni_provider,
+        &credential_configuration(snap, "", false),
+    )
+}
+
+fn credential_configuration(
+    snap: &CredentialsSnapshot,
+    llm_provider: &str,
+    codex_oauth: bool,
+) -> openless_core::provider_rules::CredentialConfiguration {
+    let llm_endpoint = snap
+        .ark_endpoint
+        .as_deref()
+        .filter(|value| !value.trim().is_empty());
+    openless_core::provider_rules::CredentialConfiguration {
+        asr_api_key: configured(&snap.asr_api_key),
+        asr_endpoint: configured(&snap.asr_endpoint),
+        asr_model: configured(&snap.asr_model),
+        volcengine_auth_mode: snap.volcengine_auth_mode.clone(),
+        volcengine_app_key: configured(&snap.volcengine_app_key),
+        volcengine_access_key: configured(&snap.volcengine_access_key),
+        volcengine_api_key: configured(&snap.volcengine_api_key),
+        volcengine_resource_id: configured(&snap.volcengine_resource_id),
+        xfyun_app_id: configured(&snap.xfyun_app_id),
+        xfyun_api_key: configured(&snap.xfyun_api_key),
+        llm_api_key: configured(&snap.ark_api_key),
+        llm_endpoint: llm_endpoint.is_some(),
+        llm_endpoint_matches_default: llm_endpoint.is_some_and(|endpoint| {
+            openless_core::provider_rules::default_llm_endpoint(llm_provider).is_some_and(
+                |default| openless_core::provider_rules::equivalent_endpoint(endpoint, default),
+            )
+        }),
+        llm_model: configured(&snap.ark_model_id),
+        codex_oauth,
+        omni_api_key: configured(&snap.omni_api_key),
+        omni_endpoint: configured(&snap.omni_endpoint),
+        omni_model: configured(&snap.omni_model),
     }
-    has_api_key && configured(&snap.omni_endpoint) && has_model
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -121,6 +121,8 @@ impl CodingAgentProcessAdapter for LinuxCodingAgentProcessAdapter {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .kill_on_drop(true);
+            #[cfg(target_os = "linux")]
+            command.process_group(0);
             if let Some(cwd) = &request.cwd {
                 command.current_dir(cwd);
             }
@@ -178,9 +180,20 @@ impl CodingAgentProcessAdapter for LinuxCodingAgentProcessAdapter {
             let status = loop {
                 tokio::select! {
                     status = child.wait() => break status.map_err(platform_error)?,
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(20)), if cancel.is_cancelled() => {
-                        child.kill().await.map_err(platform_error)?;
-                        break child.wait().await.map_err(platform_error)?;
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {
+                        if cancel.is_cancelled() {
+                            #[cfg(target_os = "linux")]
+                            let killed_group = child.id().is_some_and(|pid| {
+                                // SAFETY: the child was started as process-group leader above.
+                                unsafe { libc::kill(-(pid as i32), libc::SIGKILL) == 0 }
+                            });
+                            #[cfg(not(target_os = "linux"))]
+                            let killed_group = false;
+                            if !killed_group {
+                                child.start_kill().map_err(platform_error)?;
+                            }
+                            break child.wait().await.map_err(platform_error)?;
+                        }
                     }
                 }
             };
@@ -199,4 +212,53 @@ fn invalid(message: impl Into<String>) -> openless_core::BackendError {
 
 fn platform_error(error: impl std::fmt::Display) -> openless_core::BackendError {
     openless_core::BackendError::new(openless_core::BackendErrorCode::Platform, error.to_string())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    use openless_core::{
+        AgentCommand, CancellationToken, CodingAgentProcessAdapter, ProcessOutputLine,
+        ProcessOutputSink, PromptPayload,
+    };
+
+    use super::LinuxCodingAgentProcessAdapter;
+
+    struct IgnoreOutput;
+
+    impl ProcessOutputSink for IgnoreOutput {
+        fn write(&self, _line: ProcessOutputLine) {}
+    }
+
+    #[tokio::test]
+    async fn cancellation_kills_a_running_child() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&cancelled);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            flag.store(true, Ordering::Release);
+        });
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            LinuxCodingAgentProcessAdapter.execute(
+                AgentCommand {
+                    executable: "sh".into(),
+                    argv: vec!["-c".into(), "sleep 10".into()],
+                    env: BTreeMap::new(),
+                    cwd: None,
+                    prompt: PromptPayload::Stdin(String::new()),
+                    temporary_files: Vec::new(),
+                },
+                Arc::new(IgnoreOutput),
+                CancellationToken::from_flag(cancelled),
+            ),
+        )
+        .await
+        .expect("cancelled child must exit promptly")
+        .unwrap();
+        assert!(!result.success);
+    }
 }

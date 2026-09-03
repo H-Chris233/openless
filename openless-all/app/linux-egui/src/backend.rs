@@ -104,28 +104,29 @@ impl LinuxGenericLocalAsrRuntime {
     }
 }
 
+pub(crate) fn qwen_engine_available() -> bool {
+    match std::env::var_os("OPENLESS_QWEN_ASR_BIN") {
+        Some(path) => {
+            let path = std::path::Path::new(&path);
+            if path.is_absolute() {
+                path.is_file()
+            } else {
+                std::process::Command::new(path)
+                    .arg("--version")
+                    .output()
+                    .is_ok()
+            }
+        }
+        None => std::process::Command::new("qwen_asr")
+            .arg("--version")
+            .output()
+            .is_ok(),
+    }
+}
+
 impl openless_core::ModelRuntimeAdapter for LinuxGenericLocalAsrRuntime {
     fn engine_available(&self, runtime: openless_core::LocalAsrRuntime) -> bool {
-        if runtime != openless_core::LocalAsrRuntime::Generic {
-            return false;
-        }
-        match std::env::var_os("OPENLESS_QWEN_ASR_BIN") {
-            Some(path) => {
-                let path = std::path::Path::new(&path);
-                if path.is_absolute() {
-                    path.is_file()
-                } else {
-                    std::process::Command::new(path)
-                        .arg("--version")
-                        .output()
-                        .is_ok()
-                }
-            }
-            None => std::process::Command::new("qwen_asr")
-                .arg("--version")
-                .output()
-                .is_ok(),
-        }
+        runtime == openless_core::LocalAsrRuntime::Generic && qwen_engine_available()
     }
 
     fn runtime_status(

@@ -7,6 +7,29 @@ use futures_util::future::BoxFuture;
 use crate::errors::{BackendError, BackendErrorCode};
 use crate::shared_types::{CredentialsStatus, UserPreferences};
 
+pub const ASR_API_KEY_ACCOUNT: &str = "asr.api_key";
+pub const ASR_ENDPOINT_ACCOUNT: &str = "asr.endpoint";
+pub const ASR_MODEL_ACCOUNT: &str = "asr.model";
+pub const ASR_VOCABULARY_ID_ACCOUNT: &str = "asr.vocabulary_id";
+pub const ASR_ADVANCED_CONFIG_ACCOUNT: &str = "asr.advanced_config";
+pub const VOLCENGINE_APP_KEY_ACCOUNT: &str = "volcengine.app_key";
+pub const VOLCENGINE_ACCESS_KEY_ACCOUNT: &str = "volcengine.access_key";
+pub const VOLCENGINE_RESOURCE_ID_ACCOUNT: &str = "volcengine.resource_id";
+pub const VOLCENGINE_AUTH_MODE_ACCOUNT: &str = "volcengine.auth_mode";
+pub const VOLCENGINE_API_KEY_ACCOUNT: &str = "volcengine.api_key";
+pub const XFYUN_APP_ID_ACCOUNT: &str = "xfyun.app_id";
+pub const XFYUN_API_KEY_ACCOUNT: &str = "xfyun.api_key";
+pub const LLM_API_KEY_ACCOUNT: &str = "ark.api_key";
+pub const LLM_MODEL_ACCOUNT: &str = "ark.model";
+pub const LLM_ENDPOINT_ACCOUNT: &str = "ark.endpoint";
+pub const LLM_EXTRA_HEADERS_ACCOUNT: &str = "ark.extra_headers";
+pub const LLM_TEMPERATURE_ACCOUNT: &str = "ark.temperature";
+pub const OMNI_API_KEY_ACCOUNT: &str = "omni.api_key";
+pub const OMNI_ENDPOINT_ACCOUNT: &str = "omni.endpoint";
+pub const OMNI_MODEL_ACCOUNT: &str = "omni.model";
+pub const OMNI_EXTRA_HEADERS_ACCOUNT: &str = "omni.extra_headers";
+pub const OMNI_TEMPERATURE_ACCOUNT: &str = "omni.temperature";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChannelKind {

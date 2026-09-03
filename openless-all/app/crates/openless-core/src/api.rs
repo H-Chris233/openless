@@ -6834,6 +6834,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn streaming_polish_deltas_flush_before_the_final_insert() {
+        use crate::testing::{FixtureDictationEngine, FixtureInsertionAction, FixtureTextInserter};
+
+        let data_dir = TestDataDir::new("streaming-insert");
+        let engine = FixtureDictationEngine::successful("raw", "你好").with_polish_deltas(vec![
+            crate::types::PolishDelta {
+                text: "你".into(),
+                offset: 0,
+                is_final: false,
+            },
+            crate::types::PolishDelta {
+                text: "好".into(),
+                offset: 1,
+                is_final: false,
+            },
+        ]);
+        let inserter = FixtureTextInserter::with_outcome(InsertOutcome::Inserted);
+        let backend = OpenLessBackend::new(
+            BackendConfig {
+                data_dir: data_dir.path().to_path_buf(),
+                ..BackendConfig::default()
+            },
+            BackendDependencies {
+                host_actions: Arc::new(FakeHost::default()),
+                text_inserter: Arc::new(inserter.clone()),
+                dictation_engine: Arc::new(engine),
+                task_spawner: Arc::new(TokioTaskSpawner),
+                credential_store: Arc::new(crate::credentials::InMemoryCredentialStore::default()),
+                services: crate::domains::BackendServices::unsupported(),
+                local_asr_runtime: None,
+                marketplace_config: None,
+                selection_runtime: None,
+                selection_polisher: None,
+                qa_runtime: None,
+            },
+        )
+        .unwrap();
+        let mut preferences = backend.get_preferences();
+        preferences.streaming_insert = true;
+        preferences.windows_insertion_mode = crate::shared_types::WindowsInsertionMode::SendInput;
+        backend.set_preferences(preferences).unwrap();
+        backend.start().await.unwrap();
+        let session_id = backend.start_dictation().await.unwrap();
+        backend.stop_dictation().await.unwrap();
+
+        assert_eq!(
+            inserter.actions(),
+            vec![
+                FixtureInsertionAction::Prepare(session_id),
+                FixtureInsertionAction::Write {
+                    session_id,
+                    text: "你好".into(),
+                },
+                FixtureInsertionAction::Insert {
+                    session_id,
+                    text: "你好".into(),
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn cli_dictation_intents_use_the_same_core_state_machine() {
         let (backend, _) = backend();
         backend.start().await.unwrap();

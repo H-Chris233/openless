@@ -14,6 +14,9 @@ use futures_util::future::BoxFuture;
 use crate::cloud_providers::{SharedCloudTextPolisher, SharedCloudTranscriptionEngine};
 use crate::credentials::{
     ChannelKind, CredentialKey, CredentialNamespace, CredentialStore, ProviderSlot,
+    ASR_API_KEY_ACCOUNT, ASR_ENDPOINT_ACCOUNT, ASR_MODEL_ACCOUNT, LLM_API_KEY_ACCOUNT,
+    LLM_ENDPOINT_ACCOUNT, LLM_EXTRA_HEADERS_ACCOUNT, LLM_MODEL_ACCOUNT, OMNI_API_KEY_ACCOUNT,
+    OMNI_ENDPOINT_ACCOUNT, OMNI_EXTRA_HEADERS_ACCOUNT, OMNI_MODEL_ACCOUNT,
 };
 use crate::dictation_context::{DictationContext, ProviderInvocation};
 use crate::domains::{
@@ -21,6 +24,9 @@ use crate::domains::{
 };
 use crate::errors::{BackendError, BackendErrorCode};
 use crate::ports::{TextPolisher, TextStreamChunk, TextStreamSink, TranscriptionEngine};
+use crate::provider_rules::{
+    default_llm_endpoint, default_llm_model, default_omni_endpoint, parse_extra_headers,
+};
 use crate::provider_transport::{
     ProviderCancellation, ProviderTransport, ProviderTransportError, ProviderTransportRequest,
     ReqwestProviderTransport,
@@ -28,18 +34,6 @@ use crate::provider_transport::{
 use crate::shared_types::PipelineMode;
 use crate::types::SessionId;
 use crate::{encode_dictation_wav, TaskSpawner};
-
-const ASR_MODEL_ACCOUNT: &str = "asr.model";
-const ASR_API_KEY_ACCOUNT: &str = "asr.api_key";
-const ASR_ENDPOINT_ACCOUNT: &str = "asr.endpoint";
-const LLM_MODEL_ACCOUNT: &str = "ark.model";
-const LLM_API_KEY_ACCOUNT: &str = "ark.api_key";
-const LLM_ENDPOINT_ACCOUNT: &str = "ark.endpoint";
-const LLM_EXTRA_HEADERS_ACCOUNT: &str = "ark.extra_headers";
-const OMNI_MODEL_ACCOUNT: &str = "omni.model";
-const OMNI_API_KEY_ACCOUNT: &str = "omni.api_key";
-const OMNI_ENDPOINT_ACCOUNT: &str = "omni.endpoint";
-const OMNI_EXTRA_HEADERS_ACCOUNT: &str = "omni.extra_headers";
 
 const MODEL_LIST_MAX_BYTES: usize = 2 * 1024 * 1024;
 const MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(15);
@@ -601,74 +595,6 @@ fn models_url(endpoint: &str) -> Result<String, BackendError> {
     };
     url.set_path(&next_path);
     Ok(url.to_string())
-}
-
-fn parse_extra_headers(
-    value: &str,
-) -> Result<std::collections::HashMap<String, String>, BackendError> {
-    if value.trim().is_empty() {
-        return Ok(std::collections::HashMap::new());
-    }
-    let headers: std::collections::HashMap<String, String> = serde_json::from_str(value)
-        .map_err(|_| invalid_request("LLM extra headers must be a JSON object"))?;
-    for name in headers.keys() {
-        if matches!(
-            name.to_ascii_lowercase().as_str(),
-            "authorization" | "content-type" | "accept" | "host" | "content-length"
-        ) {
-            return Err(invalid_request(
-                "LLM extra headers contain a reserved header",
-            ));
-        }
-    }
-    Ok(headers)
-}
-
-fn default_llm_endpoint(provider_type: &str) -> Option<&'static str> {
-    match provider_type {
-        "ark" => Some("https://ark.cn-beijing.volces.com/api/v3"),
-        "deepseek" => Some("https://api.deepseek.com/v1"),
-        "siliconflow" => Some("https://api.siliconflow.cn/v1"),
-        "atlascloud" => Some("https://api.atlascloud.ai/v1"),
-        "openai" => Some("https://api.openai.com/v1"),
-        "gemini" => Some("https://generativelanguage.googleapis.com/v1beta"),
-        "mimo" => Some("https://api.xiaomimimo.com/v1"),
-        "cometapi" => Some("https://api.cometapi.com/v1"),
-        "openrouterFree" => Some("https://openrouter.ai/api/v1"),
-        "alibabaCoding" => Some("https://coding-intl.dashscope.aliyuncs.com/v1"),
-        "codingPlanX" => Some("https://api.codingplanx.ai/v1"),
-        "minimax" => Some("https://api.minimaxi.com/v1"),
-        "stepfun" => Some("https://api.stepfun.com/v1"),
-        _ => None,
-    }
-}
-
-fn default_llm_model(provider_type: &str) -> Option<&'static str> {
-    match provider_type {
-        "ark" => Some("deepseek-v3-2"),
-        "deepseek" => Some("deepseek-v4-flash"),
-        "siliconflow" => Some("Qwen/Qwen2.5-7B-Instruct"),
-        "atlascloud" => Some("qwen/qwen3.5-flash"),
-        "openai" | "cometapi" => Some("gpt-4o"),
-        "gemini" => Some("gemini-2.5-flash"),
-        crate::polish::CODEX_OAUTH_PROVIDER_ID => Some(crate::polish::CODEX_DEFAULT_MODEL),
-        "mimo" => Some("xiaomi/mimo-v2-flash"),
-        "openrouterFree" => Some("qwen/qwen3-coder:free"),
-        "alibabaCoding" => Some("qwen3-coder-plus"),
-        "codingPlanX" => Some("gpt-5-mini"),
-        "minimax" => Some("MiniMax-M3"),
-        "stepfun" => Some("step-1o-turbo-vision"),
-        _ => None,
-    }
-}
-
-fn default_omni_endpoint(provider_type: &str) -> Option<&'static str> {
-    match provider_type {
-        "openai" => Some("https://api.openai.com/v1"),
-        "gemini" => Some("https://generativelanguage.googleapis.com/v1beta"),
-        "dashscope-omni" => Some("https://dashscope.aliyuncs.com/compatible-mode/v1"),
-        _ => None,
-    }
 }
 
 fn map_transport_error(error: ProviderTransportError) -> BackendError {
