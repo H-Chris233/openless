@@ -192,7 +192,19 @@ impl CodingAgentProcessAdapter for TauriCodingAgentProcessAdapter {
                                 // SAFETY: the child was started as process-group leader above.
                                 unsafe { libc::kill(-(pid as i32), libc::SIGKILL) == 0 }
                             });
-                            #[cfg(not(unix))]
+                            #[cfg(windows)]
+                            let killed_group = if let Some(pid) = child.id() {
+                                let mut taskkill = tokio::process::Command::new("taskkill");
+                                taskkill
+                                    .args(["/PID", &pid.to_string(), "/T", "/F"])
+                                    .stdout(Stdio::null())
+                                    .stderr(Stdio::null());
+                                taskkill.creation_flags(0x08000000);
+                                taskkill.status().await.is_ok_and(|status| status.success())
+                            } else {
+                                false
+                            };
+                            #[cfg(not(any(unix, windows)))]
                             let killed_group = false;
                             if !killed_group {
                                 child.start_kill().map_err(platform_error)?;
@@ -217,4 +229,46 @@ fn invalid(message: impl Into<String>) -> openless_core::BackendError {
 
 fn platform_error(error: impl std::fmt::Display) -> openless_core::BackendError {
     openless_core::BackendError::new(openless_core::BackendErrorCode::Platform, error.to_string())
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::*;
+
+    struct IgnoreOutput;
+
+    impl ProcessOutputSink for IgnoreOutput {
+        fn write(&self, _line: ProcessOutputLine) {}
+    }
+
+    #[tokio::test]
+    async fn cancellation_kills_a_windows_process_tree() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&cancelled);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            flag.store(true, Ordering::Release);
+        });
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            TauriCodingAgentProcessAdapter.execute(
+                AgentCommand {
+                    executable: "cmd.exe".into(),
+                    argv: vec!["/C".into(), "ping -n 11 127.0.0.1 >nul".into()],
+                    env: BTreeMap::new(),
+                    cwd: None,
+                    prompt: PromptPayload::Stdin(String::new()),
+                    temporary_files: Vec::new(),
+                },
+                Arc::new(IgnoreOutput),
+                CancellationToken::from_flag(cancelled),
+            ),
+        )
+        .await
+        .expect("cancelled Windows process tree must exit promptly")
+        .unwrap();
+        assert!(!result.success);
+    }
 }
