@@ -329,7 +329,7 @@ jobs:
         if: runner.os == 'macOS'
         env:
           OPENLESS_CODEX_TEST_EXE: codex
-        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib coding_agent::codex::live::hardening_actually_narrows_the_writable_roots -- --ignored --nocapture --test-threads=1
+        run: cargo test --locked -p openless-core hardening_actually_narrows_the_writable_roots -- --ignored --nocapture --test-threads=1
 
       - name: Check Tauri backend (cargo check)
         run: cargo check --locked --manifest-path src-tauri/Cargo.toml

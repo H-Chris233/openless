@@ -2059,6 +2059,73 @@ broken: npx broken - ✗ Failed to connect\n";
         }]));
     }
 
+    #[test]
+    #[ignore = "requires the pinned Codex CLI"]
+    fn hardening_actually_narrows_the_writable_roots() {
+        let dir = std::env::temp_dir().join(format!(
+            "openless-codex-sandbox-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let codex = std::env::var("OPENLESS_CODEX_TEST_EXE")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "codex".to_string());
+        let run = |extra: &[String]| {
+            let output = std::process::Command::new(&codex)
+                .args(["debug", "prompt-input"])
+                .args(["-c", "sandbox_mode=\"workspace-write\""])
+                .args(extra)
+                .arg("x")
+                .current_dir(&dir)
+                .output()
+                .expect("Codex CLI must run");
+            assert!(output.status.success(), "Codex CLI debug command failed");
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        };
+
+        let mut request = CodingAgentRequest::new("sandbox", "test");
+        request.provider = CodingAgentProvider::CodexCli;
+        request.permission_mode = CodingAgentPermissionMode::AcceptEdits;
+        let args = build_codex_args(&request);
+        let hardening = args
+            .iter()
+            .enumerate()
+            .filter(|(index, arg)| {
+                arg.as_str() == "-c" || (*index > 0 && arg.starts_with("sandbox_workspace_write."))
+            })
+            .map(|(_, arg)| arg.clone())
+            .collect::<Vec<_>>();
+        assert!(!hardening.is_empty(), "Codex sandbox hardening is missing");
+
+        let before = run(&[]);
+        let after = run(&hardening);
+        let roots = |output: &str| {
+            output
+                .split("writable root")
+                .nth(1)
+                .unwrap_or_default()
+                .chars()
+                .take(400)
+                .collect::<String>()
+        };
+        let before = roots(&before);
+        let after = roots(&after);
+        let count_roots = |output: &str| output.matches('`').count() / 2;
+        assert!(
+            count_roots(&before) > 1,
+            "Codex default writable roots changed: {before}"
+        );
+        assert_eq!(
+            count_roots(&after),
+            1,
+            "Codex sandbox hardening no longer limits writable roots: {after}"
+        );
+        let cwd = std::fs::canonicalize(&dir).unwrap();
+        assert!(after.contains(&cwd.to_string_lossy().into_owned()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     fn test_request() -> CodingAgentTestRequest {
         CodingAgentTestRequest {
             provider: CodingAgentProvider::ClaudeCodeCli,
