@@ -20,6 +20,7 @@ use crate::local_asr_catalog::{LocalAsrRuntime, LocalAsrTarget};
 
 pub const MODEL_READY_SENTINEL: &str = ".openless-model-ready";
 pub const MODEL_PARTIAL_INDEX: &str = ".partial.idx";
+const MODEL_RELOCATION_JOURNAL: &str = ".openless-model-relocation.json";
 pub const DEFAULT_MODEL_CHUNK_BYTES: u64 = 32 * 1024 * 1024;
 pub const DEFAULT_MODEL_MAX_FILE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 pub const DEFAULT_MODEL_MAX_TOTAL_BYTES: u64 = 32 * 1024 * 1024 * 1024;
@@ -76,18 +77,12 @@ pub trait ModelTransport: Send + Sync {
     ) -> BoxFuture<'static, Result<ModelTransportResponse, BackendError>>;
 }
 
-#[derive(Clone)]
-pub struct ReqwestModelTransport {
-    client: reqwest::Client,
-}
+#[derive(Clone, Default)]
+pub struct ReqwestModelTransport;
 
 impl ReqwestModelTransport {
     pub fn new() -> Result<Self, BackendError> {
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::limited(5))
-            .build()
-            .map_err(|error| BackendError::new(BackendErrorCode::Internal, error.to_string()))?;
-        Ok(Self { client })
+        Ok(Self)
     }
 }
 
@@ -96,7 +91,7 @@ impl ModelTransport for ReqwestModelTransport {
         &self,
         request: ModelTransportRequest,
     ) -> BoxFuture<'static, Result<ModelTransportResponse, BackendError>> {
-        let client = self.client.clone();
+        let client = crate::net::model_http();
         Box::pin(async move {
             let mut builder = client.get(&request.url);
             if let Some((start, end)) = request.range {
@@ -169,7 +164,7 @@ pub struct ModelFile {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelManifest {
-    pub model_id: String,
+    pub target: LocalAsrTarget,
     pub repository: String,
     pub files: Vec<ModelFile>,
     pub total_bytes: u64,
@@ -316,13 +311,11 @@ impl ModelCatalog {
                 ModelFileSelector::Native,
             );
         }
-        for (id, repository, display_name, family, mode, languages, files) in [
+        for (id, repository, display_name, languages, files) in [
             (
                 "sense-voice-small-zh",
                 "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17",
                 "SenseVoice Small (zh/en/ja/ko/yue)",
-                "sense_voice",
-                "offline",
                 &["zh", "en", "ja", "ko", "yue"][..].as_ref(),
                 &[
                     ("model.int8.onnx", "model.int8.onnx"),
@@ -333,8 +326,6 @@ impl ModelCatalog {
                 "paraformer-zh",
                 "csukuangfj/sherpa-onnx-paraformer-zh-2024-03-09",
                 "Paraformer (zh)",
-                "paraformer",
-                "offline",
                 &["zh"][..].as_ref(),
                 &[
                     ("model.int8.onnx", "model.int8.onnx"),
@@ -345,8 +336,6 @@ impl ModelCatalog {
                 "whisper-small-multi",
                 "csukuangfj/sherpa-onnx-whisper-small",
                 "Whisper Small (multilingual)",
-                "whisper",
-                "offline",
                 &["multi"][..].as_ref(),
                 &[
                     ("small-encoder.int8.onnx", "encoder.int8.onnx"),
@@ -358,8 +347,6 @@ impl ModelCatalog {
                 "whisper-large-v3-multi",
                 "csukuangfj/sherpa-onnx-whisper-large-v3",
                 "Whisper Large V3 (multilingual)",
-                "whisper",
-                "offline",
                 &["multi"][..].as_ref(),
                 &[
                     ("large-v3-encoder.int8.onnx", "encoder.int8.onnx"),
@@ -371,8 +358,6 @@ impl ModelCatalog {
                 "zipformer-bilingual-zh-en-streaming",
                 "csukuangfj/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20",
                 "Zipformer Streaming bilingual (zh/en)",
-                "zipformer",
-                "online",
                 &["zh", "en"][..].as_ref(),
                 &[
                     (
@@ -388,6 +373,16 @@ impl ModelCatalog {
                 ][..],
             ),
         ] {
+            let target = LocalAsrTarget::parse(LocalAsrRuntime::SherpaOnnx, id)
+                .expect("built-in Sherpa model id");
+            let family = target
+                .sherpa_family()
+                .expect("Sherpa model family")
+                .as_str();
+            let mode = target
+                .sherpa_execution_mode()
+                .expect("Sherpa execution mode")
+                .as_str();
             add(
                 LocalAsrRuntime::SherpaOnnx,
                 id,
@@ -399,13 +394,21 @@ impl ModelCatalog {
                 exact(files),
             );
         }
+        let qwen_sherpa = LocalAsrTarget::parse(LocalAsrRuntime::SherpaOnnx, "qwen3-asr-0.6b-int8")
+            .expect("built-in Sherpa Qwen model id");
         add(
             LocalAsrRuntime::SherpaOnnx,
             "qwen3-asr-0.6b-int8",
             "",
             "Qwen3-ASR 0.6B INT8",
-            "qwen3_asr",
-            "offline",
+            qwen_sherpa
+                .sherpa_family()
+                .expect("Sherpa model family")
+                .as_str(),
+            qwen_sherpa
+                .sherpa_execution_mode()
+                .expect("Sherpa execution mode")
+                .as_str(),
             &["multi"],
             ModelFileSelector::Archive {
                 url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25.tar.bz2".into(),
@@ -462,15 +465,30 @@ fn exact(files: &[(&str, &str)]) -> ModelFileSelector {
     )
 }
 
+fn entry_is_complete(entry: &ModelCatalogEntry, directory: &Path) -> bool {
+    if !directory.join(MODEL_READY_SENTINEL).is_file() {
+        return false;
+    }
+    match &entry.selector {
+        ModelFileSelector::QwenRepository => true,
+        ModelFileSelector::Exact(files) => files
+            .iter()
+            .all(|file| directory.join(&file.local_path).is_file()),
+        ModelFileSelector::Archive { required_paths, .. } => required_paths
+            .iter()
+            .all(|path| directory.join(path).is_file()),
+        ModelFileSelector::Native => false,
+    }
+}
+
 impl ModelManifest {
     pub fn new(
-        model_id: impl Into<String>,
+        target: LocalAsrTarget,
         repository: impl Into<String>,
         files: Vec<ModelFile>,
     ) -> Result<Self, BackendError> {
-        let model_id = model_id.into();
         let repository = repository.into();
-        validate_model_id(&model_id)?;
+        validate_model_id(target.model_id())?;
         let mut seen = BTreeSet::new();
         for file in &files {
             validate_model_path(&file.path)?;
@@ -496,7 +514,7 @@ impl ModelManifest {
                 .ok_or_else(|| invalid("model total size overflowed"))
         })?;
         Ok(Self {
-            model_id,
+            target,
             repository,
             files,
             total_bytes,
@@ -505,26 +523,24 @@ impl ModelManifest {
     }
 
     pub fn from_hf_pages(
-        model_id: impl Into<String>,
+        target: LocalAsrTarget,
         repository: impl Into<String>,
         pages: &[Vec<serde_json::Value>],
     ) -> Result<Self, BackendError> {
-        let model_id = model_id.into();
         let repository = repository.into();
-        let files = merge_hf_tree_pages(&repository, &model_id, pages)?;
-        Self::new(model_id, repository, files)
+        let files = merge_hf_tree_pages(&repository, target.model_id(), pages)?;
+        Self::new(target, repository, files)
     }
 
     pub fn from_hf_pages_with_base(
-        model_id: impl Into<String>,
+        target: LocalAsrTarget,
         repository: impl Into<String>,
         pages: &[Vec<serde_json::Value>],
         base_url: &str,
     ) -> Result<Self, BackendError> {
-        let model_id = model_id.into();
         let repository = repository.into();
-        let files = merge_hf_tree_pages_with_base(&repository, &model_id, pages, base_url)?;
-        Self::new(model_id, repository, files)
+        let files = merge_hf_tree_pages_with_base(&repository, target.model_id(), pages, base_url)?;
+        Self::new(target, repository, files)
     }
 }
 
@@ -620,16 +636,17 @@ pub struct ModelStore {
     catalog: ModelCatalog,
     transport: Arc<dyn ModelTransport>,
     progress: Arc<std::sync::RwLock<Option<Arc<dyn DownloadProgressSink>>>>,
-    progress_clock: Arc<Mutex<HashMap<String, u64>>>,
-    active_downloads: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    progress_clock: Arc<Mutex<HashMap<LocalAsrTarget, u64>>>,
+    active_downloads: Arc<Mutex<HashMap<LocalAsrTarget, Arc<AtomicBool>>>>,
 }
 
 impl ModelStore {
     pub fn new(config: ModelStoreConfig) -> Result<Self, BackendError> {
-        Ok(Self::with_transport(
-            config,
-            Arc::new(ReqwestModelTransport::new()?),
-        ))
+        let store = Self::with_transport(config, Arc::new(ReqwestModelTransport::new()?));
+        if let Err(error) = store.finish_pending_relocation() {
+            log::warn!("[model-store] deferred relocation cleanup failed: {error}");
+        }
+        Ok(store)
     }
 
     pub fn with_transport(config: ModelStoreConfig, transport: Arc<dyn ModelTransport>) -> Self {
@@ -684,7 +701,8 @@ impl ModelStore {
             .iter()
             .filter(|entry| entry.target.runtime == runtime)
             .map(|entry| {
-                let directory = self.model_dir(entry.target.model_id())?;
+                let runtime_directory = self.runtime_model_dir(&entry.target)?;
+                let native = matches!(entry.selector, ModelFileSelector::Native);
                 Ok(LocalAsrModel {
                     target: entry.target.clone(),
                     display_name: entry.display_name.clone(),
@@ -692,8 +710,12 @@ impl ModelStore {
                     mode: Some(entry.mode.clone()),
                     repository: (!entry.repository.is_empty()).then(|| entry.repository.clone()),
                     languages: entry.languages.clone(),
-                    installed: directory.join(MODEL_READY_SENTINEL).is_file(),
-                    downloaded_bytes: directory_size(&directory).unwrap_or(0),
+                    installed: !native && self.is_installed(&entry.target)?,
+                    downloaded_bytes: if native {
+                        0
+                    } else {
+                        directory_size(&runtime_directory).unwrap_or(0)
+                    },
                     size_bytes: None,
                 })
             })
@@ -729,7 +751,7 @@ impl ModelStore {
             }],
             ModelFileSelector::QwenRepository | ModelFileSelector::Exact(_) => self
                 .fetch_hf_manifest(
-                    target.model_id(),
+                    target.clone(),
                     &entry.repository,
                     model_mirror_base(mirror)?,
                 )
@@ -802,65 +824,94 @@ impl ModelStore {
             .find(target.runtime, target.model_id())
             .cloned()
             .ok_or_else(|| invalid("unknown local ASR model"))?;
+        if matches!(entry.selector, ModelFileSelector::Native) {
+            return Err(BackendError::new(
+                BackendErrorCode::Unsupported,
+                "native runtime manages this model install",
+            ));
+        }
+        let (cancelled, _active_guard) = self.begin_active_download(&target)?;
         let manifest = match entry.selector {
-            ModelFileSelector::Native => {
-                return Err(BackendError::new(
-                    BackendErrorCode::Unsupported,
-                    "native runtime manages this model install",
-                ));
-            }
+            ModelFileSelector::Native => unreachable!("native selector returned above"),
             ModelFileSelector::Archive {
                 url,
                 root_dir,
                 size_bytes,
                 sha256,
                 required_paths,
-            } => {
-                let file_path = archive_file_name(&url)
-                    .ok_or_else(|| invalid("archive URL has no file name"))?;
-                let mut manifest = ModelManifest::new(
-                    target.model_id(),
-                    "github-release",
-                    vec![ModelFile {
-                        path: file_path.clone(),
-                        url,
-                        size_bytes,
-                        sha256: Some(sha256),
-                    }],
-                )?;
-                manifest.archive = Some(ModelArchiveSpec {
-                    file_path,
-                    root_dir,
-                    required_paths,
-                });
-                manifest
-            }
+            } => archive_file_name(&url)
+                .ok_or_else(|| invalid("archive URL has no file name"))
+                .and_then(|file_path| {
+                    let mut manifest = ModelManifest::new(
+                        target.clone(),
+                        "github-release",
+                        vec![ModelFile {
+                            path: file_path.clone(),
+                            url,
+                            size_bytes,
+                            sha256: Some(sha256),
+                        }],
+                    )?;
+                    manifest.archive = Some(ModelArchiveSpec {
+                        file_path,
+                        root_dir,
+                        required_paths,
+                    });
+                    Ok(manifest)
+                }),
             ModelFileSelector::QwenRepository | ModelFileSelector::Exact(_) => {
-                self.fetch_hf_manifest(
-                    target.model_id(),
+                self.fetch_hf_manifest_with_cancel(
+                    target.clone(),
                     &entry.repository,
                     model_mirror_base(mirror)?,
+                    Some(Arc::clone(&cancelled)),
                 )
-                .await?
+                .await
             }
         };
-        self.download(manifest).await
+        let manifest = match manifest {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                self.emit_target_terminal(
+                    &target,
+                    if error.code == BackendErrorCode::Cancelled {
+                        ModelDownloadPhase::Cancelled
+                    } else {
+                        ModelDownloadPhase::Failed
+                    },
+                    error.message.clone(),
+                );
+                return Err(error);
+            }
+        };
+        self.download_registered(manifest, cancelled).await
     }
 
     pub async fn fetch_hf_manifest(
         &self,
-        model_id: &str,
+        target: LocalAsrTarget,
         repository: &str,
         base_url: &str,
     ) -> Result<ModelManifest, BackendError> {
-        validate_model_id(model_id)?;
+        self.fetch_hf_manifest_with_cancel(target, repository, base_url, None)
+            .await
+    }
+
+    async fn fetch_hf_manifest_with_cancel(
+        &self,
+        target: LocalAsrTarget,
+        repository: &str,
+        base_url: &str,
+        cancelled: Option<Arc<AtomicBool>>,
+    ) -> Result<ModelManifest, BackendError> {
+        validate_model_id(target.model_id())?;
         let base_url = base_url.trim_end_matches('/');
         validate_model_url(&format!("{base_url}/"))?;
         let entry = self
             .catalog
             .entries()
             .iter()
-            .find(|entry| entry.target.model_id() == model_id && entry.repository == repository)
+            .find(|entry| entry.target == target && entry.repository == repository)
             .ok_or_else(|| invalid("model is not present in the Core catalog"))?;
         if matches!(
             entry.selector,
@@ -878,14 +929,21 @@ impl ModelStore {
             if !seen_urls.insert(url.clone()) {
                 return Err(invalid("model manifest pagination repeated a URL"));
             }
-            let response = self
-                .transport
-                .request(ModelTransportRequest {
-                    url: url.clone(),
-                    range: None,
-                    max_response_bytes: DEFAULT_MODEL_METADATA_BYTES,
-                })
-                .await?;
+            let request = self.transport.request(ModelTransportRequest {
+                url: url.clone(),
+                range: None,
+                max_response_bytes: DEFAULT_MODEL_METADATA_BYTES,
+            });
+            let response = if let Some(cancelled) = cancelled.as_ref() {
+                tokio::select! {
+                    value = request => value?,
+                    () = wait_until_cancelled(Arc::clone(cancelled)) => {
+                        return Err(cancelled_error());
+                    }
+                }
+            } else {
+                request.await?
+            };
             if response.status != 200 {
                 return Err(BackendError::new(
                     BackendErrorCode::Provider,
@@ -968,13 +1026,69 @@ impl ModelStore {
         })
     }
 
-    pub fn model_dir(&self, model_id: &str) -> Result<PathBuf, BackendError> {
-        validate_model_id(model_id)?;
-        Ok(self.models_root_dir().join(model_id))
+    pub fn model_dir(&self, target: &LocalAsrTarget) -> Result<PathBuf, BackendError> {
+        validate_model_id(target.model_id())?;
+        let root = self.models_root_dir();
+        Ok(match target.runtime {
+            LocalAsrRuntime::Generic => root.join(target.model_id()),
+            LocalAsrRuntime::Foundry => root.join("foundry-local"),
+            LocalAsrRuntime::SherpaOnnx => root.join("sherpa-onnx").join(target.model_id()),
+        })
+    }
+
+    pub fn is_native(&self, target: &LocalAsrTarget) -> Result<bool, BackendError> {
+        self.catalog
+            .find(target.runtime, target.model_id())
+            .map(|entry| matches!(entry.selector, ModelFileSelector::Native))
+            .ok_or_else(|| invalid("unknown local ASR model"))
+    }
+
+    pub fn is_installed(&self, target: &LocalAsrTarget) -> Result<bool, BackendError> {
+        let entry = self
+            .catalog
+            .find(target.runtime, target.model_id())
+            .ok_or_else(|| invalid("unknown local ASR model"))?;
+        if matches!(entry.selector, ModelFileSelector::Native) {
+            return Ok(false);
+        }
+        if entry_is_complete(entry, &self.model_dir(target)?) {
+            return Ok(true);
+        }
+        if target.runtime == LocalAsrRuntime::Generic
+            && target.model_id() == "whisper-large-v3-turbo"
+        {
+            let q5 = LocalAsrTarget::parse(LocalAsrRuntime::Generic, "whisper-large-v3-turbo-q5")?;
+            let q5_entry = self
+                .catalog
+                .find(q5.runtime, q5.model_id())
+                .expect("built-in Q5 model");
+            return Ok(entry_is_complete(q5_entry, &self.model_dir(&q5)?));
+        }
+        Ok(false)
+    }
+
+    pub fn runtime_model_dir(&self, target: &LocalAsrTarget) -> Result<PathBuf, BackendError> {
+        let primary = self.model_dir(target)?;
+        if target.runtime == LocalAsrRuntime::Generic
+            && target.model_id() == "whisper-large-v3-turbo"
+            && !entry_is_complete(
+                self.catalog
+                    .find(target.runtime, target.model_id())
+                    .expect("built-in Turbo model"),
+                &primary,
+            )
+        {
+            let q5 = LocalAsrTarget::parse(LocalAsrRuntime::Generic, "whisper-large-v3-turbo-q5")?;
+            let fallback = self.model_dir(&q5)?;
+            if self.is_installed(&q5)? {
+                return Ok(fallback);
+            }
+        }
+        Ok(primary)
     }
 
     pub fn status(&self, manifest: &ModelManifest) -> Result<ModelCacheStatus, BackendError> {
-        let dir = self.model_dir(&manifest.model_id)?;
+        let dir = self.model_dir(&manifest.target)?;
         let downloaded_bytes = manifest
             .files
             .iter()
@@ -990,7 +1104,7 @@ impl ModelStore {
                 .unwrap_or(false)
         });
         Ok(ModelCacheStatus {
-            model_id: manifest.model_id.clone(),
+            model_id: manifest.target.model_id().to_string(),
             ready: dir.join(MODEL_READY_SENTINEL).is_file() && complete_files,
             downloaded_bytes,
             expected_bytes: manifest.total_bytes,
@@ -1001,8 +1115,49 @@ impl ModelStore {
         &self,
         manifest: ModelManifest,
     ) -> Result<ModelCacheStatus, BackendError> {
+        if self.is_native(&manifest.target).unwrap_or(false) {
+            return Err(BackendError::new(
+                BackendErrorCode::Unsupported,
+                "native models are installed by the runtime adapter",
+            ));
+        }
+        let (cancelled, _active_guard) = self.begin_active_download(&manifest.target)?;
+        self.download_registered(manifest, cancelled).await
+    }
+
+    fn begin_active_download(
+        &self,
+        target: &LocalAsrTarget,
+    ) -> Result<(Arc<AtomicBool>, ActiveDownloadGuard), BackendError> {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let mut active = self
+            .active_downloads
+            .lock()
+            .expect("model download lock poisoned");
+        if active.contains_key(target) {
+            return Err(BackendError::new(
+                BackendErrorCode::Busy,
+                "model download is already in progress",
+            ));
+        }
+        active.insert(target.clone(), Arc::clone(&cancelled));
+        Ok((
+            Arc::clone(&cancelled),
+            ActiveDownloadGuard {
+                active: Arc::clone(&self.active_downloads),
+                target: target.clone(),
+                cancelled,
+            },
+        ))
+    }
+
+    async fn download_registered(
+        &self,
+        manifest: ModelManifest,
+        cancelled: Arc<AtomicBool>,
+    ) -> Result<ModelCacheStatus, BackendError> {
         let progress_manifest = manifest.clone();
-        let result = self.download_with_manifest(manifest).await;
+        let result = self.download_with_manifest(manifest, cancelled).await;
         if let Err(error) = &result {
             if error.code != BackendErrorCode::Busy {
                 self.emit(
@@ -1025,34 +1180,11 @@ impl ModelStore {
     async fn download_with_manifest(
         &self,
         manifest: ModelManifest,
+        cancelled: Arc<AtomicBool>,
     ) -> Result<ModelCacheStatus, BackendError> {
         if manifest.total_bytes > self.config.max_total_bytes {
             return Err(invalid("model exceeds the configured total size limit"));
         }
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let already_active = {
-            let mut active = self
-                .active_downloads
-                .lock()
-                .expect("model download lock poisoned");
-            if active.contains_key(&manifest.model_id) {
-                true
-            } else {
-                active.insert(manifest.model_id.clone(), Arc::clone(&cancelled));
-                false
-            }
-        };
-        if already_active {
-            return Err(BackendError::new(
-                BackendErrorCode::Busy,
-                "model download is already in progress",
-            ));
-        }
-        let _active_guard = ActiveDownloadGuard {
-            active: Arc::clone(&self.active_downloads),
-            model_id: manifest.model_id.clone(),
-            cancelled: Arc::clone(&cancelled),
-        };
         if manifest
             .files
             .iter()
@@ -1062,7 +1194,7 @@ impl ModelStore {
         }
         let root = self.models_root_dir();
         std::fs::create_dir_all(&root).map_err(platform_error)?;
-        let staging = root.join(format!(".{}.staging", manifest.model_id));
+        let staging = root.join(staging_dir_name(&manifest.target));
         std::fs::create_dir_all(&staging).map_err(platform_error)?;
         let mut partial = restore_partial_index(&staging, &manifest)?;
         self.emit(&manifest, "", 0, ModelDownloadPhase::Started, None, None);
@@ -1096,15 +1228,18 @@ impl ModelStore {
                 let mut response = None;
                 let mut last_error = None;
                 for attempt in 0..=self.config.max_retries {
-                    match self
-                        .transport
-                        .request(ModelTransportRequest {
-                            url: file.url.clone(),
-                            range: Some((offset, end)),
-                            max_response_bytes: end - offset + 1,
-                        })
-                        .await
-                    {
+                    let request = self.transport.request(ModelTransportRequest {
+                        url: file.url.clone(),
+                        range: Some((offset, end)),
+                        max_response_bytes: end - offset + 1,
+                    });
+                    let requested = tokio::select! {
+                        value = request => value,
+                        () = wait_until_cancelled(Arc::clone(&cancelled)) => {
+                            return Err(cancelled_error());
+                        }
+                    };
+                    match requested {
                         Ok(value) => {
                             match validate_range_response(&value, offset, end, file.size_bytes) {
                                 Ok(()) => {
@@ -1175,7 +1310,7 @@ impl ModelStore {
         let sentinel = staging.join(MODEL_READY_SENTINEL);
         std::fs::write(&sentinel, b"ready\n").map_err(platform_error)?;
         let _ = std::fs::remove_file(staging.join(MODEL_PARTIAL_INDEX));
-        let destination = self.model_dir(&manifest.model_id)?;
+        let destination = self.model_dir(&manifest.target)?;
         commit_staging(&staging, &destination)?;
         self.emit(
             &manifest,
@@ -1187,7 +1322,7 @@ impl ModelStore {
         );
         if manifest.archive.is_some() {
             Ok(ModelCacheStatus {
-                model_id: manifest.model_id.clone(),
+                model_id: manifest.target.model_id().to_string(),
                 ready: destination.join(MODEL_READY_SENTINEL).is_file(),
                 downloaded_bytes: manifest.total_bytes,
                 expected_bytes: manifest.total_bytes,
@@ -1197,13 +1332,13 @@ impl ModelStore {
         }
     }
 
-    pub fn cancel_download(&self, model_id: &str) -> Result<bool, BackendError> {
-        validate_model_id(model_id)?;
+    pub fn cancel_download(&self, target: &LocalAsrTarget) -> Result<bool, BackendError> {
+        validate_model_id(target.model_id())?;
         let active = self
             .active_downloads
             .lock()
             .expect("model download lock poisoned")
-            .get(model_id)
+            .get(target)
             .cloned();
         if let Some(cancelled) = active {
             cancelled.store(true, Ordering::Release);
@@ -1211,6 +1346,33 @@ impl ModelStore {
         } else {
             Ok(false)
         }
+    }
+
+    pub async fn cancel_all_downloads_and_wait(&self) -> Result<(), BackendError> {
+        {
+            let active = self
+                .active_downloads
+                .lock()
+                .expect("model download lock poisoned");
+            for cancelled in active.values() {
+                cancelled.store(true, Ordering::Release);
+            }
+        }
+        for _ in 0..3_000 {
+            if self
+                .active_downloads
+                .lock()
+                .expect("model download lock poisoned")
+                .is_empty()
+            {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        Err(BackendError::new(
+            BackendErrorCode::Busy,
+            "timed out while waiting for model downloads to stop",
+        ))
     }
 
     fn emit(
@@ -1238,21 +1400,15 @@ impl ModelStore {
             .progress_clock
             .lock()
             .expect("model progress lock poisoned");
-        let last = clocks.entry(manifest.model_id.clone()).or_default();
+        let last = clocks.entry(manifest.target.clone()).or_default();
         if phase == ModelDownloadPhase::Progress && now.saturating_sub(*last) < 150 {
             return;
         }
         *last = now;
         let (downloaded, total) = bytes.unwrap_or((0, manifest.total_bytes));
         sink.publish(ModelDownloadProgress {
-            runtime: self
-                .catalog
-                .entries()
-                .iter()
-                .find(|entry| entry.target.model_id() == manifest.model_id)
-                .map(|entry| entry.target.runtime)
-                .unwrap_or(LocalAsrRuntime::Generic),
-            model_id: manifest.model_id.clone(),
+            runtime: manifest.target.runtime,
+            model_id: manifest.target.model_id().to_string(),
             file: file.into(),
             file_index,
             file_count: manifest.files.len(),
@@ -1263,11 +1419,35 @@ impl ModelStore {
         });
     }
 
-    pub fn cleanup_incomplete(&self, model_id: &str) -> Result<(), BackendError> {
-        validate_model_id(model_id)?;
-        let staging = self
-            .models_root_dir()
-            .join(format!(".{}.staging", model_id));
+    fn emit_target_terminal(
+        &self,
+        target: &LocalAsrTarget,
+        phase: ModelDownloadPhase,
+        error: String,
+    ) {
+        let sink = self
+            .progress
+            .read()
+            .expect("model progress sink lock poisoned")
+            .clone();
+        if let Some(sink) = sink {
+            sink.publish(ModelDownloadProgress {
+                runtime: target.runtime,
+                model_id: target.model_id().to_string(),
+                file: String::new(),
+                file_index: 0,
+                file_count: 0,
+                bytes_downloaded: 0,
+                bytes_total: 0,
+                phase,
+                error: Some(error),
+            });
+        }
+    }
+
+    pub fn cleanup_incomplete(&self, target: &LocalAsrTarget) -> Result<(), BackendError> {
+        validate_model_id(target.model_id())?;
+        let staging = self.models_root_dir().join(staging_dir_name(target));
         if staging.exists() {
             std::fs::remove_dir_all(staging).map_err(platform_error)?;
         }
@@ -1283,20 +1463,56 @@ impl ModelStore {
         }
         let root = self.models_root_dir();
         std::fs::create_dir_all(&root).map_err(platform_error)?;
-        for entry in std::fs::read_dir(legacy_root).map_err(platform_error)? {
-            let entry = entry.map_err(platform_error)?;
-            let source = entry.path();
-            let name = entry.file_name();
-            let destination = root.join(&name);
-            if destination.exists() {
-                copy_dir_missing(&source, &destination).map_err(platform_error)?;
-                migrate_ready_sentinel(&destination)?;
+        for entry in self.catalog.entries() {
+            if matches!(entry.selector, ModelFileSelector::Native) {
                 continue;
             }
-            std::fs::rename(&source, &destination)
-                .or_else(|_| copy_dir_recursive(&source, &destination))
-                .map_err(platform_error)?;
+            let destination = self.model_dir(&entry.target)?;
+            if entry.target.runtime == LocalAsrRuntime::SherpaOnnx {
+                let legacy_staging =
+                    legacy_root.join(format!(".{}.staging", entry.target.model_id()));
+                let staging = root.join(staging_dir_name(&entry.target));
+                if legacy_staging.is_dir() && legacy_staging != staging {
+                    copy_dir_missing(&legacy_staging, &staging).map_err(platform_error)?;
+                    if source_fully_copied(&legacy_staging, &staging)? {
+                        remove_path(&legacy_staging)?;
+                    }
+                }
+            }
+            if entry.target.runtime == LocalAsrRuntime::Generic
+                && entry.target.model_id() == "whisper-large-v3-turbo-q5"
+            {
+                migrate_legacy_q5(legacy_root, &destination)?;
+            }
+            for source in legacy_source_candidates(legacy_root, &entry.target) {
+                if !source.exists() || source == destination {
+                    continue;
+                }
+                copy_legacy_entry_missing(entry, &source, &destination)?;
+                migrate_ready_sentinel(&destination)?;
+                mark_ready_if_complete(entry, &destination)?;
+                if source_fully_copied(&source, &destination)? {
+                    remove_path(&source)?;
+                }
+            }
             migrate_ready_sentinel(&destination)?;
+            mark_ready_if_complete(entry, &destination)?;
+        }
+        let legacy_foundry = legacy_root.join("foundry-local");
+        let foundry_destination = root.join("foundry-local");
+        if legacy_foundry.exists() && legacy_foundry != foundry_destination {
+            copy_dir_missing(&legacy_foundry, &foundry_destination).map_err(platform_error)?;
+            if source_fully_copied(&legacy_foundry, &foundry_destination)? {
+                remove_path(&legacy_foundry)?;
+            }
+        }
+        for entry in self
+            .catalog
+            .entries()
+            .iter()
+            .filter(|entry| entry.target.runtime == LocalAsrRuntime::Foundry)
+        {
+            remove_marker_only_directory(&root.join(entry.target.model_id()))?;
         }
         Ok(())
     }
@@ -1316,13 +1532,59 @@ impl ModelStore {
         }
         let current = self.models_root_dir();
         if current != next {
+            if current.join(MODEL_RELOCATION_JOURNAL).is_file() {
+                return Err(BackendError::new(
+                    BackendErrorCode::Busy,
+                    "a model relocation is waiting for restart",
+                ));
+            }
+            if next.starts_with(&current) || current.starts_with(&next) {
+                return Err(invalid("model roots cannot be nested inside one another"));
+            }
             self.migrate_root_contents(&current, &next)?;
+            write_relocation_journal(&next, &current)?;
             *self
                 .models_root_dir
                 .write()
                 .expect("model root lock poisoned") = next;
         }
         Ok(())
+    }
+
+    pub fn rollback_relocation(&self, previous_root: PathBuf) -> Result<(), BackendError> {
+        let current = self.models_root_dir();
+        *self
+            .models_root_dir
+            .write()
+            .expect("model root lock poisoned") = previous_root;
+        let journal = current.join(MODEL_RELOCATION_JOURNAL);
+        if journal.exists() {
+            std::fs::remove_file(journal).map_err(platform_error)?;
+        }
+        Ok(())
+    }
+
+    pub fn finish_pending_relocation(&self) -> Result<(), BackendError> {
+        let root = self.models_root_dir();
+        let journal_path = root.join(MODEL_RELOCATION_JOURNAL);
+        if !journal_path.is_file() {
+            return Ok(());
+        }
+        let journal: RelocationJournal =
+            serde_json::from_slice(&std::fs::read(&journal_path).map_err(platform_error)?)
+                .map_err(|error| invalid(format!("invalid model relocation journal: {error}")))?;
+        if journal.version != 1
+            || !journal.source.is_absolute()
+            || journal.source == root
+            || journal.source.file_name().and_then(|name| name.to_str()) != Some("models")
+        {
+            return Err(invalid("unsafe model relocation journal"));
+        }
+        if journal.source.exists() {
+            copy_dir_verified(&journal.source, &root)?;
+            std::fs::remove_dir_all(&journal.source).map_err(platform_error)?;
+        }
+        std::fs::remove_file(journal_path).map_err(platform_error)
     }
 
     fn migrate_root_contents(&self, current: &Path, next: &Path) -> Result<(), BackendError> {
@@ -1335,29 +1597,44 @@ impl ModelStore {
             let entry = entry.map_err(platform_error)?;
             let source = entry.path();
             let destination = next.join(entry.file_name());
-            copy_dir_missing(&source, &destination).map_err(platform_error)?;
+            copy_dir_verified(&source, &destination)?;
         }
         Ok(())
     }
 
-    pub fn delete_model(&self, model_id: &str) -> Result<(), BackendError> {
-        validate_model_id(model_id)?;
-        if self.cancel_download(model_id)? {
+    pub fn delete_model(&self, target: &LocalAsrTarget) -> Result<(), BackendError> {
+        validate_model_id(target.model_id())?;
+        if self.is_native(target)? {
+            return Err(BackendError::new(
+                BackendErrorCode::Unsupported,
+                "native model deletion must use the runtime adapter",
+            ));
+        }
+        if self.cancel_download(target)? {
             return Err(BackendError::new(
                 BackendErrorCode::Busy,
                 "model download cancellation is pending",
             ));
         }
-        let directory = self.model_dir(model_id)?;
+        let directory = self.model_dir(target)?;
         if directory.exists() {
             std::fs::remove_dir_all(directory).map_err(platform_error)?;
         }
-        self.cleanup_incomplete(model_id)
+        self.cleanup_incomplete(target)
     }
 }
 
 fn migrate_ready_sentinel(model_dir: &Path) -> Result<(), BackendError> {
-    if !model_dir.is_dir() || model_dir.join(MODEL_READY_SENTINEL).is_file() {
+    if !model_dir.is_dir() {
+        return Ok(());
+    }
+    if model_dir.join(MODEL_READY_SENTINEL).is_file() {
+        for legacy in [".openless-asr-ready", ".ready", "ready"] {
+            let path = model_dir.join(legacy);
+            if path.is_file() {
+                std::fs::remove_file(path).map_err(platform_error)?;
+            }
+        }
         return Ok(());
     }
     for legacy in [".openless-asr-ready", ".ready", "ready"] {
@@ -1371,11 +1648,89 @@ fn migrate_ready_sentinel(model_dir: &Path) -> Result<(), BackendError> {
     Ok(())
 }
 
+fn legacy_source_candidates(root: &Path, target: &LocalAsrTarget) -> Vec<PathBuf> {
+    match target.runtime {
+        LocalAsrRuntime::Generic => {
+            let mut candidates = vec![root.join(target.model_id())];
+            if target.model_id().starts_with("qwen3-asr-") {
+                candidates.insert(0, root.join("qwen3-asr").join(target.model_id()));
+            }
+            candidates
+        }
+        LocalAsrRuntime::Foundry => vec![root.join("foundry-local")],
+        LocalAsrRuntime::SherpaOnnx => vec![
+            root.join("sherpa-onnx").join(target.model_id()),
+            // Early 2.0 builds downloaded Sherpa aliases directly under the root.
+            root.join(target.model_id()),
+        ],
+    }
+}
+
+fn migrate_legacy_q5(legacy_root: &Path, destination: &Path) -> Result<(), BackendError> {
+    const FILE: &str = "ggml-large-v3-turbo-q5_0.bin";
+    let source = legacy_root.join("whisper-large-v3-turbo").join(FILE);
+    let target = destination.join(FILE);
+    if source.is_file() && !target.exists() {
+        std::fs::create_dir_all(destination).map_err(platform_error)?;
+        std::fs::copy(&source, &target).map_err(platform_error)?;
+    }
+    if source.is_file() && source_fully_copied(&source, &target)? {
+        std::fs::remove_file(source).map_err(platform_error)?;
+        let parent = legacy_root.join("whisper-large-v3-turbo");
+        if parent
+            .read_dir()
+            .map(|mut entries| entries.next().is_none())
+            .unwrap_or(false)
+        {
+            std::fs::remove_dir(parent).map_err(platform_error)?;
+        }
+    }
+    Ok(())
+}
+
+fn mark_ready_if_complete(
+    entry: &ModelCatalogEntry,
+    destination: &Path,
+) -> Result<(), BackendError> {
+    if destination.join(MODEL_READY_SENTINEL).is_file() {
+        return Ok(());
+    }
+    let complete = match &entry.selector {
+        ModelFileSelector::Exact(files) => files
+            .iter()
+            .all(|file| destination.join(&file.local_path).is_file()),
+        ModelFileSelector::Archive { required_paths, .. } => required_paths
+            .iter()
+            .all(|path| destination.join(path).is_file()),
+        ModelFileSelector::QwenRepository | ModelFileSelector::Native => false,
+    };
+    if complete {
+        std::fs::write(destination.join(MODEL_READY_SENTINEL), b"ready\n")
+            .map_err(platform_error)?;
+    }
+    Ok(())
+}
+
+fn staging_dir_name(target: &LocalAsrTarget) -> String {
+    match target.runtime {
+        LocalAsrRuntime::Generic => format!(".{}.staging", target.model_id()),
+        LocalAsrRuntime::Foundry => format!(".foundry-{}.staging", target.model_id()),
+        LocalAsrRuntime::SherpaOnnx => format!(".sherpa-onnx-{}.staging", target.model_id()),
+    }
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PartialIndex {
     version: u8,
     files: BTreeMap<String, u64>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RelocationJournal {
+    version: u8,
+    source: PathBuf,
 }
 
 fn restore_partial_index(
@@ -1475,19 +1830,6 @@ fn write_partial_index(staging: &Path, partial: &PartialIndex) -> Result<(), Bac
     std::fs::rename(temporary, path).map_err(platform_error)
 }
 
-fn copy_dir_recursive(source: &Path, destination: &Path) -> std::io::Result<()> {
-    if source.is_dir() {
-        std::fs::create_dir_all(destination)?;
-        for entry in std::fs::read_dir(source)? {
-            let entry = entry?;
-            copy_dir_recursive(&entry.path(), &destination.join(entry.file_name()))?;
-        }
-    } else {
-        std::fs::copy(source, destination)?;
-    }
-    Ok(())
-}
-
 fn copy_dir_missing(source: &Path, destination: &Path) -> std::io::Result<()> {
     if source.is_dir() {
         std::fs::create_dir_all(destination)?;
@@ -1499,6 +1841,163 @@ fn copy_dir_missing(source: &Path, destination: &Path) -> std::io::Result<()> {
         std::fs::copy(source, destination)?;
     }
     Ok(())
+}
+
+fn copy_legacy_entry_missing(
+    entry: &ModelCatalogEntry,
+    source: &Path,
+    destination: &Path,
+) -> Result<(), BackendError> {
+    match &entry.selector {
+        ModelFileSelector::Exact(files) => {
+            std::fs::create_dir_all(destination).map_err(platform_error)?;
+            for file in files {
+                let source_file = source.join(&file.local_path);
+                let destination_file = destination.join(&file.local_path);
+                if source_file.is_file() && !destination_file.exists() {
+                    if let Some(parent) = destination_file.parent() {
+                        std::fs::create_dir_all(parent).map_err(platform_error)?;
+                    }
+                    std::fs::copy(source_file, destination_file).map_err(platform_error)?;
+                }
+            }
+            for sentinel in [
+                MODEL_READY_SENTINEL,
+                ".openless-asr-ready",
+                ".ready",
+                "ready",
+            ] {
+                let source_file = source.join(sentinel);
+                let destination_file = destination.join(sentinel);
+                if source_file.is_file() && !destination_file.exists() {
+                    std::fs::copy(source_file, destination_file).map_err(platform_error)?;
+                }
+            }
+            Ok(())
+        }
+        ModelFileSelector::QwenRepository | ModelFileSelector::Archive { .. } => {
+            copy_dir_missing(source, destination).map_err(platform_error)
+        }
+        ModelFileSelector::Native => Ok(()),
+    }
+}
+
+fn copy_dir_verified(source: &Path, destination: &Path) -> Result<(), BackendError> {
+    if source.is_dir() {
+        if destination.exists() && !destination.is_dir() {
+            return Err(invalid(format!(
+                "model relocation conflicts with file {}",
+                destination.display()
+            )));
+        }
+        std::fs::create_dir_all(destination).map_err(platform_error)?;
+        for entry in std::fs::read_dir(source).map_err(platform_error)? {
+            let entry = entry.map_err(platform_error)?;
+            copy_dir_verified(&entry.path(), &destination.join(entry.file_name()))?;
+        }
+    } else if destination.exists() {
+        if !destination.is_file()
+            || std::fs::metadata(source).map_err(platform_error)?.len()
+                != std::fs::metadata(destination)
+                    .map_err(platform_error)?
+                    .len()
+            || sha256_file(source)? != sha256_file(destination)?
+        {
+            return Err(invalid(format!(
+                "model relocation found conflicting file {}",
+                destination.display()
+            )));
+        }
+    } else {
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent).map_err(platform_error)?;
+        }
+        std::fs::copy(source, destination).map_err(platform_error)?;
+    }
+    Ok(())
+}
+
+fn source_fully_copied(source: &Path, destination: &Path) -> Result<bool, BackendError> {
+    if source.is_dir() {
+        if !destination.is_dir() {
+            return Ok(false);
+        }
+        for entry in std::fs::read_dir(source).map_err(platform_error)? {
+            let entry = entry.map_err(platform_error)?;
+            let source_path = entry.path();
+            let mut destination_path = destination.join(entry.file_name());
+            if source_path.is_file()
+                && matches!(
+                    entry.file_name().to_str(),
+                    Some(".openless-asr-ready" | ".ready" | "ready")
+                )
+                && destination.join(MODEL_READY_SENTINEL).is_file()
+            {
+                destination_path = destination.join(MODEL_READY_SENTINEL);
+            }
+            if !source_fully_copied(&source_path, &destination_path)? {
+                return Ok(false);
+            }
+        }
+        return Ok(true);
+    }
+    if !destination.is_file() {
+        return Ok(false);
+    }
+    Ok(std::fs::metadata(source).map_err(platform_error)?.len()
+        == std::fs::metadata(destination)
+            .map_err(platform_error)?
+            .len()
+        && sha256_file(source)? == sha256_file(destination)?)
+}
+
+fn remove_path(path: &Path) -> Result<(), BackendError> {
+    if path.is_dir() {
+        std::fs::remove_dir_all(path).map_err(platform_error)
+    } else if path.exists() {
+        std::fs::remove_file(path).map_err(platform_error)
+    } else {
+        Ok(())
+    }
+}
+
+fn remove_marker_only_directory(path: &Path) -> Result<(), BackendError> {
+    if !path.is_dir() {
+        return Ok(());
+    }
+    let entries = std::fs::read_dir(path)
+        .map_err(platform_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(platform_error)?;
+    if !entries.is_empty()
+        && entries.iter().all(|entry| {
+            entry.file_type().is_ok_and(|kind| kind.is_file())
+                && matches!(
+                    entry.file_name().to_str(),
+                    Some(MODEL_READY_SENTINEL | ".openless-asr-ready" | ".ready" | "ready")
+                )
+        })
+    {
+        std::fs::remove_dir_all(path).map_err(platform_error)?;
+    }
+    Ok(())
+}
+
+fn write_relocation_journal(root: &Path, source: &Path) -> Result<(), BackendError> {
+    let path = root.join(MODEL_RELOCATION_JOURNAL);
+    let temporary = root.join(format!("{MODEL_RELOCATION_JOURNAL}.tmp"));
+    let bytes = serde_json::to_vec(&RelocationJournal {
+        version: 1,
+        source: source.to_path_buf(),
+    })
+    .map_err(|error| BackendError::new(BackendErrorCode::Internal, error.to_string()))?;
+    let mut file = std::fs::File::create(&temporary).map_err(platform_error)?;
+    file.write_all(&bytes).map_err(platform_error)?;
+    file.sync_all().map_err(platform_error)?;
+    if path.exists() {
+        std::fs::remove_file(&path).map_err(platform_error)?;
+    }
+    std::fs::rename(temporary, path).map_err(platform_error)
 }
 
 fn commit_staging(staging: &Path, destination: &Path) -> Result<(), BackendError> {
@@ -1668,7 +2167,7 @@ fn manifest_from_hf_pages(
     max_total_bytes: u64,
 ) -> Result<ModelManifest, BackendError> {
     let files = merge_hf_tree_pages_for_entry(entry, pages, base_url)?;
-    let manifest = ModelManifest::new(entry.target.model_id(), entry.repository.clone(), files)?;
+    let manifest = ModelManifest::new(entry.target.clone(), entry.repository.clone(), files)?;
     if manifest.total_bytes > max_total_bytes {
         return Err(invalid("model exceeds the configured total size limit"));
     }
@@ -1918,7 +2417,7 @@ fn expand_tar_bz2_archive(
     }
     for required in &spec.required_paths {
         validate_model_path(required)?;
-        if !extraction.join(required).exists() {
+        if !extraction.join(required).is_file() {
             return Err(invalid(format!(
                 "model archive is missing required path {required}"
             )));
@@ -2007,8 +2506,8 @@ struct ArchiveStagingGuard {
 }
 
 struct ActiveDownloadGuard {
-    active: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
-    model_id: String,
+    active: Arc<Mutex<HashMap<LocalAsrTarget, Arc<AtomicBool>>>>,
+    target: LocalAsrTarget,
     cancelled: Arc<AtomicBool>,
 }
 
@@ -2016,10 +2515,10 @@ impl Drop for ActiveDownloadGuard {
     fn drop(&mut self) {
         let mut active = self.active.lock().expect("model download lock poisoned");
         if active
-            .get(&self.model_id)
+            .get(&self.target)
             .is_some_and(|current| Arc::ptr_eq(current, &self.cancelled))
         {
-            active.remove(&self.model_id);
+            active.remove(&self.target);
         }
     }
 }
@@ -2058,6 +2557,12 @@ fn cancelled_error() -> BackendError {
     BackendError::new(BackendErrorCode::Cancelled, "model operation cancelled")
 }
 
+async fn wait_until_cancelled(cancelled: Arc<AtomicBool>) {
+    while !cancelled.load(Ordering::Acquire) {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2073,6 +2578,23 @@ mod tests {
         entered: Arc<tokio::sync::Notify>,
         release: Arc<tokio::sync::Semaphore>,
         body: Vec<u8>,
+    }
+
+    struct BlockingMetadataTransport {
+        entered: Arc<tokio::sync::Notify>,
+    }
+
+    impl ModelTransport for BlockingMetadataTransport {
+        fn request(
+            &self,
+            _: ModelTransportRequest,
+        ) -> BoxFuture<'static, Result<ModelTransportResponse, BackendError>> {
+            let entered = Arc::clone(&self.entered);
+            Box::pin(async move {
+                entered.notify_one();
+                std::future::pending().await
+            })
+        }
     }
 
     impl ModelTransport for BlockingTransport {
@@ -2231,8 +2753,9 @@ mod tests {
         let mut config = ModelStoreConfig::new(root.clone()).unwrap();
         config.chunk_size_bytes = 4;
         let store = ModelStore::with_transport(config, transport);
+        let target = LocalAsrTarget::parse(LocalAsrRuntime::Generic, "qwen3-asr-0.6b").unwrap();
         let manifest = ModelManifest::new(
-            "demo",
+            target.clone(),
             "org/demo",
             vec![ModelFile {
                 path: "weights.bin".into(),
@@ -2242,7 +2765,7 @@ mod tests {
             }],
         )
         .unwrap();
-        let staging = root.join(".demo.staging");
+        let staging = root.join(staging_dir_name(&target));
         std::fs::create_dir_all(&staging).unwrap();
         std::fs::write(staging.join("weights.bin"), &body[..4]).unwrap();
         std::fs::write(
@@ -2252,7 +2775,10 @@ mod tests {
         .unwrap();
         let status = store.download(manifest.clone()).await.unwrap();
         assert!(status.ready);
-        assert_eq!(std::fs::read(root.join("demo/weights.bin")).unwrap(), body);
+        assert_eq!(
+            std::fs::read(root.join("qwen3-asr-0.6b/weights.bin")).unwrap(),
+            body
+        );
         assert_eq!(calls.load(Ordering::Relaxed), 2);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -2272,8 +2798,9 @@ mod tests {
                 body: body.clone(),
             }),
         ));
+        let target = LocalAsrTarget::parse(LocalAsrRuntime::Generic, "qwen3-asr-1.7b").unwrap();
         let manifest = ModelManifest::new(
-            "cancelled",
+            target.clone(),
             "org/cancelled",
             vec![ModelFile {
                 path: "weights.bin".into(),
@@ -2288,13 +2815,103 @@ mod tests {
             async move { store.download(manifest).await }
         });
         entered.notified().await;
-        assert!(store.cancel_download("cancelled").unwrap());
+        assert!(store.cancel_download(&target).unwrap());
         release.add_permits(1);
         assert_eq!(
             task.await.unwrap().unwrap_err().code,
             BackendErrorCode::Cancelled
         );
-        assert!(!root.join("cancelled").join(MODEL_READY_SENTINEL).exists());
+        assert!(!root
+            .join("qwen3-asr-1.7b")
+            .join(MODEL_READY_SENTINEL)
+            .exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn cancel_all_waits_until_active_downloads_reach_terminal_state() {
+        let root = std::env::temp_dir().join(format!(
+            "openless-model-cancel-all-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let body = b"0123".to_vec();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let store = Arc::new(ModelStore::with_transport(
+            ModelStoreConfig::new(root.clone()).unwrap(),
+            Arc::new(BlockingTransport {
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+                body: body.clone(),
+            }),
+        ));
+        let target = LocalAsrTarget::parse(LocalAsrRuntime::Generic, "qwen3-asr-0.6b").unwrap();
+        let manifest = ModelManifest::new(
+            target,
+            "fixture",
+            vec![ModelFile {
+                path: "weights.bin".into(),
+                url: "https://example.test/weights.bin".into(),
+                size_bytes: body.len() as u64,
+                sha256: None,
+            }],
+        )
+        .unwrap();
+        let download = tokio::spawn({
+            let store = Arc::clone(&store);
+            async move { store.download(manifest).await }
+        });
+        entered.notified().await;
+        let cancel = tokio::spawn({
+            let store = Arc::clone(&store);
+            async move { store.cancel_all_downloads_and_wait().await }
+        });
+        cancel.await.unwrap().unwrap();
+        assert_eq!(
+            download.await.unwrap().unwrap_err().code,
+            BackendErrorCode::Cancelled
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn cancellation_covers_the_manifest_request_before_file_downloads_start() {
+        let root = std::env::temp_dir().join(format!(
+            "openless-model-manifest-cancel-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let store = Arc::new(ModelStore::with_transport(
+            ModelStoreConfig::new(root.clone()).unwrap(),
+            Arc::new(BlockingMetadataTransport {
+                entered: Arc::clone(&entered),
+            }),
+        ));
+        let progress = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&progress);
+        store.set_progress_sink(Arc::new(move |event| {
+            captured.lock().unwrap().push(event);
+        }));
+        let target = LocalAsrTarget::parse(LocalAsrRuntime::Generic, "whisper-small").unwrap();
+        let download = tokio::spawn({
+            let store = Arc::clone(&store);
+            let target = target.clone();
+            async move {
+                store
+                    .download_target(target, crate::LocalAsrMirror::Huggingface)
+                    .await
+            }
+        });
+        entered.notified().await;
+
+        assert!(store.cancel_download(&target).unwrap());
+        assert_eq!(
+            download.await.unwrap().unwrap_err().code,
+            BackendErrorCode::Cancelled
+        );
+        let terminal = progress.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(terminal.phase, ModelDownloadPhase::Cancelled);
+        assert_eq!(terminal.runtime, LocalAsrRuntime::Generic);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2304,7 +2921,8 @@ mod tests {
             "openless-model-corrupt-partial-{}",
             uuid::Uuid::new_v4()
         ));
-        let staging = root.join(".demo.staging");
+        let target = LocalAsrTarget::parse(LocalAsrRuntime::Generic, "qwen3-asr-0.6b").unwrap();
+        let staging = root.join(staging_dir_name(&target));
         std::fs::create_dir_all(&staging).unwrap();
         std::fs::write(staging.join("weights.bin"), b"12").unwrap();
         std::fs::write(
@@ -2313,7 +2931,7 @@ mod tests {
         )
         .unwrap();
         let manifest = ModelManifest::new(
-            "demo",
+            target,
             "org/demo",
             vec![ModelFile {
                 path: "weights.bin".into(),
@@ -2348,8 +2966,9 @@ mod tests {
         store.set_progress_sink(Arc::new(move |event| {
             captured.lock().unwrap().push(event);
         }));
+        let target = LocalAsrTarget::parse(LocalAsrRuntime::Generic, "whisper-base").unwrap();
         let manifest = ModelManifest::new(
-            "checksum",
+            target,
             "org/checksum",
             vec![ModelFile {
                 path: "weights.bin".into(),
@@ -2366,7 +2985,7 @@ mod tests {
             .unwrap_err()
             .message
             .contains("checksum"));
-        assert!(!root.join("checksum").exists());
+        assert!(!root.join("whisper-base").exists());
         let terminal = progress.lock().unwrap().last().cloned().unwrap();
         assert_eq!(terminal.phase, ModelDownloadPhase::Failed);
         assert!(terminal.error.unwrap().contains("checksum"));
@@ -2379,25 +2998,28 @@ mod tests {
             std::env::temp_dir().join(format!("openless-model-migrate-{}", uuid::Uuid::new_v4()));
         let current = root.join("current");
         let legacy = root.join("legacy");
-        std::fs::create_dir_all(current.join("demo")).unwrap();
-        std::fs::create_dir_all(legacy.join("demo")).unwrap();
-        std::fs::write(current.join("demo/conflict.bin"), b"current").unwrap();
-        std::fs::write(legacy.join("demo/conflict.bin"), b"legacy").unwrap();
-        std::fs::write(legacy.join("demo/missing.bin"), b"missing").unwrap();
-        std::fs::write(legacy.join("demo/.openless-asr-ready"), b"ready").unwrap();
+        std::fs::create_dir_all(current.join("whisper-base")).unwrap();
+        std::fs::create_dir_all(legacy.join("whisper-base")).unwrap();
+        std::fs::write(current.join("whisper-base/conflict.bin"), b"current").unwrap();
+        std::fs::write(legacy.join("whisper-base/conflict.bin"), b"legacy").unwrap();
+        std::fs::write(legacy.join("whisper-base/ggml-base.bin"), b"missing").unwrap();
+        std::fs::write(legacy.join("whisper-base/.openless-asr-ready"), b"ready").unwrap();
         let store = ModelStore::new(ModelStoreConfig::new(current.clone()).unwrap()).unwrap();
 
         store.migrate_legacy_root(&legacy).unwrap();
 
         assert_eq!(
-            std::fs::read(current.join("demo/conflict.bin")).unwrap(),
+            std::fs::read(current.join("whisper-base/conflict.bin")).unwrap(),
             b"current"
         );
         assert_eq!(
-            std::fs::read(current.join("demo/missing.bin")).unwrap(),
+            std::fs::read(current.join("whisper-base/ggml-base.bin")).unwrap(),
             b"missing"
         );
-        assert!(current.join("demo").join(MODEL_READY_SENTINEL).is_file());
+        assert!(current
+            .join("whisper-base")
+            .join(MODEL_READY_SENTINEL)
+            .is_file());
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2443,5 +3065,211 @@ mod tests {
         assert_eq!(std::fs::read(staging.join("model.onnx")).unwrap(), b"model");
         assert!(!staging.join("model.tar.bz2").exists());
         let _ = std::fs::remove_dir_all(staging);
+    }
+
+    #[test]
+    fn model_directories_are_scoped_by_runtime() {
+        let root = std::env::temp_dir().join(format!(
+            "openless-model-runtime-scope-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = ModelStore::new(ModelStoreConfig::new(root.clone()).unwrap()).unwrap();
+        let generic = LocalAsrTarget::parse(LocalAsrRuntime::Generic, "whisper-small").unwrap();
+        let foundry = LocalAsrTarget::parse(LocalAsrRuntime::Foundry, "whisper-small").unwrap();
+
+        assert_eq!(
+            store.model_dir(&generic).unwrap(),
+            root.join("whisper-small")
+        );
+        assert_eq!(
+            store.model_dir(&foundry).unwrap(),
+            root.join("foundry-local")
+        );
+        assert_ne!(
+            store.model_dir(&generic).unwrap(),
+            store.model_dir(&foundry).unwrap()
+        );
+        assert!(store.delete_model(&foundry).is_err());
+    }
+
+    #[test]
+    fn whisper_turbo_falls_back_to_q5_without_sharing_delete_state() {
+        let root = std::env::temp_dir().join(format!(
+            "openless-whisper-q5-fallback-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = ModelStore::new(ModelStoreConfig::new(root.clone()).unwrap()).unwrap();
+        let turbo =
+            LocalAsrTarget::parse(LocalAsrRuntime::Generic, "whisper-large-v3-turbo").unwrap();
+        let q5 =
+            LocalAsrTarget::parse(LocalAsrRuntime::Generic, "whisper-large-v3-turbo-q5").unwrap();
+        let q5_dir = store.model_dir(&q5).unwrap();
+        std::fs::create_dir_all(&q5_dir).unwrap();
+        std::fs::write(q5_dir.join("ggml-large-v3-turbo-q5_0.bin"), b"q5").unwrap();
+        std::fs::write(q5_dir.join(MODEL_READY_SENTINEL), b"ready").unwrap();
+
+        assert!(store.is_installed(&turbo).unwrap());
+        assert_eq!(store.runtime_model_dir(&turbo).unwrap(), q5_dir);
+        store.delete_model(&turbo).unwrap();
+        assert!(store.is_installed(&q5).unwrap());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn legacy_layout_migration_maps_qwen_sherpa_and_whisper_q5() {
+        let root = std::env::temp_dir().join(format!(
+            "openless-model-layout-migrate-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let legacy = root.join("legacy");
+        let current = root.join("current");
+        std::fs::create_dir_all(legacy.join("qwen3-asr/qwen3-asr-0.6b")).unwrap();
+        std::fs::write(
+            legacy.join("qwen3-asr/qwen3-asr-0.6b/.openless-asr-ready"),
+            b"ready",
+        )
+        .unwrap();
+        std::fs::write(legacy.join("qwen3-asr/qwen3-asr-0.6b/config.json"), b"{}").unwrap();
+        std::fs::create_dir_all(legacy.join("sherpa-onnx/sense-voice-small-zh")).unwrap();
+        std::fs::write(
+            legacy.join("sherpa-onnx/sense-voice-small-zh/model.int8.onnx"),
+            b"model",
+        )
+        .unwrap();
+        std::fs::write(
+            legacy.join("sherpa-onnx/sense-voice-small-zh/tokens.txt"),
+            b"tokens",
+        )
+        .unwrap();
+        std::fs::create_dir_all(legacy.join("whisper-large-v3-turbo")).unwrap();
+        std::fs::write(
+            legacy.join("whisper-large-v3-turbo/ggml-large-v3-turbo-q5_0.bin"),
+            b"q5",
+        )
+        .unwrap();
+        let store = ModelStore::new(ModelStoreConfig::new(current.clone()).unwrap()).unwrap();
+
+        store.migrate_legacy_root(&legacy).unwrap();
+
+        assert!(current
+            .join("qwen3-asr-0.6b/.openless-model-ready")
+            .is_file());
+        assert!(current
+            .join("sherpa-onnx/sense-voice-small-zh/model.int8.onnx")
+            .is_file());
+        assert!(current
+            .join("sherpa-onnx/sense-voice-small-zh/.openless-model-ready")
+            .is_file());
+        assert_eq!(
+            std::fs::read(current.join("whisper-large-v3-turbo-q5/ggml-large-v3-turbo-q5_0.bin"))
+                .unwrap(),
+            b"q5"
+        );
+        assert!(!legacy.join("qwen3-asr/qwen3-asr-0.6b").exists());
+        assert!(!legacy.join("sherpa-onnx/sense-voice-small-zh").exists());
+        assert!(!legacy
+            .join("whisper-large-v3-turbo/ggml-large-v3-turbo-q5_0.bin")
+            .exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn legacy_layout_migration_runs_in_place_for_the_default_root() {
+        let root = std::env::temp_dir().join(format!(
+            "openless-model-layout-in-place-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let source = root.join("qwen3-asr/qwen3-asr-0.6b");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("config.json"), b"{}").unwrap();
+        std::fs::write(source.join(".ready"), b"ready").unwrap();
+        std::fs::create_dir_all(root.join("whisper-small")).unwrap();
+        std::fs::write(root.join("whisper-small/.openless-model-ready"), b"ready").unwrap();
+        let store = ModelStore::new(ModelStoreConfig::new(root.clone()).unwrap()).unwrap();
+
+        store.migrate_legacy_root(&root).unwrap();
+
+        assert!(root.join("qwen3-asr-0.6b/config.json").is_file());
+        assert!(root.join("qwen3-asr-0.6b/.openless-model-ready").is_file());
+        assert!(!source.exists());
+        assert!(!root.join("whisper-small").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn tar_archive_required_file_cannot_be_a_directory() {
+        let staging = std::env::temp_dir().join(format!(
+            "openless-model-tar-directory-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&staging).unwrap();
+        let encoder = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::fast());
+        let mut archive = tar::Builder::new(encoder);
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Directory);
+        header.set_size(0);
+        header.set_mode(0o755);
+        header.set_cksum();
+        archive
+            .append_data(&mut header, "fixture/model.onnx/", std::io::empty())
+            .unwrap();
+        let encoder = archive.into_inner().unwrap();
+        let bytes = encoder.finish().unwrap();
+        std::fs::write(staging.join("model.tar.bz2"), bytes).unwrap();
+        let spec = ModelArchiveSpec {
+            file_path: "model.tar.bz2".into(),
+            root_dir: "fixture".into(),
+            required_paths: vec!["model.onnx".into()],
+        };
+
+        assert!(expand_tar_bz2_archive(&staging, &spec, 1024, 2048).is_err());
+        let _ = std::fs::remove_dir_all(staging);
+    }
+
+    #[test]
+    fn relocation_is_verified_and_old_root_is_removed_only_on_finish() {
+        let base = std::env::temp_dir().join(format!(
+            "openless-model-relocation-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let current = base.join("old/OpenLess/models");
+        let next = base.join("new/OpenLess/models");
+        std::fs::create_dir_all(current.join("whisper-base")).unwrap();
+        std::fs::write(current.join("whisper-base/ggml-base.bin"), b"model").unwrap();
+        let store = ModelStore::new(ModelStoreConfig::new(current.clone()).unwrap()).unwrap();
+
+        store.relocate_root(next.clone()).unwrap();
+
+        assert!(current.is_dir());
+        assert_eq!(
+            std::fs::read(next.join("whisper-base/ggml-base.bin")).unwrap(),
+            b"model"
+        );
+        assert!(next.join(MODEL_RELOCATION_JOURNAL).is_file());
+        drop(store);
+        let _resumed = ModelStore::new(ModelStoreConfig::new(next.clone()).unwrap()).unwrap();
+        assert!(!current.exists());
+        assert!(!next.join(MODEL_RELOCATION_JOURNAL).exists());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn relocation_rejects_conflicting_destination_files() {
+        let base = std::env::temp_dir().join(format!(
+            "openless-model-relocation-conflict-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let current = base.join("old/OpenLess/models");
+        let next = base.join("new/OpenLess/models");
+        std::fs::create_dir_all(current.join("whisper-base")).unwrap();
+        std::fs::create_dir_all(next.join("whisper-base")).unwrap();
+        std::fs::write(current.join("whisper-base/ggml-base.bin"), b"source").unwrap();
+        std::fs::write(next.join("whisper-base/ggml-base.bin"), b"target").unwrap();
+        let store = ModelStore::new(ModelStoreConfig::new(current.clone()).unwrap()).unwrap();
+
+        assert!(store.relocate_root(next.clone()).is_err());
+        assert_eq!(store.models_root_dir(), current);
+        assert!(!next.join(MODEL_RELOCATION_JOURNAL).exists());
+        let _ = std::fs::remove_dir_all(base);
     }
 }

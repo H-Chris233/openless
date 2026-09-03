@@ -2,6 +2,14 @@
 
 use std::sync::Arc;
 
+#[derive(Debug, Clone)]
+pub struct FoundryNativeModelState {
+    pub alias: String,
+    pub cached: bool,
+    pub size_bytes: Option<u64>,
+    pub display_name: Option<String>,
+}
+
 /// CPU 回退期间向调用方报告的最小状态。调用方只决定如何展示，不参与模型选择。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FoundryFallbackNotice {
@@ -949,6 +957,44 @@ mod imp {
                 .path()
                 .await
                 .with_context(|| format!("get Foundry model path {alias}"))
+        }
+
+        pub async fn inspect_models(
+            &self,
+            aliases: &[String],
+        ) -> Result<Vec<super::FoundryNativeModelState>> {
+            let _lifecycle = self.lifecycle.lock().await;
+            if !foundry_native::runtime_ready() {
+                return Ok(aliases
+                    .iter()
+                    .map(|alias| super::FoundryNativeModelState {
+                        alias: alias.clone(),
+                        cached: false,
+                        size_bytes: None,
+                        display_name: None,
+                    })
+                    .collect());
+            }
+            let manager = self.manager()?;
+            let mut states = Vec::with_capacity(aliases.len());
+            for alias in aliases {
+                let model = manager
+                    .catalog()
+                    .get_model(alias)
+                    .await
+                    .with_context(|| format!("get Foundry catalog model {alias}"))?;
+                let info = model.info();
+                let cached = model.is_cached().await.unwrap_or(info.cached);
+                states.push(super::FoundryNativeModelState {
+                    alias: alias.clone(),
+                    cached,
+                    size_bytes: info
+                        .file_size_mb
+                        .map(|size| size.saturating_mul(1024 * 1024)),
+                    display_name: info.display_name.clone(),
+                });
+            }
+            Ok(states)
         }
 
         pub async fn delete_model(&self, alias: &str) -> Result<()> {
@@ -2356,6 +2402,21 @@ impl FoundryLocalRuntime {
 
     pub async fn model_dir_for_alias(&self, alias: &str) -> anyhow::Result<std::path::PathBuf> {
         anyhow::bail!("Foundry Local Whisper is only available on Windows: {alias}");
+    }
+
+    pub async fn inspect_models(
+        &self,
+        aliases: &[String],
+    ) -> anyhow::Result<Vec<FoundryNativeModelState>> {
+        Ok(aliases
+            .iter()
+            .map(|alias| FoundryNativeModelState {
+                alias: alias.clone(),
+                cached: false,
+                size_bytes: None,
+                display_name: None,
+            })
+            .collect())
     }
 
     pub async fn delete_model(&self, alias: &str) -> anyhow::Result<()> {

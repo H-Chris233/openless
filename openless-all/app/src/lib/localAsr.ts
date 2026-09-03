@@ -31,6 +31,7 @@ export interface LocalAsrStorageSettings {
     modelsBaseDir: string | null
     modelsRootDir: string
     isDefault: boolean
+    restartRequired: boolean
 }
 
 export interface LocalAsrModelStatus {
@@ -220,6 +221,7 @@ export function getLocalAsrStorageSettings(): Promise<LocalAsrStorageSettings> {
         modelsBaseDir: null,
         modelsRootDir: MOCK_SETTINGS.modelsRootDir,
         isDefault: true,
+        restartRequired: false,
     }))
 }
 
@@ -235,6 +237,7 @@ export function setLocalAsrModelsBaseDir(
                 ? `${modelsBaseDir}/OpenLess/models`
                 : MOCK_SETTINGS.modelsRootDir,
             isDefault: !modelsBaseDir,
+            restartRequired: false,
         }),
     )
 }

@@ -1,116 +1,15 @@
-#![allow(dead_code, unused_imports, unused_variables)]
-//! Windows sherpa-onnx 本地 ASR 的常量、catalog 与事件载荷。
+//! Windows sherpa-onnx 本地 ASR 的原生运行模式与事件载荷。
 //!
 //! 当前 catalog 覆盖 Windows offline batch 模型和实验 online streaming 模型；
 //! `sherpa_runtime.rs` 分别持有 `OfflineRecognizer` / `OnlineRecognizer`。
 
-use std::path::{Path, PathBuf};
-
-use anyhow::Result;
 use serde::Serialize;
 
 pub const PROVIDER_ID: &str = "sherpa-onnx-local";
+#[cfg(test)]
 pub const DEFAULT_MODEL_ALIAS: &str = "sense-voice-small-zh";
+#[cfg(test)]
 pub const DEFAULT_ONLINE_MODEL_ALIAS: &str = "zipformer-bilingual-zh-en-streaming";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
-pub enum SherpaFamily {
-    SenseVoice,
-    Paraformer,
-    Whisper,
-    Qwen3Asr,
-    Zipformer,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
-pub enum SherpaMode {
-    /// 录音停止后整段 PCM 一次性识别。
-    Offline,
-    /// 边录边识别 partial / final segment。
-    Online,
-}
-
-pub fn model_alias_is_known(alias: &str) -> bool {
-    openless_core::LocalAsrTarget::parse(openless_core::LocalAsrRuntime::SherpaOnnx, alias).is_ok()
-}
-
-pub fn mode_for_alias(alias: &str) -> Result<SherpaMode> {
-    if alias == DEFAULT_ONLINE_MODEL_ALIAS {
-        Ok(SherpaMode::Online)
-    } else if model_alias_is_known(alias) {
-        Ok(SherpaMode::Offline)
-    } else {
-        anyhow::bail!("unknown sherpa-onnx model alias: {alias}")
-    }
-}
-
-pub fn alias_is_online(alias: &str) -> bool {
-    matches!(mode_for_alias(alias), Ok(SherpaMode::Online))
-}
-
-pub fn required_files_for_alias(alias: &str) -> Result<&'static [&'static str]> {
-    match alias {
-        "sense-voice-small-zh" => Ok(&["model.int8.onnx", "tokens.txt"]),
-        "paraformer-zh" => Ok(&["model.int8.onnx", "tokens.txt"]),
-        "whisper-small-multi" => Ok(&["encoder.int8.onnx", "decoder.int8.onnx", "tokens.txt"]),
-        "whisper-large-v3-multi" => Ok(&["encoder.int8.onnx", "decoder.int8.onnx", "tokens.txt"]),
-        "qwen3-asr-0.6b-int8" => Ok(&[
-            "conv_frontend.onnx",
-            "encoder.int8.onnx",
-            "decoder.int8.onnx",
-            "tokenizer",
-        ]),
-        DEFAULT_ONLINE_MODEL_ALIAS => Ok(&[
-            "encoder-epoch-99-avg-1.int8.onnx",
-            "decoder-epoch-99-avg-1.onnx",
-            "joiner-epoch-99-avg-1.int8.onnx",
-            "tokens.txt",
-        ]),
-        _ => anyhow::bail!("unknown sherpa-onnx model alias: {alias}"),
-    }
-}
-
-pub fn required_path_is_valid(alias: &str, required: &str, path: &Path) -> bool {
-    if required_path_is_dir(alias, required) {
-        required_dir_is_valid(alias, required, path)
-    } else {
-        path.is_file()
-    }
-}
-
-fn required_path_is_dir(alias: &str, required: &str) -> bool {
-    matches!((alias, required), ("qwen3-asr-0.6b-int8", "tokenizer"))
-}
-
-fn required_dir_is_valid(alias: &str, required: &str, path: &Path) -> bool {
-    match (alias, required) {
-        ("qwen3-asr-0.6b-int8", "tokenizer") => {
-            path.join("tokenizer.json").is_file()
-                || (path.join("vocab.json").is_file() && path.join("merges.txt").is_file())
-        }
-        _ => false,
-    }
-}
-
-pub fn model_dir_for_alias(alias: &str) -> Result<PathBuf> {
-    if !model_alias_is_known(alias) {
-        anyhow::bail!("unknown sherpa-onnx model alias: {alias}");
-    }
-    #[cfg(target_os = "windows")]
-    {
-        Ok(crate::persistence::sherpa_onnx_models_root()?.join(alias))
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        Ok(std::env::temp_dir()
-            .join("openless-sherpa-onnx")
-            .join(alias))
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -213,64 +112,6 @@ impl SherpaRuntimeStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-
-    #[test]
-    fn online_zipformer_has_download_and_required_files() {
-        assert_eq!(
-            mode_for_alias(DEFAULT_ONLINE_MODEL_ALIAS).unwrap(),
-            SherpaMode::Online
-        );
-        assert!(alias_is_online(DEFAULT_ONLINE_MODEL_ALIAS));
-        assert_eq!(
-            required_files_for_alias(DEFAULT_ONLINE_MODEL_ALIAS).unwrap(),
-            &[
-                "encoder-epoch-99-avg-1.int8.onnx",
-                "decoder-epoch-99-avg-1.onnx",
-                "joiner-epoch-99-avg-1.int8.onnx",
-                "tokens.txt",
-            ]
-        );
-    }
-
-    #[test]
-    fn qwen3_tokenizer_accepts_supported_layouts() {
-        let dir = std::env::temp_dir().join(format!(
-            "openless-sherpa-tokenizer-{}",
-            uuid::Uuid::new_v4()
-        ));
-        fs::create_dir_all(&dir).expect("create tokenizer dir");
-
-        assert!(!required_path_is_valid(
-            "qwen3-asr-0.6b-int8",
-            "tokenizer",
-            &dir
-        ));
-
-        fs::write(dir.join("tokenizer.json"), b"{}").expect("write tokenizer json");
-        assert!(required_path_is_valid(
-            "qwen3-asr-0.6b-int8",
-            "tokenizer",
-            &dir
-        ));
-
-        fs::remove_file(dir.join("tokenizer.json")).expect("remove tokenizer json");
-        fs::write(dir.join("vocab.json"), b"{}").expect("write vocab json");
-        assert!(!required_path_is_valid(
-            "qwen3-asr-0.6b-int8",
-            "tokenizer",
-            &dir
-        ));
-
-        fs::write(dir.join("merges.txt"), b"#version: 0.2").expect("write merges txt");
-        assert!(required_path_is_valid(
-            "qwen3-asr-0.6b-int8",
-            "tokenizer",
-            &dir
-        ));
-
-        let _ = fs::remove_dir_all(dir);
-    }
 
     #[test]
     fn unavailable_status_uses_provider_id() {

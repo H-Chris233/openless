@@ -9,7 +9,7 @@ pub(crate) const FOUNDRY_PROVIDER_ID: &str = "foundry-local-whisper";
 pub(crate) const FOUNDRY_DEFAULT_MODEL_ALIAS: &str = "whisper-small";
 pub(crate) const SHERPA_DEFAULT_MODEL_ALIAS: &str = "sense-voice-small-zh";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum LocalAsrModelId {
     #[serde(rename = "qwen3-asr-0.6b")]
     Small06b,
@@ -112,12 +112,48 @@ impl LocalAsrModelId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LocalAsrRuntime {
     Generic,
     Foundry,
     SherpaOnnx,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SherpaModelFamily {
+    SenseVoice,
+    Paraformer,
+    Whisper,
+    Qwen3Asr,
+    Zipformer,
+}
+
+impl SherpaModelFamily {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SenseVoice => "sense_voice",
+            Self::Paraformer => "paraformer",
+            Self::Whisper => "whisper",
+            Self::Qwen3Asr => "qwen3_asr",
+            Self::Zipformer => "zipformer",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LocalAsrExecutionMode {
+    Offline,
+    Online,
+}
+
+impl LocalAsrExecutionMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Offline => "offline",
+            Self::Online => "online",
+        }
+    }
 }
 
 impl LocalAsrRuntime {
@@ -155,7 +191,7 @@ const SHERPA_MODEL_ALIASES: &[&str] = &[
     "zipformer-bilingual-zh-en-streaming",
 ];
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalAsrTarget {
     pub runtime: LocalAsrRuntime,
@@ -187,6 +223,31 @@ impl LocalAsrTarget {
 
     pub fn model_id(&self) -> &str {
         &self.model_id
+    }
+
+    pub fn sherpa_family(&self) -> Option<SherpaModelFamily> {
+        if self.runtime != LocalAsrRuntime::SherpaOnnx {
+            return None;
+        }
+        match self.model_id.as_str() {
+            "sense-voice-small-zh" => Some(SherpaModelFamily::SenseVoice),
+            "paraformer-zh" => Some(SherpaModelFamily::Paraformer),
+            "whisper-small-multi" | "whisper-large-v3-multi" => Some(SherpaModelFamily::Whisper),
+            "qwen3-asr-0.6b-int8" => Some(SherpaModelFamily::Qwen3Asr),
+            "zipformer-bilingual-zh-en-streaming" => Some(SherpaModelFamily::Zipformer),
+            _ => None,
+        }
+    }
+
+    pub fn sherpa_execution_mode(&self) -> Option<LocalAsrExecutionMode> {
+        if self.runtime != LocalAsrRuntime::SherpaOnnx {
+            return None;
+        }
+        Some(if self.model_id == "zipformer-bilingual-zh-en-streaming" {
+            LocalAsrExecutionMode::Online
+        } else {
+            LocalAsrExecutionMode::Offline
+        })
     }
 }
 

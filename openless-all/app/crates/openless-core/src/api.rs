@@ -980,9 +980,7 @@ impl OpenLessBackend {
                 }
             };
             let legacy_root = config.data_dir.join("models");
-            if legacy_root != model_store.models_root_dir() {
-                model_store.migrate_legacy_root(&legacy_root)?;
-            }
+            model_store.migrate_legacy_root(&legacy_root)?;
             let model_events = BackendEventPublisher::new(Arc::clone(&events));
             model_store.set_progress_sink(Arc::new(
                 move |progress: crate::ModelDownloadProgress| {
@@ -1034,6 +1032,7 @@ impl OpenLessBackend {
                 Arc::clone(&repositories.preferences),
                 runtime,
                 model_store,
+                config.data_dir.join("models"),
                 BackendEventPublisher::new(Arc::clone(&events)),
                 Arc::clone(&preferences_revision),
             ));

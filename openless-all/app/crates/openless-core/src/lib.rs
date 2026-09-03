@@ -124,7 +124,9 @@ pub mod contract {
         utf16_offset_to_char_offset, window_around_cursor, DocumentWindow, EditPair, LearnedRule,
         WindowSpan,
     };
-    pub use crate::local_asr_service::ModelRuntimeAdapter;
+    pub use crate::local_asr_service::{
+        ModelPrepareProgressSink, ModelRuntimeAdapter, NativeModelState, StorageRebind,
+    };
     pub use crate::model_store::{
         extract_archive_safely, merge_hf_tree_pages, merge_hf_tree_pages_with_base,
         model_mirror_base, parse_hf_tree_page, validate_model_id, validate_model_path,
@@ -238,9 +240,12 @@ pub use history::{HistoryStore, HISTORY_CAP};
 pub use less_computer::LessComputerService;
 pub use local_asr_catalog::{
     normalize_foundry_language_hint, normalize_sherpa_language_hint, FoundryRuntimeSource,
-    LocalAsrMirror, LocalAsrModelId, LocalAsrRuntime, LocalAsrTarget,
+    LocalAsrExecutionMode, LocalAsrMirror, LocalAsrModelId, LocalAsrRuntime, LocalAsrTarget,
+    SherpaModelFamily,
 };
-pub use local_asr_service::ModelRuntimeAdapter;
+pub use local_asr_service::{
+    ModelPrepareProgressSink, ModelRuntimeAdapter, NativeModelState, StorageRebind,
+};
 pub use marketplace::{MarketplaceConfig, MARKETPLACE_BASE_URL, MARKETPLACE_GITHUB_TOKEN_ACCOUNT};
 pub use model_store::{
     extract_archive_safely, merge_hf_tree_pages, merge_hf_tree_pages_with_base, model_mirror_base,

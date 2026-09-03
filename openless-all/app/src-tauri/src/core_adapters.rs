@@ -100,7 +100,6 @@ pub(crate) fn backend_dependencies(
         crate::commands::SystemCredentialStore::new(model_store.clone()),
     );
     let local_asr_runtime = Arc::new(TauriLocalAsrRuntimeAdapter::new(
-        Arc::clone(&app),
         native_asr_dependencies.clone(),
         preferences,
     ));
@@ -250,31 +249,21 @@ fn native_local_asr_model(
 }
 
 struct TauriLocalAsrRuntimeAdapter {
-    app: AppHandleSlot,
     native: TauriNativeAsrDependencies,
     preferences: Arc<openless_core::PreferencesStore>,
+    foundry_rebind_pending: Arc<AtomicBool>,
 }
 
 impl TauriLocalAsrRuntimeAdapter {
     fn new(
-        app: AppHandleSlot,
         native: TauriNativeAsrDependencies,
         preferences: Arc<openless_core::PreferencesStore>,
     ) -> Self {
         Self {
-            app,
             native,
             preferences,
+            foundry_rebind_pending: Arc::new(AtomicBool::new(false)),
         }
-    }
-
-    fn app_handle(&self) -> Result<AppHandle, BackendError> {
-        self.app.lock().clone().ok_or_else(|| {
-            BackendError::new(
-                BackendErrorCode::InvalidState,
-                "Tauri app handle is not available",
-            )
-        })
     }
 }
 
@@ -287,6 +276,122 @@ impl openless_core::ModelRuntimeAdapter for TauriLocalAsrRuntimeAdapter {
             openless_core::LocalAsrRuntime::Foundry
             | openless_core::LocalAsrRuntime::SherpaOnnx => cfg!(target_os = "windows"),
         }
+    }
+
+    fn supports_model(&self, target: &openless_core::LocalAsrTarget) -> bool {
+        match target.runtime {
+            openless_core::LocalAsrRuntime::Generic => {
+                #[cfg(target_os = "macos")]
+                {
+                    true
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    openless_core::LocalAsrModelId::from_wire_id(target.model_id())
+                        .is_some_and(openless_core::LocalAsrModelId::is_qwen)
+                }
+                #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+                {
+                    false
+                }
+            }
+            openless_core::LocalAsrRuntime::Foundry
+            | openless_core::LocalAsrRuntime::SherpaOnnx => cfg!(target_os = "windows"),
+        }
+    }
+
+    fn inspect_native_models(
+        &self,
+        targets: Vec<openless_core::LocalAsrTarget>,
+    ) -> BoxFuture<'static, Result<Vec<openless_core::NativeModelState>, BackendError>> {
+        let foundry = Arc::clone(&self.native.foundry);
+        Box::pin(async move {
+            let foundry_targets = targets
+                .into_iter()
+                .filter(|target| target.runtime == openless_core::LocalAsrRuntime::Foundry)
+                .collect::<Vec<_>>();
+            if foundry_targets.is_empty() {
+                return Ok(Vec::new());
+            }
+            let aliases = foundry_targets
+                .iter()
+                .map(|target| target.model_id().to_string())
+                .collect::<Vec<_>>();
+            let states = foundry.inspect_models(&aliases).await.map_err(|error| {
+                local_asr_backend_error(BackendErrorCode::Platform, format!("{error:#}"))
+            })?;
+            Ok(states
+                .into_iter()
+                .filter_map(|state| {
+                    foundry_targets
+                        .iter()
+                        .find(|target| target.model_id() == state.alias)
+                        .cloned()
+                        .map(|target| openless_core::NativeModelState {
+                            target,
+                            installed: state.cached,
+                            size_bytes: state.size_bytes,
+                            display_name: state.display_name,
+                        })
+                })
+                .collect())
+        })
+    }
+
+    fn native_model_dir(
+        &self,
+        target: openless_core::LocalAsrTarget,
+        fallback: PathBuf,
+    ) -> BoxFuture<'static, Result<PathBuf, BackendError>> {
+        if target.runtime != openless_core::LocalAsrRuntime::Foundry {
+            return Box::pin(async move { Ok(fallback) });
+        }
+        let foundry = Arc::clone(&self.native.foundry);
+        Box::pin(async move {
+            foundry
+                .model_dir_for_alias(target.model_id())
+                .await
+                .map_err(|error| {
+                    local_asr_backend_error(BackendErrorCode::Platform, format!("{error:#}"))
+                })
+        })
+    }
+
+    fn delete_native_model(
+        &self,
+        target: openless_core::LocalAsrTarget,
+    ) -> BoxFuture<'static, Result<(), BackendError>> {
+        let foundry = Arc::clone(&self.native.foundry);
+        Box::pin(async move {
+            if target.runtime != openless_core::LocalAsrRuntime::Foundry {
+                return Err(BackendError::new(
+                    BackendErrorCode::Unsupported,
+                    "only Foundry uses native model deletion",
+                ));
+            }
+            foundry
+                .delete_model(target.model_id())
+                .await
+                .map_err(|error| {
+                    local_asr_backend_error(BackendErrorCode::Platform, format!("{error:#}"))
+                })
+        })
+    }
+
+    fn rebind_storage(
+        &self,
+        _models_root: PathBuf,
+    ) -> BoxFuture<'static, Result<openless_core::StorageRebind, BackendError>> {
+        let restart_required = self.native.foundry.storage_configuration_locked();
+        self.foundry_rebind_pending
+            .store(restart_required, Ordering::Release);
+        Box::pin(async move {
+            Ok(if restart_required {
+                openless_core::StorageRebind::RestartRequired
+            } else {
+                openless_core::StorageRebind::Applied
+            })
+        })
     }
 
     fn runtime_status(
@@ -387,15 +492,21 @@ impl openless_core::ModelRuntimeAdapter for TauriLocalAsrRuntimeAdapter {
         target: openless_core::LocalAsrTarget,
         runtime_source: openless_core::FoundryRuntimeSource,
         model_dir: PathBuf,
+        progress: openless_core::ModelPrepareProgressSink,
     ) -> BoxFuture<'static, Result<String, BackendError>> {
-        let app = self.app_handle();
         let foundry = Arc::clone(&self.native.foundry);
         let sherpa = Arc::clone(&self.native.sherpa);
+        let foundry_rebind_pending = Arc::clone(&self.foundry_rebind_pending);
         Box::pin(async move {
-            let app = app?;
             let loaded = match target.runtime {
                 openless_core::LocalAsrRuntime::Foundry => {
-                    let progress_app = app.clone();
+                    if foundry_rebind_pending.load(Ordering::Acquire) {
+                        return Err(BackendError::new(
+                            BackendErrorCode::InvalidState,
+                            "Foundry storage changed; restart is required",
+                        ));
+                    }
+                    let progress = Arc::clone(&progress);
                     foundry
                         .ensure_loaded_with_progress(
                             target.model_id(),
@@ -418,20 +529,14 @@ impl openless_core::ModelRuntimeAdapter for TauriLocalAsrRuntimeAdapter {
                                         openless_core::LocalAsrPreparePhase::Failed
                                     }
                                 };
-                                crate::tauri_events::publish(
-                                    &progress_app,
-                                    None,
-                                    openless_core::BackendEventKind::LocalAsrPrepareProgress(
-                                        openless_core::LocalAsrPrepareProgress {
-                                            runtime: openless_core::LocalAsrRuntimeKind::Foundry,
-                                            phase,
-                                            model_alias: payload.model_alias,
-                                            label: payload.label,
-                                            percent: payload.percent,
-                                            error: payload.error,
-                                        },
-                                    ),
-                                );
+                                progress(openless_core::LocalAsrPrepareProgress {
+                                    runtime: openless_core::LocalAsrRuntimeKind::Foundry,
+                                    phase,
+                                    model_alias: payload.model_alias,
+                                    label: payload.label,
+                                    percent: payload.percent,
+                                    error: payload.error,
+                                });
                             },
                         )
                         .await
@@ -443,41 +548,39 @@ impl openless_core::ModelRuntimeAdapter for TauriLocalAsrRuntimeAdapter {
                         })
                 }
                 openless_core::LocalAsrRuntime::SherpaOnnx => {
-                    let progress_app = app.clone();
+                    let progress = Arc::clone(&progress);
                     sherpa
-                        .ensure_loaded_with_progress(target.model_id(), move |payload| {
-                            let phase = match payload.phase {
-                                crate::asr::local::sherpa::SherpaPreparePhase::Runtime => {
-                                    openless_core::LocalAsrPreparePhase::Runtime
-                                }
-                                crate::asr::local::sherpa::SherpaPreparePhase::Model => {
-                                    openless_core::LocalAsrPreparePhase::Model
-                                }
-                                crate::asr::local::sherpa::SherpaPreparePhase::Load => {
-                                    openless_core::LocalAsrPreparePhase::Load
-                                }
-                                crate::asr::local::sherpa::SherpaPreparePhase::Finished => {
-                                    openless_core::LocalAsrPreparePhase::Finished
-                                }
-                                crate::asr::local::sherpa::SherpaPreparePhase::Failed => {
-                                    openless_core::LocalAsrPreparePhase::Failed
-                                }
-                            };
-                            crate::tauri_events::publish(
-                                &progress_app,
-                                None,
-                                openless_core::BackendEventKind::LocalAsrPrepareProgress(
-                                    openless_core::LocalAsrPrepareProgress {
-                                        runtime: openless_core::LocalAsrRuntimeKind::SherpaOnnx,
-                                        phase,
-                                        model_alias: payload.model_alias,
-                                        label: payload.label,
-                                        percent: payload.percent,
-                                        error: payload.error,
-                                    },
-                                ),
-                            );
-                        })
+                        .ensure_loaded_with_progress(
+                            target.model_id(),
+                            model_dir.clone(),
+                            move |payload| {
+                                let phase = match payload.phase {
+                                    crate::asr::local::sherpa::SherpaPreparePhase::Runtime => {
+                                        openless_core::LocalAsrPreparePhase::Runtime
+                                    }
+                                    crate::asr::local::sherpa::SherpaPreparePhase::Model => {
+                                        openless_core::LocalAsrPreparePhase::Model
+                                    }
+                                    crate::asr::local::sherpa::SherpaPreparePhase::Load => {
+                                        openless_core::LocalAsrPreparePhase::Load
+                                    }
+                                    crate::asr::local::sherpa::SherpaPreparePhase::Finished => {
+                                        openless_core::LocalAsrPreparePhase::Finished
+                                    }
+                                    crate::asr::local::sherpa::SherpaPreparePhase::Failed => {
+                                        openless_core::LocalAsrPreparePhase::Failed
+                                    }
+                                };
+                                progress(openless_core::LocalAsrPrepareProgress {
+                                    runtime: openless_core::LocalAsrRuntimeKind::SherpaOnnx,
+                                    phase,
+                                    model_alias: payload.model_alias,
+                                    label: payload.label,
+                                    percent: payload.percent,
+                                    error: payload.error,
+                                });
+                            },
+                        )
                         .await
                         .map_err(|error| {
                             local_asr_backend_error(
@@ -491,13 +594,7 @@ impl openless_core::ModelRuntimeAdapter for TauriLocalAsrRuntimeAdapter {
                     "generic local ASR uses preload rather than explicit prepare",
                 )),
             }?;
-            std::fs::create_dir_all(&model_dir)
-                .map_err(|error| local_asr_backend_error(BackendErrorCode::Platform, error))?;
-            std::fs::write(
-                model_dir.join(openless_core::MODEL_READY_SENTINEL),
-                b"ready\n",
-            )
-            .map_err(|error| local_asr_backend_error(BackendErrorCode::Platform, error))?;
+            let _ = model_dir;
             Ok(loaded)
         })
     }
@@ -608,15 +705,9 @@ impl openless_core::ModelRuntimeAdapter for TauriLocalAsrRuntimeAdapter {
                 #[cfg(target_os = "macos")]
                 if crate::asr::local::is_local_whisper(provider) {
                     let model_id = preferences.local_whisper_active_model;
-                    let model_path = model_dir.join(match model_id.as_str() {
-                        "whisper-base" => "ggml-base.bin",
-                        "whisper-small" => "ggml-small.bin",
-                        "whisper-medium" => "ggml-medium.bin",
-                        "whisper-large-v3" => "ggml-large-v3.bin",
-                        "whisper-large-v3-turbo" => "ggml-large-v3-turbo.bin",
-                        "whisper-large-v3-turbo-q5" => "ggml-large-v3-turbo-q5_0.bin",
-                        _ => "ggml-large-v3-turbo.bin",
-                    });
+                    let model_path =
+                        crate::asr::local::whisper_model_path_for_model(&model_id, &model_dir)
+                            .map_err(map_native_asr_error)?;
                     tauri::async_runtime::spawn_blocking(move || {
                         whisper_cache.get_or_load(&model_id, &model_path)
                     })
@@ -626,7 +717,7 @@ impl openless_core::ModelRuntimeAdapter for TauriLocalAsrRuntimeAdapter {
                 }
             }
             #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-            let _ = preferences;
+            let _ = (preferences, model_dir);
             Ok(())
         })
     }
@@ -1325,7 +1416,6 @@ impl TranscriptionEngine for TauriNativeTranscriptionEngine {
         let qwen_cache = Arc::clone(&self.dependencies.qwen_cache);
         #[cfg(target_os = "macos")]
         let whisper_cache = Arc::clone(&self.dependencies.whisper_cache);
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
         let model_store = self.model_store.clone();
 
         Box::pin(async move {
@@ -1396,9 +1486,27 @@ impl TranscriptionEngine for TauriNativeTranscriptionEngine {
                         log::warn!("[core-adapter] publish sherpa partial failed: {error}");
                     }
                 });
+                let target = openless_core::LocalAsrTarget::parse(
+                    openless_core::LocalAsrRuntime::SherpaOnnx,
+                    model.clone(),
+                )?;
+                let store = model_store.as_ref().ok_or_else(|| {
+                    BackendError::new(
+                        BackendErrorCode::Unsupported,
+                        "Core model store is unavailable",
+                    )
+                })?;
+                if !store.is_installed(&target)? {
+                    return Err(BackendError::new(
+                        BackendErrorCode::InvalidState,
+                        "Sherpa model is not downloaded",
+                    ));
+                }
+                let model_dir = store.runtime_model_dir(&target)?;
                 let provider = crate::asr::local::SherpaOnnxAsr::new_for_model(
                     Arc::clone(&sherpa),
                     model.clone(),
+                    model_dir,
                     context.asr.language.clone(),
                     Some(token_handler),
                 )
@@ -1440,15 +1548,23 @@ impl TranscriptionEngine for TauriNativeTranscriptionEngine {
                         )
                     })?;
                 let model_id = model.as_str().to_string();
-                let model_dir = model_store
-                    .as_ref()
-                    .ok_or_else(|| {
-                        BackendError::new(
-                            BackendErrorCode::Unsupported,
-                            "Core model store is unavailable",
-                        )
-                    })?
-                    .model_dir(model.as_str())?;
+                let target = openless_core::LocalAsrTarget::parse(
+                    openless_core::LocalAsrRuntime::Generic,
+                    model.as_str(),
+                )?;
+                let store = model_store.as_ref().ok_or_else(|| {
+                    BackendError::new(
+                        BackendErrorCode::Unsupported,
+                        "Core model store is unavailable",
+                    )
+                })?;
+                if !store.is_installed(&target)? {
+                    return Err(BackendError::new(
+                        BackendErrorCode::InvalidState,
+                        "local Qwen model is not downloaded",
+                    ));
+                }
+                let model_dir = store.runtime_model_dir(&target)?;
                 let cache = Arc::clone(&qwen_cache);
                 let load_cache = Arc::clone(&cache);
                 let load_model_id = model_id.clone();
@@ -1481,15 +1597,23 @@ impl TranscriptionEngine for TauriNativeTranscriptionEngine {
                                     .is_some_and(|model| model.is_whisper())
                             })
                             .unwrap_or_else(|| crate::asr::local::WHISPER_MODEL_ID.to_string());
-                        let model_dir = model_store
-                            .as_ref()
-                            .ok_or_else(|| {
-                                BackendError::new(
-                                    BackendErrorCode::Unsupported,
-                                    "Core model store is unavailable",
-                                )
-                            })?
-                            .model_dir(&model_id)?;
+                        let target = openless_core::LocalAsrTarget::parse(
+                            openless_core::LocalAsrRuntime::Generic,
+                            model_id.clone(),
+                        )?;
+                        let store = model_store.as_ref().ok_or_else(|| {
+                            BackendError::new(
+                                BackendErrorCode::Unsupported,
+                                "Core model store is unavailable",
+                            )
+                        })?;
+                        if !store.is_installed(&target)? {
+                            return Err(BackendError::new(
+                                BackendErrorCode::InvalidState,
+                                "local Whisper model is not downloaded",
+                            ));
+                        }
+                        let model_dir = store.runtime_model_dir(&target)?;
                         let model_path =
                             crate::asr::local::whisper_model_path_for_model(&model_id, &model_dir)
                                 .map_err(map_native_asr_error)?;

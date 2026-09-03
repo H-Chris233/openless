@@ -81,12 +81,20 @@ impl LinuxGenericLocalAsrRuntime {
             .join("models")
     }
 
+    fn from_models_root(root: std::path::PathBuf) -> Self {
+        Self {
+            root: std::sync::Arc::new(std::sync::Mutex::new(root)),
+            loaded_model: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
     fn executable() -> String {
         std::env::var("OPENLESS_QWEN_ASR_BIN").unwrap_or_else(|_| "qwen_asr".into())
     }
 
     fn is_ready_dir(dir: &std::path::Path) -> bool {
-        dir.join(Self::READY_SENTINEL).is_file() || dir.join(".openless-asr-ready").is_file()
+        dir.join(Self::READY_SENTINEL).is_file()
     }
 
     fn ensure_qwen_target(target: &openless_core::LocalAsrTarget) -> Result<(), BackendError> {
@@ -129,6 +137,18 @@ impl openless_core::ModelRuntimeAdapter for LinuxGenericLocalAsrRuntime {
         runtime == openless_core::LocalAsrRuntime::Generic && qwen_engine_available()
     }
 
+    fn supports_model(&self, target: &openless_core::LocalAsrTarget) -> bool {
+        Self::ensure_qwen_target(target).is_ok()
+    }
+
+    fn rebind_storage(
+        &self,
+        models_root: std::path::PathBuf,
+    ) -> BoxFuture<'static, Result<openless_core::StorageRebind, BackendError>> {
+        *self.root.lock().expect("Linux ASR root lock poisoned") = models_root;
+        Box::pin(async { Ok(openless_core::StorageRebind::Applied) })
+    }
+
     fn runtime_status(
         &self,
         settings: openless_core::LocalAsrSettings,
@@ -166,6 +186,7 @@ impl openless_core::ModelRuntimeAdapter for LinuxGenericLocalAsrRuntime {
         target: openless_core::LocalAsrTarget,
         _source: openless_core::FoundryRuntimeSource,
         dir: std::path::PathBuf,
+        _progress: openless_core::ModelPrepareProgressSink,
     ) -> BoxFuture<'static, Result<String, BackendError>> {
         if let Err(error) = Self::ensure_qwen_target(&target) {
             return Box::pin(async move { Err(error) });
@@ -495,7 +516,18 @@ impl LinuxBackendBuilder {
         for provider_type in SHARED_CLOUD_ASR_PROVIDER_TYPES {
             transcription.register(*provider_type, Arc::clone(&cloud_transcription))?;
         }
-        let linux_local_runtime = Arc::new(LinuxGenericLocalAsrRuntime::default());
+        let configured_models_root =
+            openless_core::PreferencesStore::open(config.data_dir.join("preferences.json"))
+                .ok()
+                .map(|preferences| preferences.get().local_asr_models_base_dir)
+                .filter(|base| !base.trim().is_empty())
+                .map(std::path::PathBuf::from)
+                .filter(|base| base.is_absolute())
+                .map(|base| base.join("OpenLess").join("models"))
+                .unwrap_or_else(LinuxGenericLocalAsrRuntime::default_root);
+        let linux_local_runtime = Arc::new(LinuxGenericLocalAsrRuntime::from_models_root(
+            configured_models_root,
+        ));
         let linux_local_asr: Arc<dyn TranscriptionEngine> = Arc::new(LinuxGenericAsrEngine {
             root: Arc::clone(&linux_local_runtime.root),
         });
@@ -857,6 +889,7 @@ mod tests {
                     target.clone(),
                     openless_core::FoundryRuntimeSource::Auto,
                     model_dir.clone(),
+                    Arc::new(|_| {}),
                 )
                 .await
                 .unwrap(),
@@ -887,9 +920,53 @@ mod tests {
             .release(openless_core::LocalAsrRuntime::Generic)
             .await
             .unwrap();
-        store.delete_model(target.model_id()).unwrap();
+        store.delete_model(&target).unwrap();
         assert!(!model_dir.exists());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn shared_builder_restores_custom_model_root_and_filters_unsupported_models() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "openless-linux-custom-model-root-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let custom = data_dir.join("external");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let preferences =
+            openless_core::PreferencesStore::open(data_dir.join("preferences.json")).unwrap();
+        let mut value = preferences.get();
+        value.local_asr_models_base_dir = custom.to_string_lossy().into_owned();
+        preferences.set(value).unwrap();
+
+        let runtime = LinuxBackendBuilder::from_shared_providers(BackendConfig {
+            data_dir: data_dir.clone(),
+            ..BackendConfig::default()
+        })
+        .unwrap()
+        .build()
+        .unwrap();
+        let storage = runtime
+            .backend
+            .services()
+            .local_asr
+            .storage_settings()
+            .await
+            .unwrap();
+        assert_eq!(
+            storage.models_root_dir,
+            custom.join("OpenLess").join("models")
+        );
+        let models = runtime
+            .backend
+            .services()
+            .local_asr
+            .list_models(openless_core::LocalAsrRuntime::Generic)
+            .await
+            .unwrap();
+        assert_eq!(models.len(), 2);
+        assert!(models.iter().all(|model| model.family == "qwen3"));
+        let _ = std::fs::remove_dir_all(data_dir);
     }
 
     #[tokio::test]

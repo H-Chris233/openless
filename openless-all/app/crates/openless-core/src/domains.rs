@@ -97,6 +97,8 @@ pub struct LocalAsrStorageSettings {
     pub models_base_dir: Option<PathBuf>,
     pub models_root_dir: PathBuf,
     pub is_default: bool,
+    #[serde(default)]
+    pub restart_required: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

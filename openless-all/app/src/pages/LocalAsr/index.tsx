@@ -16,6 +16,7 @@ import {
     type ReactNode,
 } from "react"
 import { useTranslation } from "react-i18next"
+import { restartApp } from "../../lib/ipc/permissions"
 import {
     createChannel,
     isTauri,
@@ -974,6 +975,10 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                       }
                     : current,
             )
+            if (next.restartRequired) {
+                await restartApp()
+                return
+            }
             await refresh()
             void refreshFoundryModelDir(selectedFoundryAlias)
             void refreshSherpaModelDir(selectedSherpaAlias)

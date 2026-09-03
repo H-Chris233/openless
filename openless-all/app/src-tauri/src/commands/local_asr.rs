@@ -51,6 +51,7 @@ pub struct LocalAsrStorageSettings {
     pub models_base_dir: Option<String>,
     pub models_root_dir: String,
     pub is_default: bool,
+    pub restart_required: bool,
 }
 
 impl From<openless_core::LocalAsrStorageSettings> for LocalAsrStorageSettings {
@@ -59,6 +60,7 @@ impl From<openless_core::LocalAsrStorageSettings> for LocalAsrStorageSettings {
             models_base_dir: settings.models_base_dir.map(display_path),
             models_root_dir: display_path(settings.models_root_dir),
             is_default: settings.is_default,
+            restart_required: settings.restart_required,
         }
     }
 }

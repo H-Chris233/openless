@@ -3,7 +3,7 @@ use openless_core::{
     normalize_foundry_language_hint, normalize_sherpa_language_hint, BackendConfig,
     BackendDependencies, BackendError, BackendErrorCode, BackendEventKind, FoundryRuntimeSource,
     LocalAsrMirror, LocalAsrRuntime, LocalAsrRuntimeStatus, LocalAsrSettings, LocalAsrTarget,
-    ModelRuntimeAdapter, OpenLessBackend,
+    ModelRuntimeAdapter, NativeModelState, OpenLessBackend,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -19,6 +19,16 @@ fn public_local_asr_catalog_rejects_unknown_models_per_runtime() {
     let sherpa =
         LocalAsrTarget::parse(LocalAsrRuntime::SherpaOnnx, "sense-voice-small-zh").unwrap();
     assert_eq!(sherpa.model_id(), "sense-voice-small-zh");
+    assert_eq!(sherpa.sherpa_family().unwrap().as_str(), "sense_voice");
+    let streaming = LocalAsrTarget::parse(
+        LocalAsrRuntime::SherpaOnnx,
+        "zipformer-bilingual-zh-en-streaming",
+    )
+    .unwrap();
+    assert_eq!(
+        streaming.sherpa_execution_mode().unwrap().as_str(),
+        "online"
+    );
 
     let error = LocalAsrTarget::parse(LocalAsrRuntime::SherpaOnnx, "whisper-small")
         .expect_err("a Foundry alias must not leak into the Sherpa catalog");
@@ -58,6 +68,9 @@ struct RecordingLocalAsrRuntime {
     invalidated: Mutex<Vec<LocalAsrRuntime>>,
     fail_release: std::sync::atomic::AtomicBool,
     status: Mutex<Option<LocalAsrRuntimeStatus>>,
+    deleted_native: Mutex<Vec<LocalAsrTarget>>,
+    restart_on_rebind: std::sync::atomic::AtomicBool,
+    emit_prepare_progress: std::sync::atomic::AtomicBool,
 }
 
 impl ModelRuntimeAdapter for RecordingLocalAsrRuntime {
@@ -98,12 +111,67 @@ impl ModelRuntimeAdapter for RecordingLocalAsrRuntime {
         Box::pin(async move { Ok(status) })
     }
 
+    fn inspect_native_models(
+        &self,
+        targets: Vec<LocalAsrTarget>,
+    ) -> BoxFuture<'static, Result<Vec<NativeModelState>, BackendError>> {
+        Box::pin(async move {
+            Ok(targets
+                .into_iter()
+                .map(|target| NativeModelState {
+                    target,
+                    installed: true,
+                    size_bytes: Some(64 * 1024 * 1024),
+                    display_name: Some("Whisper Small Native".into()),
+                })
+                .collect())
+        })
+    }
+
+    fn delete_native_model(
+        &self,
+        target: LocalAsrTarget,
+    ) -> BoxFuture<'static, Result<(), BackendError>> {
+        self.deleted_native.lock().unwrap().push(target);
+        Box::pin(async { Ok(()) })
+    }
+
+    fn rebind_storage(
+        &self,
+        _: PathBuf,
+    ) -> BoxFuture<'static, Result<openless_core::StorageRebind, BackendError>> {
+        let restart = self
+            .restart_on_rebind
+            .load(std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async move {
+            Ok(if restart {
+                openless_core::StorageRebind::RestartRequired
+            } else {
+                openless_core::StorageRebind::Applied
+            })
+        })
+    }
+
     fn prepare(
         &self,
         target: LocalAsrTarget,
         _: FoundryRuntimeSource,
         _: PathBuf,
+        progress: openless_core::ModelPrepareProgressSink,
     ) -> BoxFuture<'static, Result<String, BackendError>> {
+        if self
+            .emit_prepare_progress
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            progress(openless_core::LocalAsrPrepareProgress {
+                runtime: openless_core::LocalAsrRuntimeKind::Foundry,
+                phase: openless_core::LocalAsrPreparePhase::Model,
+                model_alias: target.model_id().to_string(),
+                label: "native model".into(),
+                percent: Some(50.0),
+                error: None,
+            });
+        }
         let model_id = target.model_id().to_string();
         *self.status.lock().unwrap() = Some(LocalAsrRuntimeStatus {
             runtime: target.runtime,
@@ -265,6 +333,94 @@ async fn backend_local_asr_storage_change_commits_only_after_runtime_quiesces() 
         backend.get_preferences().local_asr_models_base_dir,
         requested.to_string_lossy()
     );
+    let reset = backend
+        .services()
+        .local_asr
+        .set_models_base_dir(None)
+        .await
+        .unwrap();
+    assert!(reset.is_default);
+    assert_eq!(reset.models_root_dir, data_dir.join("models"));
+    assert!(backend
+        .get_preferences()
+        .local_asr_models_base_dir
+        .is_empty());
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
+async fn native_model_catalog_and_delete_use_the_runtime_adapter() {
+    let (data_dir, runtime, backend) = local_asr_backend();
+    let target = LocalAsrTarget::parse(LocalAsrRuntime::Foundry, "whisper-small").unwrap();
+
+    let models = backend
+        .services()
+        .local_asr
+        .list_models(LocalAsrRuntime::Foundry)
+        .await
+        .unwrap();
+    let model = models
+        .iter()
+        .find(|model| model.target == target)
+        .expect("Foundry model remains Core catalog owned");
+    assert!(model.installed);
+    assert_eq!(model.size_bytes, Some(64 * 1024 * 1024));
+    assert_eq!(model.display_name, "Whisper Small Native");
+
+    backend
+        .services()
+        .local_asr
+        .delete_model(target.clone())
+        .await
+        .unwrap();
+    assert_eq!(runtime.deleted_native.lock().unwrap().as_slice(), [target]);
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
+async fn storage_change_reports_native_restart_requirement() {
+    let (data_dir, runtime, backend) = local_asr_backend();
+    runtime
+        .restart_on_rebind
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let requested = data_dir.join("restart-volume");
+
+    let storage = backend
+        .services()
+        .local_asr
+        .set_models_base_dir(Some(requested))
+        .await
+        .unwrap();
+
+    assert!(storage.restart_required);
+    assert!(storage
+        .models_root_dir
+        .join(".openless-model-relocation.json")
+        .is_file());
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
+async fn native_prepare_progress_is_published_by_core() {
+    let (data_dir, runtime, backend) = local_asr_backend();
+    runtime
+        .emit_prepare_progress
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let mut events = backend.subscribe();
+    let target = LocalAsrTarget::parse(LocalAsrRuntime::Foundry, "whisper-small").unwrap();
+
+    backend.services().local_asr.prepare(target).await.unwrap();
+
+    let BackendEventKind::LocalAsrPrepareProgress(progress) = events.try_recv().unwrap().kind
+    else {
+        panic!("native progress must cross the Core event seam");
+    };
+    assert_eq!(progress.model_alias, "whisper-small");
+    assert_eq!(progress.percent, Some(50.0));
+    assert!(matches!(
+        events.try_recv().unwrap().kind,
+        BackendEventKind::LocalAsrEngineChanged(_)
+    ));
     let _ = std::fs::remove_dir_all(data_dir);
 }
 

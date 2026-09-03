@@ -115,6 +115,20 @@ pub fn anonymous_no_redirect_http() -> reqwest::Client {
     })
 }
 
+/// Shared client for public model metadata and ranged downloads. Model hosts
+/// legitimately redirect objects to a CDN, but the redirect chain stays
+/// bounded and follows the same live proxy policy as every other Core client.
+pub fn model_http() -> reqwest::Client {
+    let no_proxy = !use_system_proxy();
+    cached_client((3, no_proxy), || {
+        base_client_builder(no_proxy)
+            .redirect(reqwest::redirect::Policy::limited(5))
+            .timeout(Duration::from_secs(120))
+            .build()
+            .expect("build model HTTP client")
+    })
+}
+
 /// 按 `(timeout_secs, no_proxy)` 缓存并复用 `reqwest::Client`。
 ///
 /// LLM / ASR provider 过去每次请求都新建一个 `reqwest::Client`，新客户端连接池是
@@ -230,16 +244,19 @@ mod tests {
 
     #[test]
     fn system_proxy_toggle_updates_flag_and_rebuilds_shared_client() {
-        use super::{http, set_use_system_proxy, use_system_proxy, CACHE};
+        use super::{http, model_http, set_use_system_proxy, use_system_proxy, CACHE};
         set_use_system_proxy(true);
         CACHE.lock().clear();
         let _ = http();
+        let _ = model_http();
         assert!(!CACHE.lock().is_empty());
         set_use_system_proxy(false);
         assert!(!use_system_proxy());
         // 下一次 http() 按「直连」决策重建（key 的 bool 位 = no_proxy）。
         let _ = http();
+        let _ = model_http();
         assert!(CACHE.lock().contains_key(&(0, true)));
+        assert!(CACHE.lock().contains_key(&(3, true)));
         set_use_system_proxy(true);
         assert!(use_system_proxy());
     }
