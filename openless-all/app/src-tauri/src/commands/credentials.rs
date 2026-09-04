@@ -868,4 +868,24 @@ mod tests {
             assert_eq!(account_provider_kind(account), CredentialProviderKind::Omni);
         }
     }
+
+    #[test]
+    fn core_llm_accounts_are_supported_by_the_tauri_vault_adapter() {
+        for account in [
+            openless_core::credentials::LLM_API_KEY_ACCOUNT,
+            openless_core::credentials::LLM_MODEL_ACCOUNT,
+            openless_core::credentials::LLM_ENDPOINT_ACCOUNT,
+        ] {
+            let key = openless_core::CredentialKey::new(
+                openless_core::CredentialNamespace::Llm,
+                Some("channel".to_string()),
+                account,
+            )
+            .unwrap();
+            assert!(
+                parse_vault_account(&key).is_ok(),
+                "Core LLM account must be accepted by the Tauri vault adapter: {account}"
+            );
+        }
+    }
 }
