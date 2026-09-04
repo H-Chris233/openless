@@ -25,7 +25,9 @@ use crate::domains::{
 use crate::errors::{BackendError, BackendErrorCode};
 use crate::ports::{TextPolisher, TextStreamChunk, TextStreamSink, TranscriptionEngine};
 use crate::provider_rules::{
-    default_llm_endpoint, default_llm_model, default_omni_endpoint, parse_extra_headers,
+    api_key_required, default_asr_endpoint, default_asr_model, default_llm_endpoint,
+    default_omni_endpoint, parse_extra_headers, provider_descriptor, validation_probe_for,
+    AuthRequirement, ValidationProbe,
 };
 use crate::provider_transport::{
     ProviderCancellation, ProviderTransport, ProviderTransportError, ProviderTransportRequest,
@@ -182,9 +184,37 @@ impl ProviderService {
     async fn validate_inner(
         &self,
         request: ProviderRequest,
+        cancellation: ProviderCancellation,
     ) -> Result<ProviderCheckResult, BackendError> {
+        if cancellation.is_cancelled() {
+            return Err(cancelled_request());
+        }
         let resolved = self.resolve(request).await?;
+        self.validate_resolved(resolved, cancellation).await?;
+        Ok(ProviderCheckResult { ok: true })
+    }
+
+    async fn validate_resolved(
+        &self,
+        resolved: ResolvedProvider,
+        cancellation: ProviderCancellation,
+    ) -> Result<(), BackendError> {
+        if cancellation.is_cancelled() {
+            return Err(cancelled_request());
+        }
         ensure_supported_kind(&resolved)?;
+        validate_configuration(&resolved)?;
+        let probe = validation_probe_for(
+            resolved.kind,
+            &resolved.provider_type,
+            resolved.model.as_deref(),
+        );
+        if probe == ValidationProbe::AsrNonSilent {
+            return tokio::select! {
+                _ = wait_for_cancellation(cancellation) => Err(cancelled_request()),
+                result = validate_dashscope_probe(&resolved) => result,
+            };
+        }
         let context = Arc::new(resolved.context());
         let session_id = SessionId::new();
         match resolved.kind {
@@ -193,36 +223,62 @@ impl ProviderService {
                     Arc::clone(&self.credentials),
                     Arc::clone(&self.task_spawner),
                 );
-                let session = engine
-                    .start(session_id, context, Arc::new(DiscardTextStream))
-                    .await?;
-                // A 250 ms 16 kHz mono silence probe exercises the same
+                let session = tokio::select! {
+                    _ = wait_for_cancellation(cancellation.clone()) => return Err(cancelled_request()),
+                    result = engine.start(session_id, context, Arc::new(DiscardTextStream)) => {
+                        result.map_err(sanitize_validation_error)?
+                    }
+                };
+                // A 500 ms 16 kHz mono silence probe exercises the same
                 // request/handshake path without storing user audio.
-                let pcm = vec![0_u8; 16_000 / 2 * 2 / 4];
+                let pcm = vec![0_u8; 16_000];
                 let wav = encode_dictation_wav(&pcm)?;
                 session.consume_pcm_chunk(&wav[44..]);
-                session.finish().await.map(|_| ())?;
+                let finish = tokio::select! {
+                    _ = wait_for_cancellation(cancellation) => {
+                        let _ = session.cancel().await;
+                        return Err(cancelled_request());
+                    }
+                    result = session.finish() => result.map(|_| ()),
+                };
+                if let Err(error) = finish {
+                    let accepted = (probe == ValidationProbe::StepfunNoSpeech
+                        && stepfun_no_speech_is_valid(&error))
+                        || (probe == ValidationProbe::AsrSilenceAllowsNoFinal
+                            && provider_no_final_is_valid(&error));
+                    if !accepted {
+                        return Err(sanitize_validation_error(error));
+                    }
+                }
             }
             ProviderKind::Llm => {
                 let polisher = SharedCloudTextPolisher::new(Arc::clone(&self.credentials));
-                polisher
-                    .polish(
-                        session_id,
-                        context,
-                        "验证连接".to_string(),
-                        Arc::new(DiscardTextStream),
-                    )
-                    .await?;
+                let polish = polisher.polish(
+                    session_id,
+                    context,
+                    "验证连接".to_string(),
+                    Arc::new(DiscardTextStream),
+                );
+                tokio::select! {
+                    _ = wait_for_cancellation(cancellation) => {
+                        let _ = polisher.cancel(session_id).await;
+                        return Err(cancelled_request());
+                    }
+                    result = polish => result.map_err(sanitize_validation_error)?,
+                };
             }
             ProviderKind::Omni => {
-                crate::cloud_providers::validate_shared_omni_provider(
+                let validation = crate::cloud_providers::validate_shared_omni_provider(
                     Arc::clone(&self.credentials),
                     context,
-                )
-                .await?;
+                );
+                tokio::select! {
+                    _ = wait_for_cancellation(cancellation) => return Err(cancelled_request()),
+                    result = validation => result.map_err(sanitize_validation_error)?,
+                };
             }
         }
-        Ok(ProviderCheckResult { ok: true })
+        Ok(())
     }
 
     async fn list_models_inner(
@@ -233,7 +289,10 @@ impl ProviderService {
         let resolved = self.resolve(request).await?;
         ensure_supported_kind(&resolved)?;
         if let Some(models) = static_models(&resolved) {
-            validate_configuration(&resolved)?;
+            if cancellation.is_cancelled() {
+                return Err(cancelled_request());
+            }
+            self.validate_resolved(resolved, cancellation).await?;
             return Ok(ProviderModelsResult { models });
         }
         validate_configuration(&resolved)?;
@@ -252,6 +311,15 @@ impl ProviderService {
         let service = self.clone();
         Box::pin(async move { service.list_models_inner(request, cancellation).await })
     }
+
+    pub fn validate_with_cancellation(
+        &self,
+        request: ProviderRequest,
+        cancellation: ProviderCancellation,
+    ) -> BoxFuture<'static, Result<ProviderCheckResult, BackendError>> {
+        let service = self.clone();
+        Box::pin(async move { service.validate_inner(request, cancellation).await })
+    }
 }
 
 impl ProviderApi for ProviderService {
@@ -260,7 +328,11 @@ impl ProviderApi for ProviderService {
         request: ProviderRequest,
     ) -> BoxFuture<'static, Result<ProviderCheckResult, BackendError>> {
         let service = self.clone();
-        Box::pin(async move { service.validate_inner(request).await })
+        Box::pin(async move {
+            service
+                .validate_inner(request, ProviderCancellation::new())
+                .await
+        })
     }
 
     fn list_models(
@@ -312,17 +384,8 @@ impl ResolvedProvider {
 }
 
 fn ensure_supported_kind(resolved: &ResolvedProvider) -> Result<(), BackendError> {
-    let supported = match resolved.kind {
-        ProviderKind::Asr => crate::SHARED_CLOUD_ASR_PROVIDER_TYPES
-            .iter()
-            .any(|value| *value == resolved.provider_type),
-        ProviderKind::Llm => crate::SHARED_CLOUD_LLM_PROVIDER_TYPES
-            .iter()
-            .any(|value| *value == resolved.provider_type),
-        ProviderKind::Omni => crate::SHARED_OMNI_PROVIDER_TYPES
-            .iter()
-            .any(|value| *value == resolved.provider_type),
-    };
+    let supported = provider_descriptor(resolved.kind, &resolved.provider_type)
+        .is_some_and(|descriptor| descriptor.validation_probe != ValidationProbe::Unsupported);
     if supported {
         Ok(())
     } else {
@@ -334,150 +397,214 @@ fn ensure_supported_kind(resolved: &ResolvedProvider) -> Result<(), BackendError
 }
 
 fn validate_configuration(resolved: &ResolvedProvider) -> Result<(), BackendError> {
-    match resolved.kind {
-        ProviderKind::Asr => {
-            if resolved.provider_type != "openai-compatible"
-                && resolved
-                    .api_key
-                    .as_deref()
-                    .unwrap_or_default()
-                    .trim()
-                    .is_empty()
-            {
-                return Err(provider_error("ASR API key is not configured"));
-            }
-            let model = resolved.model.as_deref().unwrap_or_default().trim();
-            if model.is_empty() && static_models(resolved).is_none() {
-                return Err(invalid_request("ASR model is not configured"));
-            }
-            if let Some(endpoint) = resolved
-                .endpoint
-                .as_deref()
-                .filter(|value| !value.trim().is_empty())
-            {
-                crate::endpoint_security::validate_http_endpoint(endpoint)?;
-            }
+    let descriptor = provider_descriptor(resolved.kind, &resolved.provider_type)
+        .ok_or_else(|| provider_error("provider descriptor is not configured"))?;
+    let api_key = resolved.api_key.as_deref().unwrap_or_default();
+    if api_key_required(
+        resolved.kind,
+        &resolved.provider_type,
+        resolved.endpoint.as_deref(),
+    ) && api_key.trim().is_empty()
+        && !matches!(
+            descriptor.auth_requirement,
+            AuthRequirement::Volcengine | AuthRequirement::Xfyun
+        )
+    {
+        let label = match resolved.kind {
+            ProviderKind::Asr => "ASR",
+            ProviderKind::Llm => "LLM",
+            ProviderKind::Omni => "Omni",
+        };
+        return Err(provider_error(format!("{label} API key is not configured")));
+    }
+    let model = resolved
+        .model
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .or(descriptor.default_model.as_deref());
+    if model.is_none()
+        && !matches!(
+            descriptor.auth_requirement,
+            AuthRequirement::None | AuthRequirement::Volcengine | AuthRequirement::Xfyun
+        )
+    {
+        return Err(invalid_request("provider model is not configured"));
+    }
+    if !matches!(descriptor.auth_requirement, AuthRequirement::OAuth) {
+        let endpoint = resolved
+            .endpoint
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .or(descriptor.default_endpoint.as_deref());
+        if endpoint.is_none()
+            && !matches!(
+                descriptor.auth_requirement,
+                AuthRequirement::None | AuthRequirement::Volcengine | AuthRequirement::Xfyun
+            )
+        {
+            return Err(provider_error("provider endpoint is not configured"));
         }
-        ProviderKind::Llm => {
-            if resolved.provider_type != crate::polish::CODEX_OAUTH_PROVIDER_ID
-                && resolved
-                    .api_key
-                    .as_deref()
-                    .unwrap_or_default()
-                    .trim()
-                    .is_empty()
-            {
-                return Err(provider_error("LLM API key is not configured"));
-            }
-            if resolved
-                .model
-                .as_deref()
-                .unwrap_or_default()
-                .trim()
-                .is_empty()
-                && default_llm_model(&resolved.provider_type).is_none()
-            {
-                return Err(invalid_request("LLM model is not configured"));
-            }
-            if resolved.provider_type != crate::polish::CODEX_OAUTH_PROVIDER_ID {
-                let endpoint = resolved
-                    .endpoint
-                    .as_deref()
-                    .filter(|value| !value.trim().is_empty())
-                    .or_else(|| default_llm_endpoint(&resolved.provider_type))
-                    .ok_or_else(|| provider_error("LLM endpoint is not configured"))?;
-                crate::endpoint_security::validate_http_endpoint(endpoint)?;
-                if let Some(headers) = resolved.extra_headers.as_deref() {
-                    parse_extra_headers(headers)?;
-                }
-            }
+        if let Some(endpoint) = endpoint {
+            validate_provider_endpoint(endpoint, resolved.kind == ProviderKind::Asr)?;
         }
-        ProviderKind::Omni => {
-            if resolved
-                .api_key
-                .as_deref()
-                .unwrap_or_default()
-                .trim()
-                .is_empty()
-            {
-                return Err(provider_error("Omni API key is not configured"));
-            }
-            if resolved
-                .model
-                .as_deref()
-                .unwrap_or_default()
-                .trim()
-                .is_empty()
-            {
-                return Err(invalid_request("Omni model is not configured"));
-            }
-            let endpoint = resolved
-                .endpoint
-                .as_deref()
-                .filter(|value| !value.trim().is_empty())
-                .or_else(|| default_omni_endpoint(&resolved.provider_type))
-                .ok_or_else(|| provider_error("Omni endpoint is not configured"))?;
-            crate::endpoint_security::validate_http_endpoint(endpoint)?;
-            if let Some(headers) = resolved.extra_headers.as_deref() {
-                parse_extra_headers(headers)?;
-            }
+        if let Some(headers) = resolved.extra_headers.as_deref() {
+            parse_extra_headers(headers)?;
         }
     }
     Ok(())
 }
 
 fn static_models(resolved: &ResolvedProvider) -> Option<Vec<String>> {
-    let models = match resolved.kind {
-        ProviderKind::Asr => match resolved.provider_type.as_str() {
-            "bailian" => vec![
-                crate::asr::bailian::DEFAULT_MODEL,
-                "fun-asr-flash-8k-realtime",
-                crate::asr::qwen_realtime::DEFAULT_MODEL,
-                "qwen3-asr-flash-realtime-2026-02-10",
-                "qwen3-asr-flash-realtime-2025-10-27",
-                crate::asr::dashscope_multimodal::QWEN_AUDIO_MODEL,
-                crate::asr::dashscope_multimodal::DEFAULT_MODEL,
-                "qwen3-asr-flash",
-                "fun-asr",
-                "fun-asr-2025-11-07",
-                "fun-asr-2025-08-25",
-                "fun-asr-mtl",
-                "fun-asr-mtl-2025-08-25",
-                "paraformer-v2",
-            ],
-            "bailian-qwen3-realtime" => vec![
-                crate::asr::qwen_realtime::DEFAULT_MODEL,
-                "qwen3-asr-flash-realtime-2026-02-10",
-                "qwen3-asr-flash-realtime-2025-10-27",
-            ],
-            "xiaomi-mimo-asr" => vec![crate::asr::mimo::DEFAULT_MODEL],
-            "bailian-fun-asr-flash" => vec![
-                crate::asr::dashscope_multimodal::QWEN_AUDIO_MODEL,
-                crate::asr::dashscope_multimodal::DEFAULT_MODEL,
-            ],
-            "elevenlabs" => vec![crate::asr::elevenlabs::DEFAULT_MODEL],
-            "dashscope-omni" => vec!["qwen-audio-turbo", "qwen-omni-turbo"],
-            _ => return None,
-        },
-        ProviderKind::Llm => match resolved.provider_type.as_str() {
-            crate::polish::CODEX_OAUTH_PROVIDER_ID => vec![
-                crate::polish::CODEX_DEFAULT_MODEL,
-                "gpt-5.3-codex",
-                "gpt-5.4",
-                "gpt-5.5",
-            ],
-            _ => return None,
-        },
-        ProviderKind::Omni => return None,
+    provider_descriptor(resolved.kind, &resolved.provider_type)
+        .map(|descriptor| descriptor.static_models)
+        .filter(|models| !models.is_empty())
+}
+
+fn validate_provider_endpoint(endpoint: &str, allow_websocket: bool) -> Result<(), BackendError> {
+    let url =
+        url::Url::parse(endpoint).map_err(|_| invalid_request("provider endpoint is invalid"))?;
+    if url.host_str().is_none()
+        || !matches!(url.scheme(), "http" | "https")
+            && !(allow_websocket && matches!(url.scheme(), "ws" | "wss"))
+    {
+        return Err(invalid_request("provider endpoint is invalid"));
+    }
+    Ok(())
+}
+
+const DASHSCOPE_ASR_VALIDATE_SAMPLE_URL: &str =
+    "https://dashscope.oss-cn-beijing.aliyuncs.com/samples/audio/paraformer/hello_world_female2.wav";
+
+async fn validate_dashscope_probe(resolved: &ResolvedProvider) -> Result<(), BackendError> {
+    let api_key = resolved
+        .api_key
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| provider_error("ASR API key is not configured"))?;
+    let model = resolved
+        .model
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| default_asr_model(&resolved.provider_type))
+        .ok_or_else(|| invalid_request("ASR model is not configured"))?;
+    crate::provider_rules::validate_dashscope_multimodal_model(model).map_err(invalid_request)?;
+    let protocol = crate::provider_rules::dashscope_batch_protocol_for_model(model)
+        .unwrap_or(crate::provider_rules::DashScopeBatchProtocol::Multimodal);
+    let stored_endpoint = resolved
+        .endpoint
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| default_asr_endpoint(&resolved.provider_type))
+        .ok_or_else(|| provider_error("ASR endpoint is not configured"))?;
+    let endpoint = if resolved.provider_type == "bailian" {
+        let endpoint_protocol = match protocol {
+            crate::provider_rules::DashScopeBatchProtocol::Multimodal => {
+                crate::provider_rules::BailianEndpointProtocol::Multimodal
+            }
+            crate::provider_rules::DashScopeBatchProtocol::AsyncTranscription => {
+                crate::provider_rules::BailianEndpointProtocol::AsyncTranscription
+            }
+        };
+        crate::provider_rules::derive_bailian_endpoint(stored_endpoint, endpoint_protocol)
+            .map_err(invalid_request)?
+    } else {
+        stored_endpoint.to_string()
     };
-    let mut seen = std::collections::HashSet::new();
-    Some(
-        models
-            .into_iter()
-            .filter(|model| seen.insert(*model))
-            .map(str::to_string)
-            .collect(),
-    )
+    validate_provider_endpoint(&endpoint, false)?;
+    let provider = crate::asr::DashScopeMultimodalASR::new(
+        api_key.to_string(),
+        endpoint.clone(),
+        model.to_string(),
+    );
+    if protocol == crate::provider_rules::DashScopeBatchProtocol::AsyncTranscription {
+        return tokio::time::timeout(
+            Duration::from_secs(120),
+            provider.transcribe_async_url_with_timeout(
+                DASHSCOPE_ASR_VALIDATE_SAMPLE_URL,
+                Duration::from_secs(60),
+            ),
+        )
+        .await
+        .map_err(|_| {
+            BackendError::new(BackendErrorCode::Provider, "ASR provider timed out").retryable(true)
+        })?
+        .map(|_| ())
+        .map_err(|error| provider_error(format!("ASR provider failed: {error}")));
+    }
+
+    let url = crate::asr::dashscope_multimodal::generation_url(&endpoint)
+        .map_err(|_| invalid_request("ASR endpoint is invalid"))?;
+    let body = crate::asr::dashscope_multimodal::dashscope_multimodal_body_from_uri(
+        model,
+        DASHSCOPE_ASR_VALIDATE_SAMPLE_URL,
+    );
+    let response = crate::net::credential_http()
+        .post(url)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .header("Content-Type", "application/json")
+        .header("X-DashScope-SSE", "disable")
+        .json(&body)
+        .timeout(Duration::from_secs(20))
+        .send()
+        .await
+        .map_err(|error| {
+            if error.is_timeout() {
+                BackendError::new(BackendErrorCode::Provider, "ASR provider timed out")
+                    .retryable(true)
+            } else {
+                provider_error("ASR provider network request failed")
+            }
+        })?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(provider_error(format!(
+            "providerHttpStatus:{}",
+            response.status().as_u16()
+        )))
+    }
+}
+
+fn stepfun_no_speech_is_valid(error: &BackendError) -> bool {
+    let message = error.message.to_ascii_lowercase();
+    error.code == BackendErrorCode::Provider
+        && message.contains("400")
+        && message.contains("no speech")
+}
+
+fn provider_no_final_is_valid(error: &BackendError) -> bool {
+    error.code == BackendErrorCode::Provider
+        && error
+            .message
+            .to_ascii_lowercase()
+            .contains("no final result")
+}
+
+fn sanitize_validation_error(error: BackendError) -> BackendError {
+    if error.code != BackendErrorCode::Provider {
+        return error;
+    }
+    let message = error.message.as_str();
+    if message.ends_with("is not configured") {
+        return error;
+    }
+    let status = ["status ", "API error ", "HTTP "]
+        .iter()
+        .find_map(|marker| {
+            let tail = message.split_once(marker)?.1;
+            let digits = tail
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>();
+            digits
+                .parse::<u16>()
+                .ok()
+                .filter(|status| (100..600).contains(status))
+        });
+    let message = status
+        .map(|status| format!("providerHttpStatus:{status}"))
+        .unwrap_or_else(|| "provider validation failed".to_string());
+    BackendError::new(BackendErrorCode::Provider, message).retryable(error.retryable)
 }
 
 async fn fetch_models(
@@ -628,6 +755,16 @@ fn provider_error(message: impl Into<String>) -> BackendError {
     BackendError::new(BackendErrorCode::Provider, message)
 }
 
+fn cancelled_request() -> BackendError {
+    BackendError::new(BackendErrorCode::Cancelled, "provider request cancelled")
+}
+
+async fn wait_for_cancellation(cancellation: ProviderCancellation) {
+    while !cancellation.is_cancelled() {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 struct DiscardTextStream;
 
 impl TextStreamSink for DiscardTextStream {
@@ -644,6 +781,276 @@ mod tests {
     };
     use crate::provider_transport::{ProviderCancellation, ProviderTransportError};
     use crate::testing::FakeProviderTransport;
+    use std::io::{Read, Write};
+
+    fn spawn_http_response(
+        status: &'static str,
+        content_type: &'static str,
+        body: &'static str,
+    ) -> (String, std::sync::mpsc::Receiver<Vec<u8>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (request_tx, request_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 8192];
+            loop {
+                let read = stream.read(&mut buffer).unwrap_or(0);
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .and_then(|value| value.trim().parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
+                if request.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+            request_tx.send(request).unwrap();
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        });
+        (format!("http://{address}/v1"), request_rx)
+    }
+
+    async fn create_channel_with_values(
+        credentials: &Arc<InMemoryCredentialStore>,
+        kind: ChannelKind,
+        provider_type: &str,
+        values: &[(&str, &str)],
+    ) -> String {
+        let result = credentials
+            .mutate_channel(ChannelMutation::Create {
+                kind,
+                provider_type: provider_type.to_string(),
+                name: "fixture".to_string(),
+            })
+            .await
+            .unwrap();
+        let id = match result {
+            ChannelMutationResult::Created(id) => id,
+            other => panic!("unexpected mutation result: {other:?}"),
+        };
+        let namespace = match kind {
+            ChannelKind::Asr => CredentialNamespace::Asr,
+            ChannelKind::Llm => CredentialNamespace::Llm,
+        };
+        for (account, value) in values {
+            credentials
+                .write(
+                    CredentialKey::new(namespace, Some(id.clone()), *account).unwrap(),
+                    SecretValue::new(*value),
+                )
+                .await
+                .unwrap();
+        }
+        id
+    }
+
+    #[tokio::test]
+    async fn openai_compatible_asr_without_key_reaches_the_configured_endpoint() {
+        let (endpoint, request) =
+            spawn_http_response("200 OK", "application/json", r#"{"text":"ok"}"#);
+        let credentials = Arc::new(InMemoryCredentialStore::default());
+        let channel = create_channel_with_values(
+            &credentials,
+            ChannelKind::Asr,
+            "openai-compatible",
+            &[
+                (ASR_ENDPOINT_ACCOUNT, endpoint.as_str()),
+                (ASR_MODEL_ACCOUNT, "local-asr"),
+            ],
+        )
+        .await;
+        let service = ProviderService::new(credentials, Arc::new(crate::TokioTaskSpawner));
+
+        service
+            .validate(ProviderRequest {
+                kind: ProviderKind::Asr,
+                channel_id: Some(channel),
+            })
+            .await
+            .unwrap();
+
+        let request = String::from_utf8_lossy(&request.recv().unwrap()).to_ascii_lowercase();
+        assert!(request.starts_with("post /v1/audio/transcriptions "));
+        assert!(!request.contains("authorization:"));
+    }
+
+    #[tokio::test]
+    async fn custom_llm_without_key_reaches_its_explicit_endpoint() {
+        let (endpoint, request) = spawn_http_response(
+            "200 OK",
+            "text/event-stream",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n",
+        );
+        let credentials = Arc::new(InMemoryCredentialStore::default());
+        let channel = create_channel_with_values(
+            &credentials,
+            ChannelKind::Llm,
+            "custom",
+            &[
+                (LLM_ENDPOINT_ACCOUNT, endpoint.as_str()),
+                (LLM_MODEL_ACCOUNT, "local-llm"),
+            ],
+        )
+        .await;
+        let service = ProviderService::new(credentials, Arc::new(crate::TokioTaskSpawner));
+
+        service
+            .validate(ProviderRequest {
+                kind: ProviderKind::Llm,
+                channel_id: Some(channel),
+            })
+            .await
+            .unwrap();
+
+        let request = String::from_utf8_lossy(&request.recv().unwrap()).to_ascii_lowercase();
+        assert!(request.starts_with("post /v1/chat/completions "));
+        assert!(!request.contains("authorization:"));
+    }
+
+    #[tokio::test]
+    async fn provider_validation_never_returns_an_untrusted_error_body() {
+        let (endpoint, _request) = spawn_http_response(
+            "401 Unauthorized",
+            "application/json",
+            r#"{"error":"response-secret"}"#,
+        );
+        let credentials = Arc::new(InMemoryCredentialStore::default());
+        let channel = create_channel_with_values(
+            &credentials,
+            ChannelKind::Llm,
+            "custom",
+            &[
+                (LLM_ENDPOINT_ACCOUNT, endpoint.as_str()),
+                (LLM_MODEL_ACCOUNT, "local-llm"),
+            ],
+        )
+        .await;
+        let service = ProviderService::new(credentials, Arc::new(crate::TokioTaskSpawner));
+
+        let error = service
+            .validate(ProviderRequest {
+                kind: ProviderKind::Llm,
+                channel_id: Some(channel),
+            })
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.message, "providerHttpStatus:401");
+        assert!(!format!("{error:?}").contains("response-secret"));
+    }
+
+    #[tokio::test]
+    async fn static_model_list_runs_the_real_provider_probe_first() {
+        let (endpoint, request) =
+            spawn_http_response("200 OK", "application/json", r#"{"output":{}}"#);
+        let credentials = Arc::new(InMemoryCredentialStore::default());
+        let channel = create_channel_with_values(
+            &credentials,
+            ChannelKind::Asr,
+            "bailian-fun-asr-flash",
+            &[
+                (ASR_API_KEY_ACCOUNT, "fixture-key"),
+                (ASR_ENDPOINT_ACCOUNT, endpoint.as_str()),
+                (ASR_MODEL_ACCOUNT, "fun-asr-flash-2026-06-15"),
+            ],
+        )
+        .await;
+        let service = ProviderService::new(credentials, Arc::new(crate::TokioTaskSpawner));
+
+        let result = service
+            .list_models(ProviderRequest {
+                kind: ProviderKind::Asr,
+                channel_id: Some(channel),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.models,
+            vec!["qwen-audio-3.0-asr-flash", "fun-asr-flash-2026-06-15"]
+        );
+        let request = request
+            .recv_timeout(Duration::from_secs(2))
+            .expect("static list must perform a protocol probe");
+        let request = String::from_utf8_lossy(&request);
+        assert!(request.contains(DASHSCOPE_ASR_VALIDATE_SAMPLE_URL));
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer fixture-key"));
+    }
+
+    #[tokio::test]
+    async fn stepfun_no_speech_400_proves_credentials_and_protocol_are_valid() {
+        let (endpoint, _request) = spawn_http_response(
+            "400 Bad Request",
+            "application/json",
+            r#"{"error":{"message":"no speech found","type":"request_params_invalid"}}"#,
+        );
+        let credentials = Arc::new(InMemoryCredentialStore::default());
+        let channel = create_channel_with_values(
+            &credentials,
+            ChannelKind::Asr,
+            "stepfun",
+            &[
+                (ASR_API_KEY_ACCOUNT, "fixture-key"),
+                (ASR_ENDPOINT_ACCOUNT, endpoint.as_str()),
+                (ASR_MODEL_ACCOUNT, "stepaudio-2.5-asr"),
+            ],
+        )
+        .await;
+        let service = ProviderService::new(credentials, Arc::new(crate::TokioTaskSpawner));
+
+        service
+            .validate(ProviderRequest {
+                kind: ProviderKind::Asr,
+                channel_id: Some(channel),
+            })
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn no_speech_probe_does_not_hide_other_bad_requests() {
+        let accepted = BackendError::new(
+            BackendErrorCode::Provider,
+            "ASR provider failed: Whisper API error 400: no speech found",
+        );
+        let rejected = BackendError::new(
+            BackendErrorCode::Provider,
+            "ASR provider failed: Whisper API error 400: response_format is invalid",
+        );
+        assert!(stepfun_no_speech_is_valid(&accepted));
+        assert!(!stepfun_no_speech_is_valid(&rejected));
+
+        let no_final = BackendError::new(
+            BackendErrorCode::Provider,
+            "ASR provider failed: no final result",
+        );
+        assert!(provider_no_final_is_valid(&no_final));
+        assert!(!provider_no_final_is_valid(&rejected));
+    }
 
     async fn service_with_channel() -> (ProviderService, Arc<InMemoryCredentialStore>) {
         let credentials = Arc::new(InMemoryCredentialStore::default());
@@ -1011,6 +1418,37 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code, BackendErrorCode::Cancelled);
         assert_eq!(transport.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn cancellation_stops_static_validation_before_network_dispatch() {
+        let credentials = Arc::new(InMemoryCredentialStore::default());
+        let channel = create_channel_with_values(
+            &credentials,
+            ChannelKind::Asr,
+            "bailian-fun-asr-flash",
+            &[
+                (ASR_API_KEY_ACCOUNT, "fixture-key"),
+                (ASR_ENDPOINT_ACCOUNT, "http://127.0.0.1:9/v1"),
+                (ASR_MODEL_ACCOUNT, "fun-asr-flash-2026-06-15"),
+            ],
+        )
+        .await;
+        let service = ProviderService::new(credentials, Arc::new(crate::TokioTaskSpawner));
+        let cancellation = ProviderCancellation::new();
+        cancellation.cancel();
+
+        let error = service
+            .list_models_with_cancellation(
+                ProviderRequest {
+                    kind: ProviderKind::Asr,
+                    channel_id: Some(channel),
+                },
+                cancellation,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, BackendErrorCode::Cancelled);
     }
 
     #[test]

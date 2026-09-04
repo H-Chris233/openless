@@ -205,11 +205,12 @@ async fn forwarded_launch_intents_use_core_state_and_semantic_host_actions() {
         Some(CliDispatchOutcome::DictationCompleted(_))
     ));
 
-    let pressed_at = std::time::Instant::now();
+    let pressed_at = std::time::Instant::now() + std::time::Duration::from_secs(1);
     assert!(matches!(
         host.dispatch_hotkey_event(LinuxHotkeyEvent::DictationPressed {
             symbol: 1,
             states: 0,
+            press_id: 1,
             at: pressed_at,
         })
         .await
@@ -220,6 +221,7 @@ async fn forwarded_launch_intents_use_core_state_and_semantic_host_actions() {
         host.dispatch_hotkey_event(LinuxHotkeyEvent::DictationCombined {
             symbol: 2,
             states: 0,
+            press_id: 1,
             at: pressed_at,
         })
         .await
@@ -242,7 +244,8 @@ async fn forwarded_launch_intents_use_core_state_and_semantic_host_actions() {
         host.dispatch_hotkey_event(LinuxHotkeyEvent::DictationPressed {
             symbol: 1,
             states: 0,
-            at: std::time::Instant::now(),
+            press_id: 2,
+            at: pressed_at + std::time::Duration::from_secs(1),
         })
         .await
         .unwrap(),
@@ -259,7 +262,8 @@ async fn forwarded_launch_intents_use_core_state_and_semantic_host_actions() {
     host.dispatch_hotkey_event(LinuxHotkeyEvent::DictationCombined {
         symbol: 2,
         states: 0,
-        at: std::time::Instant::now(),
+        press_id: 2,
+        at: pressed_at + std::time::Duration::from_secs(1),
     })
     .await
     .unwrap();
@@ -434,12 +438,13 @@ async fn linux_headless_selection_contract_covers_capability_and_session_edges()
             .as_nanos()
     ));
     let mut dependencies = BackendDependencies::unsupported();
-    dependencies.selection_runtime = Some(Arc::new(
-        FixtureSelectionRuntime::linux_preview_unsupported(SelectionCapture {
+    dependencies.selection_runtime = Some(Arc::new(FixtureSelectionRuntime::successful(
+        SelectionCapture {
             text: "fixture selection".into(),
             source_app: None,
-        }),
-    ));
+        },
+        InsertOutcome::Inserted,
+    )));
     dependencies.selection_polisher = Some(Arc::new(FixtureTextPolisher::successful(
         "fixture selection polished",
     )));
@@ -464,31 +469,26 @@ async fn linux_headless_selection_contract_covers_capability_and_session_edges()
         })
         .await
         .unwrap();
-    assert_eq!(
-        selection
-            .revert(direct_session)
-            .await
-            .expect_err("Linux revert must be an explicit capability failure")
-            .code,
-        BackendErrorCode::Unsupported
-    );
+    selection.revert(direct_session).await.unwrap();
 
     let mut preferences = backend.get_preferences();
     preferences.selection_polish_output_mode = SelectionPolishOutputMode::PreviewConfirm;
     host.update_settings_strict(preferences, host.snapshot().preferences_revision)
         .unwrap();
+    let preview_session = selection
+        .begin_polish(SelectionPolishRequest {
+            selected_text: Some("fixture selection".into()),
+            mode: PolishMode::Raw,
+            instruction: None,
+        })
+        .await
+        .unwrap();
     assert_eq!(
-        selection
-            .begin_polish(SelectionPolishRequest {
-                selected_text: Some("fixture selection".into()),
-                mode: PolishMode::Raw,
-                instruction: None,
-            })
-            .await
-            .expect_err("Linux retained preview must be an explicit capability failure")
-            .code,
-        BackendErrorCode::Unsupported
+        selection.snapshot().await.unwrap().phase,
+        openless_linux_egui::SelectionPhase::Preview
     );
+    selection.confirm(preview_session, None).await.unwrap();
+    selection.revert(preview_session).await.unwrap();
 
     let voice = &backend.services().selection_voice;
     let confirmed = voice

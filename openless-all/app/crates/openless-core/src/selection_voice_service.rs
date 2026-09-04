@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, Weak};
 
 use futures_util::future::BoxFuture;
 
@@ -10,10 +10,11 @@ use crate::dictation_context::{
     DictationContext, DictationProviderInvocations, DictationStartOptions, ProviderInvocation,
 };
 use crate::domains::{
-    SelectionCapture, SelectionVoiceApi, SelectionVoiceApplyOutcome, SelectionVoiceApplyTicket,
-    SelectionVoiceDisposition, SelectionVoiceEditAction, SelectionVoiceEditPreviewResult,
-    SelectionVoiceEditRequest, SelectionVoiceInstructionRequest, SelectionVoiceIntentPrompt,
-    SelectionVoicePhase, SelectionVoicePreview, SelectionVoicePreviewUpdate,
+    QaApi, SelectionCapture, SelectionVoiceApi, SelectionVoiceApplyOutcome,
+    SelectionVoiceApplyTicket, SelectionVoiceDisposition, SelectionVoiceEditAction,
+    SelectionVoiceEditPreviewResult, SelectionVoiceEditRequest, SelectionVoiceHotkeyAction,
+    SelectionVoiceHotkeyEdge, SelectionVoiceInstructionRequest, SelectionVoiceIntentPrompt,
+    SelectionVoicePhase, SelectionVoicePreview, SelectionVoicePreviewUpdate, SelectionVoiceRoute,
     SelectionVoiceSnapshot,
 };
 use crate::edit_plan::{apply_edit_plan, parse_edit_plan, EditOperation, EditPlan};
@@ -128,6 +129,8 @@ pub(crate) struct SelectionVoiceService {
     persistence: Arc<SelectionVoicePersistence>,
     workflow: Arc<SelectionVoiceWorkflow>,
     voice_sessions: Arc<crate::voice_session::VoiceSessionGate>,
+    qa: Arc<RwLock<Option<Weak<dyn QaApi>>>>,
+    auto_press_at: Arc<RwLock<Option<std::time::Instant>>>,
 }
 
 struct SelectionVoiceWorkflow {
@@ -186,7 +189,23 @@ impl SelectionVoiceService {
                 polisher,
             }),
             voice_sessions,
+            qa: Arc::new(RwLock::new(None)),
+            auto_press_at: Arc::new(RwLock::new(None)),
         }
+    }
+
+    fn qa(&self) -> Result<Arc<dyn QaApi>, BackendError> {
+        self.qa
+            .read()
+            .expect("selection voice QA binding lock poisoned")
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .ok_or_else(|| {
+                BackendError::new(
+                    BackendErrorCode::Unsupported,
+                    "selection voice QA routing is unavailable",
+                )
+            })
     }
 }
 
@@ -522,6 +541,114 @@ impl SelectionVoicePersistence {
 }
 
 impl SelectionVoiceApi for SelectionVoiceService {
+    fn bind_qa(&self, qa: Weak<dyn QaApi>) {
+        *self
+            .qa
+            .write()
+            .expect("selection voice QA binding lock poisoned") = Some(qa);
+    }
+
+    fn dispatch_hotkey_edge(
+        &self,
+        edge: SelectionVoiceHotkeyEdge,
+    ) -> Result<SelectionVoiceHotkeyAction, BackendError> {
+        use crate::shared_types::HotkeyMode;
+
+        const AUTO_HOLD_THRESHOLD: std::time::Duration = std::time::Duration::from_millis(350);
+
+        let preferences = self.workflow.preferences.get();
+        if !preferences.selection_voice_enabled {
+            return Ok(SelectionVoiceHotkeyAction::Noop);
+        }
+        let phase = self
+            .state
+            .read()
+            .expect("selection voice state lock poisoned")
+            .phase;
+        let active = phase == SelectionVoicePhase::Recording;
+        let idle = matches!(
+            phase,
+            SelectionVoicePhase::Idle
+                | SelectionVoicePhase::Completed
+                | SelectionVoicePhase::Cancelled
+                | SelectionVoicePhase::Failed
+        );
+        Ok(match edge {
+            SelectionVoiceHotkeyEdge::Pressed { at } if idle => {
+                *self
+                    .auto_press_at
+                    .write()
+                    .expect("selection voice hotkey lock poisoned") =
+                    (preferences.hotkey.mode == HotkeyMode::Auto).then_some(at);
+                SelectionVoiceHotkeyAction::Start
+            }
+            SelectionVoiceHotkeyEdge::Pressed { .. } if active => match preferences.hotkey.mode {
+                HotkeyMode::Toggle | HotkeyMode::Auto => {
+                    *self
+                        .auto_press_at
+                        .write()
+                        .expect("selection voice hotkey lock poisoned") = None;
+                    SelectionVoiceHotkeyAction::Finish
+                }
+                HotkeyMode::Hold | HotkeyMode::DoubleClick => SelectionVoiceHotkeyAction::Noop,
+            },
+            SelectionVoiceHotkeyEdge::Released { .. }
+                if active && preferences.hotkey.mode == HotkeyMode::Hold =>
+            {
+                SelectionVoiceHotkeyAction::Finish
+            }
+            SelectionVoiceHotkeyEdge::Released { at }
+                if active && preferences.hotkey.mode == HotkeyMode::Auto =>
+            {
+                let pressed_at = self
+                    .auto_press_at
+                    .write()
+                    .expect("selection voice hotkey lock poisoned")
+                    .take();
+                if pressed_at.is_some_and(|pressed| {
+                    at.saturating_duration_since(pressed) >= AUTO_HOLD_THRESHOLD
+                }) {
+                    SelectionVoiceHotkeyAction::Finish
+                } else {
+                    SelectionVoiceHotkeyAction::Noop
+                }
+            }
+            SelectionVoiceHotkeyEdge::Pressed { .. }
+            | SelectionVoiceHotkeyEdge::Released { .. } => SelectionVoiceHotkeyAction::Noop,
+        })
+    }
+
+    fn recording_fault(
+        &self,
+        session_id: SessionId,
+        _error: BackendError,
+    ) -> BoxFuture<'static, Result<(), BackendError>> {
+        let state = Arc::clone(&self.state);
+        let events = self.events.clone();
+        let voice_sessions = Arc::clone(&self.voice_sessions);
+        let polisher = self.workflow.polisher.clone();
+        Box::pin(async move {
+            let snapshot = {
+                let mut state = state.write().expect("selection voice state lock poisoned");
+                state.ensure_session(session_id)?;
+                if state.phase != SelectionVoicePhase::Recording {
+                    return Err(invalid_state("selection voice is not recording"));
+                }
+                state.phase = SelectionVoicePhase::Failed;
+                state.snapshot()
+            };
+            events.publish(
+                Some(session_id),
+                BackendEventKind::SelectionVoiceStateChanged(snapshot),
+            );
+            voice_sessions.release(session_id);
+            if let Some(polisher) = polisher {
+                polisher.cancel(session_id).await?;
+            }
+            Ok(())
+        })
+    }
+
     fn snapshot(&self) -> BoxFuture<'static, Result<SelectionVoiceSnapshot, BackendError>> {
         let state = Arc::clone(&self.state);
         Box::pin(async move {
@@ -748,6 +875,63 @@ impl SelectionVoiceApi for SelectionVoiceService {
                 BackendEventKind::SelectionVoiceStateChanged(snapshot),
             );
             Ok(disposition)
+        })
+    }
+
+    fn route_disposition(
+        &self,
+        disposition: SelectionVoiceDisposition,
+    ) -> BoxFuture<'static, Result<SelectionVoiceRoute, BackendError>> {
+        let service = self.clone();
+        Box::pin(async move {
+            let session_id = match &disposition {
+                SelectionVoiceDisposition::AwaitingIntent { prompt } => prompt.session_id,
+                SelectionVoiceDisposition::Question { session_id, .. }
+                | SelectionVoiceDisposition::Edit { session_id, .. } => *session_id,
+            };
+            let routed = async {
+                match disposition {
+                    SelectionVoiceDisposition::AwaitingIntent { prompt } => {
+                        Ok(SelectionVoiceRoute::AwaitingIntent { prompt })
+                    }
+                    SelectionVoiceDisposition::Question { instruction, .. } => {
+                        let qa = service.qa()?;
+                        qa.show().await?;
+                        qa.set_edit_instruction_mode(false).await?;
+                        qa.submit_text(instruction).await?;
+                        service.complete(session_id).await?;
+                        Ok(SelectionVoiceRoute::QuestionCompleted { session_id })
+                    }
+                    SelectionVoiceDisposition::Edit { .. } => {
+                        match service.prepare_edit(session_id, None).await? {
+                            SelectionVoiceEditAction::OpenConversation {
+                                session_id,
+                                selection,
+                                instruction,
+                            } => {
+                                let qa = service.qa()?;
+                                qa.show().await?;
+                                qa.set_edit_instruction_mode(true).await?;
+                                // The capture predates the QA window. Passing
+                                // it explicitly prevents a focus change from
+                                // silently replacing the source text/target
+                                // with whatever happens to be selected now.
+                                qa.submit_selection_edit(session_id, selection, instruction)
+                                    .await?;
+                                Ok(SelectionVoiceRoute::EditConversationOpened { session_id })
+                            }
+                            SelectionVoiceEditAction::ReadyToApply { preview } => {
+                                Ok(SelectionVoiceRoute::ReadyToApply { preview })
+                            }
+                        }
+                    }
+                }
+            }
+            .await;
+            if routed.is_err() {
+                let _ = service.cancel(Some(session_id)).await;
+            }
+            routed
         })
     }
 

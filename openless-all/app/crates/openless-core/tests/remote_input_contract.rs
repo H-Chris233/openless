@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use futures_util::future::BoxFuture;
 use openless_core::{
     BackendConfig, BackendDependencies, BackendError, BackendErrorCode, BackendEventKind,
-    OpenLessBackend, RemoteAuthResult, RemoteInputApi, RemoteInputConfig,
+    OpenLessBackend, RemoteAuthResult, RemoteFrameCodec, RemoteInputApi, RemoteInputConfig,
     RemoteInputRuntimeAdapter, RemoteInputServerBinding, RemoteInputServerConfig,
     RemoteInputService, SecretValue, SessionId, REMOTE_INPUT_MAX_PCM_FRAME_BYTES,
 };
@@ -141,6 +141,70 @@ async fn authenticate(remote: &dyn RemoteInputApi, connection_id: SessionId) {
             .await
             .unwrap(),
         RemoteAuthResult::Ok
+    );
+}
+
+#[test]
+fn contract_2_audio_frames_use_ol20_uuid_big_endian_sequence_and_pcm() {
+    let session_id = SessionId::from_uuid(
+        uuid::Uuid::parse_str("00112233-4455-6677-8899-aabbccddeeff").unwrap(),
+    );
+    let expected = vec![
+        0x4f, 0x4c, 0x32, 0x30, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa,
+        0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x34, 0x12,
+        0xcc, 0xff,
+    ];
+
+    assert_eq!(
+        RemoteFrameCodec::encode(session_id, 0x0102_0304_0506_0708, &[0x34, 0x12, 0xcc, 0xff])
+            .unwrap(),
+        expected
+    );
+    assert_eq!(
+        RemoteFrameCodec::decode(&expected).unwrap(),
+        (
+            session_id,
+            0x0102_0304_0506_0708,
+            vec![0x34, 0x12, 0xcc, 0xff]
+        )
+    );
+}
+
+#[test]
+fn contract_2_audio_frames_reject_invalid_headers_and_pcm() {
+    let session_id = SessionId::new();
+    assert_eq!(
+        RemoteFrameCodec::encode(session_id, 0, &[])
+            .unwrap_err()
+            .code,
+        BackendErrorCode::InvalidArgument
+    );
+    assert_eq!(
+        RemoteFrameCodec::encode(session_id, 0, &[0])
+            .unwrap_err()
+            .code,
+        BackendErrorCode::InvalidArgument
+    );
+    assert_eq!(
+        RemoteFrameCodec::encode(
+            session_id,
+            0,
+            &vec![0; REMOTE_INPUT_MAX_PCM_FRAME_BYTES + 2]
+        )
+        .unwrap_err()
+        .code,
+        BackendErrorCode::InvalidArgument
+    );
+
+    let mut frame = RemoteFrameCodec::encode(session_id, 0, &[0, 0]).unwrap();
+    frame[0] = b'X';
+    assert_eq!(
+        RemoteFrameCodec::decode(&frame).unwrap_err().code,
+        BackendErrorCode::InvalidArgument
+    );
+    assert_eq!(
+        RemoteFrameCodec::decode(b"OL20").unwrap_err().code,
+        BackendErrorCode::InvalidArgument
     );
 }
 

@@ -714,7 +714,9 @@ impl ModelStore {
                     downloaded_bytes: if native {
                         0
                     } else {
-                        directory_size(&runtime_directory).unwrap_or(0)
+                        directory_size(&runtime_directory)
+                            .unwrap_or(0)
+                            .saturating_add(self.partial_downloaded_bytes(&entry.target, None)?)
                     },
                     size_bytes: None,
                 })
@@ -1003,14 +1005,35 @@ impl ModelStore {
         }
         let value: serde_json::Value = serde_json::from_slice(&response.bytes)
             .map_err(|error| invalid(format!("invalid model card JSON: {error}")))?;
-        let description = value
+        let mut description = value
             .pointer("/cardData/summary")
-            .or_else(|| value.get("description"))
             .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                value
+                    .get("description")
+                    .and_then(|value| value.as_str())
+                    .filter(|value| !value.trim().is_empty())
+            })
             .unwrap_or_default()
-            .chars()
-            .take(280)
-            .collect();
+            .to_string();
+        if description.trim().is_empty() {
+            let readme = self
+                .transport
+                .request(ModelTransportRequest {
+                    url: format!("{base_url}/{repository}/raw/main/README.md"),
+                    range: None,
+                    max_response_bytes: DEFAULT_MODEL_METADATA_BYTES,
+                })
+                .await;
+            if let Ok(response) = readme {
+                if response.status == 200 {
+                    description = std::str::from_utf8(&response.bytes)
+                        .map(first_readme_paragraph)
+                        .unwrap_or_default();
+                }
+            }
+        }
         Ok(ModelCard {
             model_id: model_id.into(),
             repository: repository.into(),
@@ -1022,7 +1045,7 @@ impl ModelStore {
                 .get("likes")
                 .and_then(|value| value.as_u64())
                 .unwrap_or(0),
-            description,
+            description: truncate_description(&description),
         })
     }
 
@@ -1089,7 +1112,7 @@ impl ModelStore {
 
     pub fn status(&self, manifest: &ModelManifest) -> Result<ModelCacheStatus, BackendError> {
         let dir = self.model_dir(&manifest.target)?;
-        let downloaded_bytes = manifest
+        let complete_bytes = manifest
             .files
             .iter()
             .map(|file| {
@@ -1098,6 +1121,13 @@ impl ModelStore {
                     .unwrap_or(0)
             })
             .fold(0u64, u64::saturating_add);
+        let expected = manifest
+            .files
+            .iter()
+            .map(|file| (file.path.clone(), file.size_bytes))
+            .collect();
+        let downloaded_bytes = complete_bytes
+            .saturating_add(self.partial_downloaded_bytes(&manifest.target, Some(&expected))?);
         let complete_files = manifest.files.iter().all(|file| {
             std::fs::metadata(dir.join(&file.path))
                 .map(|meta| meta.len() == file.size_bytes)
@@ -1109,6 +1139,35 @@ impl ModelStore {
             downloaded_bytes,
             expected_bytes: manifest.total_bytes,
         })
+    }
+
+    fn partial_downloaded_bytes(
+        &self,
+        target: &LocalAsrTarget,
+        expected: Option<&BTreeMap<String, u64>>,
+    ) -> Result<u64, BackendError> {
+        let staging = self.models_root_dir().join(staging_dir_name(target));
+        if !staging.is_dir() || !staging.join(MODEL_PARTIAL_INDEX).is_file() {
+            return Ok(0);
+        }
+        match trusted_partial_bytes(
+            &staging,
+            expected,
+            self.config.max_file_bytes,
+            self.config.max_total_bytes,
+        )? {
+            Some(bytes) => Ok(bytes),
+            None => {
+                let active = self
+                    .active_downloads
+                    .lock()
+                    .expect("model download lock poisoned");
+                if !active.contains_key(target) {
+                    std::fs::remove_dir_all(staging).map_err(platform_error)?;
+                }
+                Ok(0)
+            }
+        }
     }
 
     pub async fn download(
@@ -1733,6 +1792,58 @@ struct RelocationJournal {
     source: PathBuf,
 }
 
+fn trusted_partial_bytes(
+    staging: &Path,
+    expected: Option<&BTreeMap<String, u64>>,
+    max_file_bytes: u64,
+    max_total_bytes: u64,
+) -> Result<Option<u64>, BackendError> {
+    let index_path = staging.join(MODEL_PARTIAL_INDEX);
+    if !std::fs::symlink_metadata(&index_path)
+        .map(|metadata| metadata.file_type().is_file())
+        .unwrap_or(false)
+    {
+        return Ok(None);
+    }
+    let partial = match std::fs::read(index_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<PartialIndex>(&bytes).ok())
+    {
+        Some(partial) if partial.version == PARTIAL_INDEX_VERSION => partial,
+        _ => return Ok(None),
+    };
+    let mut total = 0u64;
+    for (path, offset) in &partial.files {
+        if validate_model_path(path).is_err()
+            || *offset > max_file_bytes
+            || expected.is_some_and(|files| {
+                files
+                    .get(path)
+                    .is_none_or(|expected_bytes| offset > expected_bytes)
+            })
+            || !std::fs::symlink_metadata(staging.join(path))
+                .map(|metadata| metadata.file_type().is_file() && metadata.len() == *offset)
+                .unwrap_or(false)
+        {
+            return Ok(None);
+        }
+        total = total.saturating_add(*offset);
+        if total > max_total_bytes {
+            return Ok(None);
+        }
+    }
+    let mut staged_files = Vec::new();
+    collect_relative_files(staging, staging, &mut staged_files).map_err(platform_error)?;
+    if staged_files.into_iter().any(|relative| {
+        relative != MODEL_PARTIAL_INDEX
+            && relative != format!("{MODEL_PARTIAL_INDEX}.tmp")
+            && !partial.files.contains_key(&relative)
+    }) {
+        return Ok(None);
+    }
+    Ok(Some(total))
+}
+
 fn restore_partial_index(
     staging: &Path,
     manifest: &ModelManifest,
@@ -1814,6 +1925,108 @@ fn directory_size(path: &Path) -> std::io::Result<u64> {
         let size = directory_size(&entry?.path())?;
         Ok(total.saturating_add(size))
     })
+}
+
+const MODEL_CARD_DESCRIPTION_CHARS: usize = 280;
+
+fn first_readme_paragraph(markdown: &str) -> String {
+    for block in markdown.split("\n\n") {
+        let block = block.trim();
+        if block.is_empty() || block.starts_with("---") {
+            continue;
+        }
+        let mut parts = Vec::new();
+        for raw_line in block.lines() {
+            let line = raw_line.trim();
+            if line.is_empty()
+                || line.starts_with('#')
+                || line.starts_with('!')
+                || line.starts_with('|')
+                || line.starts_with("---")
+                || line.starts_with('<')
+                || is_link_only_line(line)
+            {
+                continue;
+            }
+            let stripped = strip_markdown_inline(line);
+            if !stripped.is_empty() {
+                parts.push(stripped);
+            }
+        }
+        if !parts.is_empty() {
+            return truncate_description(&parts.join(" "));
+        }
+    }
+    String::new()
+}
+
+fn is_link_only_line(line: &str) -> bool {
+    if line.contains("img.shields.io") || line.trim_start().starts_with("[![") {
+        return true;
+    }
+    let mut rest = line;
+    while let Some(open) = rest.find('[') {
+        if !rest[..open].chars().all(is_markdown_link_separator) {
+            return false;
+        }
+        let tail = &rest[open + 1..];
+        let Some(close) = tail.find("](") else {
+            return false;
+        };
+        let after = &tail[close + 2..];
+        let Some(end) = after.find(')') else {
+            return false;
+        };
+        rest = &after[end + 1..];
+    }
+    rest.chars().all(is_markdown_link_separator)
+}
+
+fn is_markdown_link_separator(character: char) -> bool {
+    character.is_whitespace() || matches!(character, '|' | ',' | '·' | '、')
+}
+
+fn strip_markdown_inline(line: &str) -> String {
+    let mut output = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(open) = rest.find('[') {
+        output.push_str(&rest[..open]);
+        let tail = &rest[open + 1..];
+        if let Some(close) = tail.find("](") {
+            let after = &tail[close + 2..];
+            if let Some(end) = after.find(')') {
+                let image = output.ends_with('!');
+                if image {
+                    output.pop();
+                } else {
+                    output.push_str(tail[..close].trim());
+                }
+                rest = &after[end + 1..];
+                continue;
+            }
+        }
+        output.push('[');
+        rest = tail;
+    }
+    output.push_str(rest);
+    output
+        .replace("**", "")
+        .replace(['`', '*', '_'], "")
+        .trim()
+        .to_string()
+}
+
+fn truncate_description(text: &str) -> String {
+    let text = text.trim();
+    if text.chars().count() <= MODEL_CARD_DESCRIPTION_CHARS {
+        return text.to_string();
+    }
+    format!(
+        "{}…",
+        text.chars()
+            .take(MODEL_CARD_DESCRIPTION_CHARS)
+            .collect::<String>()
+    )
 }
 
 fn write_partial_index(staging: &Path, partial: &PartialIndex) -> Result<(), BackendError> {
@@ -2584,6 +2797,35 @@ mod tests {
         entered: Arc<tokio::sync::Notify>,
     }
 
+    struct ModelCardTransport {
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl ModelTransport for ModelCardTransport {
+        fn request(
+            &self,
+            request: ModelTransportRequest,
+        ) -> BoxFuture<'static, Result<ModelTransportResponse, BackendError>> {
+            self.calls.lock().unwrap().push(request.url.clone());
+            let bytes = if request.url.contains("/api/models/") {
+                br#"{"downloads":7,"likes":3,"cardData":{}}"#.to_vec()
+            } else {
+                b"---\nlicense: apache-2.0\n---\n\n# Model\n\n[English](en) | [Chinese](zh)\n\nThe **first** [useful paragraph](https://example.test).\n\n## Details"
+                    .to_vec()
+            };
+            Box::pin(async move {
+                Ok(ModelTransportResponse {
+                    status: 200,
+                    metadata: ModelHttpMetadata {
+                        content_length: Some(bytes.len() as u64),
+                        ..ModelHttpMetadata::default()
+                    },
+                    bytes,
+                })
+            })
+        }
+    }
+
     impl ModelTransport for BlockingMetadataTransport {
         fn request(
             &self,
@@ -2780,6 +3022,93 @@ mod tests {
             body
         );
         assert_eq!(calls.load(Ordering::Relaxed), 2);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn model_list_restores_trusted_partial_bytes_and_cleans_bad_indexes() {
+        let root = std::env::temp_dir().join(format!(
+            "openless-model-list-partial-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = ModelStore::new(ModelStoreConfig::new(root.clone()).unwrap()).unwrap();
+        let target = LocalAsrTarget::parse(LocalAsrRuntime::Generic, "qwen3-asr-0.6b").unwrap();
+        let staging = root.join(staging_dir_name(&target));
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("weights.bin"), b"1234").unwrap();
+        std::fs::write(
+            staging.join(MODEL_PARTIAL_INDEX),
+            br#"{"version":1,"files":{"weights.bin":4}}"#,
+        )
+        .unwrap();
+
+        let models = store.list_models(LocalAsrRuntime::Generic).unwrap();
+        assert_eq!(
+            models
+                .iter()
+                .find(|model| model.target == target)
+                .unwrap()
+                .downloaded_bytes,
+            4
+        );
+        let manifest = ModelManifest::new(
+            target.clone(),
+            "org/demo",
+            vec![ModelFile {
+                path: "weights.bin".into(),
+                url: "https://example.test/weights.bin".into(),
+                size_bytes: 8,
+                sha256: None,
+            }],
+        )
+        .unwrap();
+        assert_eq!(store.status(&manifest).unwrap().downloaded_bytes, 4);
+
+        std::fs::write(
+            staging.join(MODEL_PARTIAL_INDEX),
+            br#"{"version":1,"files":{"../escape":4}}"#,
+        )
+        .unwrap();
+        let models = store.list_models(LocalAsrRuntime::Generic).unwrap();
+        assert_eq!(
+            models
+                .iter()
+                .find(|model| model.target == target)
+                .unwrap()
+                .downloaded_bytes,
+            0
+        );
+        assert!(!staging.exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn model_card_falls_back_to_the_first_useful_readme_paragraph() {
+        let root = std::env::temp_dir().join(format!(
+            "openless-model-card-readme-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let store = ModelStore::with_transport(
+            ModelStoreConfig::new(root.clone()).unwrap(),
+            Arc::new(ModelCardTransport {
+                calls: Arc::clone(&calls),
+            }),
+        );
+
+        let card = store
+            .fetch_hf_model_card(
+                "qwen3-asr-0.6b",
+                "Qwen/Qwen3-ASR-0.6B",
+                "https://huggingface.co",
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(card.downloads, 7);
+        assert_eq!(card.likes, 3);
+        assert_eq!(card.description, "The first useful paragraph.");
+        assert_eq!(calls.lock().unwrap().len(), 2);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -3020,6 +3349,7 @@ mod tests {
             .join("whisper-base")
             .join(MODEL_READY_SENTINEL)
             .is_file());
+        assert!(legacy.join("whisper-base/conflict.bin").is_file());
         let _ = std::fs::remove_dir_all(root);
     }
 

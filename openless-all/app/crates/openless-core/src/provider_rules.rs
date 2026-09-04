@@ -7,6 +7,8 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use crate::credentials::ProviderType;
+use crate::domains::ProviderKind;
 use crate::errors::{BackendError, BackendErrorCode};
 
 pub const OPENAI_COMPATIBLE_ASR_PROVIDER_ID: &str = "openai-compatible";
@@ -19,6 +21,254 @@ const MIMO_PROVIDER_ID: &str = "xiaomi-mimo-asr";
 const DASHSCOPE_MULTIMODAL_PROVIDER_ID: &str = "bailian-fun-asr-flash";
 const ELEVENLABS_PROVIDER_ID: &str = "elevenlabs";
 const XFYUN_PROVIDER_ID: &str = "iflytek";
+
+const ASR_PROVIDER_TYPES: &[(&str, &str)] = &[
+    ("volcengine", "asrVolcengine"),
+    ("elevenlabs", "asrElevenLabs"),
+    ("bailian", "asrBailian"),
+    ("bailian-qwen3-realtime", "asrBailianQwen3"),
+    ("bailian-fun-asr-flash", "asrBailianFunAsrFlash"),
+    ("siliconflow", "asrSiliconflow"),
+    ("stepfun", "asrStepfun"),
+    ("zhipu", "asrZhipu"),
+    ("groq", "asrGroq"),
+    ("whisper", "asrWhisper"),
+    ("openrouter", "asrOpenrouter"),
+    ("zenmux", "asrZenmux"),
+    (OPENAI_COMPATIBLE_ASR_PROVIDER_ID, "asrOpenAiCompatible"),
+    ("xiaomi-mimo-asr", "asrXiaomiMimo"),
+    (XFYUN_PROVIDER_ID, "asrIflytek"),
+    ("foundry-local-whisper", "asrFoundryLocalWhisper"),
+    ("local-whisper", "asrLocalWhisper"),
+    ("sherpa-onnx-local", "asrSherpaOnnxLocal"),
+    ("local-qwen3-mlx", "asrLocalQwen3Mlx"),
+    ("local-qwen3-c", "asrLocalQwen3C"),
+    ("local-qwen3", "asrLocalQwen3"),
+    ("apple-speech", "asrAppleSpeech"),
+];
+
+const LLM_PROVIDER_TYPES: &[(&str, &str)] = &[
+    ("ark", "ark"),
+    ("deepseek", "deepseek"),
+    ("siliconflow", "siliconflow"),
+    ("atlascloud", "atlascloud"),
+    ("openai", "openai"),
+    ("gemini", "gemini"),
+    (crate::polish::CODEX_OAUTH_PROVIDER_ID, "codexOAuth"),
+    ("mimo", "mimo"),
+    ("cometapi", "cometapi"),
+    ("openrouterFree", "openrouterFree"),
+    ("alibabaCoding", "alibabaCoding"),
+    ("codingPlanX", "codingPlanX"),
+    ("minimax", "minimax"),
+    ("stepfun", "stepfun"),
+    ("custom", "custom"),
+];
+
+const OMNI_PROVIDER_TYPES: &[(&str, &str)] = &[
+    ("openai", "omniOpenai"),
+    ("gemini", "omniGemini"),
+    ("dashscope-omni", "omniDashscope"),
+    ("custom", "custom"),
+];
+
+const BAILIAN_MODELS: &[&str] = &[
+    crate::asr::bailian::DEFAULT_MODEL,
+    "fun-asr-flash-8k-realtime",
+    crate::asr::qwen_realtime::DEFAULT_MODEL,
+    "qwen3-asr-flash-realtime-2026-02-10",
+    "qwen3-asr-flash-realtime-2025-10-27",
+    crate::asr::dashscope_multimodal::QWEN_AUDIO_MODEL,
+    crate::asr::dashscope_multimodal::DEFAULT_MODEL,
+    "qwen3-asr-flash",
+    "fun-asr",
+    "fun-asr-2025-11-07",
+    "fun-asr-2025-08-25",
+    "fun-asr-mtl",
+    "fun-asr-mtl-2025-08-25",
+    "paraformer-v2",
+];
+const QWEN_REALTIME_MODELS: &[&str] = &[
+    crate::asr::qwen_realtime::DEFAULT_MODEL,
+    "qwen3-asr-flash-realtime-2026-02-10",
+    "qwen3-asr-flash-realtime-2025-10-27",
+];
+const DASHSCOPE_MODELS: &[&str] = &[
+    crate::asr::dashscope_multimodal::QWEN_AUDIO_MODEL,
+    crate::asr::dashscope_multimodal::DEFAULT_MODEL,
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthRequirement {
+    None,
+    ApiKey,
+    EndpointModelOptionalApiKey,
+    ApiKeyUnlessCustomEndpoint,
+    Volcengine,
+    Xfyun,
+    OAuth,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationProbe {
+    Unsupported,
+    AsrSilence,
+    AsrSilenceAllowsNoFinal,
+    AsrNonSilent,
+    StepfunNoSpeech,
+    LlmText,
+    OmniText,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderDescriptor {
+    pub kind: ProviderKind,
+    pub provider_type: ProviderType,
+    pub label_key: String,
+    pub default_endpoint: Option<String>,
+    pub default_model: Option<String>,
+    pub auth_requirement: AuthRequirement,
+    pub validation_probe: ValidationProbe,
+    pub static_models: Vec<String>,
+}
+
+pub fn provider_descriptors(kind: ProviderKind) -> Vec<ProviderDescriptor> {
+    let providers = match kind {
+        ProviderKind::Asr => ASR_PROVIDER_TYPES,
+        ProviderKind::Llm => LLM_PROVIDER_TYPES,
+        ProviderKind::Omni => OMNI_PROVIDER_TYPES,
+    };
+    providers
+        .iter()
+        .filter_map(|(provider_type, label_key)| {
+            provider_descriptor_with_label(kind, provider_type, label_key)
+        })
+        .collect()
+}
+
+pub fn provider_descriptor(kind: ProviderKind, provider_type: &str) -> Option<ProviderDescriptor> {
+    let label_key = match kind {
+        ProviderKind::Asr => ASR_PROVIDER_TYPES,
+        ProviderKind::Llm => LLM_PROVIDER_TYPES,
+        ProviderKind::Omni => OMNI_PROVIDER_TYPES,
+    }
+    .iter()
+    .find(|(candidate, _)| *candidate == provider_type)
+    .map(|(_, label)| *label)
+    .or((kind == ProviderKind::Llm).then_some("custom"))?;
+    provider_descriptor_with_label(kind, provider_type, label_key)
+}
+
+fn provider_descriptor_with_label(
+    kind: ProviderKind,
+    provider_type: &str,
+    label_key: &str,
+) -> Option<ProviderDescriptor> {
+    let provider_type = ProviderType::new(provider_type).ok()?;
+    let id = provider_type.as_str().to_string();
+    let (default_endpoint, default_model, auth_requirement, validation_probe) = match kind {
+        ProviderKind::Asr if is_local_asr_provider(&id) => (
+            None,
+            None,
+            AuthRequirement::None,
+            ValidationProbe::Unsupported,
+        ),
+        ProviderKind::Asr => (
+            default_asr_endpoint(&id),
+            default_asr_model(&id),
+            match id.as_str() {
+                "volcengine" => AuthRequirement::Volcengine,
+                XFYUN_PROVIDER_ID => AuthRequirement::Xfyun,
+                OPENAI_COMPATIBLE_ASR_PROVIDER_ID => AuthRequirement::EndpointModelOptionalApiKey,
+                _ => AuthRequirement::ApiKey,
+            },
+            match id.as_str() {
+                "volcengine" | XFYUN_PROVIDER_ID => ValidationProbe::AsrSilenceAllowsNoFinal,
+                "stepfun" => ValidationProbe::StepfunNoSpeech,
+                DASHSCOPE_MULTIMODAL_PROVIDER_ID => ValidationProbe::AsrNonSilent,
+                _ => ValidationProbe::AsrSilence,
+            },
+        ),
+        ProviderKind::Llm => (
+            default_llm_endpoint(&id),
+            default_llm_model(&id),
+            match id.as_str() {
+                crate::polish::CODEX_OAUTH_PROVIDER_ID => AuthRequirement::OAuth,
+                "gemini" => AuthRequirement::ApiKey,
+                _ => AuthRequirement::ApiKeyUnlessCustomEndpoint,
+            },
+            ValidationProbe::LlmText,
+        ),
+        ProviderKind::Omni => (
+            default_omni_endpoint(&id),
+            default_omni_model(&id),
+            AuthRequirement::ApiKey,
+            ValidationProbe::OmniText,
+        ),
+    };
+    Some(ProviderDescriptor {
+        kind,
+        provider_type,
+        label_key: label_key.to_string(),
+        default_endpoint: default_endpoint.map(str::to_string),
+        default_model: default_model.map(str::to_string),
+        auth_requirement,
+        validation_probe,
+        static_models: static_models(kind, &id)
+            .iter()
+            .map(|model| (*model).to_string())
+            .collect(),
+    })
+}
+
+pub fn validation_probe_for(
+    kind: ProviderKind,
+    provider_type: &str,
+    model: Option<&str>,
+) -> ValidationProbe {
+    if kind == ProviderKind::Asr
+        && provider_type == BAILIAN_PROVIDER_ID
+        && model.and_then(dashscope_batch_protocol_for_model).is_some()
+    {
+        return ValidationProbe::AsrNonSilent;
+    }
+    provider_descriptor(kind, provider_type)
+        .map(|descriptor| descriptor.validation_probe)
+        .unwrap_or(ValidationProbe::Unsupported)
+}
+
+fn is_local_asr_provider(provider_type: &str) -> bool {
+    matches!(
+        provider_type,
+        "foundry-local-whisper"
+            | "local-whisper"
+            | "sherpa-onnx-local"
+            | "local-qwen3-mlx"
+            | "local-qwen3-c"
+            | "local-qwen3"
+            | "apple-speech"
+    )
+}
+
+fn static_models(kind: ProviderKind, provider_type: &str) -> &'static [&'static str] {
+    match (kind, provider_type) {
+        (ProviderKind::Asr, "bailian") => BAILIAN_MODELS,
+        (ProviderKind::Asr, "bailian-qwen3-realtime") => QWEN_REALTIME_MODELS,
+        (ProviderKind::Asr, "xiaomi-mimo-asr") => &[crate::asr::mimo::DEFAULT_MODEL],
+        (ProviderKind::Asr, "bailian-fun-asr-flash") => DASHSCOPE_MODELS,
+        (ProviderKind::Asr, "elevenlabs") => &[crate::asr::elevenlabs::DEFAULT_MODEL],
+        (ProviderKind::Llm, crate::polish::CODEX_OAUTH_PROVIDER_ID) => &[
+            crate::polish::CODEX_DEFAULT_MODEL,
+            "gpt-5.3-codex",
+            "gpt-5.4",
+            "gpt-5.5",
+        ],
+        _ => &[],
+    }
+}
 
 const BAILIAN_DEFAULT_ENDPOINT: &str = "wss://dashscope.aliyuncs.com/api-ws/v1/inference/";
 const QWEN3_REALTIME_DEFAULT_ENDPOINT: &str = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime";
@@ -38,22 +288,6 @@ pub enum ActiveAsrProviderKind {
     WhisperCompatible,
     Volcengine,
     Xfyun,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AsrPreflightCredential {
-    AsrApiKey,
-    VolcAppKey,
-    XfyunAppKey,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AsrConfiguredFields {
-    ApiKeyOnly,
-    ApiKeyEndpointModel,
-    EndpointModelOnly,
-    VolcAppKey,
-    XfyunAppKey,
 }
 
 /// Non-secret facts read by a platform credential adapter. Core evaluates
@@ -105,38 +339,81 @@ pub fn asr_configured(
     if let Some(configured) = local_runtime_configured {
         return configured;
     }
-    match active_asr_provider_kind(provider_id).configured_fields() {
-        AsrConfiguredFields::ApiKeyOnly => configuration.asr_api_key,
-        AsrConfiguredFields::ApiKeyEndpointModel => {
-            configuration.asr_api_key && configuration.asr_endpoint && configuration.asr_model
-        }
-        AsrConfiguredFields::EndpointModelOnly => {
-            configuration.asr_endpoint && configuration.asr_model
-        }
-        AsrConfiguredFields::VolcAppKey => volcengine_configured(configuration),
-        AsrConfiguredFields::XfyunAppKey => {
-            configuration.xfyun_app_id && configuration.xfyun_api_key
-        }
-    }
+    provider_descriptor(ProviderKind::Asr, provider_id)
+        .is_some_and(|descriptor| auth_requirement_satisfied(&descriptor, configuration))
 }
 
 pub fn llm_configured(provider_id: &str, configuration: &CredentialConfiguration) -> bool {
-    if provider_id == crate::polish::CODEX_OAUTH_PROVIDER_ID {
-        return configuration.codex_oauth;
-    }
-    if !configuration.llm_endpoint {
-        return false;
-    }
-    if !configuration.llm_model {
-        return false;
-    }
-    !configuration.llm_endpoint_matches_default || configuration.llm_api_key
+    provider_descriptor(ProviderKind::Llm, provider_id)
+        .is_some_and(|descriptor| auth_requirement_satisfied(&descriptor, configuration))
 }
 
 pub fn omni_configured(provider_id: &str, configuration: &CredentialConfiguration) -> bool {
-    configuration.omni_api_key
-        && configuration.omni_model
-        && (provider_id == "gemini" || configuration.omni_endpoint)
+    provider_descriptor(ProviderKind::Omni, provider_id)
+        .is_some_and(|descriptor| auth_requirement_satisfied(&descriptor, configuration))
+}
+
+pub fn auth_requirement_satisfied(
+    descriptor: &ProviderDescriptor,
+    configuration: &CredentialConfiguration,
+) -> bool {
+    let (api_key, endpoint, model) = match descriptor.kind {
+        ProviderKind::Asr => (
+            configuration.asr_api_key,
+            configuration.asr_endpoint || descriptor.default_endpoint.is_some(),
+            configuration.asr_model || descriptor.default_model.is_some(),
+        ),
+        ProviderKind::Llm => (
+            configuration.llm_api_key,
+            configuration.llm_endpoint || descriptor.default_endpoint.is_some(),
+            configuration.llm_model || descriptor.default_model.is_some(),
+        ),
+        ProviderKind::Omni => (
+            configuration.omni_api_key,
+            configuration.omni_endpoint || descriptor.default_endpoint.is_some(),
+            configuration.omni_model || descriptor.default_model.is_some(),
+        ),
+    };
+    match descriptor.auth_requirement {
+        AuthRequirement::None => true,
+        AuthRequirement::ApiKey => api_key && endpoint && model,
+        AuthRequirement::EndpointModelOptionalApiKey => endpoint && model,
+        AuthRequirement::ApiKeyUnlessCustomEndpoint => {
+            endpoint
+                && model
+                && (api_key
+                    || (configuration.llm_endpoint && !configuration.llm_endpoint_matches_default))
+        }
+        AuthRequirement::Volcengine => volcengine_configured(configuration),
+        AuthRequirement::Xfyun => configuration.xfyun_app_id && configuration.xfyun_api_key,
+        AuthRequirement::OAuth => configuration.codex_oauth && model,
+    }
+}
+
+pub fn api_key_required(
+    kind: ProviderKind,
+    provider_type: &str,
+    configured_endpoint: Option<&str>,
+) -> bool {
+    let Some(descriptor) = provider_descriptor(kind, provider_type) else {
+        return true;
+    };
+    match descriptor.auth_requirement {
+        AuthRequirement::None
+        | AuthRequirement::EndpointModelOptionalApiKey
+        | AuthRequirement::OAuth => false,
+        AuthRequirement::ApiKeyUnlessCustomEndpoint => {
+            let Some(endpoint) = configured_endpoint.filter(|value| !value.trim().is_empty())
+            else {
+                return true;
+            };
+            descriptor
+                .default_endpoint
+                .as_deref()
+                .is_some_and(|default| equivalent_endpoint(endpoint, default))
+        }
+        _ => true,
+    }
 }
 
 pub fn equivalent_endpoint(left: &str, right: &str) -> bool {
@@ -148,6 +425,42 @@ pub fn equivalent_endpoint(left: &str, right: &str) -> bool {
             .trim_end_matches('/')
     }
     normalize(left).eq_ignore_ascii_case(normalize(right))
+}
+
+pub fn default_asr_endpoint(provider_type: &str) -> Option<&'static str> {
+    match provider_type {
+        "elevenlabs" => Some("https://api.elevenlabs.io/v1"),
+        "bailian" => Some(BAILIAN_DEFAULT_ENDPOINT),
+        "bailian-qwen3-realtime" => Some(QWEN3_REALTIME_DEFAULT_ENDPOINT),
+        "bailian-fun-asr-flash" => Some(DASHSCOPE_MULTIMODAL_DEFAULT_ENDPOINT),
+        "siliconflow" => Some("https://api.siliconflow.cn/v1"),
+        "stepfun" => Some("https://api.stepfun.com/v1"),
+        "zhipu" => Some("https://open.bigmodel.cn/api/paas/v4"),
+        "groq" => Some("https://api.groq.com/openai/v1"),
+        "whisper" => Some("https://api.openai.com/v1"),
+        "openrouter" => Some("https://openrouter.ai/api/v1"),
+        "zenmux" => Some("https://zenmux.ai/api/v1"),
+        "xiaomi-mimo-asr" => Some("https://api.xiaomimimo.com/v1"),
+        _ => None,
+    }
+}
+
+pub fn default_asr_model(provider_type: &str) -> Option<&'static str> {
+    match provider_type {
+        "elevenlabs" => Some(crate::asr::elevenlabs::DEFAULT_MODEL),
+        "bailian" => Some(crate::asr::bailian::DEFAULT_MODEL),
+        "bailian-qwen3-realtime" => Some(crate::asr::qwen_realtime::DEFAULT_MODEL),
+        "bailian-fun-asr-flash" => Some(crate::asr::dashscope_multimodal::DEFAULT_MODEL),
+        "siliconflow" => Some("FunAudioLLM/SenseVoiceSmall"),
+        "stepfun" => Some("stepaudio-2.5-asr"),
+        "zhipu" => Some("glm-asr-2512"),
+        "groq" => Some("whisper-large-v3-turbo"),
+        "whisper" => Some("whisper-1"),
+        "openrouter" => Some("openai/whisper-large-v3-turbo"),
+        "zenmux" => Some(crate::asr::whisper::ZENMUX_DEFAULT_MODEL),
+        "xiaomi-mimo-asr" => Some(crate::asr::mimo::DEFAULT_MODEL),
+        _ => None,
+    }
 }
 
 pub fn default_llm_endpoint(provider_type: &str) -> Option<&'static str> {
@@ -197,6 +510,15 @@ pub fn default_omni_endpoint(provider_type: &str) -> Option<&'static str> {
     }
 }
 
+pub fn default_omni_model(provider_type: &str) -> Option<&'static str> {
+    match provider_type {
+        "openai" => Some("gpt-4o-audio-preview"),
+        "gemini" => Some("gemini-2.5-flash"),
+        "dashscope-omni" => Some("qwen3-omni-flash"),
+        _ => None,
+    }
+}
+
 pub fn parse_extra_headers(value: &str) -> Result<HashMap<String, String>, BackendError> {
     if value.trim().is_empty() {
         return Ok(HashMap::new());
@@ -219,36 +541,6 @@ pub fn parse_extra_headers(value: &str) -> Result<HashMap<String, String>, Backe
         }
     }
     Ok(headers)
-}
-
-impl ActiveAsrProviderKind {
-    pub fn preflight_credential(self) -> AsrPreflightCredential {
-        match self {
-            Self::Bailian
-            | Self::Qwen3Realtime
-            | Self::StepfunRealtime
-            | Self::Mimo
-            | Self::DashScopeMultimodal
-            | Self::ElevenLabs
-            | Self::WhisperCompatible => AsrPreflightCredential::AsrApiKey,
-            Self::Volcengine => AsrPreflightCredential::VolcAppKey,
-            Self::Xfyun => AsrPreflightCredential::XfyunAppKey,
-        }
-    }
-
-    pub fn configured_fields(self) -> AsrConfiguredFields {
-        match self {
-            Self::Bailian | Self::Qwen3Realtime | Self::ElevenLabs => {
-                AsrConfiguredFields::ApiKeyOnly
-            }
-            Self::Mimo | Self::DashScopeMultimodal => AsrConfiguredFields::ApiKeyEndpointModel,
-            Self::WhisperCompatible | Self::StepfunRealtime => {
-                AsrConfiguredFields::EndpointModelOnly
-            }
-            Self::Volcengine => AsrConfiguredFields::VolcAppKey,
-            Self::Xfyun => AsrConfiguredFields::XfyunAppKey,
-        }
-    }
 }
 
 pub fn active_asr_provider_kind(id: &str) -> ActiveAsrProviderKind {
@@ -662,6 +954,70 @@ mod tests {
         );
         assert!(parse_extra_headers(r#"{"x-trace":"enabled"}"#).is_ok());
         assert!(parse_extra_headers(r#"{"authorization":"secret"}"#).is_err());
+    }
+
+    #[test]
+    fn descriptors_are_the_single_source_for_defaults_auth_and_probes() {
+        let compatible = provider_descriptor(ProviderKind::Asr, "openai-compatible").unwrap();
+        assert_eq!(
+            compatible.auth_requirement,
+            AuthRequirement::EndpointModelOptionalApiKey
+        );
+        assert_eq!(compatible.default_endpoint, None);
+        assert_eq!(compatible.default_model, None);
+
+        let mut configuration = CredentialConfiguration {
+            asr_endpoint: true,
+            asr_model: true,
+            ..CredentialConfiguration::default()
+        };
+        assert!(auth_requirement_satisfied(&compatible, &configuration));
+        configuration.asr_endpoint = false;
+        assert!(!auth_requirement_satisfied(&compatible, &configuration));
+
+        let stepfun = provider_descriptor(ProviderKind::Asr, "stepfun").unwrap();
+        assert_eq!(stepfun.validation_probe, ValidationProbe::StepfunNoSpeech);
+        assert!(api_key_required(
+            ProviderKind::Asr,
+            "stepfun",
+            Some("https://api.stepfun.com/v1")
+        ));
+
+        let dashscope =
+            provider_descriptor(ProviderKind::Asr, DASHSCOPE_MULTIMODAL_PROVIDER_ID).unwrap();
+        assert_eq!(dashscope.validation_probe, ValidationProbe::AsrNonSilent);
+        assert!(!dashscope.static_models.is_empty());
+    }
+
+    #[test]
+    fn custom_llm_auth_depends_on_the_effective_endpoint() {
+        assert!(!api_key_required(
+            ProviderKind::Llm,
+            "custom",
+            Some("http://127.0.0.1:8080/v1")
+        ));
+        assert!(api_key_required(
+            ProviderKind::Llm,
+            "openai",
+            Some("https://api.openai.com/v1/chat/completions")
+        ));
+        assert!(!api_key_required(
+            ProviderKind::Llm,
+            "openai",
+            Some("http://127.0.0.1:8080/v1")
+        ));
+    }
+
+    #[test]
+    fn provider_descriptor_catalogs_have_unique_protocol_ids() {
+        for kind in [ProviderKind::Asr, ProviderKind::Llm, ProviderKind::Omni] {
+            let descriptors = provider_descriptors(kind);
+            let unique = descriptors
+                .iter()
+                .map(|descriptor| descriptor.provider_type.as_str())
+                .collect::<std::collections::HashSet<_>>();
+            assert_eq!(unique.len(), descriptors.len());
+        }
     }
 
     #[test]

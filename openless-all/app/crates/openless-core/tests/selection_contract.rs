@@ -256,6 +256,7 @@ impl TextPolisher for RecordingContextPolisher {
             Ok(PolishOutput {
                 text: "context output".to_string(),
                 source_text: Some("source polished".to_string()),
+                llm_call_label: None,
             })
         })
     }

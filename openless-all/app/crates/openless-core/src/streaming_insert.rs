@@ -1,8 +1,45 @@
 //! 流式插入的纯策略与 Unicode 边界规则。
 
-use crate::shared_types::ChineseScriptPreference;
+use crate::shared_types::{ChineseScriptPreference, MacosNewlineMode};
 
 pub const STREAMING_FLUSH_INTERVAL_MS: u64 = 12;
+
+const TERMINAL_BUNDLE_PREFIXES: &[&str] = &[
+    "com.apple.terminal",
+    "com.googlecode.iterm2",
+    "dev.warp.warp",
+    "com.github.wez.wezterm",
+    "io.alacritty",
+    "org.alacritty",
+    "net.kovidgoyal.kitty",
+    "co.zeit.hyper",
+    "org.tabby",
+    "com.tabby",
+    "com.mitchellh.ghostty",
+];
+
+pub fn resolve_macos_newline_mode(
+    configured: MacosNewlineMode,
+    front_app: Option<&str>,
+) -> MacosNewlineMode {
+    if configured != MacosNewlineMode::Auto {
+        return configured;
+    }
+    let front = front_app.map(|label| crate::shared_types::split_front_app_label(label, true));
+    let identity = front
+        .as_ref()
+        .and_then(|front| front.bundle_id.as_deref().or(front.name.as_deref()));
+    if identity.is_some_and(|value| {
+        let value = value.to_ascii_lowercase();
+        TERMINAL_BUNDLE_PREFIXES
+            .iter()
+            .any(|prefix| value.starts_with(prefix))
+    }) {
+        MacosNewlineMode::LineFeed
+    } else {
+        MacosNewlineMode::ShiftReturn
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StreamingInsertState {
@@ -12,7 +49,29 @@ pub struct StreamingInsertState {
     accepted_chars: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FinalReconciliation {
+    InsertFinal(String),
+    WriteTail(String),
+    CopyFallback(String),
+    Complete,
+}
+
 impl StreamingInsertState {
+    pub fn reconcile_final(&self, final_text: &str) -> FinalReconciliation {
+        if self.failed.is_some() {
+            return FinalReconciliation::CopyFallback(final_text.to_string());
+        }
+        if self.typed_text.is_empty() {
+            return FinalReconciliation::InsertFinal(final_text.to_string());
+        }
+        match final_text.strip_prefix(&self.typed_text) {
+            Some("") => FinalReconciliation::Complete,
+            Some(tail) => FinalReconciliation::WriteTail(tail.to_string()),
+            None => FinalReconciliation::CopyFallback(final_text.to_string()),
+        }
+    }
+
     pub fn push_delta(&mut self, offset: u64, delta: &str) {
         if self.failed.is_some() || delta.is_empty() {
             return;
@@ -95,6 +154,61 @@ pub fn streaming_insert_eligible(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shared_types::MacosNewlineMode;
+
+    #[test]
+    fn macos_auto_newline_uses_line_feed_only_for_known_terminals() {
+        assert_eq!(
+            resolve_macos_newline_mode(
+                MacosNewlineMode::Auto,
+                Some("Terminal (com.apple.Terminal)")
+            ),
+            MacosNewlineMode::LineFeed
+        );
+        assert_eq!(
+            resolve_macos_newline_mode(MacosNewlineMode::Auto, Some("Chat")),
+            MacosNewlineMode::ShiftReturn
+        );
+        assert_eq!(
+            resolve_macos_newline_mode(MacosNewlineMode::Return, None),
+            MacosNewlineMode::Return
+        );
+    }
+
+    #[test]
+    fn final_reconciliation_never_retypes_an_accepted_prefix() {
+        let mut stream = StreamingInsertState::default();
+        assert_eq!(
+            stream.reconcile_final("你好"),
+            FinalReconciliation::InsertFinal("你好".into())
+        );
+
+        stream.typed_text = "你".into();
+        assert_eq!(
+            stream.reconcile_final("你好"),
+            FinalReconciliation::WriteTail("好".into())
+        );
+        assert_eq!(stream.reconcile_final("你"), FinalReconciliation::Complete);
+
+        stream.typed_text = "旧".into();
+        assert_eq!(
+            stream.reconcile_final("新文本"),
+            FinalReconciliation::CopyFallback("新文本".into())
+        );
+    }
+
+    #[test]
+    fn failed_stream_preserves_the_complete_final_for_fallback() {
+        let stream = StreamingInsertState {
+            typed_text: "已经".into(),
+            failed: Some("partial write".into()),
+            ..StreamingInsertState::default()
+        };
+        assert_eq!(
+            stream.reconcile_final("已经完成"),
+            FinalReconciliation::CopyFallback("已经完成".into())
+        );
+    }
 
     #[test]
     fn partial_unicode_write_is_explicit_and_prefix_safe() {

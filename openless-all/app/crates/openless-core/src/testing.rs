@@ -441,11 +441,17 @@ impl FixtureAudioRecorder {
 
 struct FixtureRecordingArchive {
     available: std::sync::atomic::AtomicBool,
+    pcm: Vec<u8>,
 }
 
 impl RecordingArchive for FixtureRecordingArchive {
     fn is_available(&self) -> bool {
         self.available.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn read_pcm(&self) -> BoxFuture<'static, Result<Vec<u8>, BackendError>> {
+        let pcm = self.pcm.clone();
+        Box::pin(async move { Ok(pcm) })
     }
 
     fn discard(&self) -> BoxFuture<'static, Result<(), BackendError>> {
@@ -480,11 +486,13 @@ impl AudioRecorder for FixtureAudioRecorder {
         progress: Arc<dyn RecordingProgressSink>,
     ) -> BoxFuture<'static, Result<Box<dyn ActiveRecording>, BackendError>> {
         let pcm_chunks = self.pcm_chunks.clone();
+        let archived_pcm = pcm_chunks.concat();
         let levels = self.levels.clone();
         let stops = Arc::clone(&self.stops);
         let archive = self.has_archived_recording.map(|available| {
             Arc::new(FixtureRecordingArchive {
                 available: std::sync::atomic::AtomicBool::new(available),
+                pcm: archived_pcm,
             }) as Arc<dyn RecordingArchive>
         });
         Box::pin(async move {
@@ -593,6 +601,7 @@ impl TranscriptionEngine for FixtureTranscriptionEngine {
 pub struct FixtureTextPolisher {
     result: Result<crate::ports::PolishOutput, BackendError>,
     cancels: Arc<std::sync::atomic::AtomicUsize>,
+    inputs: Arc<Mutex<Vec<String>>>,
 }
 
 impl FixtureTextPolisher {
@@ -600,6 +609,7 @@ impl FixtureTextPolisher {
         Self {
             result: Ok(crate::ports::PolishOutput::text(text)),
             cancels: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            inputs: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -607,11 +617,19 @@ impl FixtureTextPolisher {
         Self {
             result: Err(error),
             cancels: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            inputs: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     pub fn cancel_count(&self) -> usize {
         self.cancels.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub fn inputs(&self) -> Vec<String> {
+        self.inputs
+            .lock()
+            .expect("fixture polisher input lock poisoned")
+            .clone()
     }
 }
 
@@ -620,10 +638,14 @@ impl TextPolisher for FixtureTextPolisher {
         &self,
         _session_id: SessionId,
         _context: Arc<DictationContext>,
-        _raw_text: String,
+        raw_text: String,
         partials: Arc<dyn TextStreamSink>,
     ) -> BoxFuture<'static, Result<crate::ports::PolishOutput, BackendError>> {
         let result = self.result.clone();
+        self.inputs
+            .lock()
+            .expect("fixture polisher input lock poisoned")
+            .push(raw_text);
         Box::pin(async move {
             if let Ok(output) = &result {
                 partials.publish(TextStreamChunk {
@@ -674,6 +696,7 @@ impl FixtureDictationEngine {
         Self {
             result: Ok(EngineResult {
                 raw_text: raw_text.into(),
+                asr_transcript: None,
                 polished_text: polished_text.into(),
                 polish_source,
                 duration_ms,
@@ -681,6 +704,8 @@ impl FixtureDictationEngine {
                 asr_ms: None,
                 polish_ms: None,
                 has_audio_recording: None,
+                asr_call_label: None,
+                llm_call_label: None,
             }),
             context_update_error: None,
             polish_deltas: Vec::new(),
@@ -830,6 +855,7 @@ pub enum FixtureInsertionAction {
     Prepare(SessionId),
     Write { session_id: SessionId, text: String },
     Insert { session_id: SessionId, text: String },
+    Copy { session_id: SessionId, text: String },
     Cancel(SessionId),
 }
 
@@ -893,6 +919,17 @@ impl TextInsertionSession for FixtureTextInsertionSession {
                 text,
             });
         Box::pin(async move { Ok(InsertWriteResult { written_chars }) })
+    }
+
+    fn copy(&self, text: String) -> BoxFuture<'static, Result<(), BackendError>> {
+        self.actions
+            .lock()
+            .expect("fixture inserter lock poisoned")
+            .push(FixtureInsertionAction::Copy {
+                session_id: self.session_id,
+                text,
+            });
+        Box::pin(async { Ok(()) })
     }
 
     fn finish(&self, text: String) -> BoxFuture<'static, Result<InsertOutcome, BackendError>> {

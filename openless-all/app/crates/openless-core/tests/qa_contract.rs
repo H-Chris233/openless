@@ -6,8 +6,9 @@ use openless_core::{
     BackendConfig, BackendDependencies, BackendError, BackendErrorCode, BackendEventKind,
     HostAction, HostActions, OpenLessBackend, QaInput, QaMessage, QaPhase, QaProgress,
     QaProgressSink, QaRuntimeAdapter, QaService, QaSnapshot, QaStateEvent, QaStateKind,
-    QaTurnRequest, QaTurnResult, SelectionCapture, SelectionVoicePhase,
-    SelectionVoicePreviewUpdate, SessionId,
+    QaTurnRequest, QaTurnResult, SelectionCapture, SelectionPolishOutputMode,
+    SelectionVoiceInstructionRequest, SelectionVoiceIntentMode, SelectionVoiceManualIntent,
+    SelectionVoicePhase, SelectionVoicePreviewUpdate, SelectionVoiceRoute, SessionId,
 };
 
 struct FixtureQaRuntime {
@@ -16,7 +17,9 @@ struct FixtureQaRuntime {
     answer: Mutex<String>,
     requests: Mutex<Vec<QaTurnRequest>>,
     prepared_sessions: Mutex<Vec<SessionId>>,
+    prepared_selection_edits: Mutex<Vec<(SessionId, SelectionCapture, String)>>,
     recording_sessions: Mutex<Vec<SessionId>>,
+    bound_selection_targets: Mutex<Vec<(SessionId, SessionId)>>,
     emit_approval: AtomicBool,
     fail_prepare: AtomicBool,
     fail_finish: AtomicBool,
@@ -37,7 +40,9 @@ impl Default for FixtureQaRuntime {
             answer: Mutex::new(String::new()),
             requests: Mutex::new(Vec::new()),
             prepared_sessions: Mutex::new(Vec::new()),
+            prepared_selection_edits: Mutex::new(Vec::new()),
             recording_sessions: Mutex::new(Vec::new()),
+            bound_selection_targets: Mutex::new(Vec::new()),
             emit_approval: AtomicBool::new(false),
             fail_prepare: AtomicBool::new(false),
             fail_finish: AtomicBool::new(false),
@@ -86,6 +91,7 @@ impl QaRuntimeAdapter for FixtureQaRuntime {
             Ok(QaInput {
                 text,
                 selection_text,
+                selection_source_app: None,
             })
         })
     }
@@ -101,6 +107,28 @@ impl QaRuntimeAdapter for FixtureQaRuntime {
             progress.publish(session_id, QaProgress::SelectionCaptured(selection))?;
             progress.publish(session_id, QaProgress::RecordingLevel(1.5))?;
             Ok(())
+        })
+    }
+
+    fn prepare_selection_edit(
+        &self,
+        session_id: SessionId,
+        selection_voice_session_id: SessionId,
+        capture: SelectionCapture,
+        instruction: String,
+    ) -> BoxFuture<'static, Result<QaInput, BackendError>> {
+        self.prepared_sessions.lock().unwrap().push(session_id);
+        self.prepared_selection_edits.lock().unwrap().push((
+            selection_voice_session_id,
+            capture.clone(),
+            instruction.clone(),
+        ));
+        Box::pin(async move {
+            Ok(QaInput {
+                text: instruction,
+                selection_text: Some(capture.text),
+                selection_source_app: capture.source_app,
+            })
         })
     }
 
@@ -121,6 +149,7 @@ impl QaRuntimeAdapter for FixtureQaRuntime {
             Ok(QaInput {
                 text,
                 selection_text,
+                selection_source_app: None,
             })
         })
     }
@@ -172,6 +201,18 @@ impl QaRuntimeAdapter for FixtureQaRuntime {
     ) -> BoxFuture<'static, Result<openless_core::QaRuntimeCompletion, BackendError>> {
         self.complete_count.fetch_add(1, Ordering::AcqRel);
         Box::pin(async { Ok(openless_core::QaRuntimeCompletion::default()) })
+    }
+
+    fn bind_selection_voice_target(
+        &self,
+        qa_session_id: SessionId,
+        selection_voice_session_id: SessionId,
+    ) -> Result<(), BackendError> {
+        self.bound_selection_targets
+            .lock()
+            .unwrap()
+            .push((qa_session_id, selection_voice_session_id));
+        Ok(())
     }
 
     fn cancel(&self, _session_id: SessionId) -> BoxFuture<'static, Result<(), BackendError>> {
@@ -232,6 +273,20 @@ fn backend_with_selection_voice(
     dependencies.dictation_engine = Arc::new(
         openless_core::testing::FixtureDictationEngine::successful("raw", "final"),
     );
+    dependencies.selection_polisher = Some(Arc::new(
+        openless_core::testing::FixtureTextPolisher::successful(
+            "<edit_plan><summary>shorten</summary><full_rewrite><text>short</text></full_rewrite></edit_plan>",
+        ),
+    ));
+    dependencies.selection_runtime = Some(Arc::new(
+        openless_core::testing::FixtureSelectionRuntime::successful(
+            SelectionCapture {
+                text: "fixture selection".to_string(),
+                source_app: None,
+            },
+            openless_core::InsertOutcome::Inserted,
+        ),
+    ));
     let backend = OpenLessBackend::new(
         BackendConfig {
             data_dir: data_dir.clone(),
@@ -554,6 +609,52 @@ async fn voice_toggle_tracks_recording_level_and_finishes_the_same_session() {
 }
 
 #[tokio::test]
+async fn qa_recording_fault_is_terminal_and_releases_the_runtime_once() {
+    let runtime = Arc::new(FixtureQaRuntime::responding("unused"));
+    let (backend, data_dir) = backend(Arc::clone(&runtime));
+    backend.services().qa.toggle_recording().await.unwrap();
+    let session_id = backend
+        .services()
+        .qa
+        .snapshot()
+        .await
+        .unwrap()
+        .session_id
+        .unwrap();
+
+    backend
+        .services()
+        .qa
+        .recording_fault(
+            session_id,
+            BackendError::new(BackendErrorCode::Platform, "microphone disconnected"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        backend.services().qa.snapshot().await.unwrap().phase,
+        QaPhase::Failed
+    );
+    assert_eq!(runtime.cancel_count.load(Ordering::Acquire), 1);
+    assert_eq!(
+        backend
+            .services()
+            .qa
+            .recording_fault(
+                session_id,
+                BackendError::new(BackendErrorCode::Platform, "late fault"),
+            )
+            .await
+            .unwrap_err()
+            .code,
+        BackendErrorCode::Cancelled
+    );
+
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
 async fn cancellation_rejects_a_late_answer_and_dismiss_is_idempotent() {
     let runtime = Arc::new(FixtureQaRuntime::responding("late answer"));
     runtime.block_answer.store(true, Ordering::Release);
@@ -635,12 +736,6 @@ async fn dismiss_clears_the_selection_preview_owned_by_the_conversation() {
     backend
         .services()
         .qa
-        .set_edit_instruction_mode(true)
-        .await
-        .unwrap();
-    backend
-        .services()
-        .qa
         .submit_text("make it shorter".to_string())
         .await
         .unwrap();
@@ -697,6 +792,120 @@ async fn dismiss_clears_the_selection_preview_owned_by_the_conversation() {
         backend.services().qa.snapshot().await.unwrap(),
         openless_core::QaSnapshot::default()
     );
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
+async fn qa_edit_routing_is_core_owned_and_runtime_only_binds_the_host_target() {
+    let runtime = Arc::new(FixtureQaRuntime::responding("runtime must not answer"));
+    *runtime.selection.lock().unwrap() = Some("original selection".to_string());
+    let (backend, data_dir) = backend_with_selection_voice(Arc::clone(&runtime));
+
+    backend
+        .services()
+        .qa
+        .set_edit_instruction_mode(true)
+        .await
+        .unwrap();
+    backend
+        .services()
+        .qa
+        .submit_text("make it shorter".to_string())
+        .await
+        .unwrap();
+
+    let qa = backend.services().qa.snapshot().await.unwrap();
+    assert_eq!(qa.messages.last().unwrap().content, "（shorten）\n\nshort");
+    assert!(qa.edit_apply_available);
+    assert!(!qa.edit_revert_available);
+    assert!(runtime.requests.lock().unwrap().is_empty());
+    let binding = {
+        let bindings = runtime.bound_selection_targets.lock().unwrap();
+        assert_eq!(bindings.len(), 1);
+        bindings[0]
+    };
+    assert_eq!(binding.0, qa.session_id.unwrap());
+    assert_eq!(
+        binding.1,
+        backend
+            .services()
+            .selection_voice
+            .snapshot()
+            .await
+            .unwrap()
+            .session_id
+            .unwrap()
+    );
+
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
+async fn selection_voice_to_qa_preserves_the_pre_focus_capture() {
+    let runtime = Arc::new(FixtureQaRuntime::responding("runtime must not answer"));
+    // If the QA window recaptured selection, this hostile value would replace
+    // the original Selection Voice capture and the test would fail.
+    *runtime.selection.lock().unwrap() = Some("selection after QA focus".to_string());
+    let (backend, data_dir) = backend_with_selection_voice(Arc::clone(&runtime));
+    let mut preferences = backend.repositories().preferences.get();
+    preferences.selection_voice_intent_mode = SelectionVoiceIntentMode::Manual;
+    preferences.selection_voice_manual_intent = SelectionVoiceManualIntent::Edit;
+    preferences.selection_polish_output_mode = SelectionPolishOutputMode::PreviewConfirm;
+    backend.repositories().preferences.set(preferences).unwrap();
+
+    let capture = SelectionCapture {
+        text: "original pre-focus selection".to_string(),
+        source_app: Some("Editor".to_string()),
+    };
+    let voice = &backend.services().selection_voice;
+    let selection_voice_session_id = voice.begin(capture.clone()).await.unwrap();
+    voice
+        .mark_processing(selection_voice_session_id)
+        .await
+        .unwrap();
+    let disposition = voice
+        .resolve_instruction(SelectionVoiceInstructionRequest {
+            session_id: selection_voice_session_id,
+            raw: "shorten it".to_string(),
+            polished: "shorten it".to_string(),
+            intent_mode: SelectionVoiceIntentMode::Manual,
+            manual_intent: SelectionVoiceManualIntent::Edit,
+            question_keywords: Vec::new(),
+            auto_classification: None,
+        })
+        .await
+        .unwrap();
+    let route = voice.route_disposition(disposition).await.unwrap();
+    assert!(matches!(
+        route,
+        SelectionVoiceRoute::EditConversationOpened {
+            session_id
+        } if session_id == selection_voice_session_id
+    ));
+
+    {
+        // Keep the synchronous fixture guard out of the later await; the real
+        // runtime has the same rule because native target locks must never be
+        // held while Core advances another async domain.
+        let prepared = runtime.prepared_selection_edits.lock().unwrap();
+        assert_eq!(prepared.len(), 1);
+        assert_eq!(prepared[0].0, selection_voice_session_id);
+        assert_eq!(prepared[0].1, capture);
+        assert_eq!(prepared[0].2, "shorten it");
+    }
+    assert!(runtime.requests.lock().unwrap().is_empty());
+    assert_eq!(
+        backend
+            .services()
+            .selection_voice
+            .snapshot()
+            .await
+            .unwrap()
+            .source_text
+            .as_deref(),
+        Some("original pre-focus selection")
+    );
+
     let _ = std::fs::remove_dir_all(data_dir);
 }
 

@@ -343,7 +343,7 @@ impl Drop for EditWatcher {
 /// 接受的，影响落字不行。
 pub fn watch_for_edits<F>(typed_text: String, on_edit: F) -> Option<EditWatcher>
 where
-    F: Fn(EditPair) + Send + Sync + 'static,
+    F: Fn(EditPair) -> bool + Send + Sync + 'static,
 {
     #[cfg(target_os = "macos")]
     {

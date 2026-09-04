@@ -15,7 +15,6 @@ use crate::dictation_context::{
 };
 use crate::errors::{BackendError, BackendErrorCode};
 use crate::ports::{TextPolisher, TextStreamChunk, TextStreamSink, TranscriptionEngine};
-use crate::shared_types::PipelineMode;
 use crate::style_pack_store::StylePackStore;
 use crate::types::SessionId;
 use crate::{DictionaryStore, PreferencesStore, UserPreferences};
@@ -192,11 +191,10 @@ impl AuxiliaryService {
             Vec::new(),
             &options,
         );
-        // Preserve the legacy feature gate: selecting the enum alone must not
-        // activate Omni while the experimental capability is disabled.
-        if !preferences.multimodal_pipeline_enabled {
-            context.pipeline_mode = PipelineMode::Traditional;
-        }
+        context.pipeline_mode = crate::shared_types::effective_pipeline_mode(
+            preferences.multimodal_pipeline_enabled,
+            preferences.pipeline_mode,
+        );
         Ok(Arc::new(context))
     }
 

@@ -41,6 +41,10 @@ pub fn run() {
             let core_backend = coordinator.backend();
             app.manage(Arc::clone(&core_backend));
             coordinator.tauri_host().bind(app.handle().clone());
+            let startup = tauri::async_runtime::block_on(core_backend.start())?;
+            if !startup.backend.running {
+                return Err("OpenLess Core did not reach the running state".into());
+            }
             crate::tauri_events::start(app.handle().clone(), Arc::clone(&core_backend));
             #[cfg(target_os = "android")]
             {

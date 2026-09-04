@@ -22,6 +22,9 @@ const [
   tauriCoordinatorHost,
   coreAdapters,
   providersCommand,
+  qaCore,
+  selectionVoiceCore,
+  coreApi,
   qaAdapter,
   selectionVoiceCoordinator,
   dictionaryCommand,
@@ -29,6 +32,16 @@ const [
   androidNativeBridge,
   androidKotlinBridge,
   androidOverlayService,
+  appShell,
+  providerSection,
+  channelList,
+  providerLabels,
+  historyCommand,
+  credentialCommands,
+  credentialPersistence,
+  hostDocumentMacos,
+  linuxFcitx,
+  localAsrPage,
 ] =
   await Promise.all([
     read('src/lib/types.ts'),
@@ -50,6 +63,9 @@ const [
     read('src-tauri/src/tauri_coordinator_host.rs'),
     read('src-tauri/src/core_adapters.rs'),
     read('src-tauri/src/commands/providers.rs'),
+    read('crates/openless-core/src/qa_service.rs'),
+    read('crates/openless-core/src/selection_voice_service.rs'),
+    read('crates/openless-core/src/api.rs'),
     read('src-tauri/src/qa_adapter.rs'),
     read('src-tauri/src/coordinator/selection_voice_session.rs'),
     read('src-tauri/src/commands/dictionary.rs'),
@@ -57,6 +73,16 @@ const [
     read('src-tauri/src/android/native_bridge.rs'),
     read('android/kotlin/OpenLessNative.kt'),
     read('android/kotlin/OpenLessOverlayService.kt'),
+    read('src/App.tsx'),
+    read('src/pages/settings/ProvidersSection.tsx'),
+    read('src/pages/settings/ChannelList.tsx'),
+    read('src/pages/settings/shared.tsx'),
+    read('src-tauri/src/commands/history.rs'),
+    read('src-tauri/src/commands/credentials.rs'),
+    read('src-tauri/src/persistence/credentials.rs'),
+    read('src-tauri/src/host_document/macos.rs'),
+    read('linux-egui/src/fcitx5.rs'),
+    read('src/pages/LocalAsr/index.tsx'),
   ]);
 
 for (const kind of ['awaiting_approval', 'cancelled', 'error']) {
@@ -159,6 +185,20 @@ assert.match(
   remoteServer,
   /apply_remote_control\([^]*?state\.backend\.services\(\)\.remote_input\.as_ref\(\)/,
   'Remote Input WebSocket control must use the Core lifecycle',
+);
+const remoteFrameParser = remoteServer.match(
+  /fn parse_audio_frame\([^]*?\n\}/,
+)?.[0];
+assert.ok(remoteFrameParser, 'the Remote Input WebSocket frame adapter must remain present');
+assert.match(
+  remoteFrameParser,
+  /openless_core::RemoteFrameCodec::decode\(frame\)/,
+  'Remote Input WebSocket frames must be decoded by openless-core',
+);
+assert.doesNotMatch(
+  remoteFrameParser,
+  /b"OL20"|Uuid::from_slice|u64::from_be_bytes/,
+  'the Tauri WebSocket adapter must not retain Remote Input frame policy',
 );
 assert.match(
   remoteServer,
@@ -292,8 +332,8 @@ assert.match(
 );
 assert.match(
   selectionVoiceCoordinator,
-  /\.prepare_edit\(session_id, None\)/,
-  'the Tauri selection-voice adapter must consume the Core-owned edit delivery decision',
+  /\.route_disposition\(disposition\)/,
+  'the Tauri selection-voice adapter must consume the complete Core-owned QA/Edit route',
 );
 for (const forbiddenBusinessToken of [
   /apply_correction_rules/,
@@ -314,14 +354,36 @@ for (const forbiddenBusinessToken of [
   );
 }
 assert.match(
+  qaCore,
+  /\.edit_preview\(crate::domains::SelectionVoiceEditRequest/,
+  'the Core QA service must own edit-vs-answer routing and preview generation',
+);
+assert.match(
+  selectionVoiceCore,
+  /qa\.submit_selection_edit\(session_id, selection, instruction\)/,
+  'Selection Voice must pass the pre-focus capture into the Core QA use-case',
+);
+assert.match(
   qaAdapter,
-  /\.edit_preview\(SelectionVoiceEditRequest/,
-  'the QA adapter must delegate preview generation and revision to openless-core',
+  /fn prepare_selection_edit\([^]*?Do not call `capture_turn`[^]*?prebound_selection_voice_session_id/,
+  'the QA host adapter must preserve the already-bound Selection Voice target',
 );
 assert.doesNotMatch(
   qaAdapter,
-  /parse_edit_plan|apply_edit_plan|generate_edit_plan|voice_edit_system_prompt/,
-  'the QA adapter must not recreate the Core selection-edit workflow',
+  /request\.edit_instruction_mode|\.edit_preview\(|parse_edit_plan|apply_edit_plan|generate_edit_plan|voice_edit_system_prompt/,
+  'the QA adapter must not decide edit-vs-answer or recreate the Core selection-edit workflow',
+);
+for (const mode of ['Hold', 'Toggle', 'Auto']) {
+  assert.match(
+    selectionVoiceCore,
+    new RegExp(`HotkeyMode::${mode}`),
+    `Selection Voice ${mode} policy must remain in openless-core`,
+  );
+}
+assert.doesNotMatch(
+  selectionVoiceCoordinator,
+  /HotkeyMode|selection_polish_output_mode|classify_selection_voice_intent|SelectionVoiceIntent::/,
+  'the Tauri selection-voice coordinator must only execute Core actions and host effects',
 );
 assert.match(
   qaAdapter,
@@ -332,6 +394,26 @@ assert.doesNotMatch(
   qaAdapter,
   /\b(?:AudioRecorder|TranscriptionEngine|ActiveRecording|TauriQaPcmBuffer|TauriQaAudioFanout)\b/,
   'the QA adapter must not own recorder, transcription, or PCM lifecycle implementations',
+);
+assert.match(
+  coreApi,
+  /struct QaRecordingProgress[^]*?SilenceAutoStop[^]*?qa\.recording_fault/,
+  'QA silence and typed recording-fault routing must be Core-owned',
+);
+assert.match(
+  coreApi,
+  /struct SelectionVoiceRecordingProgress[^]*?SilenceAutoStop[^]*?selection_voice\.recording_fault/,
+  'Selection Voice silence and typed recording-fault routing must be Core-owned',
+);
+assert.match(
+  coreApi,
+  /struct LessComputerRecordingProgress[^]*?SilenceAutoStop[^]*?less_computer\.capture_fault/,
+  'Less Computer silence and typed recording-fault routing must be Core-owned',
+);
+assert.doesNotMatch(
+  qaAdapter,
+  /\.recording_fault\(/,
+  'the QA host adapter must only forward recorder effects, never decide fault state',
 );
 assert.doesNotMatch(
   qaAdapter,
@@ -398,6 +480,62 @@ assert.doesNotMatch(
   coordinatorBusinessSources,
   /\bActiveAsr\b|CredentialsVault|ProviderScope|build_active_omni_provider|build_tauri_omni_provider|(?:fn|const)\s+(?:asr_vocab_phrases|prioritize_vocab_for_asr|FRESH_VOCAB_SEATS)\b/,
   'Coordinator must not own ASR provider, credential, active-session, or vocabulary policy',
+);
+assert.doesNotMatch(
+  `${credentialCommands}\n${credentialPersistence}`,
+  /\b(?:allocate_channel_id|compact_orders|reposition_after_toggle|apply_order|mutate_vault_channel)\b/,
+  'Tauri credential persistence must not retain Core channel mutation/order/active policy',
+);
+assert.doesNotMatch(
+  `${coreAdapters}\n${linuxFcitx}`,
+  /\b(?:streamed_text|stream_failed)\b|starts_with\(/,
+  'Host insertion adapters must not retain final reconciliation policy',
+);
+assert.doesNotMatch(
+  hostDocumentMacos,
+  /\b(?:edit_is_within_typed_text|is_vocab_worthy|learned_rule)\b/,
+  'the macOS edit watcher must report EditPair and leave learning policy to Core',
+);
+assert.match(
+  historyCommand,
+  /core\.apply_history_retranscription\(/,
+  'history retranscription mutation and attribution must be owned by Core',
+);
+assert.doesNotMatch(
+  historyCommand,
+  /entry\.(?:raw_transcript|final_text|asr_provider|asr_model|llm_provider|llm_model|polish_ms)\s*=/,
+  'the Tauri history command must not mutate retranscription records',
+);
+const providerUiSources = `${providerSection}\n${channelList}\n${providerLabels}`;
+assert.match(
+  providerUiSources,
+  /listProviderDescriptors/,
+  'React provider UI must consume Core ProviderDescriptor',
+);
+assert.doesNotMatch(
+  providerUiSources,
+  /\b(?:ASR_PRESETS|LLM_PRESETS|OMNI_PRESETS|LOCAL_ASR_PROVIDER_IDS)\b/,
+  'React must retain labels only, not provider defaults or capability tables',
+);
+assert.doesNotMatch(
+  providerUiSources,
+  /https:\/\/(?:api\.openai\.com|api\.deepseek\.com|dashscope\.aliyuncs\.com|ark\.cn-beijing\.volces\.com)/,
+  'React must not hard-code provider endpoints owned by Core descriptors',
+);
+assert.match(
+  appShell,
+  /export function App\([^]*?getStartupSnapshot\(\)[^]*?return <ReadyApp \{\.\.\.props\} \/>/,
+  'every Tauri webview route must mount behind the shared readiness handshake',
+);
+assert.match(
+  localAsrPage,
+  /find\(c => c\.providerType === providerType\)[^]*?return current\.id/,
+  'local ASR activation must pass the concrete provider channel id, not its provider type',
+);
+assert.doesNotMatch(
+  localAsrPage,
+  /activateSherpaProvider\(selectedSherpaAlias\)[^]*?prepareSherpaOnnxAsr\(/,
+  'local ASR activation must not layer the old prepare sequence after the Core transaction',
 );
 for (const legacyDictationFacade of [
   'start_dictation',

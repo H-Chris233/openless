@@ -1,28 +1,106 @@
 //! Selection-voice edit session (issue #987 desktop MVP, Windows-first).
 
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::sync::{Arc, Weak};
 
 use super::{emit_capsule, schedule_capsule_idle, Coordinator, Inner};
 use crate::coordinator_state::SessionId;
 use crate::selection::SelectionInsertionTarget;
-use crate::types::{CapsuleState, HotkeyMode, InsertStatus};
+use crate::types::{CapsuleState, InsertStatus};
 use openless_core::{
     BackendError, BackendErrorCode, SelectionCapture, SelectionVoiceApplyOutcome,
-    SelectionVoiceDisposition, SelectionVoiceEditAction, SelectionVoicePhase,
-    SessionId as CoreSessionId,
+    SelectionVoiceDisposition, SelectionVoiceHotkeyAction, SelectionVoiceHotkeyEdge,
+    SelectionVoicePhase, SelectionVoiceRoute, SessionId as CoreSessionId,
 };
 
-static SELECTION_VOICE_BUSY: AtomicBool = AtomicBool::new(false);
+/// Platform half of automatic recording control. Core owns the silence/fault
+/// decision; this object only reaches the capture handle kept by the Tauri
+/// coordinator and performs the requested stop/cancel effect.
+struct SelectionVoiceRecordingControl {
+    inner: Weak<Inner>,
+    pending: parking_lot::Mutex<Vec<(CoreSessionId, openless_core::RecordingControlAction)>>,
+}
 
-/// 与听写 Auto 模式一致：短于该阈值视为点按（切换式锁存），否则视为按住说话。
-const AUTO_HOLD_THRESHOLD: std::time::Duration = std::time::Duration::from_millis(350);
+impl SelectionVoiceRecordingControl {
+    fn new(inner: &Arc<Inner>) -> Self {
+        Self {
+            inner: Arc::downgrade(inner),
+            pending: parking_lot::Mutex::new(Vec::new()),
+        }
+    }
 
-/// 选区语音会话占用麦克风时，禁止再开听写/追问录音。
-pub(super) fn selection_voice_blocks_other_recording(inner: &Arc<Inner>) -> bool {
-    inner.selection_voice_host.lock().blocks_recording
+    fn apply(
+        inner: &Arc<Inner>,
+        session_id: CoreSessionId,
+        action: openless_core::RecordingControlAction,
+    ) {
+        match action {
+            openless_core::RecordingControlAction::Stop => {
+                let task_inner = Arc::clone(inner);
+                inner.host.spawn(async move {
+                    if let Err(error) = end_selection_voice_session(&task_inner).await {
+                        log::warn!("[selection-voice] automatic stop failed: {error}");
+                    }
+                });
+            }
+            openless_core::RecordingControlAction::Cancel => {
+                Coordinator {
+                    inner: Arc::clone(inner),
+                }
+                .finish_cancelled_selection_voice_host(Some(session_id));
+            }
+        }
+    }
+
+    fn flush(&self, session_id: CoreSessionId) {
+        let requests = {
+            let mut pending = self.pending.lock();
+            let mut requests = Vec::new();
+            let mut index = 0;
+            while index < pending.len() {
+                if pending[index].0 == session_id {
+                    requests.push(pending.remove(index));
+                } else {
+                    index += 1;
+                }
+            }
+            requests
+        };
+        let Some(inner) = self.inner.upgrade() else {
+            return;
+        };
+        for (_, action) in requests {
+            Self::apply(&inner, session_id, action);
+        }
+    }
+}
+
+impl openless_core::RecordingControlSink for SelectionVoiceRecordingControl {
+    fn request(
+        &self,
+        session_id: CoreSessionId,
+        action: openless_core::RecordingControlAction,
+    ) -> Result<(), BackendError> {
+        let inner = self.inner.upgrade().ok_or_else(|| {
+            BackendError::new(
+                BackendErrorCode::Cancelled,
+                "selection voice host session is no longer available",
+            )
+        })?;
+        let ready = inner
+            .selection_voice_capture
+            .lock()
+            .as_ref()
+            .is_some_and(|capture| capture.session_id() == session_id);
+        if ready {
+            Self::apply(&inner, session_id, action);
+        } else {
+            // cpal may report a device fault immediately after starting its
+            // stream, before the returned capture reaches the Host slot.
+            // Preserve that Core decision and replay it after installation.
+            self.pending.lock().push((session_id, action));
+        }
+        Ok(())
+    }
 }
 
 fn selection_voice_user_message(error: &str) -> String {
@@ -84,10 +162,6 @@ pub(super) struct SelectionVoiceHostState {
     /// preview remain exclusively owned by `openless-core`.
     target_session_id: Option<CoreSessionId>,
     insertion_target: SelectionInsertionTarget,
-    /// Host shortcut arbitration state; not part of the business session.
-    blocks_recording: bool,
-    /// Auto 模式判定短按/长按的按下时刻。
-    auto_press_at: Option<std::time::Instant>,
 }
 
 fn core_error(error: BackendError) -> String {
@@ -142,127 +216,56 @@ pub(super) fn bind_selection_voice_target_state(
     let mut host = host_slot.lock();
     host.target_session_id = Some(session_id);
     host.insertion_target = insertion_target;
-    host.blocks_recording = false;
     Ok(())
 }
 
 pub(super) async fn handle_selection_voice_pressed(inner: &Arc<Inner>) {
-    if !inner.backend.get_preferences().selection_voice_enabled {
-        return;
-    }
-
-    let mode = inner.backend.get_preferences().hotkey.mode;
-    let phase = match inner.backend.services().selection_voice.snapshot().await {
-        Ok(snapshot) => snapshot.phase,
+    let action = match inner
+        .backend
+        .services()
+        .selection_voice
+        .dispatch_hotkey_edge(SelectionVoiceHotkeyEdge::Pressed {
+            at: std::time::Instant::now(),
+        }) {
+        Ok(action) => action,
         Err(error) => {
-            log::warn!("[selection-voice] snapshot failed: {error}");
+            log::warn!("[selection-voice] hotkey dispatch failed: {error}");
             return;
         }
     };
-
-    // 切换式 / Auto 锁存态的「再按一次停止」不能被子 busy 挡住。
-    match (mode, phase) {
-        (HotkeyMode::Toggle, SelectionVoicePhase::Recording)
-        | (HotkeyMode::Auto, SelectionVoicePhase::Recording) => {
-            if let Err(error) = end_selection_voice_session(inner).await {
-                log::warn!("[selection-voice] end on stop press failed: {error}");
-            }
-            SELECTION_VOICE_BUSY.store(false, Ordering::Release);
-            inner.selection_voice_host.lock().auto_press_at = None;
-            return;
-        }
-        _ => {}
-    }
-
-    if SELECTION_VOICE_BUSY.swap(true, Ordering::AcqRel) {
-        return;
-    }
-
-    let begin_result = match (mode, phase) {
-        (HotkeyMode::Toggle, SelectionVoicePhase::Idle) => {
-            begin_selection_voice_session(inner).await
-        }
-        (HotkeyMode::Hold, SelectionVoicePhase::Idle) => begin_selection_voice_session(inner).await,
-        (HotkeyMode::Auto, SelectionVoicePhase::Idle) => {
-            {
-                inner.selection_voice_host.lock().auto_press_at = Some(std::time::Instant::now());
-            }
-            begin_selection_voice_session(inner).await
-        }
-        _ => {
-            SELECTION_VOICE_BUSY.store(false, Ordering::Release);
-            return;
-        }
+    let result = match action {
+        SelectionVoiceHotkeyAction::Start => begin_selection_voice_session(inner).await,
+        SelectionVoiceHotkeyAction::Finish => end_selection_voice_session(inner).await,
+        SelectionVoiceHotkeyAction::Noop => return,
     };
-
-    if let Err(error) = begin_result {
-        log::warn!("[selection-voice] begin failed: {error}");
+    if let Err(error) = result {
+        log::warn!("[selection-voice] hotkey action failed: {error}");
         emit_selection_voice_begin_error(inner, &error);
-        {
-            inner.selection_voice_host.lock().auto_press_at = None;
-        }
     }
-    SELECTION_VOICE_BUSY.store(false, Ordering::Release);
 }
 
 pub(super) async fn handle_selection_voice_released(inner: &Arc<Inner>) {
-    if !inner.backend.get_preferences().selection_voice_enabled {
-        return;
-    }
-    let mode = inner.backend.get_preferences().hotkey.mode;
-    if mode == HotkeyMode::Toggle {
-        return;
-    }
-    let phase = match inner.backend.services().selection_voice.snapshot().await {
-        Ok(snapshot) => snapshot.phase,
+    let action = match inner
+        .backend
+        .services()
+        .selection_voice
+        .dispatch_hotkey_edge(SelectionVoiceHotkeyEdge::Released {
+            at: std::time::Instant::now(),
+        }) {
+        Ok(action) => action,
         Err(error) => {
-            log::warn!("[selection-voice] snapshot failed: {error}");
+            log::warn!("[selection-voice] hotkey dispatch failed: {error}");
             return;
         }
     };
-    if phase != SelectionVoicePhase::Recording {
-        SELECTION_VOICE_BUSY.store(false, Ordering::Release);
-        return;
-    }
-    if mode == HotkeyMode::Hold {
+    if action == SelectionVoiceHotkeyAction::Finish {
         if let Err(error) = end_selection_voice_session(inner).await {
-            log::warn!("[selection-voice] end on hold release failed: {error}");
+            log::warn!("[selection-voice] end on hotkey release failed: {error}");
         }
-        SELECTION_VOICE_BUSY.store(false, Ordering::Release);
-        return;
-    }
-    if mode == HotkeyMode::Auto {
-        let released_at = std::time::Instant::now();
-        let held_long = {
-            inner
-                .selection_voice_host
-                .lock()
-                .auto_press_at
-                .take()
-                .map(|pressed_at| {
-                    released_at.saturating_duration_since(pressed_at) >= AUTO_HOLD_THRESHOLD
-                })
-                .unwrap_or(false)
-        };
-        if held_long {
-            if let Err(error) = end_selection_voice_session(inner).await {
-                log::warn!("[selection-voice] end on auto hold release failed: {error}");
-            }
-        } else {
-            log::info!("[selection-voice] auto short-tap latched; next press stops");
-        }
-        SELECTION_VOICE_BUSY.store(false, Ordering::Release);
     }
 }
 
 async fn begin_selection_voice_session(inner: &Arc<Inner>) -> Result<(), String> {
-    if inner.backend.snapshot().dictation.phase != openless_core::DictationPhase::Idle {
-        return Err("dictationActive".into());
-    }
-    if selection_voice_blocks_other_recording(inner) {
-        return Err("selectionVoiceBusy".into());
-    }
-
     let (selection_opt, insertion_target) = crate::selection::resolve_selection_workspace_capture();
     let selection = selection_opt.ok_or_else(|| "selectionVoiceNoSelection".to_string())?;
     if !crate::selection::selection_insertion_target_is_captured(&insertion_target) {
@@ -283,16 +286,22 @@ async fn begin_selection_voice_session(inner: &Arc<Inner>) -> Result<(), String>
         let mut host = inner.selection_voice_host.lock();
         host.target_session_id = Some(session_id);
         host.insertion_target = insertion_target;
-        host.blocks_recording = true;
     }
 
     emit_capsule(inner, CapsuleState::Recording, 0.0, 0, None, None);
+    let recording_control = Arc::new(SelectionVoiceRecordingControl::new(inner));
     match inner
         .backend
-        .start_selection_voice_capture(session_id)
+        .start_selection_voice_capture(
+            session_id,
+            Arc::clone(&recording_control) as Arc<dyn openless_core::RecordingControlSink>,
+        )
         .await
     {
-        Ok(capture) => *inner.selection_voice_capture.lock() = Some(capture),
+        Ok(capture) => {
+            *inner.selection_voice_capture.lock() = Some(capture);
+            recording_control.flush(session_id);
+        }
         Err(error) => {
             let _ = inner
                 .backend
@@ -338,10 +347,6 @@ async fn end_selection_voice_session(inner: &Arc<Inner>) -> Result<(), String> {
             .take()
             .ok_or_else(|| "selectionVoiceAsrUnavailable".to_string())?;
         let transcript = capture.finish().await.map_err(core_error)?;
-        {
-            let mut host = inner.selection_voice_host.lock();
-            host.blocks_recording = false;
-        }
         if transcript.trim().is_empty() {
             inner
                 .backend
@@ -370,13 +375,7 @@ async fn end_selection_voice_session(inner: &Arc<Inner>) -> Result<(), String> {
             .process_transcript(session_id, transcript)
             .await
             .map_err(core_error)?;
-        if disposition.is_awaiting_intent() {
-            inner.host.show_selection_voice_intent_prompt();
-            return Ok(EndWorkflowOutcome::AwaitingIntent);
-        }
-
-        continue_selection_voice_disposition(inner, disposition).await?;
-        Ok(EndWorkflowOutcome::Finished)
+        continue_selection_voice_disposition(inner, disposition).await
     }
     .await;
 
@@ -406,115 +405,34 @@ enum EndWorkflowOutcome {
 async fn continue_selection_voice_disposition(
     inner: &Arc<Inner>,
     disposition: SelectionVoiceDisposition,
-) -> Result<(), String> {
-    match disposition {
-        SelectionVoiceDisposition::AwaitingIntent { .. } => {
-            return Err("selectionVoiceIntentPromptUnavailable".to_string());
-        }
-        SelectionVoiceDisposition::Question {
-            session_id,
-            instruction,
-            ..
-        } => run_selection_voice_question(inner, session_id, &instruction).await?,
-        SelectionVoiceDisposition::Edit { session_id, .. } => {
-            run_selection_voice_edit(inner, session_id).await?
-        }
-    }
-    Ok(())
-}
-
-async fn run_selection_voice_question(
-    inner: &Arc<Inner>,
-    session_id: CoreSessionId,
-    instruction_polished: &str,
-) -> Result<(), String> {
-    inner
-        .backend
-        .services()
-        .qa
-        .show()
-        .await
-        .map_err(core_error)?;
-    inner
-        .backend
-        .services()
-        .qa
-        .set_edit_instruction_mode(false)
-        .await
-        .map_err(core_error)?;
-    inner
-        .backend
-        .services()
-        .qa
-        .submit_text(instruction_polished.to_string())
-        .await
-        .map_err(core_error)?;
-    inner
+) -> Result<EndWorkflowOutcome, String> {
+    let route = inner
         .backend
         .services()
         .selection_voice
-        .complete(session_id)
+        .route_disposition(disposition)
         .await
         .map_err(core_error)?;
-    clear_host_session(inner, session_id);
-    Ok(())
-}
-
-async fn run_selection_voice_edit(
-    inner: &Arc<Inner>,
-    session_id: CoreSessionId,
-) -> Result<(), String> {
-    emit_capsule(
-        inner,
-        CapsuleState::Polishing,
-        0.0,
-        0,
-        Some("正在生成编辑…".into()),
-        None,
-    );
-    match inner
-        .backend
-        .services()
-        .selection_voice
-        .prepare_edit(session_id, None)
-        .await
-        .map_err(core_error)?
-    {
-        SelectionVoiceEditAction::OpenConversation { instruction, .. } => {
-            inner
-                .backend
-                .services()
-                .qa
-                .show()
-                .await
-                .map_err(core_error)?;
-            inner
-                .backend
-                .services()
-                .qa
-                .set_edit_instruction_mode(true)
-                .await
-                .map_err(core_error)?;
-            inner
-                .backend
-                .services()
-                .qa
-                .submit_text(instruction)
-                .await
-                .map_err(core_error)?;
+    match route {
+        SelectionVoiceRoute::AwaitingIntent { .. } => {
+            inner.host.show_selection_voice_intent_prompt();
+            Ok(EndWorkflowOutcome::AwaitingIntent)
         }
-        SelectionVoiceEditAction::ReadyToApply { preview } => {
+        SelectionVoiceRoute::QuestionCompleted { session_id } => {
+            clear_host_session(inner, session_id);
+            Ok(EndWorkflowOutcome::Finished)
+        }
+        SelectionVoiceRoute::EditConversationOpened { .. } => Ok(EndWorkflowOutcome::Finished),
+        SelectionVoiceRoute::ReadyToApply { preview } => {
             let coordinator = Coordinator {
                 inner: Arc::clone(inner),
             };
             coordinator
                 .confirm_selection_voice_preview(preview.text, None)
                 .await?;
+            Ok(EndWorkflowOutcome::Finished)
         }
     }
-    emit_capsule(inner, CapsuleState::Idle, 0.0, 0, None, None);
-    schedule_capsule_idle(inner, 0);
-    Ok(())
 }
 
 impl Coordinator {
@@ -524,7 +442,9 @@ impl Coordinator {
         disposition: SelectionVoiceDisposition,
     ) -> Result<(), String> {
         self.inner.host.hide_selection_voice_intent_prompt();
-        let result = continue_selection_voice_disposition(&self.inner, disposition).await;
+        let result = continue_selection_voice_disposition(&self.inner, disposition)
+            .await
+            .map(|_| ());
         if let Err(error) = &result {
             let _ = self
                 .inner

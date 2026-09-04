@@ -29,6 +29,30 @@ pub trait HostActions: Send + Sync {
     fn request(&self, action: HostAction) -> Result<(), BackendError>;
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HostContextCapture {
+    pub front_app: Option<String>,
+    pub cursor_context: Option<String>,
+}
+
+pub trait HostContextAdapter: Send + Sync {
+    fn capture(
+        &self,
+        include_cursor: bool,
+    ) -> BoxFuture<'static, Result<HostContextCapture, BackendError>>;
+}
+
+pub struct NoopHostContextAdapter;
+
+impl HostContextAdapter for NoopHostContextAdapter {
+    fn capture(
+        &self,
+        _include_cursor: bool,
+    ) -> BoxFuture<'static, Result<HostContextCapture, BackendError>> {
+        Box::pin(async { Ok(HostContextCapture::default()) })
+    }
+}
+
 pub struct NoopHostActions;
 
 impl HostActions for NoopHostActions {
@@ -88,6 +112,7 @@ impl ResourceResolver for DirectoryResourceResolver {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineResult {
     pub raw_text: String,
+    pub asr_transcript: Option<String>,
     pub polished_text: String,
     pub polish_source: Option<String>,
     pub duration_ms: u64,
@@ -95,6 +120,8 @@ pub struct EngineResult {
     pub asr_ms: Option<u64>,
     pub polish_ms: Option<u64>,
     pub has_audio_recording: Option<bool>,
+    pub asr_call_label: Option<crate::auxiliary::AsrCallLabel>,
+    pub llm_call_label: Option<crate::polish::LlmCallLabel>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,6 +139,8 @@ pub struct EngineFailure {
     pub asr_ms: Option<u64>,
     pub polish_ms: Option<u64>,
     pub has_audio_recording: Option<bool>,
+    pub asr_call_label: Option<crate::auxiliary::AsrCallLabel>,
+    pub llm_call_label: Option<crate::polish::LlmCallLabel>,
 }
 
 impl EngineFailure {
@@ -124,6 +153,8 @@ impl EngineFailure {
             asr_ms: None,
             polish_ms: None,
             has_audio_recording: None,
+            asr_call_label: None,
+            llm_call_label: None,
         }
     }
 }
@@ -138,6 +169,7 @@ impl From<BackendError> for EngineFailure {
 pub struct PolishOutput {
     pub text: String,
     pub source_text: Option<String>,
+    pub llm_call_label: Option<crate::polish::LlmCallLabel>,
 }
 
 impl PolishOutput {
@@ -145,6 +177,7 @@ impl PolishOutput {
         Self {
             text: text.into(),
             source_text: None,
+            llm_call_label: None,
         }
     }
 }
@@ -158,6 +191,8 @@ pub enum EngineStage {
 #[derive(Debug, Clone, PartialEq)]
 pub enum EngineProgress {
     RecordingLevel { elapsed_ms: u64, level: f32 },
+    RecordingFault(BackendError),
+    Notification(crate::types::NotificationPayload),
     Stage(EngineStage),
     TranscriptDelta(TranscriptDelta),
     PolishDelta(PolishDelta),
@@ -302,8 +337,32 @@ pub trait AudioConsumer: Send + Sync {
 }
 
 /// Recording-time progress. Implementations must keep callbacks non-blocking.
+#[derive(Debug, Clone)]
+pub enum RecordingEvent {
+    Level { elapsed_ms: u64, level: f32 },
+    Fatal(BackendError),
+}
+
 pub trait RecordingProgressSink: Send + Sync {
     fn publish_level(&self, elapsed_ms: u64, level: f32) -> Result<(), BackendError>;
+
+    fn publish(&self, event: RecordingEvent) -> Result<(), BackendError> {
+        match event {
+            RecordingEvent::Level { elapsed_ms, level } => self.publish_level(elapsed_ms, level),
+            RecordingEvent::Fatal(error) => Err(error),
+        }
+    }
+}
+
+/// Narrow callback for a Core-owned recording policy to request a platform
+/// effect. The Core decides *when* silence means stop/cancel; the host only
+/// closes the opaque microphone/transcription handles it already owns.
+pub trait RecordingControlSink: Send + Sync {
+    fn request(
+        &self,
+        session_id: SessionId,
+        action: crate::events::RecordingControlAction,
+    ) -> Result<(), BackendError>;
 }
 
 /// A recoverable recording archive owned by the platform adapter.
@@ -313,6 +372,15 @@ pub trait RecordingProgressSink: Send + Sync {
 /// immutable session policy.
 pub trait RecordingArchive: Send + Sync {
     fn is_available(&self) -> bool;
+
+    fn read_pcm(&self) -> BoxFuture<'static, Result<Vec<u8>, BackendError>> {
+        Box::pin(async {
+            Err(BackendError::new(
+                BackendErrorCode::Unsupported,
+                "recording archive cannot provide canonical PCM",
+            ))
+        })
+    }
 
     fn discard(&self) -> BoxFuture<'static, Result<(), BackendError>>;
 }
@@ -374,6 +442,13 @@ pub trait TranscriptionSession: AudioConsumer {
         None
     }
 
+    /// Drain provider notices discovered during finalization. This lets a
+    /// native adapter report facts such as Foundry GPU-to-CPU fallback without
+    /// publishing UI events or inventing host-only callback policy.
+    fn take_progress_notifications(&self) -> Vec<crate::types::NotificationPayload> {
+        Vec::new()
+    }
+
     fn finish(&self) -> BoxFuture<'static, Result<TranscriptOutput, BackendError>>;
     fn cancel(&self) -> BoxFuture<'static, Result<(), BackendError>>;
 }
@@ -409,9 +484,46 @@ pub trait TextInserter: Send + Sync {
 
 pub trait TextInsertionSession: Send + Sync {
     fn write(&self, text: String) -> BoxFuture<'static, Result<InsertWriteResult, BackendError>>;
+    fn copy(&self, text: String) -> BoxFuture<'static, Result<(), BackendError>>;
     fn finish(&self, final_text: String)
         -> BoxFuture<'static, Result<InsertOutcome, BackendError>>;
     fn cancel(&self) -> BoxFuture<'static, Result<(), BackendError>>;
+}
+
+/// Core-side decision point for a native document edit observation.
+///
+/// The boolean is an acknowledgement: `true` means Core accepted the edit as
+/// belonging to the inserted text, so the native watcher may advance its
+/// document baseline. Keeping that decision here prevents macOS AX code from
+/// owning vocabulary policy or accepting a report from a stale generation.
+pub trait EditObservationSink: Send + Sync {
+    fn publish(&self, edit: crate::host_document::EditPair) -> bool;
+}
+
+/// Narrow native watcher seam. Hosts observe document changes and own the
+/// platform resource; Core owns arming policy, generation and deduplication.
+pub trait EditObservationAdapter: Send + Sync {
+    fn arm(
+        &self,
+        typed_text: String,
+        sink: Arc<dyn EditObservationSink>,
+    ) -> Result<(), BackendError>;
+
+    fn disarm(&self);
+}
+
+pub struct NoopEditObservationAdapter;
+
+impl EditObservationAdapter for NoopEditObservationAdapter {
+    fn arm(
+        &self,
+        _typed_text: String,
+        _sink: Arc<dyn EditObservationSink>,
+    ) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    fn disarm(&self) {}
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -440,6 +552,7 @@ impl TextInserter for UnsupportedTextInserter {
 #[serde(rename_all = "camelCase")]
 pub enum InsertOutcome {
     Inserted,
+    PasteSent,
     CopiedFallback,
 }
 
@@ -447,6 +560,7 @@ impl InsertOutcome {
     pub fn into_status(self) -> InsertStatus {
         match self {
             Self::Inserted => InsertStatus::Inserted,
+            Self::PasteSent => InsertStatus::PasteSent,
             Self::CopiedFallback => InsertStatus::CopiedFallback,
         }
     }

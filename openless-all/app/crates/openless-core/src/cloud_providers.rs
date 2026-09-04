@@ -37,7 +37,9 @@ use crate::ports::{
     TranscriptOutput, TranscriptionEngine, TranscriptionSession,
 };
 use crate::provider_rules::{
-    default_llm_endpoint, default_llm_model, default_omni_endpoint, parse_extra_headers,
+    default_asr_endpoint, default_asr_model, default_llm_endpoint, default_llm_model,
+    default_omni_endpoint, default_omni_model, parse_extra_headers, provider_descriptor,
+    ValidationProbe,
 };
 use crate::types::SessionId;
 
@@ -288,6 +290,14 @@ async fn build_cloud_transcription_session(
             "ASR channel id and provider type must not be empty",
         ));
     }
+    if provider_descriptor(crate::ProviderKind::Asr, provider_type)
+        .is_none_or(|descriptor| descriptor.validation_probe == ValidationProbe::Unsupported)
+    {
+        return Err(BackendError::new(
+            BackendErrorCode::Unsupported,
+            "shared cloud ASR provider is not supported",
+        ));
+    }
     let stored_model = read_channel_credential(
         credentials,
         CredentialNamespace::Asr,
@@ -478,15 +488,15 @@ async fn build_cloud_transcription_session(
             )
         }
         ActiveAsrProviderKind::WhisperCompatible => {
-            require_configured(&api_key, "ASR API key")?;
-            let (default_endpoint, default_model) = if provider_type == "zenmux" {
-                (
-                    crate::asr::whisper::ZENMUX_DEFAULT_ENDPOINT,
-                    crate::asr::whisper::ZENMUX_DEFAULT_MODEL,
-                )
-            } else {
-                ("", "whisper-1")
-            };
+            if crate::provider_rules::api_key_required(
+                crate::ProviderKind::Asr,
+                provider_type,
+                Some(&endpoint),
+            ) {
+                require_configured(&api_key, "ASR API key")?;
+            }
+            let default_endpoint = default_asr_endpoint(provider_type).unwrap_or("");
+            let default_model = default_asr_model(provider_type).unwrap_or("whisper-1");
             let effective_model =
                 non_blank_owned(model).unwrap_or_else(|| default_model.to_string());
             let mut provider = WhisperBatchASR::new(
@@ -798,6 +808,18 @@ async fn run_cloud_polish(
     if cancellation.is_cancelled() {
         return Err(cancelled_provider_error());
     }
+    let call_label = match &provider {
+        CloudPolisherProvider::OpenAi(provider) => provider.call_label(),
+        CloudPolisherProvider::Gemini(_) => crate::polish::LlmCallLabel {
+            provider: context.llm.provider_id.clone(),
+            model: context
+                .llm
+                .model
+                .clone()
+                .or_else(|| default_llm_model(&context.llm.provider_type).map(str::to_string))
+                .unwrap_or_default(),
+        },
+    };
     let prior_turns: Vec<(String, String)> = context
         .polish
         .prior_turns
@@ -895,9 +917,13 @@ async fn run_cloud_polish(
     if cancellation.is_cancelled() {
         return Err(cancelled_provider_error());
     }
-    let output = if context.polish.translation_active {
+    let mut output = if context.polish.translation_active {
         match crate::split_polish_translate_output(&polished) {
-            Some((source_text, text)) => PolishOutput { text, source_text },
+            Some((source_text, text)) => PolishOutput {
+                text,
+                source_text,
+                llm_call_label: None,
+            },
             None => {
                 log::warn!(
                     "[cloud-provider] polish+translate response missing markers; using plain translation"
@@ -938,6 +964,7 @@ async fn run_cloud_polish(
             "LLM provider returned empty polish output",
         ));
     }
+    output.llm_call_label = Some(call_label);
     Ok(output)
 }
 
@@ -980,19 +1007,26 @@ async fn build_cloud_polisher_provider(
     )
     .await?
     .unwrap_or_default();
-    require_configured(&api_key, "LLM API key")?;
-    let endpoint = read_channel_credential(
+    let configured_endpoint = read_channel_credential(
         credentials,
         CredentialNamespace::Llm,
         channel_id,
         LLM_ENDPOINT_ACCOUNT,
     )
-    .await?
-    .and_then(non_blank_owned)
-    .or_else(|| default_llm_endpoint(provider_type).map(str::to_string))
-    .ok_or_else(|| {
-        BackendError::new(BackendErrorCode::Provider, "LLM endpoint is not configured")
-    })?;
+    .await?;
+    if crate::provider_rules::api_key_required(
+        crate::ProviderKind::Llm,
+        provider_type,
+        configured_endpoint.as_deref(),
+    ) {
+        require_configured(&api_key, "LLM API key")?;
+    }
+    let endpoint = configured_endpoint
+        .and_then(non_blank_owned)
+        .or_else(|| default_llm_endpoint(provider_type).map(str::to_string))
+        .ok_or_else(|| {
+            BackendError::new(BackendErrorCode::Provider, "LLM endpoint is not configured")
+        })?;
     crate::endpoint_security::validate_http_endpoint(&endpoint)
         .map_err(|error| map_llm_error(error.to_string()))?;
     if provider_type == "gemini" {
@@ -1313,6 +1347,7 @@ async fn build_omni_provider(
         )
         .await?
         .and_then(non_blank_owned))
+        .or_else(|| default_omni_model(provider_type).map(str::to_string))
         .ok_or_else(|| {
             BackendError::new(BackendErrorCode::Provider, "Omni model is not configured")
         })?;
@@ -1675,7 +1710,7 @@ impl DictationEngine for SharedOmniDictationEngine {
                     return Err(failure);
                 }
             };
-            if !context.record_audio_for_debug {
+            if !context.recording.archive_successful_recording {
                 if let Some(archive) = archive.as_ref() {
                     if archive.is_available() {
                         let _ = archive.discard().await;
@@ -1696,8 +1731,11 @@ impl DictationEngine for SharedOmniDictationEngine {
             remove_omni_session(&sessions, session_id, &session);
             Ok(EngineResult {
                 raw_text: output.clone(),
+                asr_transcript: None,
                 polished_text: output,
                 polish_source: None,
+                asr_call_label: None,
+                llm_call_label: None,
                 duration_ms,
                 polish_failed: false,
                 asr_ms: None,
@@ -1859,6 +1897,29 @@ mod tests {
             )
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cloud_asr_rejects_unknown_protocol_instead_of_falling_back_to_volcengine() {
+        let credentials: Arc<dyn CredentialStore> = Arc::new(InMemoryCredentialStore::default());
+        let engine = SharedCloudTranscriptionEngine::new(credentials);
+        let context = DictationContext {
+            asr: ProviderInvocation::new("channel", "unknown-provider"),
+            ..DictationContext::default()
+        };
+
+        let error = match engine
+            .start(
+                SessionId::new(),
+                Arc::new(context),
+                Arc::new(IgnoreTextStreamSink),
+            )
+            .await
+        {
+            Ok(_) => panic!("unknown provider must not enter a production builder"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, BackendErrorCode::Unsupported);
     }
 
     #[tokio::test]

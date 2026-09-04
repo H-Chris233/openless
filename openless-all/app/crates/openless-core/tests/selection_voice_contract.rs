@@ -7,9 +7,10 @@ use openless_core::{
     BackendConfig, BackendDependencies, BackendError, BackendErrorCode, BackendEventKind,
     BackendRepositories, DictationContext, InsertOutcome, OpenLessBackend, PolishOutput,
     SelectionCapture, SelectionPolishOutputMode, SelectionVoiceApplyOutcome,
-    SelectionVoiceEditAction, SelectionVoiceEditRequest, SelectionVoiceInstructionRequest,
-    SelectionVoiceIntent, SelectionVoiceIntentMode, SelectionVoiceManualIntent,
-    SelectionVoicePhase, SelectionVoicePreviewUpdate, SelectionVoiceSnapshot, SessionId,
+    SelectionVoiceEditAction, SelectionVoiceEditRequest, SelectionVoiceHotkeyAction,
+    SelectionVoiceHotkeyEdge, SelectionVoiceInstructionRequest, SelectionVoiceIntent,
+    SelectionVoiceIntentMode, SelectionVoiceManualIntent, SelectionVoicePhase,
+    SelectionVoicePreviewUpdate, SelectionVoiceRoute, SelectionVoiceSnapshot, SessionId,
     TextPolisher, TextStreamSink, UserPreferences,
 };
 
@@ -201,8 +202,8 @@ async fn direct_edit_plan_generation_and_application_are_core_owned() {
         .unwrap();
     assert_eq!(disposition.intent(), Some(SelectionVoiceIntent::Edit));
 
-    let action = voice.prepare_edit(session_id, None).await.unwrap();
-    let SelectionVoiceEditAction::ReadyToApply { preview } = action else {
+    let route = voice.route_disposition(disposition).await.unwrap();
+    let SelectionVoiceRoute::ReadyToApply { preview } = route else {
         panic!("direct-replace mode must return a ready preview");
     };
     assert_eq!(preview.text, "alpha gamma");
@@ -211,6 +212,149 @@ async fn direct_edit_plan_generation_and_application_are_core_owned() {
     assert_eq!(calls.len(), 2);
     assert!(calls[1].system_prompt.contains("语音编辑"));
     assert!(calls[1].input.contains("<draft>\nalpha beta\n</draft>"));
+
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
+async fn hold_toggle_auto_and_busy_hotkey_decisions_are_core_owned() {
+    let (backend, data_dir) = backend();
+    let voice = &backend.services().selection_voice;
+    let mut preferences = backend.get_preferences();
+    preferences.selection_voice_enabled = true;
+
+    preferences.hotkey.mode = openless_core::HotkeyMode::Hold;
+    backend
+        .repositories()
+        .preferences
+        .set(preferences.clone())
+        .unwrap();
+    let pressed = std::time::Instant::now();
+    assert_eq!(
+        voice
+            .dispatch_hotkey_edge(SelectionVoiceHotkeyEdge::Pressed { at: pressed })
+            .unwrap(),
+        SelectionVoiceHotkeyAction::Start
+    );
+    let session_id = voice
+        .begin(SelectionCapture {
+            text: "selection".to_string(),
+            source_app: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        voice
+            .dispatch_hotkey_edge(SelectionVoiceHotkeyEdge::Released {
+                at: pressed + std::time::Duration::from_millis(20),
+            })
+            .unwrap(),
+        SelectionVoiceHotkeyAction::Finish
+    );
+    voice.cancel(Some(session_id)).await.unwrap();
+
+    preferences.hotkey.mode = openless_core::HotkeyMode::Auto;
+    backend
+        .repositories()
+        .preferences
+        .set(preferences.clone())
+        .unwrap();
+    let pressed = std::time::Instant::now();
+    assert_eq!(
+        voice
+            .dispatch_hotkey_edge(SelectionVoiceHotkeyEdge::Pressed { at: pressed })
+            .unwrap(),
+        SelectionVoiceHotkeyAction::Start
+    );
+    let session_id = voice
+        .begin(SelectionCapture {
+            text: "selection".to_string(),
+            source_app: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        voice
+            .dispatch_hotkey_edge(SelectionVoiceHotkeyEdge::Released {
+                at: pressed + std::time::Duration::from_millis(349),
+            })
+            .unwrap(),
+        SelectionVoiceHotkeyAction::Noop
+    );
+    assert_eq!(
+        voice
+            .dispatch_hotkey_edge(SelectionVoiceHotkeyEdge::Pressed {
+                at: pressed + std::time::Duration::from_millis(500),
+            })
+            .unwrap(),
+        SelectionVoiceHotkeyAction::Finish
+    );
+    voice.mark_processing(session_id).await.unwrap();
+    assert_eq!(
+        voice
+            .dispatch_hotkey_edge(SelectionVoiceHotkeyEdge::Pressed {
+                at: pressed + std::time::Duration::from_secs(1),
+            })
+            .unwrap(),
+        SelectionVoiceHotkeyAction::Noop
+    );
+    voice.cancel(Some(session_id)).await.unwrap();
+
+    preferences.hotkey.mode = openless_core::HotkeyMode::Toggle;
+    backend.repositories().preferences.set(preferences).unwrap();
+    assert_eq!(
+        voice
+            .dispatch_hotkey_edge(SelectionVoiceHotkeyEdge::Pressed {
+                at: std::time::Instant::now(),
+            })
+            .unwrap(),
+        SelectionVoiceHotkeyAction::Start
+    );
+
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
+async fn recording_fault_fails_only_the_current_selection_voice_session_and_releases_busy() {
+    let (backend, data_dir) = backend();
+    let voice = &backend.services().selection_voice;
+    let session_id = voice
+        .begin(SelectionCapture {
+            text: "selection".to_string(),
+            source_app: None,
+        })
+        .await
+        .unwrap();
+
+    voice
+        .recording_fault(
+            session_id,
+            BackendError::new(BackendErrorCode::Platform, "microphone disconnected"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        voice.snapshot().await.unwrap().phase,
+        SelectionVoicePhase::Failed
+    );
+    assert_eq!(
+        voice
+            .recording_fault(
+                session_id,
+                BackendError::new(BackendErrorCode::Platform, "late fault"),
+            )
+            .await
+            .unwrap_err()
+            .code,
+        BackendErrorCode::InvalidState
+    );
+    voice
+        .begin(SelectionCapture {
+            text: "next selection".to_string(),
+            source_app: None,
+        })
+        .await
+        .unwrap();
 
     let _ = std::fs::remove_dir_all(data_dir);
 }

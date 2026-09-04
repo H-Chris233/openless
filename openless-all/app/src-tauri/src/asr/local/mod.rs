@@ -66,7 +66,7 @@ pub use whisper_provider::{LocalWhisperAsr, LocalWhisperCache};
 
 pub use models::ModelId;
 
-/// 本地 Qwen3-ASR 在 active_asr 字段里的标识；与前端 ASR_PRESETS 的 id 对齐。
+/// 本地 Qwen3-ASR 在 active_asr 字段里的标识；与 Core ProviderDescriptor 的 type 对齐。
 /// 旧版本的本地 Qwen3-ASR provider id。macOS 映射到 MLX，Linux 映射到 C，
 /// 仅用于兼容已经保存的渠道配置；新渠道请使用下方两个明确后端 id。
 pub const PROVIDER_ID: &str = "local-qwen3";
@@ -229,8 +229,8 @@ mod qwen_dictation_tests {
     }
 }
 
-/// Apple Speech（SFSpeechRecognizer）本地 ASR 的 provider id；与前端
-/// ASR_PRESETS 的 id 对齐（issue #574）。该字符串在所有平台都可被识别，
+/// Apple Speech（SFSpeechRecognizer）本地 ASR 的 provider id；与 Core
+/// ProviderDescriptor 的 type 对齐（issue #574）。该字符串在所有平台都可被识别，
 /// 但 provider 实现只在 macOS 编译；非 macOS 上由上层判为 not-configured /
 /// 不可用（见 commands / coordinator 的平台门控）。
 pub const APPLE_SPEECH_PROVIDER_ID: &str = "apple-speech";

@@ -151,8 +151,6 @@ if ($fixture.startupSnapshot.sample.contractVersion -ne $baseline.contractVersio
 
 $fieldGroups = @(
     @($fixture.startupSnapshot.fields),
-    @($fixture.command.requestFields),
-    @($fixture.command.responseFields),
     @($fixture.backendEvent.fields),
     @($fixture.androidJni.fields),
     @($fixture.linuxFacade.startupFields),
@@ -188,13 +186,7 @@ Assert-CamelCaseObjectFields -Value $fixture
 if ($fixture.androidJni.sample.contractVersion -ne $baseline.contractVersion) {
     throw "canonical Android JNI sample has the wrong contract version"
 }
-if ((Compare-Object @($fixture.command.requestFields | Sort-Object) @($fixture.command.sampleRequest.PSObject.Properties.Name | Sort-Object)).Count -ne 0) {
-    throw "canonical command request sample fields do not match requestFields"
-}
-if ((Compare-Object @($fixture.command.responseFields | Sort-Object) @($fixture.command.sampleResponse.PSObject.Properties.Name | Sort-Object)).Count -ne 0) {
-    throw "canonical command response sample fields do not match responseFields"
-}
-if ((Compare-Object @("copiedFallback", "inserted", "notRequested") @($fixture.enums.insertStatus | Sort-Object)).Count -ne 0) {
+if ((Compare-Object @("copiedFallback", "inserted", "notRequested", "pasteSent") @($fixture.enums.insertStatus | Sort-Object)).Count -ne 0) {
     throw "canonical insertStatus enum values changed"
 }
 if ((Compare-Object @("bad_pin", "locked", "ok") @($fixture.enums.remoteAuthResult | Sort-Object)).Count -ne 0) {

@@ -28,6 +28,7 @@ impl AudioRecorder for LinuxCpalRecorder {
         progress: Arc<dyn RecordingProgressSink>,
     ) -> BoxFuture<'static, Result<Box<dyn ActiveRecording>, BackendError>> {
         let preferred_device_name = context
+            .recording
             .microphone_device_name
             .clone()
             .or_else(|| self.preferred_device_name.clone());

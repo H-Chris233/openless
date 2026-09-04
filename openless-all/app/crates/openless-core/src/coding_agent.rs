@@ -1,9 +1,10 @@
 //! Coding Agent 的跨宿主请求类型、参数归一化和纯业务规则。
 //!
-//! 进程创建、Git 快照、临时配置文件和事件转发属于宿主 Adapter；本模块只保留两个宿主
-//! 必须共享的规则，避免 Tauri 与 Linux 各维护一份 provider/权限/模型语义。
+//! 进程创建、文件 I/O 和事件转发属于宿主 Adapter；本模块统一命令、护栏、临时文件计划、
+//! PATH 规则和协议解析，避免 Tauri 与 Linux 各维护一份业务语义。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -247,6 +248,147 @@ pub struct AgentTemporaryFile {
     pub contents: Vec<u8>,
 }
 
+/// 一项已经过 Core 校验与 token 展开的临时文件写入 effect。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentMaterializedFile {
+    pub path: PathBuf,
+    pub contents: Vec<u8>,
+}
+
+/// Core 生成的临时文件写入与 argv 替换计划；宿主只执行这些文件 effect。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentMaterializationPlan {
+    pub argv: Vec<String>,
+    pub files: Vec<AgentMaterializedFile>,
+}
+
+impl AgentMaterializationPlan {
+    /// 在宿主选定的隔离目录内验证文件名并展开所有临时路径 token。
+    pub fn new(command: &AgentCommand, directory: &Path) -> Result<Self, BackendError> {
+        let mut paths = BTreeMap::new();
+        for file in &command.temporary_files {
+            let path = Path::new(&file.name);
+            if file.name.is_empty()
+                || path.components().count() != 1
+                || !matches!(path.components().next(), Some(Component::Normal(_)))
+            {
+                return Err(invalid_argument("invalid temporary file name"));
+            }
+            if paths
+                .insert(file.name.clone(), directory.join(&file.name))
+                .is_some()
+            {
+                return Err(invalid_argument("duplicate temporary file name"));
+            }
+        }
+
+        let replace_tokens = |input: &str| -> Result<String, BackendError> {
+            let mut output = input.to_string();
+            for (name, path) in &paths {
+                let value = path.to_string_lossy();
+                output = output.replace(&temporary_path_token(name), &value);
+                let encoded = serde_json::to_string(value.as_ref())
+                    .map_err(|error| invalid_argument(error.to_string()))?;
+                let encoded = encoded
+                    .strip_prefix('"')
+                    .and_then(|value| value.strip_suffix('"'))
+                    .unwrap_or(&encoded);
+                output = output.replace(&temporary_json_path_token(name), encoded);
+            }
+            Ok(output)
+        };
+
+        let files = command
+            .temporary_files
+            .iter()
+            .map(|file| {
+                let contents = std::str::from_utf8(&file.contents)
+                    .map_err(|_| invalid_argument("temporary file contents must be UTF-8"))?;
+                Ok(AgentMaterializedFile {
+                    path: directory.join(&file.name),
+                    contents: replace_tokens(contents)?.into_bytes(),
+                })
+            })
+            .collect::<Result<Vec<_>, BackendError>>()?;
+        let argv = command
+            .argv
+            .iter()
+            .map(|argument| replace_tokens(argument))
+            .collect::<Result<Vec<_>, BackendError>>()?;
+        Ok(Self { argv, files })
+    }
+}
+
+/// 登录 shell 输出中标记可信 PATH 起点的固定哨兵。
+pub const AGENT_PATH_SENTINEL: &str = "__OPENLESS_PATH__";
+
+/// GUI 宿主获取登录 shell PATH 时应依次执行的纯计划。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentLoginShellPathPlan {
+    pub shell: String,
+    pub attempts: [Vec<String>; 2],
+    pub timeout: std::time::Duration,
+}
+
+impl AgentLoginShellPathPlan {
+    pub fn new(shell: Option<String>) -> Option<Self> {
+        let shell = shell?.trim().to_string();
+        if shell.is_empty() {
+            return None;
+        }
+        let script = format!("printf '{AGENT_PATH_SENTINEL}%s' \"$PATH\"");
+        Some(Self {
+            shell,
+            attempts: [
+                vec!["-lic".into(), script.clone()],
+                vec!["-lc".into(), script],
+            ],
+            timeout: std::time::Duration::from_secs(5),
+        })
+    }
+}
+
+pub fn parse_agent_login_shell_path(output: &str) -> Option<String> {
+    output
+        .rsplit_once(AGENT_PATH_SENTINEL)
+        .and_then(|(_, path)| path.lines().next())
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(str::to_string)
+}
+
+/// 按登录 shell、静态 fallback、现有环境的优先级保序合并 PATH。
+pub fn merge_agent_path(
+    current: &OsStr,
+    home: Option<&Path>,
+    login_shell_path: Option<&str>,
+) -> OsString {
+    let mut seen = HashSet::new();
+    let mut paths = Vec::new();
+    let mut push = |path: PathBuf| {
+        if !path.as_os_str().is_empty() && seen.insert(path.clone()) {
+            paths.push(path);
+        }
+    };
+    if let Some(path) = login_shell_path {
+        for entry in std::env::split_paths(OsStr::new(path)) {
+            push(entry);
+        }
+    }
+    if let Some(home) = home {
+        for relative in [".local/bin", ".opencode/bin", ".npm-global/bin", ".bun/bin"] {
+            push(home.join(relative));
+        }
+    }
+    for fallback in ["/opt/homebrew/bin", "/usr/local/bin"] {
+        push(PathBuf::from(fallback));
+    }
+    for entry in std::env::split_paths(current) {
+        push(entry);
+    }
+    std::env::join_paths(paths).unwrap_or_else(|_| current.to_os_string())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PromptPayload {
     Stdin(String),
@@ -319,6 +461,9 @@ pub fn autonomous_prompt(task: &str) -> String {
 需求：\n{task}"
     )
 }
+
+const CLAUDE_ALLOWED_TOOLS: [&str; 7] =
+    ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "WebSearch"];
 
 /// 构造 Claude Code 无头流式参数；不含可执行文件和 prompt。
 pub fn build_claude_args(request: &CodingAgentRequest) -> Vec<String> {
@@ -553,6 +698,16 @@ pub fn parse_opencode_stream_line(session_id: &str, line: &str) -> Option<Coding
     }
 }
 
+fn codex_protocol_error_message(value: &serde_json::Value, fallback: &str) -> String {
+    value
+        .pointer("/error/message")
+        .or_else(|| value.get("message"))
+        .or_else(|| value.get("error"))
+        .and_then(|message| message.as_str())
+        .unwrap_or(fallback)
+        .into()
+}
+
 pub fn parse_codex_stream_line(session_id: &str, line: &str) -> Option<CodingAgentStreamEvent> {
     let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
     match value.get("type")?.as_str()? {
@@ -568,32 +723,66 @@ pub fn parse_codex_stream_line(session_id: &str, line: &str) -> Option<CodingAge
                 text: text.into(),
             })
         }
-        "item.started"
-            if value.pointer("/item/type").and_then(|v| v.as_str())
-                == Some("command_execution") =>
-        {
-            Some(CodingAgentStreamEvent::ToolUse {
+        "item.started" => match value.pointer("/item/type").and_then(|item| item.as_str())? {
+            "command_execution" => Some(CodingAgentStreamEvent::ToolUse {
+                session_id: session_id.into(),
+                name: codex_command_display_name(value.pointer("/item/command")?.as_str()?),
+            }),
+            "file_change" | "patch_apply" => Some(CodingAgentStreamEvent::ToolUse {
+                session_id: session_id.into(),
+                name: "edit".into(),
+            }),
+            "mcp_tool_call" => Some(CodingAgentStreamEvent::ToolUse {
                 session_id: session_id.into(),
                 name: value
-                    .pointer("/item/command")?
-                    .as_str()?
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("command")
+                    .pointer("/item/tool")
+                    .and_then(|tool| tool.as_str())
+                    .unwrap_or("mcp")
                     .into(),
-            })
-        }
+            }),
+            "web_search" => Some(CodingAgentStreamEvent::ToolUse {
+                session_id: session_id.into(),
+                name: "web_search".into(),
+            }),
+            _ => None,
+        },
         "turn.failed" | "error" => Some(CodingAgentStreamEvent::Error {
             session_id: session_id.into(),
-            message: value
-                .pointer("/error/message")
-                .or_else(|| value.get("message"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("Codex 协议错误")
-                .into(),
+            message: codex_protocol_error_message(&value, "Codex 协议错误"),
         }),
         _ => None,
     }
+}
+
+fn is_codex_turn_completed(line: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(line.trim())
+        .ok()
+        .is_some_and(|value| {
+            value.get("type").and_then(|kind| kind.as_str()) == Some("turn.completed")
+        })
+}
+
+fn codex_command_display_name(command: &str) -> String {
+    let trimmed = command.trim();
+    let first = trimmed.split_whitespace().next().unwrap_or("command");
+    let shell = first.rsplit('/').next().unwrap_or(first);
+    let display = if matches!(shell, "sh" | "bash" | "dash" | "fish" | "zsh") {
+        let after_shell = trimmed[first.len()..].trim_start();
+        let flags = after_shell.split_whitespace().next().unwrap_or_default();
+        if flags.starts_with('-') && flags.contains('c') {
+            after_shell[flags.len()..]
+                .trim_start()
+                .trim_matches(['\'', '"'])
+                .split_whitespace()
+                .next()
+                .unwrap_or(shell)
+        } else {
+            shell
+        }
+    } else {
+        shell
+    };
+    display.rsplit('/').next().unwrap_or(display).to_string()
 }
 
 pub fn parse_dsh_stream_line(session_id: &str, line: &str) -> Option<CodingAgentStreamEvent> {
@@ -704,6 +893,17 @@ pub fn build_agent_command(request: &CodingAgentRequest) -> Result<AgentCommand,
             });
             let mut resolved = request.clone();
             resolved.settings_json_path = Some(PathBuf::from(temporary_path_token(settings_name)));
+            resolved.allowed_tools = CLAUDE_ALLOWED_TOOLS
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+            if !resolved
+                .disallowed_tools
+                .iter()
+                .any(|tool| tool == "WebFetch")
+            {
+                resolved.disallowed_tools.push("WebFetch".into());
+            }
             (
                 build_claude_args(&resolved),
                 PromptPayload::Stdin(request.prompt.clone()),
@@ -952,6 +1152,7 @@ async fn run_process(
     let mut stdout = String::new();
     let mut stderr = String::new();
     let mut terminal = false;
+    let mut codex_turn_completed = false;
     let result = {
         let mut consume_line = |line: ProcessOutputLine| {
             match line.stream {
@@ -971,6 +1172,12 @@ async fn run_process(
             }
             if terminal {
                 return;
+            }
+            if request.provider == CodingAgentProvider::CodexCli
+                && line.stream == ProcessStream::Stdout
+                && is_codex_turn_completed(&line.line)
+            {
+                codex_turn_completed = true;
             }
             let event = match (request.provider, line.stream) {
                 (CodingAgentProvider::ClaudeCodeCli, ProcessStream::Stdout) => {
@@ -1031,6 +1238,13 @@ async fn run_process(
         let _ = events.send(CodingAgentStreamEvent::Error {
             session_id: request.session_id,
             message,
+        });
+        return Ok(());
+    }
+    if request.provider == CodingAgentProvider::CodexCli && !codex_turn_completed {
+        let _ = events.send(CodingAgentStreamEvent::Error {
+            session_id: request.session_id,
+            message: "Codex 进程结束但未收到 turn.completed".into(),
         });
         return Ok(());
     }
@@ -1852,6 +2066,24 @@ mod tests {
     }
 
     #[test]
+    fn claude_agent_command_uses_the_fixed_safe_tool_surface() {
+        let mut request = CodingAgentRequest::new("session", "prompt");
+        request.allowed_tools = vec!["WebFetch".into()];
+        request.approved_patterns = vec!["git push --force".into()];
+
+        let command = build_agent_command(&request).unwrap();
+
+        assert_eq!(
+            arg_value(&command.argv, "--allowedTools"),
+            Some("Bash,Read,Edit,Write,Glob,Grep,WebSearch")
+        );
+        assert_eq!(
+            arg_value(&command.argv, "--disallowedTools"),
+            Some("WebFetch")
+        );
+    }
+
+    #[test]
     fn every_provider_has_a_distinct_headless_command_shape() {
         let mut request = CodingAgentRequest::new("session", "prompt");
         request.permission_mode = CodingAgentPermissionMode::AcceptEdits;
@@ -1914,6 +2146,134 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn materialization_plan_substitutes_plain_and_json_paths() {
+        let directory = std::env::temp_dir().join("openless-agent-plan");
+        let mut command = simple_command(
+            "dsh".into(),
+            vec![temporary_path_token("openless.patch.yml")],
+        );
+        command.temporary_files = vec![
+            AgentTemporaryFile {
+                name: "dsh-events.mjs".into(),
+                contents: b"export default {};".to_vec(),
+            },
+            AgentTemporaryFile {
+                name: "openless.patch.yml".into(),
+                contents: format!(
+                    "{{\"plugin\":\"{}\"}}",
+                    temporary_json_path_token("dsh-events.mjs")
+                )
+                .into_bytes(),
+            },
+        ];
+
+        let plan = AgentMaterializationPlan::new(&command, &directory).unwrap();
+
+        assert_eq!(
+            plan.argv,
+            vec![directory.join("openless.patch.yml").to_string_lossy()]
+        );
+        assert_eq!(plan.files.len(), 2);
+        assert_eq!(plan.files[0].path, directory.join("dsh-events.mjs"));
+        let patch: serde_json::Value = serde_json::from_slice(&plan.files[1].contents).unwrap();
+        assert_eq!(
+            patch["plugin"],
+            directory.join("dsh-events.mjs").to_string_lossy().as_ref()
+        );
+    }
+
+    #[test]
+    fn materialization_plan_rejects_unsafe_or_ambiguous_files() {
+        let directory = std::env::temp_dir().join("openless-agent-plan");
+        let invalid = [
+            vec![AgentTemporaryFile {
+                name: "../escape".into(),
+                contents: Vec::new(),
+            }],
+            vec![
+                AgentTemporaryFile {
+                    name: "same".into(),
+                    contents: Vec::new(),
+                },
+                AgentTemporaryFile {
+                    name: "same".into(),
+                    contents: Vec::new(),
+                },
+            ],
+            vec![AgentTemporaryFile {
+                name: "binary".into(),
+                contents: vec![0xff],
+            }],
+        ];
+
+        for temporary_files in invalid {
+            let command = AgentCommand {
+                temporary_files,
+                ..simple_command("agent".into(), Vec::new())
+            };
+            assert_eq!(
+                AgentMaterializationPlan::new(&command, &directory)
+                    .unwrap_err()
+                    .code,
+                BackendErrorCode::InvalidArgument
+            );
+        }
+    }
+
+    #[test]
+    fn login_shell_path_plan_and_parser_are_fail_closed() {
+        let plan = AgentLoginShellPathPlan::new(Some(" /bin/zsh ".into())).unwrap();
+
+        assert_eq!(plan.shell, "/bin/zsh");
+        assert_eq!(plan.timeout, std::time::Duration::from_secs(5));
+        assert_eq!(plan.attempts[0][0], "-lic");
+        assert_eq!(plan.attempts[1][0], "-lc");
+        assert!(plan.attempts[0][1].contains(AGENT_PATH_SENTINEL));
+        assert!(AgentLoginShellPathPlan::new(Some("  ".into())).is_none());
+        assert_eq!(
+            parse_agent_login_shell_path("shell banner\n__OPENLESS_PATH__/nvm/bin:/usr/bin\n"),
+            Some("/nvm/bin:/usr/bin".into())
+        );
+        assert_eq!(
+            parse_agent_login_shell_path(
+                "shell banner\n__OPENLESS_PATH__/nvm/bin:/usr/bin\nlogout banner\n"
+            ),
+            Some("/nvm/bin:/usr/bin".into())
+        );
+        assert_eq!(
+            parse_agent_login_shell_path("/untrusted/bin:/usr/bin"),
+            None
+        );
+        assert_eq!(parse_agent_login_shell_path("__OPENLESS_PATH__  \n"), None);
+    }
+
+    #[test]
+    fn merged_agent_path_preserves_priority_order_and_deduplicates() {
+        let join = |parts: &[&str]| std::env::join_paths(parts).unwrap();
+        let shell = join(&["/nvm/v24/bin", "/opt/homebrew/bin", "/usr/bin"]);
+        let current = join(&["/usr/bin", "/bin"]);
+        let home = Path::new("/home/openless");
+
+        let merged = merge_agent_path(&current, Some(home), Some(shell.to_string_lossy().as_ref()));
+        let parts = std::env::split_paths(&merged).collect::<Vec<_>>();
+
+        assert_eq!(
+            parts,
+            vec![
+                PathBuf::from("/nvm/v24/bin"),
+                PathBuf::from("/opt/homebrew/bin"),
+                PathBuf::from("/usr/bin"),
+                home.join(".local/bin"),
+                home.join(".opencode/bin"),
+                home.join(".npm-global/bin"),
+                home.join(".bun/bin"),
+                PathBuf::from("/usr/local/bin"),
+                PathBuf::from("/bin"),
+            ]
+        );
     }
 
     #[tokio::test]
@@ -2049,6 +2409,97 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn codex_terminal_protocol_is_fail_closed() {
+        let process = Arc::new(ScriptedProcess(
+            vec![ProcessOutputLine {
+                stream: ProcessStream::Stdout,
+                line:
+                    r#"{"type":"item.completed","item":{"type":"agent_message","text":"partial"}}"#
+                        .into(),
+            }],
+            Ok(ProcessExit {
+                code: Some(0),
+                success: true,
+            }),
+        ));
+        let runner = CodingAgentRunner::new(process);
+        let mut request = CodingAgentRequest::new("session", "task");
+        request.provider = CodingAgentProvider::CodexCli;
+
+        let result = runner
+            .run(request, Arc::new(AtomicBool::new(false)))
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            result.outcome,
+            CodingAgentRunOutcome::Failed(message) if message.contains("turn.completed")
+        ));
+
+        let completed = CodingAgentRunner::new(Arc::new(ScriptedProcess(
+            vec![
+                ProcessOutputLine {
+                    stream: ProcessStream::Stdout,
+                    line: r#"{"type":"item.completed","item":{"type":"error","message":"metadata warning"}}"#.into(),
+                },
+                ProcessOutputLine {
+                    stream: ProcessStream::Stdout,
+                    line: r#"{"type":"item.completed","item":{"type":"agent_message","text":"done"}}"#.into(),
+                },
+                ProcessOutputLine {
+                    stream: ProcessStream::Stdout,
+                    line: r#"{"type":"turn.completed"}"#.into(),
+                },
+            ],
+            Ok(ProcessExit {
+                code: Some(0),
+                success: true,
+            }),
+        )));
+        let mut request = CodingAgentRequest::new("completed", "task");
+        request.provider = CodingAgentProvider::CodexCli;
+        assert_eq!(
+            completed
+                .run(request, Arc::new(AtomicBool::new(false)))
+                .await
+                .unwrap()
+                .outcome,
+            CodingAgentRunOutcome::Completed {
+                text: "done".into(),
+                cost_usd: None,
+                duration_ms: None,
+            }
+        );
+
+        let failed = CodingAgentRunner::new(Arc::new(ScriptedProcess(
+            vec![
+                ProcessOutputLine {
+                    stream: ProcessStream::Stdout,
+                    line: r#"{"type":"turn.completed"}"#.into(),
+                },
+                ProcessOutputLine {
+                    stream: ProcessStream::Stdout,
+                    line: r#"{"type":"error","message":"stream disconnected"}"#.into(),
+                },
+            ],
+            Ok(ProcessExit {
+                code: Some(0),
+                success: true,
+            }),
+        )));
+        let mut request = CodingAgentRequest::new("failed", "task");
+        request.provider = CodingAgentProvider::CodexCli;
+        assert_eq!(
+            failed
+                .run(request, Arc::new(AtomicBool::new(false)))
+                .await
+                .unwrap()
+                .outcome,
+            CodingAgentRunOutcome::Failed("stream disconnected".into())
+        );
+    }
+
     #[test]
     fn shared_stream_parsers_cover_all_provider_protocols() {
         assert!(matches!(
@@ -2077,6 +2528,53 @@ mod tests {
             parse_coding_agent_models("\u{1b}[32mopenai/gpt-5\u{1b}[0m\nopenai/gpt-5\n"),
             vec!["openai/gpt-5"]
         );
+    }
+
+    #[test]
+    fn codex_stream_parser_maps_each_visible_tool_once() {
+        let tool_name = |line| match parse_codex_stream_line("s", line) {
+            Some(CodingAgentStreamEvent::ToolUse { name, .. }) => Some(name),
+            _ => None,
+        };
+
+        assert_eq!(
+            tool_name(
+                r#"{"type":"item.started","item":{"type":"command_execution","command":"/bin/zsh -lc 'git status'"}}"#
+            ),
+            Some("git".into())
+        );
+        assert_eq!(
+            tool_name(r#"{"type":"item.started","item":{"type":"file_change"}}"#),
+            Some("edit".into())
+        );
+        assert_eq!(
+            tool_name(
+                r#"{"type":"item.started","item":{"type":"mcp_tool_call","tool":"memory.read"}}"#
+            ),
+            Some("memory.read".into())
+        );
+        assert_eq!(
+            tool_name(r#"{"type":"item.started","item":{"type":"web_search"}}"#),
+            Some("web_search".into())
+        );
+        assert_eq!(
+            parse_codex_stream_line(
+                "s",
+                r#"{"type":"item.completed","item":{"type":"command_execution","command":"git status"}}"#
+            ),
+            None
+        );
+        assert_eq!(
+            parse_codex_stream_line(
+                "s",
+                r#"{"type":"item.completed","item":{"type":"error","message":"metadata warning"}}"#
+            ),
+            None
+        );
+        assert!(matches!(
+            parse_codex_stream_line("s", r#"{"type":"turn.failed","error":"quota exceeded"}"#),
+            Some(CodingAgentStreamEvent::Error { message, .. }) if message == "quota exceeded"
+        ));
     }
 
     #[test]

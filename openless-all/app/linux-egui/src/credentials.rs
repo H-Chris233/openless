@@ -82,10 +82,7 @@ impl LinuxCredentialStore {
                 "active provider id must not be blank",
             ));
         }
-        self.update_metadata(|state| {
-            state.metadata.set_active_provider(slot, provider_id);
-            Ok(())
-        })
+        self.update_metadata(|state| state.metadata.select_active_provider(slot, provider_id))
     }
 }
 

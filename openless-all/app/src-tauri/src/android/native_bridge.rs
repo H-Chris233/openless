@@ -28,11 +28,17 @@ struct AndroidBackendSnapshotResponse {
 
 fn android_backend_snapshot_response(backend: Option<&OpenLessBackend>) -> String {
     let response = match backend {
-        Some(backend) => AndroidBackendSnapshotResponse {
+        Some(backend) if backend.snapshot().running => AndroidBackendSnapshotResponse {
             contract_version: openless_core::BACKEND_CONTRACT_VERSION,
             ok: true,
             payload: Some(backend.snapshot()),
             error: None,
+        },
+        Some(backend) => AndroidBackendSnapshotResponse {
+            contract_version: openless_core::BACKEND_CONTRACT_VERSION,
+            ok: false,
+            payload: Some(backend.snapshot()),
+            error: Some("backend is not running"),
         },
         None => AndroidBackendSnapshotResponse {
             contract_version: openless_core::BACKEND_CONTRACT_VERSION,
@@ -555,12 +561,19 @@ mod tests {
             },
         )
         .unwrap();
+        let not_ready: serde_json::Value =
+            serde_json::from_str(&android_backend_snapshot_response(Some(&backend))).unwrap();
+        assert_eq!(not_ready["ok"], false);
+        assert_eq!(not_ready["error"], "backend is not running");
         let mut preferences = backend.get_preferences();
         preferences.translation_target_language = "English".to_string();
         preferences.working_languages = vec!["简体中文".to_string()];
         crate::set_backend_preferences_for_test(&backend, preferences);
 
         start_core_dictation(&backend, false).await.unwrap();
+        let ready: serde_json::Value =
+            serde_json::from_str(&android_backend_snapshot_response(Some(&backend))).unwrap();
+        assert_eq!(ready["ok"], true);
         let translated_session = backend.snapshot().dictation.session_id.unwrap();
         stop_core_dictation(&backend, Some(true)).await.unwrap();
         start_core_dictation(&backend, true).await.unwrap();

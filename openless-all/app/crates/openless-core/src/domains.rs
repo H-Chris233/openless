@@ -190,7 +190,30 @@ pub struct LocalAsrTestResult {
     pub transcribe_ms: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalAsrActivationRequest {
+    pub target: LocalAsrTarget,
+    pub provider_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalAsrActivationResult {
+    pub target: LocalAsrTarget,
+    pub provider_id: String,
+    pub generation: u64,
+    pub prepared_model: String,
+}
+
 pub trait LocalAsrApi: Send + Sync {
+    fn activate(
+        &self,
+        _request: LocalAsrActivationRequest,
+    ) -> BoxFuture<'static, Result<LocalAsrActivationResult, BackendError>> {
+        unsupported("local ASR activation")
+    }
+
     fn settings(
         &self,
         runtime: LocalAsrRuntime,
@@ -541,6 +564,27 @@ pub enum SelectionVoiceDisposition {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionVoiceHotkeyEdge {
+    Pressed { at: std::time::Instant },
+    Released { at: std::time::Instant },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionVoiceHotkeyAction {
+    Start,
+    Finish,
+    Noop,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SelectionVoiceRoute {
+    AwaitingIntent { prompt: SelectionVoiceIntentPrompt },
+    QuestionCompleted { session_id: SessionId },
+    EditConversationOpened { session_id: SessionId },
+    ReadyToApply { preview: SelectionVoicePreview },
+}
+
 impl SelectionVoiceDisposition {
     pub fn is_awaiting_intent(&self) -> bool {
         matches!(self, Self::AwaitingIntent { .. })
@@ -587,6 +631,21 @@ impl SelectionVoiceApplyOutcome {
 }
 
 pub trait SelectionVoiceApi: Send + Sync {
+    #[doc(hidden)]
+    fn bind_qa(&self, _qa: std::sync::Weak<dyn QaApi>) {}
+    fn dispatch_hotkey_edge(
+        &self,
+        _edge: SelectionVoiceHotkeyEdge,
+    ) -> Result<SelectionVoiceHotkeyAction, BackendError> {
+        Ok(SelectionVoiceHotkeyAction::Noop)
+    }
+    fn recording_fault(
+        &self,
+        _session_id: SessionId,
+        _error: BackendError,
+    ) -> BoxFuture<'static, Result<(), BackendError>> {
+        unsupported("selection voice")
+    }
     fn snapshot(&self) -> BoxFuture<'static, Result<SelectionVoiceSnapshot, BackendError>>;
     fn begin(
         &self,
@@ -612,6 +671,12 @@ pub trait SelectionVoiceApi: Send + Sync {
         session_id: SessionId,
         intent: String,
     ) -> BoxFuture<'static, Result<SelectionVoiceDisposition, BackendError>>;
+    fn route_disposition(
+        &self,
+        _disposition: SelectionVoiceDisposition,
+    ) -> BoxFuture<'static, Result<SelectionVoiceRoute, BackendError>> {
+        unsupported("selection voice")
+    }
     /// Resolve the configured edit delivery mode and, for direct replacement,
     /// generate the validated preview entirely inside core.
     fn prepare_edit(
@@ -728,6 +793,8 @@ pub struct QaInput {
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selection_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection_source_app: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -740,7 +807,6 @@ pub struct QaTurnRequest {
     pub conversation_id: SessionId,
     pub input: QaInput,
     pub messages: Vec<QaMessage>,
-    pub edit_instruction_mode: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -759,8 +825,6 @@ pub struct QaRuntimeCompletion {
     /// `Some("")` is meaningful for multimodal voice turns whose question is
     /// present only in the audio payload.
     pub raw_transcript_override: Option<String>,
-    pub edit_apply_available: bool,
-    pub edit_revert_available: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -784,6 +848,18 @@ pub trait QaRuntimeAdapter: Send + Sync {
         session_id: SessionId,
         text: String,
     ) -> BoxFuture<'static, Result<QaInput, BackendError>>;
+    /// Prepare a Selection Voice edit turn whose text and opaque target were
+    /// already captured before the QA window took focus. Hosts must not
+    /// recapture the current selection in this path.
+    fn prepare_selection_edit(
+        &self,
+        _session_id: SessionId,
+        _selection_voice_session_id: SessionId,
+        _capture: SelectionCapture,
+        _instruction: String,
+    ) -> BoxFuture<'static, Result<QaInput, BackendError>> {
+        unsupported("QA selection edit")
+    }
     fn start_recording(
         &self,
         session_id: SessionId,
@@ -798,6 +874,18 @@ pub trait QaRuntimeAdapter: Send + Sync {
         request: QaTurnRequest,
         progress: Arc<dyn QaProgressSink>,
     ) -> BoxFuture<'static, Result<QaTurnResult, BackendError>>;
+    /// Attach the opaque native selection target captured for a QA turn to a
+    /// Core-owned selection-voice preview. This is a host effect only.
+    fn bind_selection_voice_target(
+        &self,
+        _qa_session_id: SessionId,
+        _selection_voice_session_id: SessionId,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::new(
+            BackendErrorCode::Unsupported,
+            "selection voice target binding is unavailable",
+        ))
+    }
     /// Release a successfully completed runtime session and return the small
     /// amount of host metadata needed by the core history policy.
     fn complete(
@@ -817,7 +905,24 @@ pub trait QaApi: Send + Sync {
     fn show(&self) -> BoxFuture<'static, Result<(), BackendError>>;
     fn snapshot(&self) -> BoxFuture<'static, Result<QaSnapshot, BackendError>>;
     fn toggle_recording(&self) -> BoxFuture<'static, Result<(), BackendError>>;
+    fn recording_fault(
+        &self,
+        _session_id: SessionId,
+        _error: BackendError,
+    ) -> BoxFuture<'static, Result<(), BackendError>> {
+        unsupported("QA")
+    }
     fn submit_text(&self, text: String) -> BoxFuture<'static, Result<(), BackendError>>;
+    /// Open a QA edit turn from an already captured Selection Voice session.
+    /// This preserves the original text/target across the QA focus change.
+    fn submit_selection_edit(
+        &self,
+        _selection_voice_session_id: SessionId,
+        _capture: SelectionCapture,
+        _instruction: String,
+    ) -> BoxFuture<'static, Result<(), BackendError>> {
+        unsupported("QA selection edit")
+    }
     fn set_edit_instruction_mode(
         &self,
         enabled: bool,
@@ -1204,6 +1309,17 @@ pub trait LessComputerApi: Send + Sync {
     /// operation is idempotent and does not cancel an already-running Agent.
     fn abort_capture(&self, _session_id: SessionId) -> Result<(), BackendError> {
         Ok(())
+    }
+
+    /// Finish a reserved capture with one typed failure terminal. The host
+    /// reports the native fault; Core owns event deduplication and lease
+    /// release before the host tears down its opaque recorder handles.
+    fn capture_fault(
+        &self,
+        _session_id: SessionId,
+        _error: BackendError,
+    ) -> BoxFuture<'static, Result<(), BackendError>> {
+        unsupported("Less Computer")
     }
 
     /// Run one text/voice turn through the Core-owned policy and state machine.
@@ -1736,6 +1852,8 @@ pub struct BackendServices {
     pub coding_agent: Arc<dyn CodingAgentApi>,
     pub less_computer: Arc<dyn LessComputerApi>,
     pub platform: Arc<dyn PlatformApi>,
+    pub host_context: Arc<dyn crate::ports::HostContextAdapter>,
+    pub edit_observation: Arc<dyn crate::ports::EditObservationAdapter>,
     coding_agent_process: Option<Arc<dyn crate::coding_agent::CodingAgentProcessAdapter>>,
     auxiliary_polisher: Option<Arc<dyn crate::ports::TextPolisher>>,
     auxiliary_transcription: Option<Arc<dyn crate::ports::TranscriptionEngine>>,
@@ -1762,6 +1880,8 @@ impl BackendServices {
                 )),
             ),
             platform: Arc::new(UnsupportedDomainServices),
+            host_context: Arc::new(crate::ports::NoopHostContextAdapter),
+            edit_observation: Arc::new(crate::ports::NoopEditObservationAdapter),
             coding_agent_process: None,
             auxiliary_polisher: None,
             auxiliary_transcription: None,

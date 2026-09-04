@@ -391,6 +391,10 @@ impl TextPolisher for OpenAiChatPolisher {
                 .model
                 .clone()
                 .unwrap_or_else(|| config.model.clone());
+            let call_label = crate::polish::LlmCallLabel {
+                provider: context.llm.provider_id.clone(),
+                model: model.clone(),
+            };
             let (captured_prompt, user_prompt) = context.effective_polish_prompts(&raw_text);
             let system_prompt = if captured_prompt.trim().is_empty() {
                 config.system_prompt.clone()
@@ -423,11 +427,15 @@ impl TextPolisher for OpenAiChatPolisher {
             });
             let cleaned =
                 send_chat_completion(&client, &config, Arc::clone(&cancellation), payload).await?;
-            let output = if context.polish.translation_active {
+            let mut output = if context.polish.translation_active {
                 if let Some((source_text, text)) =
                     crate::prompt_compose::split_polish_translate_output(&cleaned)
                 {
-                    crate::ports::PolishOutput { text, source_text }
+                    crate::ports::PolishOutput {
+                        text,
+                        source_text,
+                        llm_call_label: None,
+                    }
                 } else {
                     log::warn!(
                         "polish-and-translate response missing markers; retrying plain translation"
@@ -467,6 +475,7 @@ impl TextPolisher for OpenAiChatPolisher {
                     false,
                 ));
             }
+            output.llm_call_label = Some(call_label);
             Ok(output)
         })
     }

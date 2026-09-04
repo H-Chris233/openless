@@ -19,7 +19,10 @@ pub fn start(app: AppHandle, backend: Arc<OpenLessBackend>) {
     tauri::async_runtime::spawn(async move {
         loop {
             match events.recv().await {
-                Ok(event) => forward_legacy_event(&app, &backend_for_events, event.kind),
+                Ok(event) => {
+                    let _ = app.emit("backend:event", &event);
+                    forward_legacy_event(&app, &backend_for_events, event.kind);
+                }
                 Err(EventRecvError::Lagged(dropped)) => {
                     log::warn!(
                         "[core-events] Tauri bridge lagged by {dropped} event(s); resyncing snapshots"
@@ -82,15 +85,57 @@ fn forward_legacy_event(app: &AppHandle, backend: &OpenLessBackend, kind: Backen
         BackendEventKind::DictationStateChanged(snapshot) => {
             emit_dictation_state(app, backend, snapshot)
         }
-        BackendEventKind::TranscriptDelta(delta) => {
-            if !delta.text.is_empty() {
-                let _ = app.emit("local-asr-token", delta.text);
-            }
-        }
+        BackendEventKind::TranscriptDelta(_) => {}
         BackendEventKind::DictationCompleted(result) => {
+            if let Some(coordinator) = app.try_state::<Arc<crate::coordinator::Coordinator>>() {
+                let message = match &result.inserted {
+                    openless_core::DictationInsertStatus::Inserted => "已输入",
+                    openless_core::DictationInsertStatus::PasteSent => "已发送粘贴，请确认",
+                    openless_core::DictationInsertStatus::CopiedFallback => "已复制，请手动粘贴",
+                    openless_core::DictationInsertStatus::NotRequested => "处理完成",
+                };
+                coordinator.present_core_capsule(CapsulePayload {
+                    state: CapsuleState::Done,
+                    level: 0.0,
+                    elapsed_ms: result.duration_ms,
+                    message: Some(message.to_string()),
+                    inserted_chars: Some(
+                        u32::try_from(result.polished_text.chars().count()).unwrap_or(u32::MAX),
+                    ),
+                    translation: false,
+                    operating: false,
+                    warming: false,
+                    capsule_style: backend.get_preferences().capsule_style,
+                    selection_polish: false,
+                });
+            }
             if !result.polished_text.trim().is_empty() {
                 let _ = app.emit("remote:result", result.polished_text);
             }
+        }
+        BackendEventKind::RecordingControlRequested(request) => {
+            let Some(backend) = app
+                .try_state::<Arc<OpenLessBackend>>()
+                .map(|backend| Arc::clone(&*backend))
+            else {
+                return;
+            };
+            tauri::async_runtime::spawn(async move {
+                let result = match request.action {
+                    openless_core::RecordingControlAction::Stop => backend
+                        .stop_dictation_session(request.session_id)
+                        .await
+                        .map(|_| ()),
+                    openless_core::RecordingControlAction::Cancel => {
+                        backend.cancel_dictation(Some(request.session_id)).await
+                    }
+                };
+                if let Err(error) = result {
+                    if error.code != openless_core::BackendErrorCode::InvalidState {
+                        log::warn!("[recording] automatic terminal action failed: {error}");
+                    }
+                }
+            });
         }
         BackendEventKind::InsertFallback(fallback) => {
             if let Some(text) = fallback.copied_text {
@@ -162,6 +207,9 @@ fn forward_legacy_event(app: &AppHandle, backend: &OpenLessBackend, kind: Backen
             let _ = app.emit("remote-input:error", error);
         }
         BackendEventKind::VocabularySuggestionsChanged(suggestions) => {
+            if let Some(coordinator) = app.try_state::<Arc<crate::coordinator::Coordinator>>() {
+                coordinator.refresh_vocab_suggestion_presentation(!suggestions.is_empty());
+            }
             let _ = app.emit_to("capsule", "vocab:suggested", suggestions);
         }
         // These domains either have no legacy push event or require a
@@ -185,7 +233,14 @@ fn emit_dictation_state(
     backend: &OpenLessBackend,
     snapshot: DictationStateSnapshot,
 ) {
+    if snapshot.phase == DictationPhase::Completed {
+        return;
+    }
     let payload = map_dictation_state(snapshot, backend.get_preferences().capsule_style);
+    if let Some(coordinator) = app.try_state::<Arc<crate::coordinator::Coordinator>>() {
+        coordinator.present_core_capsule(payload);
+        return;
+    }
     if let Some(capsule) = app.get_webview_window("capsule") {
         let _ = capsule.emit("capsule:state", &payload);
     }
@@ -209,11 +264,32 @@ fn map_dictation_state(
         DictationPhase::Cancelled => CapsuleState::Cancelled,
         DictationPhase::Failed => CapsuleState::Error,
     };
+    let message = match snapshot.phase {
+        DictationPhase::Failed => Some(match snapshot.message.as_deref() {
+            Some("PermissionDenied") => "请允许麦克风权限后重试".to_string(),
+            Some("Busy") => "另一个语音任务正在进行".to_string(),
+            Some("Cancelled") => "已取消".to_string(),
+            Some("Provider") | Some("Network") | Some("Timeout") => {
+                "识别或润色失败，请重试".to_string()
+            }
+            Some("Platform") => "录音或输入失败，请重试".to_string(),
+            Some("InvalidArgument") => "输入或设置无效，请检查后重试".to_string(),
+            Some("InvalidState") => "当前状态无法完成此操作，请重试".to_string(),
+            Some("Unsupported") => "当前配置或平台不支持此操作".to_string(),
+            Some("Persistence") => "保存结果失败，请检查磁盘后重试".to_string(),
+            Some("OutcomeUnknown") => "无法确认是否已输入，请检查目标应用".to_string(),
+            Some("Internal") => "处理遇到内部错误，请重试".to_string(),
+            Some(message) if !message.trim().is_empty() => message.to_string(),
+            _ => "处理失败，请重试".to_string(),
+        }),
+        DictationPhase::Cancelled => Some("已取消".to_string()),
+        _ => snapshot.message,
+    };
     CapsulePayload {
         state,
         level: snapshot.level,
         elapsed_ms: snapshot.elapsed_ms,
-        message: snapshot.message,
+        message,
         inserted_chars: None,
         translation: snapshot.translation_active,
         operating: false,
@@ -314,7 +390,41 @@ mod tests {
             assert_eq!(payload.capsule_style, CapsuleStyle::Classic);
             assert_eq!(payload.elapsed_ms, 321);
             assert_eq!(payload.level, 0.25);
-            assert_eq!(payload.message.as_deref(), Some("fixture"));
+            assert_eq!(
+                payload.message.as_deref(),
+                Some(if phase == DictationPhase::Cancelled {
+                    "已取消"
+                } else {
+                    "fixture"
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn internal_failure_tokens_are_not_shown_to_users() {
+        for token in [
+            "InvalidArgument",
+            "InvalidState",
+            "Busy",
+            "Cancelled",
+            "PermissionDenied",
+            "Unsupported",
+            "Provider",
+            "Persistence",
+            "Platform",
+            "OutcomeUnknown",
+            "Internal",
+        ] {
+            let payload = map_dictation_state(
+                DictationStateSnapshot {
+                    phase: DictationPhase::Failed,
+                    message: Some(token.into()),
+                    ..DictationStateSnapshot::default()
+                },
+                CapsuleStyle::Classic,
+            );
+            assert_ne!(payload.message.as_deref(), Some(token), "{token}");
         }
     }
 

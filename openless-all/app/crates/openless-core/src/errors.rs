@@ -13,10 +13,11 @@ pub enum BackendErrorCode {
     Provider,
     Persistence,
     Platform,
+    OutcomeUnknown,
     Internal,
 }
 
-#[derive(Debug, Clone, Error, Serialize, Deserialize)]
+#[derive(Debug, Clone, Error, Serialize, Deserialize, PartialEq, Eq)]
 #[error("{message}")]
 pub struct BackendError {
     pub code: BackendErrorCode,

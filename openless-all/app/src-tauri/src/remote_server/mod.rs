@@ -806,37 +806,7 @@ fn parse_hello_pin(txt: &str) -> openless_core::SecretValue {
 fn parse_audio_frame(
     frame: &[u8],
 ) -> Result<(openless_core::SessionId, u64, Vec<u8>), openless_core::BackendError> {
-    const HEADER_BYTES: usize = 4 + 16 + 8;
-    if frame.len() <= HEADER_BYTES
-        || frame.len() > HEADER_BYTES + openless_core::REMOTE_INPUT_MAX_PCM_FRAME_BYTES
-        || &frame[..4] != b"OL20"
-    {
-        return Err(openless_core::BackendError::new(
-            openless_core::BackendErrorCode::InvalidArgument,
-            "remote binary frame header or size is invalid",
-        ));
-    }
-    let session_id = uuid::Uuid::from_slice(&frame[4..20])
-        .map(openless_core::SessionId::from_uuid)
-        .map_err(|error| {
-            openless_core::BackendError::new(
-                openless_core::BackendErrorCode::InvalidArgument,
-                format!("remote binary frame session UUID is invalid: {error}"),
-            )
-        })?;
-    let sequence = u64::from_be_bytes(
-        frame[20..28]
-            .try_into()
-            .expect("validated remote frame header has a complete sequence"),
-    );
-    let pcm = frame[HEADER_BYTES..].to_vec();
-    if !pcm.len().is_multiple_of(2) {
-        return Err(openless_core::BackendError::new(
-            openless_core::BackendErrorCode::InvalidArgument,
-            "remote PCM payload must contain complete signed Int16LE samples",
-        ));
-    }
-    Ok((session_id, sequence, pcm))
+    openless_core::RemoteFrameCodec::decode(frame)
 }
 
 #[cfg(test)]

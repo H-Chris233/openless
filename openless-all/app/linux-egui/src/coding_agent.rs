@@ -1,14 +1,13 @@
 //! Linux Coding Agent Adapter：只负责临时文件与子进程 I/O。
 
-use std::collections::BTreeMap;
-use std::path::{Component, PathBuf};
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 
 use futures_util::future::BoxFuture;
 use openless_core::{
-    AgentCommand, CancellationToken, CodingAgentProcessAdapter, ProcessExit, ProcessOutputLine,
-    ProcessOutputSink, ProcessStream, PromptPayload,
+    AgentCommand, AgentMaterializationPlan, CancellationToken, CodingAgentProcessAdapter,
+    ProcessExit, ProcessOutputLine, ProcessOutputSink, ProcessStream, PromptPayload,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -31,6 +30,7 @@ fn materialize(
     }
     let directory =
         std::env::temp_dir().join(format!("openless-agent-{}", uuid::Uuid::new_v4().simple()));
+    let plan = AgentMaterializationPlan::new(command, &directory)?;
     std::fs::create_dir(&directory).map_err(platform_error)?;
     #[cfg(unix)]
     {
@@ -39,68 +39,92 @@ fn materialize(
             .map_err(platform_error)?;
     }
     let workspace = TemporaryWorkspace(directory.clone());
-    let mut paths = BTreeMap::new();
-    for file in &command.temporary_files {
-        let path = PathBuf::from(&file.name);
-        if file.name.is_empty()
-            || path.components().count() != 1
-            || !matches!(path.components().next(), Some(Component::Normal(_)))
-        {
-            return Err(invalid("invalid temporary file name"));
-        }
-        paths.insert(file.name.clone(), directory.join(&file.name));
+    for file in plan.files {
+        std::fs::write(file.path, file.contents).map_err(platform_error)?;
     }
-    for file in &command.temporary_files {
-        let text = std::str::from_utf8(&file.contents)
-            .map_err(|_| invalid("temporary file contents must be UTF-8"))?;
-        std::fs::write(
-            paths.get(&file.name).expect("validated temporary path"),
-            replace_tokens(text, &paths)?,
-        )
-        .map_err(platform_error)?;
-    }
-    for argument in &mut command.argv {
-        *argument = replace_tokens(argument, &paths)?;
-    }
+    command.argv = plan.argv;
     Ok(Some(workspace))
 }
 
-fn replace_tokens(
-    input: &str,
-    paths: &BTreeMap<String, PathBuf>,
-) -> Result<String, openless_core::BackendError> {
-    let mut output = input.to_string();
-    for (name, path) in paths {
-        let value = path.to_string_lossy();
-        output = output.replace(&openless_core::temporary_path_token(name), &value);
-        let encoded =
-            serde_json::to_string(value.as_ref()).map_err(|error| invalid(error.to_string()))?;
-        output = output.replace(
-            &openless_core::temporary_json_path_token(name),
-            encoded.trim_matches('"'),
-        );
-    }
-    Ok(output)
+static LOGIN_SHELL_PATH: tokio::sync::OnceCell<Option<String>> = tokio::sync::OnceCell::const_new();
+
+async fn login_shell_path() -> Option<&'static str> {
+    LOGIN_SHELL_PATH
+        .get_or_init(|| async {
+            let plan = openless_core::AgentLoginShellPathPlan::new(std::env::var("SHELL").ok())?;
+            let deadline = tokio::time::Instant::now() + plan.timeout;
+            for arguments in &plan.attempts {
+                let mut command = tokio::process::Command::new(&plan.shell);
+                command
+                    .args(arguments)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .kill_on_drop(true);
+                let Ok(Ok(output)) = tokio::time::timeout_at(deadline, command.output()).await
+                else {
+                    continue;
+                };
+                if output.status.success() {
+                    if let Some(path) = openless_core::parse_agent_login_shell_path(
+                        &String::from_utf8_lossy(&output.stdout),
+                    ) {
+                        return Some(path);
+                    }
+                }
+            }
+            None
+        })
+        .await
+        .as_deref()
 }
 
-fn augment_path(command: &mut tokio::process::Command) {
-    let current = std::env::var_os("PATH").unwrap_or_default();
-    let mut paths = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .into_iter()
-        .flat_map(|home| {
-            [
-                home.join(".local/bin"),
-                home.join(".opencode/bin"),
-                home.join(".npm-global/bin"),
-                home.join(".bun/bin"),
-            ]
-        })
-        .collect::<Vec<_>>();
-    paths.extend(std::env::split_paths(&current));
-    if let Ok(path) = std::env::join_paths(paths) {
-        command.env("PATH", path);
+async fn augment_path(command: &mut tokio::process::Command, cancel: &CancellationToken) -> bool {
+    if cancel.is_cancelled() {
+        return false;
     }
+    let current = std::env::var_os("PATH").unwrap_or_default();
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    if let Some(home) = &home {
+        command.env("HOME", home);
+    }
+    // Finder/desktop-launched shells may need up to five seconds to discover
+    // login PATH. Cancellation must still win during that lookup; otherwise a
+    // request cancelled before spawn appears to hang and no child exists for
+    // the normal process-group kill path to terminate.
+    let login_path = tokio::select! {
+        path = login_shell_path() => path,
+        _ = async {
+            while !cancel.is_cancelled() {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        } => return false,
+    };
+    command.env(
+        "PATH",
+        openless_core::merge_agent_path(&current, home.as_deref(), login_path),
+    );
+    true
+}
+
+pub(crate) fn isolate_process_group(command: &mut tokio::process::Command) {
+    #[cfg(target_os = "linux")]
+    command.process_group(0);
+    #[cfg(not(target_os = "linux"))]
+    let _ = command;
+}
+
+pub(crate) fn kill_process_group(
+    child: &mut tokio::process::Child,
+) -> Result<(), openless_core::BackendError> {
+    #[cfg(target_os = "linux")]
+    if child.id().is_some_and(|pid| {
+        // SAFETY: `isolate_process_group` starts the child as process-group leader.
+        unsafe { libc::kill(-(pid as i32), libc::SIGKILL) == 0 }
+    }) {
+        return Ok(());
+    }
+    child.start_kill().map_err(platform_error)
 }
 
 impl CodingAgentProcessAdapter for LinuxCodingAgentProcessAdapter {
@@ -113,7 +137,12 @@ impl CodingAgentProcessAdapter for LinuxCodingAgentProcessAdapter {
         Box::pin(async move {
             let _workspace = materialize(&mut request)?;
             let mut command = tokio::process::Command::new(&request.executable);
-            augment_path(&mut command);
+            if !augment_path(&mut command, &cancel).await {
+                return Ok(ProcessExit {
+                    code: None,
+                    success: false,
+                });
+            }
             command
                 .args(&request.argv)
                 .envs(&request.env)
@@ -121,8 +150,7 @@ impl CodingAgentProcessAdapter for LinuxCodingAgentProcessAdapter {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .kill_on_drop(true);
-            #[cfg(target_os = "linux")]
-            command.process_group(0);
+            isolate_process_group(&mut command);
             if let Some(cwd) = &request.cwd {
                 command.current_dir(cwd);
             }
@@ -182,16 +210,7 @@ impl CodingAgentProcessAdapter for LinuxCodingAgentProcessAdapter {
                     status = child.wait() => break status.map_err(platform_error)?,
                     _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {
                         if cancel.is_cancelled() {
-                            #[cfg(target_os = "linux")]
-                            let killed_group = child.id().is_some_and(|pid| {
-                                // SAFETY: the child was started as process-group leader above.
-                                unsafe { libc::kill(-(pid as i32), libc::SIGKILL) == 0 }
-                            });
-                            #[cfg(not(target_os = "linux"))]
-                            let killed_group = false;
-                            if !killed_group {
-                                child.start_kill().map_err(platform_error)?;
-                            }
+                            kill_process_group(&mut child)?;
                             break child.wait().await.map_err(platform_error)?;
                         }
                     }

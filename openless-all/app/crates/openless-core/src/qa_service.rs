@@ -22,6 +22,15 @@ struct QaState {
     snapshot: QaSnapshot,
 }
 
+enum QaSubmission {
+    Text(String),
+    SelectionEdit {
+        selection_voice_session_id: SessionId,
+        capture: crate::domains::SelectionCapture,
+        instruction: String,
+    },
+}
+
 #[derive(Clone)]
 pub struct QaService {
     runtime: Arc<dyn QaRuntimeAdapter>,
@@ -213,7 +222,30 @@ impl QaService {
     }
 
     async fn submit_text_inner(&self, text: String) -> Result<(), BackendError> {
-        let text = text.trim().to_string();
+        self.submit_inner(QaSubmission::Text(text)).await
+    }
+
+    async fn submit_selection_edit_inner(
+        &self,
+        selection_voice_session_id: SessionId,
+        capture: crate::domains::SelectionCapture,
+        instruction: String,
+    ) -> Result<(), BackendError> {
+        self.submit_inner(QaSubmission::SelectionEdit {
+            selection_voice_session_id,
+            capture,
+            instruction,
+        })
+        .await
+    }
+
+    async fn submit_inner(&self, submission: QaSubmission) -> Result<(), BackendError> {
+        let text = match &submission {
+            QaSubmission::Text(text) => text,
+            QaSubmission::SelectionEdit { instruction, .. } => instruction,
+        }
+        .trim()
+        .to_string();
         if text.is_empty() {
             return Ok(());
         }
@@ -244,7 +276,19 @@ impl QaService {
         }
         self.publish_snapshot(QaStateKind::Loading);
 
-        let input = match self.runtime.prepare_text(session_id, text).await {
+        let prepared = match submission {
+            QaSubmission::Text(_) => self.runtime.prepare_text(session_id, text).await,
+            QaSubmission::SelectionEdit {
+                selection_voice_session_id,
+                capture,
+                ..
+            } => {
+                self.runtime
+                    .prepare_selection_edit(session_id, selection_voice_session_id, capture, text)
+                    .await
+            }
+        };
+        let input = match prepared {
             Ok(input) => input,
             Err(error) => {
                 self.fail_if_current(session_id, &error);
@@ -275,7 +319,7 @@ impl QaService {
             return Ok(());
         }
 
-        let request = {
+        let (request, edit_instruction_mode) = {
             let mut state = self.state.lock().expect("QA state lock poisoned");
             ensure_current_phase(&state.snapshot, session_id, QaPhase::Thinking)?;
             let conversation_id = state.snapshot.conversation_id.ok_or_else(|| {
@@ -295,26 +339,71 @@ impl QaService {
                 content: user_content,
                 selection_text: input.selection_text.clone(),
             });
-            QaTurnRequest {
-                session_id,
-                conversation_id,
-                input,
-                messages: state.snapshot.messages.clone(),
-                edit_instruction_mode: state.snapshot.edit_instruction_mode,
-            }
+            (
+                QaTurnRequest {
+                    session_id,
+                    conversation_id,
+                    input,
+                    messages: state.snapshot.messages.clone(),
+                },
+                state.snapshot.edit_instruction_mode,
+            )
         };
         self.publish_snapshot(QaStateKind::Thinking);
 
         let history_input = request.input.clone();
-        let result = match self.runtime.answer(request, self.progress_sink()).await {
+        let turn_result = if edit_instruction_mode {
+            let selection_text = request
+                .input
+                .selection_text
+                .clone()
+                .filter(|text| !text.trim().is_empty())
+                .ok_or_else(|| {
+                    BackendError::new(
+                        BackendErrorCode::InvalidArgument,
+                        "no selection is available for editing",
+                    )
+                });
+            match (self.selection_voice.as_ref(), selection_text) {
+                (Some(selection_voice), Ok(selection_text)) => selection_voice
+                    .edit_preview(crate::domains::SelectionVoiceEditRequest {
+                        owner_session_id: request.conversation_id,
+                        capture: crate::domains::SelectionCapture {
+                            text: selection_text,
+                            source_app: request.input.selection_source_app.clone(),
+                        },
+                        instruction: request.input.text.clone(),
+                    })
+                    .await
+                    .and_then(|result| {
+                        self.runtime
+                            .bind_selection_voice_target(session_id, result.preview.session_id)?;
+                        Ok((result.answer_text(), true, result.replaced_existing))
+                    }),
+                (None, _) => Err(BackendError::new(
+                    BackendErrorCode::Unsupported,
+                    "selection voice editing is unavailable",
+                )),
+                (_, Err(error)) => Err(error),
+            }
+        } else {
+            self.runtime
+                .answer(request.clone(), self.progress_sink())
+                .await
+                .map(|result| (result.answer, false, false))
+        };
+        let (answer, edit_apply_available, edit_revert_available) = match turn_result {
             Ok(result) => result,
             Err(error) => {
                 self.fail_if_current(session_id, &error);
                 self.cancel_runtime_best_effort(session_id).await;
+                if edit_instruction_mode {
+                    self.clear_edit_preview_best_effort(Some(request.conversation_id))
+                        .await;
+                }
                 return Err(public_qa_backend_error(&error));
             }
         };
-        let answer = result.answer;
         let completion = match self.runtime.complete(session_id).await {
             Ok(completion) => completion,
             Err(error) => {
@@ -347,8 +436,8 @@ impl QaService {
             state.snapshot.selection_preview = None;
             state.snapshot.pending_approval_token = None;
             state.snapshot.last_error = None;
-            state.snapshot.edit_apply_available = completion.edit_apply_available;
-            state.snapshot.edit_revert_available = completion.edit_revert_available;
+            state.snapshot.edit_apply_available = edit_apply_available;
+            state.snapshot.edit_revert_available = edit_revert_available;
             state.snapshot.clone()
         };
         publish_qa_snapshot(
@@ -564,9 +653,40 @@ impl QaApi for QaService {
         })
     }
 
+    fn recording_fault(
+        &self,
+        session_id: SessionId,
+        error: BackendError,
+    ) -> BoxFuture<'static, Result<(), BackendError>> {
+        let service = self.clone();
+        Box::pin(async move {
+            {
+                let state = service.state.lock().expect("QA state lock poisoned");
+                ensure_current_phase(&state.snapshot, session_id, QaPhase::Recording)?;
+            }
+            service.fail_if_current(session_id, &error);
+            service.voice_sessions.release(session_id);
+            service.runtime.cancel(session_id).await
+        })
+    }
+
     fn submit_text(&self, text: String) -> BoxFuture<'static, Result<(), BackendError>> {
         let service = self.clone();
         Box::pin(async move { service.submit_text_inner(text).await })
+    }
+
+    fn submit_selection_edit(
+        &self,
+        selection_voice_session_id: SessionId,
+        capture: crate::domains::SelectionCapture,
+        instruction: String,
+    ) -> BoxFuture<'static, Result<(), BackendError>> {
+        let service = self.clone();
+        Box::pin(async move {
+            service
+                .submit_selection_edit_inner(selection_voice_session_id, capture, instruction)
+                .await
+        })
     }
 
     fn set_edit_instruction_mode(

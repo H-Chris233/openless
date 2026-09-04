@@ -2,15 +2,14 @@
 
 pub mod commands;
 
-use std::collections::BTreeMap;
-use std::path::{Component, PathBuf};
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 
 use futures_util::future::BoxFuture;
 use openless_core::{
-    AgentCommand, CancellationToken, CodingAgentProcessAdapter, ProcessExit, ProcessOutputLine,
-    ProcessOutputSink, ProcessStream, PromptPayload,
+    AgentCommand, AgentMaterializationPlan, CancellationToken, CodingAgentProcessAdapter,
+    ProcessExit, ProcessOutputLine, ProcessOutputSink, ProcessStream, PromptPayload,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -33,6 +32,7 @@ fn materialize_temporary_files(
     }
     let directory =
         std::env::temp_dir().join(format!("openless-agent-{}", uuid::Uuid::new_v4().simple()));
+    let plan = AgentMaterializationPlan::new(command, &directory)?;
     std::fs::create_dir(&directory).map_err(platform_error)?;
     #[cfg(unix)]
     {
@@ -41,49 +41,46 @@ fn materialize_temporary_files(
             .map_err(platform_error)?;
     }
     let workspace = TemporaryWorkspace(directory.clone());
-    let mut paths = BTreeMap::new();
-    for file in &command.temporary_files {
-        let path = PathBuf::from(&file.name);
-        if file.name.is_empty()
-            || path.components().count() != 1
-            || !matches!(path.components().next(), Some(Component::Normal(_)))
-        {
-            return Err(invalid("invalid temporary file name"));
-        }
-        paths.insert(file.name.clone(), directory.join(&file.name));
+    for file in plan.files {
+        std::fs::write(file.path, file.contents).map_err(platform_error)?;
     }
-    for file in &command.temporary_files {
-        let text = std::str::from_utf8(&file.contents)
-            .map_err(|_| invalid("temporary file contents must be UTF-8"))?;
-        let contents = replace_path_tokens(text, &paths)?;
-        std::fs::write(
-            paths.get(&file.name).expect("validated temporary path"),
-            contents,
-        )
-        .map_err(platform_error)?;
-    }
-    for argument in &mut command.argv {
-        *argument = replace_path_tokens(argument, &paths)?;
-    }
+    command.argv = plan.argv;
     Ok(Some(workspace))
 }
 
-fn replace_path_tokens(
-    input: &str,
-    paths: &BTreeMap<String, PathBuf>,
-) -> Result<String, openless_core::BackendError> {
-    let mut output = input.to_string();
-    for (name, path) in paths {
-        let value = path.to_string_lossy();
-        output = output.replace(&openless_core::temporary_path_token(name), &value);
-        let encoded =
-            serde_json::to_string(value.as_ref()).map_err(|error| invalid(error.to_string()))?;
-        output = output.replace(
-            &openless_core::temporary_json_path_token(name),
-            encoded.trim_matches('"'),
-        );
-    }
-    Ok(output)
+#[cfg(unix)]
+static LOGIN_SHELL_PATH: tokio::sync::OnceCell<Option<String>> = tokio::sync::OnceCell::const_new();
+
+#[cfg(unix)]
+async fn login_shell_path() -> Option<&'static str> {
+    LOGIN_SHELL_PATH
+        .get_or_init(|| async {
+            let plan = openless_core::AgentLoginShellPathPlan::new(std::env::var("SHELL").ok())?;
+            let deadline = tokio::time::Instant::now() + plan.timeout;
+            for arguments in &plan.attempts {
+                let mut command = tokio::process::Command::new(&plan.shell);
+                command
+                    .args(arguments)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .kill_on_drop(true);
+                let Ok(Ok(output)) = tokio::time::timeout_at(deadline, command.output()).await
+                else {
+                    continue;
+                };
+                if output.status.success() {
+                    if let Some(path) = openless_core::parse_agent_login_shell_path(
+                        &String::from_utf8_lossy(&output.stdout),
+                    ) {
+                        return Some(path);
+                    }
+                }
+            }
+            None
+        })
+        .await
+        .as_deref()
 }
 
 async fn augment_path(_command: &mut tokio::process::Command) {
@@ -91,22 +88,14 @@ async fn augment_path(_command: &mut tokio::process::Command) {
     {
         let command = _command;
         let current = std::env::var_os("PATH").unwrap_or_default();
-        let mut paths = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .into_iter()
-            .flat_map(|home| {
-                [
-                    home.join(".local/bin"),
-                    home.join(".opencode/bin"),
-                    home.join(".npm-global/bin"),
-                    home.join(".bun/bin"),
-                ]
-            })
-            .collect::<Vec<_>>();
-        paths.extend(std::env::split_paths(&current));
-        if let Ok(path) = std::env::join_paths(paths) {
-            command.env("PATH", path);
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        if let Some(home) = &home {
+            command.env("HOME", home);
         }
+        command.env(
+            "PATH",
+            openless_core::merge_agent_path(&current, home.as_deref(), login_shell_path().await),
+        );
     }
 }
 
@@ -233,6 +222,7 @@ fn platform_error(error: impl std::fmt::Display) -> openless_core::BackendError 
 
 #[cfg(all(test, target_os = "windows"))]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::*;

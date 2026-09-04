@@ -328,11 +328,13 @@ macro_rules! app_invoke_handler_desktop {
             commands::less_computer_approve,
             commands::validate_combo_hotkey,
             commands::set_combo_hotkey,
+            commands::list_provider_descriptors,
             commands::validate_provider_credentials,
             commands::list_provider_models,
             commands::local_asr_get_settings,
             commands::local_asr_storage_settings,
             commands::local_asr_set_models_base_dir,
+            commands::local_asr_activate,
             commands::local_asr_set_active_model,
             commands::local_asr_set_mirror,
             commands::local_asr_list_models,
@@ -442,6 +444,7 @@ macro_rules! app_invoke_handler_mobile {
             $crate::commands::reorder_channels,
             $crate::commands::record_channel_test,
             $crate::commands::set_active_omni_provider,
+            $crate::commands::list_provider_descriptors,
             $crate::commands::validate_provider_credentials,
             $crate::commands::list_provider_models,
             $crate::commands::list_history,
@@ -2535,7 +2538,7 @@ fn ensure_qa_window<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<tauri::Webv
     app.get_webview_window("qa")
 }
 
-/// 懒创建 Less Computer 浮窗（macOS only）。配置与原 tauri.conf 的 less-computer 块一致。
+/// 懒创建 Less Computer 浮窗。macOS 额外转换为不抢焦点的 NSPanel。
 #[cfg(target_os = "macos")]
 fn ensure_less_computer_window<R: tauri::Runtime>(
     app: &AppHandle<R>,
@@ -2576,6 +2579,36 @@ fn ensure_less_computer_window<R: tauri::Runtime>(
             None
         }
     }
+}
+
+#[cfg(target_os = "windows")]
+fn ensure_less_computer_window<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Option<tauri::WebviewWindow<R>> {
+    if let Some(window) = app.get_webview_window("less-computer") {
+        return Some(window);
+    }
+    WebviewWindowBuilder::new(
+        app,
+        "less-computer",
+        WebviewUrl::App("index.html?window=less-computer".into()),
+    )
+    .title("OpenLess Less Computer")
+    .inner_size(LESS_COMPUTER_WINDOW_WIDTH, LESS_COMPUTER_WINDOW_HEIGHT)
+    .decorations(false)
+    .transparent(true)
+    .shadow(true)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .resizable(false)
+    .focused(false)
+    .visible(false)
+    .build()
+    .map(Some)
+    .unwrap_or_else(|error| {
+        log::warn!("[less-computer] lazy window create failed: {error}");
+        None
+    })
 }
 
 /// 懒创建 Less Computer glow 描边窗（macOS only）。shadow:false、无 acceptFirstMouse。
@@ -2770,9 +2803,9 @@ pub(crate) fn hide_selection_voice_intent_prompt<R: tauri::Runtime>(_app: &AppHa
 
 /// Less Computer 浮窗尺寸：与 QA 同款「统一聊天面板」固定大小 —— 窗口出现即
 /// 定死，内容只在面板内部的 MessageScroller 里滚动，不再按内容自适应缩放窗口。
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 const LESS_COMPUTER_WINDOW_WIDTH: f64 = 420.0;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 const LESS_COMPUTER_WINDOW_HEIGHT: f64 = 540.0;
 
 /// 把 Less Computer 浮窗（固定尺寸）摆到屏幕底部居中、紧贴胶囊上方。
@@ -2850,16 +2883,29 @@ pub(crate) fn show_less_computer_window<R: tauri::Runtime>(app: &AppHandle<R>) {
     let _ = app.emit_to("less-computer", "chat-panel:shown", serde_json::json!({}));
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+pub(crate) fn show_less_computer_window<R: tauri::Runtime>(app: &AppHandle<R>) {
+    let Some(window) = ensure_less_computer_window(app) else {
+        return;
+    };
+    if let Err(error) = window.show() {
+        log::warn!("[less-computer] show failed: {error}");
+        return;
+    }
+    LESS_COMPUTER_PANEL_EPOCH.fetch_add(1, Ordering::SeqCst);
+    let _ = app.emit_to("less-computer", "chat-panel:shown", serde_json::json!({}));
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub(crate) fn show_less_computer_window<R: tauri::Runtime>(_app: &AppHandle<R>) {}
 
 /// 隐藏 Less Computer 浮窗。供 dismiss 命令 / session 收尾共用。
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub(crate) fn hide_less_computer_window<R: tauri::Runtime>(app: &AppHandle<R>) {
     hide_chat_window_animated(app, "less-computer", &LESS_COMPUTER_PANEL_EPOCH);
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub(crate) fn hide_less_computer_window<R: tauri::Runtime>(_app: &AppHandle<R>) {}
 
 /// 显示全屏彩虹描边浮层：盖满当前显示器、点击穿透、置顶。Agent 工作时点亮整屏边缘。

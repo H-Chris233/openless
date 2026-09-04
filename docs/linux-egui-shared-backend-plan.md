@@ -4,11 +4,42 @@
 > 测试计数和 UI stub 状态不代表 PR #1019 最新实现。当前 2.0.0 接口以
 > `linux-egui-backend-contract.md`、代码中的 canonical fixtures 和 PR #1019 body 为准。
 
-> 文档状态：可执行计划；实施状态：Linux egui Interface 已交付，跨平台 CI runner 门禁已通过，正式原生发布与 egui UI 验收仍在进行。第 1.1 节只记录当前工作树事实，不代表未取得 runner 证据的里程碑已经获得最终验收；完成状态一律以第 12 节的逐项证据为准
-> 更新日期：2026-09-01；Linux 原生证据记录截至 2026-08-29，跨平台 CI 证据截至 2026-08-31
+> 文档状态：实施与复审记录；实施状态：2026-09-04 已按 PR #1019 全量修复 handoff 完成 F01–F24 的生产接线和自动 contract，正在执行最终 CI/artifact 复审。Linux QA/Remote/Selection、Provider/Model、Qwen runtime 与 egui 操作面均不再是 stub；真实设备、签名、安装、升级和回滚证据仍须单独记录，自动测试不能替代。
+> 更新日期：2026-09-04；本地/WSL 自动证据随本次提交更新，最终远端 run/head 以 PR #1019 body 和复审记录为准
 > 范围：抽取无 Tauri 依赖的共享 Rust 应用核心；保留 macOS / Windows 的 Tauri 前端；为 Linux egui 前端准备公共接口、事件契约、测试适配器和构建契约
 > egui 责任：由另一组负责 egui/eframe 界面、交互、视觉和 UI 验收；本文只负责让他们能够稳定调用后端
-> 最终审查基线：`a569a8749188e7843d426f159523193c8d5363ce`；完成迁移后以该固定点执行 Standards / Spec 双轴审查
+> 最终审查基线：推送后重新读取 PR #1019 的真实 `baseRefOid/headRefOid`；不得继续使用历史 SHA 或把 `MERGEABLE` 等同发布就绪
+
+## 0. F01–F24 收口矩阵（2026-09-04）
+
+下表记录生产调用者与最小自动证据；“设备待补”表示代码/contract 已通过，但不能据此宣称真实平台或发布就绪。
+
+| 项 | Core 生产调用链 / 已删除的 Host policy | 自动证据 | 真实平台证据 |
+| --- | --- | --- | --- |
+| F01 | Linux egui → Core Credential/Provider/LocalAsr activation；UI 不再持有 endpoint/model/auth 默认值 | provider、credential、Linux factory/UI contract | Ubuntu 首次配置待补 |
+| F02 | Linux factory → Qa/Remote/Selection Adapter；AppImage installer 先于 listener | Linux lib/host contract、WSL 条件编译 | Ubuntu QA/Remote/preview/fcitx5 待补 |
+| F03 | Tauri/Linux → `start_less_computer_voice` +统一 voice lease/cancel；Host 不再因 `take()` 丢取消路由 | Less Computer capture/cancel/approval tests | Windows/macOS 冷启动语音待补 |
+| F04 | `CredentialDirectory` 持有 channel ID/type/order/enable/active；Tauri mutation policy 已删除 | provider channel facade、CredentialDirectory contract、source gate | Keychain/Secret Service A/B channel 待补 |
+| F05 | ProviderDescriptor auth requirement → validate 与真实 builder；空 key 不发 Authorization | local fake HTTP no-auth ASR/LLM tests | 自建无鉴权服务待补 |
+| F06 | ProviderDescriptor validation probe/static model policy → ProviderService | StepFun/DashScope/static-list/timeout/cancel/redirect tests | 各云厂商错误 key 待补 |
+| F07 | 共享 `SilenceAutoStop` + typed RecordingPlan/Event/Control；Host 仅 recorder effect | 六个 silence tests、QA/Selection/Less wiring、recording fault test | 三平台 mute/fault/设备切换待补 |
+| F08 | `TextInserter::begin` 固定 opaque target；Core HostContext/EditObservation generation | host-context zero-call、edit stale、target restore/source gate | Windows 切焦点、macOS AX/privacy 待补 |
+| F09 | Pipeline correction → actual ASR/LLM labels/timing/history；Host 归因逻辑已删除 | corrected-polisher/history/provider attribution tests | Foundry GPU→CPU notice 待补 |
+| F10 | `HotkeyInterpreter` 持有 press generation、grace/debounce/cooldown；Host 只发 edge | Core 29、Tauri 39、Linux hotkey contract | 三平台物理三连按待补 |
+| F11 | Pipeline 从同一 archive/冻结 context 最多重试两次 | retry success/exhaust/cancel/terminal contract | 冷云 ASR 失败恢复待补 |
+| F12 | H5 bounded pre-ACK queue → Core `RemoteFrameCodec`/session guard | Rust remote contract、浏览器 queue contract | 手机冷启动首词待补 |
+| F13 | Core `MacosNewlineMode` 与 frozen front app；Host 只执行 LF/Return effect | serde、Terminal/非 Terminal、Unicode streaming tests | macOS Terminal/聊天框待补 |
+| F14 | 唯一 `effective_pipeline_mode` 供 Dictation/QA/Selection/Auxiliary/status 使用 | flag/mode 与 credential zero-read tests | 运行中切换待补 |
+| F15 | Core `PasteSent` 与 `OutcomeUnknown` 分离；不自动重试未知结果 | Core/Tauri mapping 与 contract fixture | Windows Paste/TSF 待补 |
+| F16 | Core `ActiveTextInsertion` 独占 final reconciliation；两 Host 副本已删除 | streamed/tail/Unicode/diverge/fallback tests、source gate | Tauri/Linux 实际落字待补 |
+| F17 | Tauri presenter 按 generation 延迟终态，fallback 卡持有窗口；主窗仍收 cue | capsule visibility/ownership/timing/message tests | Windows/macOS 可见时序待补 |
+| F18 | Unicode replace-from TranscriptDelta + session/sequence reducer/replay | Rust canonical fixture、TS reducer、Linux lag replay tests | provider interim 修订待补 |
+| F19 | startup 同时迁移默认与 custom ModelStore root | Qwen/Q5/Sherpa/conflict/idempotence tests | 1.x 用户目录升级待补 |
+| F20 | Core LocalAsr activation transaction + target/generation lease | activation rollback/switch/release、Linux process-group tests | macOS/Windows runtime 切换待补 |
+| F21 | ModelStore partial/ready/card 与 Linux 打包 Qwen runtime | model-store contract、package script/workflow checks | deb/rpm/AppImage 安装与性能待补 |
+| F22 | Core AgentCommand/materialization/PATH/parser；Host 只做 I/O/spawn/kill | coding-agent parser/guard/PATH/process tests | 四 CLI 桌面启动待补 |
+| F23 | 真实 StartupSnapshot/BackendEvent DTO；所有 React webview 与 Android fail-closed | Rust canonical fixture、TS gate、Android snapshot tests | Android overlay/IME 待补 |
+| F24 | Credential/QA/Selection/stream/provider/history 旧 Host policy 同阶段删除 | `shared-backend-wire-contract.test.mjs` residual allowlist | 不适用；随源码复审 |
 
 ## 1. 执行摘要
 

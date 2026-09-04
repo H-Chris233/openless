@@ -12,7 +12,7 @@ use futures_util::future::BoxFuture;
 use openless_core::{
     BackendError, BackendErrorCode, DictationContext, DictationStartOptions, QaInput, QaProgress,
     QaProgressSink, QaRuntimeAdapter, QaRuntimeCompletion, QaTurnRequest, QaTurnResult,
-    RecordingProgressSink, SelectionCapture, SelectionVoiceEditRequest, SessionId,
+    RecordingProgressSink, SelectionCapture, SessionId,
 };
 use parking_lot::Mutex;
 
@@ -126,12 +126,14 @@ struct TauriQaRuntimeSession {
     audio_wav: Mutex<Option<Vec<u8>>>,
     selection_text: Option<String>,
     selection_target: Mutex<Option<crate::selection::SelectionInsertionTarget>>,
+    /// Selection Voice already bound this turn's opaque target before opening
+    /// QA. In that path QA must preserve the target instead of recapturing the
+    /// now-focused panel.
+    prebound_selection_voice_session_id: Option<SessionId>,
     front_app: Option<String>,
     duration_ms: AtomicU64,
     voice_turn: bool,
     cancelled: Arc<AtomicBool>,
-    edit_apply_available: AtomicBool,
-    edit_revert_available: AtomicBool,
 }
 
 impl TauriQaRuntimeSession {
@@ -236,12 +238,11 @@ impl TauriQaRuntimeAdapter {
             audio_wav: Mutex::new(None),
             selection_text: capture.selection_text,
             selection_target: Mutex::new(Some(capture.selection_target)),
+            prebound_selection_voice_session_id: None,
             front_app: capture.front_app,
             duration_ms: AtomicU64::new(0),
             voice_turn: false,
             cancelled: Arc::new(AtomicBool::new(false)),
-            edit_apply_available: AtomicBool::new(false),
-            edit_revert_available: AtomicBool::new(false),
         });
         Self::insert_session(&self.sessions, session_id, Arc::clone(&session))?;
         Ok(session)
@@ -267,6 +268,47 @@ impl QaRuntimeAdapter for TauriQaRuntimeAdapter {
             Ok(QaInput {
                 text,
                 selection_text: session.selection_text.clone(),
+                selection_source_app: session.front_app.clone(),
+            })
+        })
+    }
+
+    fn prepare_selection_edit(
+        &self,
+        session_id: SessionId,
+        selection_voice_session_id: SessionId,
+        capture: SelectionCapture,
+        instruction: String,
+    ) -> BoxFuture<'static, Result<QaInput, BackendError>> {
+        let adapter = self.clone();
+        Box::pin(async move {
+            // Do not call `capture_turn`: opening QA has already changed focus,
+            // while Selection Voice still owns the original opaque insertion
+            // target in the coordinator's host state.
+            let context = adapter
+                .backend()?
+                .capture_host_dictation_context(DictationStartOptions {
+                    front_app: capture.source_app.clone(),
+                    ..DictationStartOptions::default()
+                })
+                .await?;
+            let session = Arc::new(TauriQaRuntimeSession {
+                context: Mutex::new(Some(context)),
+                voice_capture: Mutex::new(None),
+                audio_wav: Mutex::new(None),
+                selection_text: Some(capture.text.clone()),
+                selection_target: Mutex::new(None),
+                prebound_selection_voice_session_id: Some(selection_voice_session_id),
+                front_app: capture.source_app.clone(),
+                duration_ms: AtomicU64::new(0),
+                voice_turn: false,
+                cancelled: Arc::new(AtomicBool::new(false)),
+            });
+            Self::insert_session(&adapter.sessions, session_id, session)?;
+            Ok(QaInput {
+                text: instruction,
+                selection_text: Some(capture.text),
+                selection_source_app: capture.source_app,
             })
         })
     }
@@ -285,12 +327,11 @@ impl QaRuntimeAdapter for TauriQaRuntimeAdapter {
                 audio_wav: Mutex::new(None),
                 selection_text: capture.selection_text,
                 selection_target: Mutex::new(Some(capture.selection_target)),
+                prebound_selection_voice_session_id: None,
                 front_app: capture.front_app.clone(),
                 duration_ms: AtomicU64::new(0),
                 voice_turn: true,
                 cancelled: Arc::new(AtomicBool::new(false)),
-                edit_apply_available: AtomicBool::new(false),
-                edit_revert_available: AtomicBool::new(false),
             });
             Self::insert_session(&adapter.sessions, session_id, Arc::clone(&session))?;
             if let Err(error) = progress.publish(
@@ -329,6 +370,12 @@ impl QaRuntimeAdapter for TauriQaRuntimeAdapter {
             };
             *session.context.lock() = Some(voice_capture.context());
             *session.voice_capture.lock() = Some(voice_capture);
+            // Core may have queued an immediate device fault while cpal was
+            // starting. Arm only after the capture is reachable by cancel or
+            // finish, otherwise the terminal action could race this install.
+            if let Some(capture) = session.voice_capture.lock().as_ref() {
+                capture.arm_recording_progress();
+            }
             if session.cancelled.load(Ordering::Acquire) {
                 let voice_capture = session.voice_capture.lock().take();
                 if let Some(voice_capture) = voice_capture {
@@ -369,6 +416,7 @@ impl QaRuntimeAdapter for TauriQaRuntimeAdapter {
                     .transcript
                     .unwrap_or_else(|| "（语音问题）".to_string()),
                 selection_text: session.selection_text.clone(),
+                selection_source_app: session.front_app.clone(),
             })
         })
     }
@@ -379,9 +427,7 @@ impl QaRuntimeAdapter for TauriQaRuntimeAdapter {
         progress: Arc<dyn QaProgressSink>,
     ) -> BoxFuture<'static, Result<QaTurnResult, BackendError>> {
         let session = self.sessions.lock().get(&request.session_id).cloned();
-        let backend_slot = Arc::clone(&self.backend);
         let credentials = Arc::clone(&self.credentials);
-        let host_context = Arc::clone(&self.host_context);
         Box::pin(async move {
             let session = session.ok_or_else(|| {
                 BackendError::new(
@@ -393,55 +439,6 @@ impl QaRuntimeAdapter for TauriQaRuntimeAdapter {
                 return Err(Self::cancelled_error());
             }
             let context = session.context()?;
-            if request.edit_instruction_mode {
-                let selection_text = request
-                    .input
-                    .selection_text
-                    .clone()
-                    .filter(|text| !text.trim().is_empty())
-                    .ok_or_else(|| {
-                        BackendError::new(
-                            BackendErrorCode::InvalidArgument,
-                            "no selection is available for editing",
-                        )
-                    })?;
-                let target = session.selection_target.lock().take().ok_or_else(|| {
-                    BackendError::new(
-                        BackendErrorCode::Platform,
-                        "selection edit target is unavailable",
-                    )
-                })?;
-                let backend = backend_slot
-                    .lock()
-                    .as_ref()
-                    .and_then(std::sync::Weak::upgrade)
-                    .ok_or_else(|| {
-                        BackendError::new(
-                            BackendErrorCode::InvalidState,
-                            "core backend state is unavailable",
-                        )
-                    })?;
-                let result = backend
-                    .services()
-                    .selection_voice
-                    .edit_preview(SelectionVoiceEditRequest {
-                        owner_session_id: request.conversation_id,
-                        capture: SelectionCapture {
-                            text: selection_text,
-                            source_app: context.polish.front_app.clone(),
-                        },
-                        instruction: request.input.text,
-                    })
-                    .await?;
-                host_context.bind_selection_voice_target(result.preview.session_id, target)?;
-                session.edit_apply_available.store(true, Ordering::Release);
-                session
-                    .edit_revert_available
-                    .store(result.replaced_existing, Ordering::Release);
-                return Ok(QaTurnResult {
-                    answer: result.answer_text(),
-                });
-            }
             let audio_wav = session.audio_wav.lock().take();
             let answer = openless_core::answer_qa_with_context(
                 credentials,
@@ -455,6 +452,37 @@ impl QaRuntimeAdapter for TauriQaRuntimeAdapter {
             .await?;
             Ok(QaTurnResult { answer })
         })
+    }
+
+    fn bind_selection_voice_target(
+        &self,
+        qa_session_id: SessionId,
+        selection_voice_session_id: SessionId,
+    ) -> Result<(), BackendError> {
+        let session = self
+            .sessions
+            .lock()
+            .get(&qa_session_id)
+            .cloned()
+            .ok_or_else(Self::cancelled_error)?;
+        if let Some(expected) = session.prebound_selection_voice_session_id {
+            return if expected == selection_voice_session_id {
+                Ok(())
+            } else {
+                Err(BackendError::new(
+                    BackendErrorCode::Cancelled,
+                    "selection edit target belongs to a stale Selection Voice session",
+                ))
+            };
+        }
+        let target = session.selection_target.lock().take().ok_or_else(|| {
+            BackendError::new(
+                BackendErrorCode::Platform,
+                "selection edit target is unavailable",
+            )
+        })?;
+        self.host_context
+            .bind_selection_voice_target(selection_voice_session_id, target)
     }
 
     fn complete(
@@ -479,8 +507,6 @@ impl QaRuntimeAdapter for TauriQaRuntimeAdapter {
                     && context.pipeline_mode
                         == openless_core::shared_types::PipelineMode::Multimodal)
                     .then(String::new),
-                edit_apply_available: session.edit_apply_available.load(Ordering::Acquire),
-                edit_revert_available: session.edit_revert_available.load(Ordering::Acquire),
             })
         })
     }
@@ -524,12 +550,11 @@ mod tests {
             audio_wav: Mutex::new(None),
             selection_text: None,
             selection_target: Mutex::new(Some(Default::default())),
+            prebound_selection_voice_session_id: None,
             front_app: None,
             duration_ms: AtomicU64::new(0),
             voice_turn: false,
             cancelled: Arc::new(AtomicBool::new(false)),
-            edit_apply_available: AtomicBool::new(false),
-            edit_revert_available: AtomicBool::new(false),
         })
     }
 
@@ -580,5 +605,39 @@ mod tests {
             .unwrap();
 
         assert_eq!(*calls.lock(), vec![session_id]);
+    }
+
+    #[test]
+    fn prebound_selection_voice_target_is_preserved_and_stale_ids_are_rejected() {
+        let host_context = Arc::new(TauriQaHostContext::default());
+        let adapter = TauriQaRuntimeAdapter::new(
+            Arc::new(Mutex::new(None)),
+            Arc::new(Mutex::new(None)),
+            Arc::new(openless_core::UnsupportedCredentialStore),
+            host_context,
+        );
+        let qa_session_id = SessionId::new();
+        let selection_voice_session_id = SessionId::new();
+        let session = Arc::new(TauriQaRuntimeSession {
+            context: Mutex::new(Some(Arc::new(DictationContext::default()))),
+            voice_capture: Mutex::new(None),
+            audio_wav: Mutex::new(None),
+            selection_text: Some("original selection".to_string()),
+            prebound_selection_voice_session_id: Some(selection_voice_session_id),
+            selection_target: Mutex::new(None),
+            front_app: Some("Editor".to_string()),
+            duration_ms: AtomicU64::new(0),
+            voice_turn: false,
+            cancelled: Arc::new(AtomicBool::new(false)),
+        });
+        adapter.sessions.lock().insert(qa_session_id, session);
+
+        adapter
+            .bind_selection_voice_target(qa_session_id, selection_voice_session_id)
+            .unwrap();
+        let error = adapter
+            .bind_selection_voice_target(qa_session_id, SessionId::new())
+            .unwrap_err();
+        assert_eq!(error.code, BackendErrorCode::Cancelled);
     }
 }

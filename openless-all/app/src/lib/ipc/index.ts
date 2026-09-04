@@ -40,6 +40,9 @@ export {
     listProviderModels,
 } from "./asr-credentials"
 
+export type { AuthRequirement, ProviderDescriptor, ProviderKind } from './providers'
+export { listProviderDescriptors } from './providers'
+
 // channels（渠道卡片）
 export type { Channel, ChannelKind, ChannelTestResult } from "./channels"
 export {

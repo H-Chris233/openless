@@ -30,6 +30,14 @@ pub enum PipelineMode {
     Multimodal,
 }
 
+pub fn effective_pipeline_mode(enabled: bool, configured: PipelineMode) -> PipelineMode {
+    if enabled {
+        configured
+    } else {
+        PipelineMode::Traditional
+    }
+}
+
 fn default_pipeline_mode() -> PipelineMode {
     PipelineMode::Traditional
 }
@@ -100,17 +108,20 @@ pub enum WindowsSendInputNewlineMode {
 
 /// macOS 逐字上屏时换行符怎么发。仅流式插入路径生效。
 ///
-/// 默认 `ShiftReturn`：macOS 把 U+000A 当 Return 键，而聊天框里 Return 就是「发送」——
-/// 一条带空行的两段话会被从中间劈开发出去。Shift+Return 在聊天框是软换行，在编辑器 /
-/// 终端 / 网页输入框里就是普通换行。
+/// 默认 `Auto`：按会话开始时冻结的前台应用选择。Terminal/TUI 使用 U+000A，
+/// 其它和未知应用安全回退为 Shift+Return。
 ///
 /// 保留 `Return` 是因为风格市场里有靠换行发多条消息的风格包，那种效果需要真回车。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum MacosNewlineMode {
-    /// Shift+Return：聊天框软换行，不发送。
+    /// 按会话开始时捕获的前台应用自动选择。
     #[default]
+    Auto,
+    /// Shift+Return：聊天框软换行，不发送。
     ShiftReturn,
+    /// U+000A：Terminal/TUI 中等价于 Ctrl+J 软换行。
+    LineFeed,
     /// Return：聊天框里等于发送 —— 想要「一段话拆成多条消息」的风格包用这个。
     Return,
 }
@@ -2494,6 +2505,41 @@ mod translation_effective_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn macos_newline_modes_round_trip_legacy_auto_and_line_feed() {
+        assert_eq!(MacosNewlineMode::default(), MacosNewlineMode::Auto);
+        for (wire, expected) in [
+            ("\"auto\"", MacosNewlineMode::Auto),
+            ("\"shiftReturn\"", MacosNewlineMode::ShiftReturn),
+            ("\"lineFeed\"", MacosNewlineMode::LineFeed),
+            ("\"return\"", MacosNewlineMode::Return),
+        ] {
+            let decoded: MacosNewlineMode = serde_json::from_str(wire).unwrap();
+            assert_eq!(decoded, expected);
+            assert_eq!(serde_json::to_string(&decoded).unwrap(), wire);
+        }
+    }
+
+    #[test]
+    fn multimodal_mode_requires_the_experiment_switch() {
+        assert_eq!(
+            effective_pipeline_mode(false, PipelineMode::Traditional),
+            PipelineMode::Traditional
+        );
+        assert_eq!(
+            effective_pipeline_mode(false, PipelineMode::Multimodal),
+            PipelineMode::Traditional
+        );
+        assert_eq!(
+            effective_pipeline_mode(true, PipelineMode::Traditional),
+            PipelineMode::Traditional
+        );
+        assert_eq!(
+            effective_pipeline_mode(true, PipelineMode::Multimodal),
+            PipelineMode::Multimodal
+        );
+    }
 
     #[test]
     fn obsolete_selection_voice_hotkey_is_ignored_and_not_serialized() {

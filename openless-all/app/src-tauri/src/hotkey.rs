@@ -7,10 +7,10 @@
 //!   trigger（如右 Control / 右 Alt）的真实语义。
 //! - Linux：fcitx5 插件提供热键事件（DBus 信号 `DictationKeyEvent`）。
 //!
-//! 仅产出"边沿"事件，toggle vs hold 由 Coordinator 解释。
+//! 仅产出带代次和单调时间戳的原始边沿，业务语义由 openless-core 解释。
 //!
 //! Esc（取消）与组合键撤销（触发键按住期间叠加了普通键）**都不走** `HotkeyEvent`
-//! 通道，而是独立的 `Sender<u64>`：Pressed/Released 的 bridge 线程为了修 #468/#475 的
+//! 通道，而是独立的 `Sender<HotkeyCombinedEdge>`：Pressed/Released 的 bridge 线程为了修 #468/#475 的
 //! latch 竞态改成了串行 block_on，Pressed / Released 会在 bridge 线程上同步跑完
 //! `begin_session`（开麦 + ASR 握手）或整个转写 + 润色流程 —— 若取消 / 撤销与它们同
 //! 队列，事件只能排队等流程跑完，观感就是「晚几百毫秒才生效」。独立通道 + 专用消费
@@ -35,6 +35,7 @@ pub enum HotkeyEvent {
     },
     Released {
         at: Instant,
+        press_id: u64,
     },
     // 组合键撤销不在此枚举里：走独立的 `combo_abort` 通道，避免被上面 Pressed →
     // begin_session 的同步开麦流程堵在队列里（见模块注释）。
@@ -47,6 +48,12 @@ pub enum HotkeyEvent {
     /// 录制态按下 Fn（浏览器不向网页层下发 Fn 的 keydown，无法通过 recorder 捕获；
     /// 由 CGEventTap 在录制态检测后上报，供前端 ShortcutRecorder 提交 Fn 绑定）。
     FnRecordingPressed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HotkeyCombinedEdge {
+    pub at: Instant,
+    pub press_id: u64,
 }
 
 #[cfg(test)]
@@ -148,12 +155,6 @@ pub trait HotkeyAdapter: Send + Sync {
     /// 快捷键录制态开关。激活期间监听器上报 Fn 按下边沿（`FnRecordingPressed`），
     /// 供前端 recorder 提交 Fn 绑定（浏览器不向网页层下发 Fn keydown）。
     fn set_recording_active(&self, _active: bool) {}
-    /// 本次按住期间，监听器是否已经看到触发键被叠加了普通键。上层的「仲裁窗口」
-    /// 按下后先等一小会儿再读它，命中就整条按下作废（麦克风都不用开）。
-    /// 没有键盘监听器的平台（Linux/fcitx5）恒为 false。
-    fn trigger_combined_since_press(&self, _press_id: u64) -> bool {
-        false
-    }
     fn shutdown(&self) {}
 }
 
@@ -193,14 +194,14 @@ impl HotkeyMonitor {
     ///
     /// `cancel_tx`：Esc 按下即发一个 `()`。独立于 `tx`，见模块注释——不能与
     /// Pressed/Released 挤同一条串行 bridge，否则 Processing 期间取消排不上队。
-    /// `combo_tx`：触发键按住期间叠加了普通键就发一个 press id。独立于 `tx`，见模块
+    /// `combo_tx`：触发键按住期间叠加了普通键就发一个带时间戳的 press edge。独立于 `tx`，见模块
     /// 注释——不能与 Pressed/Released 挤同一条串行 bridge，否则撤销要等
     /// `begin_session` 开完麦才排得上队，胶囊晚几百毫秒才消失。
     pub fn start(
         binding: HotkeyBinding,
         tx: Sender<HotkeyEvent>,
         cancel_tx: Sender<()>,
-        combo_tx: Sender<u64>,
+        combo_tx: Sender<HotkeyCombinedEdge>,
     ) -> Result<Self, HotkeyInstallError> {
         Ok(Self {
             adapter: platform::start_adapter(binding, tx, cancel_tx, combo_tx)?,
@@ -236,10 +237,6 @@ impl HotkeyMonitor {
         self.adapter.set_recording_active(active);
     }
 
-    pub fn trigger_combined_since_press(&self, press_id: u64) -> bool {
-        self.adapter.trigger_combined_since_press(press_id)
-    }
-
     pub fn capability() -> HotkeyCapability {
         HotkeyCapability::current()
     }
@@ -270,8 +267,11 @@ fn send_cancel_or_log(tx: &Sender<()>) {
     }
 }
 
-fn send_combo_abort_or_log(tx: &Sender<u64>, press_id: u64) {
-    if let Err(e) = tx.send(press_id) {
+fn send_combo_abort_or_log(tx: &Sender<HotkeyCombinedEdge>, press_id: u64) {
+    if let Err(e) = tx.send(HotkeyCombinedEdge {
+        at: Instant::now(),
+        press_id,
+    }) {
         log::warn!("[hotkey] 组合键撤销事件发送失败: {e}");
     }
 }
@@ -279,6 +279,7 @@ fn send_combo_abort_or_log(tx: &Sender<u64>, press_id: u64) {
 static NEXT_PRESS_ID: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) fn next_press_id() -> u64 {
+    // 这里只需要跨监听器唯一；边沿的先后顺序由各自携带的 Instant 表达。
     NEXT_PRESS_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
@@ -308,15 +309,20 @@ fn start_listener_thread<T, F>(
     binding: HotkeyBinding,
     tx: Sender<HotkeyEvent>,
     cancel_tx: Sender<()>,
-    combo_tx: Sender<u64>,
+    combo_tx: Sender<HotkeyCombinedEdge>,
     thread_name: &str,
     startup_timeout_message: &'static str,
     run_listen_loop: F,
 ) -> Result<ListenerThread<T>, HotkeyInstallError>
 where
     T: Send + 'static,
-    F: FnOnce(Arc<Shared>, Sender<HotkeyEvent>, Sender<()>, Sender<u64>, StartupTx<T>)
-        + Send
+    F: FnOnce(
+            Arc<Shared>,
+            Sender<HotkeyEvent>,
+            Sender<()>,
+            Sender<HotkeyCombinedEdge>,
+            StartupTx<T>,
+        ) + Send
         + 'static,
 {
     let shared = Arc::new(Shared {
@@ -428,7 +434,8 @@ mod platform {
     use super::{
         esc_exclusive, install_error, reset_shared_held_state, send_cancel_or_log,
         send_combo_abort_or_log, send_or_log, start_listener_thread, update_shared_binding,
-        update_shared_modifier_shortcuts, HotkeyAdapter, HotkeyEvent, Shared, StartupTx,
+        update_shared_modifier_shortcuts, HotkeyAdapter, HotkeyCombinedEdge, HotkeyEvent, Shared,
+        StartupTx,
     };
     use crate::types::{HotkeyAdapterKind, HotkeyBinding, HotkeyInstallError, HotkeyTrigger};
 
@@ -436,7 +443,7 @@ mod platform {
         binding: HotkeyBinding,
         tx: Sender<HotkeyEvent>,
         cancel_tx: Sender<()>,
-        combo_tx: Sender<u64>,
+        combo_tx: Sender<HotkeyCombinedEdge>,
     ) -> Result<Box<dyn HotkeyAdapter>, HotkeyInstallError> {
         let listener = start_listener_thread(
             binding,
@@ -506,10 +513,6 @@ mod platform {
             if !active {
                 self.shared.recording_fn_held.store(false, Ordering::SeqCst);
             }
-        }
-
-        fn trigger_combined_since_press(&self, press_id: u64) -> bool {
-            self.shared.trigger_companion_seen.load(Ordering::SeqCst) == press_id
         }
 
         fn shutdown(&self) {
@@ -617,7 +620,7 @@ mod platform {
         /// Esc 专用通道，见模块注释——不与 tx 挤同一条串行 bridge。
         cancel_tx: Sender<()>,
         /// 组合键撤销专用通道，见模块注释——不与 tx 挤同一条串行 bridge。
-        combo_tx: Sender<u64>,
+        combo_tx: Sender<HotkeyCombinedEdge>,
         /// 与 MacHotkeyAdapter 共享的 (tap, runloop) refs。tap re-enable on
         /// TAP_DISABLED_BY_TIMEOUT 走 handles.tap；adapter shutdown 也走这两个 lock。
         handles: Arc<MacShutdownHandles>,
@@ -630,7 +633,7 @@ mod platform {
         shared: Arc<Shared>,
         tx: Sender<HotkeyEvent>,
         cancel_tx: Sender<()>,
-        combo_tx: Sender<u64>,
+        combo_tx: Sender<HotkeyCombinedEdge>,
         status_tx: StartupTx<Arc<MacShutdownHandles>>,
     ) {
         let mask: CgEventMask = (1u64 << FLAGS_CHANGED) | (1u64 << KEY_DOWN) | (1u64 << KEY_UP);
@@ -813,10 +816,12 @@ mod platform {
             );
         } else if !is_active && was_held {
             ctx.shared.trigger_held.store(false, Ordering::SeqCst);
+            let press_id = ctx.shared.trigger_press_id.swap(0, Ordering::SeqCst);
             send_or_log(
                 &ctx.tx,
                 HotkeyEvent::Released {
                     at: std::time::Instant::now(),
+                    press_id,
                 },
             );
         }
@@ -954,7 +959,7 @@ mod platform {
         ) -> (
             CallbackContext,
             mpsc::Receiver<HotkeyEvent>,
-            mpsc::Receiver<u64>,
+            mpsc::Receiver<HotkeyCombinedEdge>,
         ) {
             let (tx, rx) = mpsc::channel();
             let (cancel_tx, _cancel_rx) = mpsc::channel();
@@ -981,7 +986,7 @@ mod platform {
             (ctx, rx)
         }
 
-        fn drain_combo(rx: &mpsc::Receiver<u64>) -> usize {
+        fn drain_combo(rx: &mpsc::Receiver<HotkeyCombinedEdge>) -> usize {
             rx.try_iter().count()
         }
 
@@ -1101,7 +1106,8 @@ mod platform {
     use super::{
         esc_exclusive, install_error, reset_shared_held_state, send_cancel_or_log,
         send_combo_abort_or_log, send_or_log, start_listener_thread, update_shared_binding,
-        update_shared_modifier_shortcuts, HotkeyAdapter, HotkeyEvent, Shared, StartupTx,
+        update_shared_modifier_shortcuts, HotkeyAdapter, HotkeyCombinedEdge, HotkeyEvent, Shared,
+        StartupTx,
     };
     use crate::types::{HotkeyAdapterKind, HotkeyBinding, HotkeyInstallError, HotkeyTrigger};
 
@@ -1130,7 +1136,7 @@ mod platform {
         binding: HotkeyBinding,
         tx: Sender<HotkeyEvent>,
         cancel_tx: Sender<()>,
-        combo_tx: Sender<u64>,
+        combo_tx: Sender<HotkeyCombinedEdge>,
     ) -> Result<Box<dyn HotkeyAdapter>, HotkeyInstallError> {
         let listener = start_listener_thread(
             binding,
@@ -1179,10 +1185,6 @@ mod platform {
             reset_shared_held_state(&self.shared);
         }
 
-        fn trigger_combined_since_press(&self, press_id: u64) -> bool {
-            self.shared.trigger_companion_seen.load(Ordering::SeqCst) == press_id
-        }
-
         fn shutdown(&self) {
             unsafe {
                 if let Err(err) = PostThreadMessageW(self.thread_id, WM_QUIT, WPARAM(0), LPARAM(0))
@@ -1199,7 +1201,7 @@ mod platform {
         /// Esc 专用通道，见模块注释——不与 tx 挤同一条串行 bridge。
         cancel_tx: Sender<()>,
         /// 组合键撤销专用通道，见模块注释——不与 tx 挤同一条串行 bridge。
-        combo_tx: Sender<u64>,
+        combo_tx: Sender<HotkeyCombinedEdge>,
         hook: std::sync::Mutex<Option<HHOOK>>,
     }
 
@@ -1210,7 +1212,7 @@ mod platform {
         shared: Arc<Shared>,
         tx: Sender<HotkeyEvent>,
         cancel_tx: Sender<()>,
-        combo_tx: Sender<u64>,
+        combo_tx: Sender<HotkeyCombinedEdge>,
         status_tx: StartupTx<u32>,
     ) {
         let thread_id = unsafe { GetCurrentThreadId() };
@@ -1394,11 +1396,13 @@ mod platform {
             WM_KEYUP | WM_SYSKEYUP => {
                 let was_held = ctx.shared.trigger_held.swap(false, Ordering::SeqCst);
                 if was_held {
+                    let press_id = ctx.shared.trigger_press_id.swap(0, Ordering::SeqCst);
                     log::info!("[hotkey] Windows trigger released vk={vk_code}");
                     send_or_log(
                         &ctx.tx,
                         HotkeyEvent::Released {
                             at: std::time::Instant::now(),
+                            press_id,
                         },
                     );
                 }
@@ -1539,7 +1543,7 @@ mod platform {
         ) -> (
             CallbackContext,
             mpsc::Receiver<HotkeyEvent>,
-            mpsc::Receiver<u64>,
+            mpsc::Receiver<HotkeyCombinedEdge>,
         ) {
             let (tx, rx) = mpsc::channel();
             let (cancel_tx, _cancel_rx) = mpsc::channel();
@@ -1563,7 +1567,7 @@ mod platform {
             (ctx, rx)
         }
 
-        fn drain_combo(rx: &mpsc::Receiver<u64>) -> usize {
+        fn drain_combo(rx: &mpsc::Receiver<HotkeyCombinedEdge>) -> usize {
             rx.try_iter().count()
         }
 
@@ -1592,7 +1596,20 @@ mod platform {
             assert!(dispatch_keyboard_event(&ctx, VK_RCONTROL, WM_KEYUP));
             assert!(dispatch_keyboard_event(&ctx, VK_RCONTROL, WM_KEYUP));
 
-            assert_eq!(edge_names(drain(&rx)), vec!["pressed", "released"]);
+            let events = drain(&rx);
+            assert_eq!(edge_names(events.clone()), vec!["pressed", "released"]);
+            let [HotkeyEvent::Pressed {
+                press_id: pressed_id,
+                ..
+            }, HotkeyEvent::Released {
+                press_id: released_id,
+                ..
+            }] = events.as_slice()
+            else {
+                panic!("expected one paired Windows press/release generation")
+            };
+            assert_ne!(*pressed_id, 0);
+            assert_eq!(pressed_id, released_id);
         }
 
         #[test]
@@ -1774,7 +1791,7 @@ mod platform {
 mod platform {
     use std::sync::mpsc::Sender;
 
-    use super::{HotkeyAdapter, HotkeyEvent};
+    use super::{HotkeyAdapter, HotkeyCombinedEdge, HotkeyEvent};
     use crate::types::{HotkeyAdapterKind, HotkeyBinding, HotkeyInstallError, HotkeyTrigger};
 
     /// Linux 统一使用 fcitx5 插件作为热键源（Wayland / X11 均可）。
@@ -1785,7 +1802,7 @@ mod platform {
         _binding: HotkeyBinding,
         _tx: Sender<HotkeyEvent>,
         _cancel_tx: Sender<()>,
-        _combo_tx: Sender<u64>,
+        _combo_tx: Sender<HotkeyCombinedEdge>,
     ) -> Result<Box<dyn HotkeyAdapter>, HotkeyInstallError> {
         log::info!("[hotkey] Linux — fcitx5 plugin handles hotkeys");
         Ok(Box::new(PlaceholderAdapter {
@@ -1801,7 +1818,7 @@ mod platform {
     struct PlaceholderAdapter {
         _tx: Sender<HotkeyEvent>,
         _cancel_tx: Sender<()>,
-        _combo_tx: Sender<u64>,
+        _combo_tx: Sender<HotkeyCombinedEdge>,
     }
 
     impl HotkeyAdapter for PlaceholderAdapter {

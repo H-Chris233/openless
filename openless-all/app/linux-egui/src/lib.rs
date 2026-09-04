@@ -14,6 +14,8 @@ mod fcitx5;
 mod host_actions;
 mod hotkeys;
 mod marketplace;
+mod qa;
+mod remote_input;
 mod resources;
 mod runtime;
 mod selection;
@@ -55,7 +57,125 @@ pub struct LinuxHost {
     backend: std::sync::Arc<OpenLessBackend>,
     settings_runtime: std::sync::Arc<dyn SettingsRuntime>,
     translation_pending: std::sync::atomic::AtomicBool,
-    less_computer_voice: std::sync::Mutex<Option<LessComputerVoiceSession>>,
+    less_computer_voice: std::sync::Arc<std::sync::Mutex<LinuxLessComputerCaptureState>>,
+}
+
+#[derive(Default)]
+struct LinuxLessComputerCaptureState {
+    /// Set before entering Core so a recorder callback that fires during
+    /// construction can queue its Host effect against the right generation.
+    expected_session_id: Option<SessionId>,
+    session: Option<LessComputerVoiceSession>,
+    pending: Option<RecordingControlAction>,
+}
+
+struct LinuxLessComputerRecordingControl {
+    state: std::sync::Arc<std::sync::Mutex<LinuxLessComputerCaptureState>>,
+    runtime: tokio::runtime::Handle,
+}
+
+impl LinuxLessComputerRecordingControl {
+    fn begin(&self, session_id: SessionId) -> Result<(), BackendError> {
+        let mut state = self
+            .state
+            .lock()
+            .expect("Linux Less Computer voice lock poisoned");
+        if state.expected_session_id.is_some() || state.session.is_some() {
+            return Err(BackendError::new(
+                BackendErrorCode::Busy,
+                "Linux Less Computer capture is already active",
+            ));
+        }
+        state.expected_session_id = Some(session_id);
+        state.pending = None;
+        Ok(())
+    }
+
+    fn abort_start(&self, session_id: SessionId) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("Linux Less Computer voice lock poisoned");
+        if state.expected_session_id == Some(session_id) && state.session.is_none() {
+            state.expected_session_id = None;
+            state.pending = None;
+        }
+    }
+
+    fn install(&self, session: LessComputerVoiceSession) -> Result<(), BackendError> {
+        let session_id = session.session_id();
+        let pending = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("Linux Less Computer voice lock poisoned");
+            if state.expected_session_id != Some(session_id) || state.session.is_some() {
+                return Err(BackendError::new(
+                    BackendErrorCode::Cancelled,
+                    "Linux Less Computer capture generation changed during startup",
+                ));
+            }
+            state.session = Some(session);
+            state.pending.take()
+        };
+        if let Some(action) = pending {
+            self.execute(session_id, action)?;
+        }
+        Ok(())
+    }
+
+    fn execute(
+        &self,
+        session_id: SessionId,
+        action: RecordingControlAction,
+    ) -> Result<(), BackendError> {
+        let session = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("Linux Less Computer voice lock poisoned");
+            if state.expected_session_id != Some(session_id) {
+                return Err(BackendError::new(
+                    BackendErrorCode::Cancelled,
+                    "Linux Less Computer recording control is stale",
+                ));
+            }
+            let Some(session) = state.session.take() else {
+                // Recorder level/fault callbacks can run before Core returns
+                // the capture object. Queue exactly one effect; Cancel wins
+                // because it is the stronger terminal request.
+                state.pending = Some(match (state.pending, action) {
+                    (Some(RecordingControlAction::Cancel), _)
+                    | (_, RecordingControlAction::Cancel) => RecordingControlAction::Cancel,
+                    _ => RecordingControlAction::Stop,
+                });
+                return Ok(());
+            };
+            state.expected_session_id = None;
+            state.pending = None;
+            session
+        };
+        self.runtime.spawn(async move {
+            let result = match action {
+                RecordingControlAction::Stop => session.finish().await.map(|_| ()),
+                RecordingControlAction::Cancel => session.cancel().await,
+            };
+            if let Err(error) = result {
+                log::warn!("Linux Less Computer recording control failed: {error}");
+            }
+        });
+        Ok(())
+    }
+}
+
+impl RecordingControlSink for LinuxLessComputerRecordingControl {
+    fn request(
+        &self,
+        session_id: SessionId,
+        action: RecordingControlAction,
+    ) -> Result<(), BackendError> {
+        self.execute(session_id, action)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,7 +225,9 @@ impl LinuxHost {
             backend,
             settings_runtime,
             translation_pending: std::sync::atomic::AtomicBool::new(false),
-            less_computer_voice: std::sync::Mutex::new(None),
+            less_computer_voice: std::sync::Arc::new(std::sync::Mutex::new(
+                LinuxLessComputerCaptureState::default(),
+            )),
         }
     }
 
@@ -181,25 +303,25 @@ impl LinuxHost {
         event: LinuxHotkeyEvent,
     ) -> Result<Option<CliDispatchOutcome>, BackendError> {
         match event {
-            LinuxHotkeyEvent::LessComputerPressed { at, .. } => {
-                self.dispatch_less_computer_edge(DictationHotkeyEdge::Pressed { at })
+            LinuxHotkeyEvent::LessComputerPressed { press_id, at, .. } => {
+                self.dispatch_less_computer_edge(DictationHotkeyEdge::Pressed { press_id, at })
                     .await
             }
-            LinuxHotkeyEvent::LessComputerReleased { at, .. } => {
-                self.dispatch_less_computer_edge(DictationHotkeyEdge::Released { at })
+            LinuxHotkeyEvent::LessComputerReleased { press_id, at, .. } => {
+                self.dispatch_less_computer_edge(DictationHotkeyEdge::Released { press_id, at })
                     .await
             }
-            LinuxHotkeyEvent::LessComputerCombined { .. } => {
-                self.dispatch_less_computer_edge(DictationHotkeyEdge::Combined)
+            LinuxHotkeyEvent::LessComputerCombined { press_id, at, .. } => {
+                self.dispatch_less_computer_edge(DictationHotkeyEdge::Combined { press_id, at })
                     .await
             }
-            LinuxHotkeyEvent::DictationPressed { at, .. } => {
+            LinuxHotkeyEvent::DictationPressed { press_id, at, .. } => {
                 let translation_requested = self
                     .translation_pending
                     .swap(false, std::sync::atomic::Ordering::AcqRel);
                 self.backend
                     .dispatch_dictation_hotkey_edge_with_options(
-                        DictationHotkeyEdge::Pressed { at },
+                        DictationHotkeyEdge::Pressed { press_id, at },
                         DictationStartOptions {
                             translation_requested,
                             style_pack_id: None,
@@ -209,14 +331,14 @@ impl LinuxHost {
                     .await
                     .map(Some)
             }
-            LinuxHotkeyEvent::DictationReleased { at, .. } => self
+            LinuxHotkeyEvent::DictationReleased { press_id, at, .. } => self
                 .backend
-                .dispatch_dictation_hotkey_edge(DictationHotkeyEdge::Released { at })
+                .dispatch_dictation_hotkey_edge(DictationHotkeyEdge::Released { press_id, at })
                 .await
                 .map(Some),
-            LinuxHotkeyEvent::DictationCombined { .. } => self
+            LinuxHotkeyEvent::DictationCombined { press_id, at, .. } => self
                 .backend
-                .dispatch_dictation_hotkey_edge(DictationHotkeyEdge::Combined)
+                .dispatch_dictation_hotkey_edge(DictationHotkeyEdge::Combined { press_id, at })
                 .await
                 .map(Some),
             LinuxHotkeyEvent::QaPressed => self
@@ -256,34 +378,47 @@ impl LinuxHost {
     ) -> Result<Option<CliDispatchOutcome>, BackendError> {
         match self.backend.dispatch_less_computer_hotkey_edge(edge) {
             LessComputerHotkeyAction::Start => {
+                let session_id = SessionId::new();
+                let control = std::sync::Arc::new(LinuxLessComputerRecordingControl {
+                    state: std::sync::Arc::clone(&self.less_computer_voice),
+                    runtime: tokio::runtime::Handle::current(),
+                });
+                control.begin(session_id)?;
                 let session = self
                     .backend
-                    .start_less_computer_voice(SessionId::new())
-                    .await?;
-                *self
-                    .less_computer_voice
-                    .lock()
-                    .expect("Linux Less Computer voice lock poisoned") = Some(session);
+                    .start_less_computer_voice(session_id, control.clone())
+                    .await;
+                match session {
+                    Ok(session) => control.install(session)?,
+                    Err(error) => {
+                        control.abort_start(session_id);
+                        return Err(error);
+                    }
+                }
             }
             LessComputerHotkeyAction::Finish => {
-                let session = self
+                let session_id = self
                     .less_computer_voice
                     .lock()
                     .expect("Linux Less Computer voice lock poisoned")
-                    .take();
-                if let Some(session) = session {
-                    session.finish().await?;
+                    .expected_session_id;
+                if let Some(session_id) = session_id {
+                    LinuxLessComputerRecordingControl {
+                        state: std::sync::Arc::clone(&self.less_computer_voice),
+                        runtime: tokio::runtime::Handle::current(),
+                    }
+                    .execute(session_id, RecordingControlAction::Stop)?;
                 }
             }
             LessComputerHotkeyAction::Cancel => {
-                let session = self
+                self.backend.cancel_active_voice_session(None).await?;
+                let mut state = self
                     .less_computer_voice
                     .lock()
-                    .expect("Linux Less Computer voice lock poisoned")
-                    .take();
-                if let Some(session) = session {
-                    session.cancel().await?;
-                }
+                    .expect("Linux Less Computer voice lock poisoned");
+                state.expected_session_id = None;
+                state.session = None;
+                state.pending = None;
             }
             LessComputerHotkeyAction::Noop => {}
         }
@@ -296,6 +431,7 @@ impl LinuxHost {
         self.less_computer_voice
             .lock()
             .expect("Linux Less Computer voice lock poisoned")
+            .session
             .as_ref()
             .ok_or_else(|| {
                 BackendError::new(
@@ -320,5 +456,42 @@ impl LinuxHost {
             .download_archive(pack_id)
             .await?;
         marketplace::write_archive(&target, &bytes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn less_computer_recording_control_queues_early_cancel_for_the_current_generation() {
+        let state = std::sync::Arc::new(std::sync::Mutex::new(
+            LinuxLessComputerCaptureState::default(),
+        ));
+        let control = LinuxLessComputerRecordingControl {
+            state: std::sync::Arc::clone(&state),
+            runtime: tokio::runtime::Handle::current(),
+        };
+        let session_id = SessionId::new();
+        control.begin(session_id).unwrap();
+
+        control
+            .request(session_id, RecordingControlAction::Stop)
+            .unwrap();
+        control
+            .request(session_id, RecordingControlAction::Cancel)
+            .unwrap();
+
+        let queued = state.lock().unwrap();
+        assert_eq!(queued.expected_session_id, Some(session_id));
+        assert_eq!(queued.pending, Some(RecordingControlAction::Cancel));
+        drop(queued);
+        assert_eq!(
+            control
+                .request(SessionId::new(), RecordingControlAction::Stop)
+                .unwrap_err()
+                .code,
+            BackendErrorCode::Cancelled
+        );
     }
 }

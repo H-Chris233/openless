@@ -1,9 +1,12 @@
 use futures_util::future::BoxFuture;
 use openless_core::{
     normalize_foundry_language_hint, normalize_sherpa_language_hint, BackendConfig,
-    BackendDependencies, BackendError, BackendErrorCode, BackendEventKind, FoundryRuntimeSource,
-    LocalAsrMirror, LocalAsrRuntime, LocalAsrRuntimeStatus, LocalAsrSettings, LocalAsrTarget,
-    ModelRuntimeAdapter, NativeModelState, OpenLessBackend,
+    BackendDependencies, BackendError, BackendErrorCode, BackendEventKind, ChannelKind,
+    CredentialKey, CredentialStore, CredentialsStatus, FoundryRuntimeSource,
+    InMemoryCredentialStore, LocalAsrActivationRequest, LocalAsrMirror, LocalAsrRuntime,
+    LocalAsrRuntimeLease, LocalAsrRuntimeStatus, LocalAsrSettings, LocalAsrTarget,
+    ModelRuntimeAdapter, ModelStore, ModelStoreConfig, NativeModelState, OpenLessBackend,
+    PreferencesStore, ProviderSlot, SecretValue,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -67,10 +70,13 @@ fn public_local_asr_preferences_keep_legacy_normalization_semantics() {
 struct RecordingLocalAsrRuntime {
     invalidated: Mutex<Vec<LocalAsrRuntime>>,
     fail_release: std::sync::atomic::AtomicBool,
+    fail_prepare: std::sync::atomic::AtomicBool,
+    fail_preload: std::sync::atomic::AtomicBool,
     status: Mutex<Option<LocalAsrRuntimeStatus>>,
     deleted_native: Mutex<Vec<LocalAsrTarget>>,
     restart_on_rebind: std::sync::atomic::AtomicBool,
     emit_prepare_progress: std::sync::atomic::AtomicBool,
+    operations: Mutex<Vec<String>>,
 }
 
 impl ModelRuntimeAdapter for RecordingLocalAsrRuntime {
@@ -159,6 +165,18 @@ impl ModelRuntimeAdapter for RecordingLocalAsrRuntime {
         _: PathBuf,
         progress: openless_core::ModelPrepareProgressSink,
     ) -> BoxFuture<'static, Result<String, BackendError>> {
+        self.operations
+            .lock()
+            .unwrap()
+            .push(format!("prepare:{}", target.model_id()));
+        if self.fail_prepare.load(std::sync::atomic::Ordering::SeqCst) {
+            return Box::pin(async {
+                Err(BackendError::new(
+                    BackendErrorCode::Platform,
+                    "fixture prepare failed",
+                ))
+            });
+        }
         if self
             .emit_prepare_progress
             .load(std::sync::atomic::Ordering::SeqCst)
@@ -194,6 +212,10 @@ impl ModelRuntimeAdapter for RecordingLocalAsrRuntime {
     }
 
     fn release(&self, runtime: LocalAsrRuntime) -> BoxFuture<'static, Result<(), BackendError>> {
+        self.operations
+            .lock()
+            .unwrap()
+            .push(format!("release:{runtime:?}"));
         if self.fail_release.load(std::sync::atomic::Ordering::SeqCst) {
             return Box::pin(async {
                 Err(BackendError::new(
@@ -210,20 +232,145 @@ impl ModelRuntimeAdapter for RecordingLocalAsrRuntime {
         Box::pin(async { Ok(()) })
     }
 
+    fn release_lease(
+        &self,
+        lease: LocalAsrRuntimeLease,
+    ) -> BoxFuture<'static, Result<(), BackendError>> {
+        self.operations.lock().unwrap().push(format!(
+            "release-lease:{}:{}",
+            lease.target.model_id(),
+            lease.generation
+        ));
+        if self
+            .fail_release
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Box::pin(async {
+                Err(BackendError::new(
+                    BackendErrorCode::Platform,
+                    "fixture runtime refused to release the lease",
+                ))
+            });
+        }
+        if let Some(status) = self.status.lock().unwrap().as_mut() {
+            if status.model_id.as_deref() == Some(lease.target.model_id()) {
+                status.loaded = false;
+                status.model_id = None;
+            }
+        }
+        Box::pin(async { Ok(()) })
+    }
+
+    fn preload(
+        &self,
+        target: LocalAsrTarget,
+        _: PathBuf,
+    ) -> BoxFuture<'static, Result<(), BackendError>> {
+        self.operations
+            .lock()
+            .unwrap()
+            .push(format!("preload:{}", target.model_id()));
+        let failed = self.fail_preload.load(std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async move {
+            if failed {
+                Err(BackendError::new(
+                    BackendErrorCode::Platform,
+                    "fixture preload failed",
+                ))
+            } else {
+                Ok(())
+            }
+        })
+    }
+
     fn invalidate_route(&self, runtime: LocalAsrRuntime) {
         self.invalidated.lock().unwrap().push(runtime);
     }
 }
 
+#[derive(Default)]
+struct FailingActiveCredentialStore {
+    inner: InMemoryCredentialStore,
+    fail_set: std::sync::atomic::AtomicBool,
+}
+
+impl CredentialStore for FailingActiveCredentialStore {
+    fn status(
+        &self,
+        preferences: openless_core::UserPreferences,
+    ) -> BoxFuture<'static, Result<CredentialsStatus, BackendError>> {
+        self.inner.status(preferences)
+    }
+
+    fn read(
+        &self,
+        key: CredentialKey,
+    ) -> BoxFuture<'static, Result<Option<SecretValue>, BackendError>> {
+        self.inner.read(key)
+    }
+
+    fn write(
+        &self,
+        key: CredentialKey,
+        value: SecretValue,
+    ) -> BoxFuture<'static, Result<(), BackendError>> {
+        self.inner.write(key, value)
+    }
+
+    fn remove(&self, key: CredentialKey) -> BoxFuture<'static, Result<(), BackendError>> {
+        self.inner.remove(key)
+    }
+
+    fn active_provider(
+        &self,
+        slot: ProviderSlot,
+    ) -> BoxFuture<'static, Result<String, BackendError>> {
+        self.inner.active_provider(slot)
+    }
+
+    fn set_active_provider(
+        &self,
+        slot: ProviderSlot,
+        provider_id: String,
+    ) -> BoxFuture<'static, Result<(), BackendError>> {
+        if self
+            .fail_set
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Box::pin(async {
+                Err(BackendError::new(
+                    BackendErrorCode::Platform,
+                    "fixture active provider save failed",
+                ))
+            });
+        }
+        self.inner.set_active_provider(slot, provider_id)
+    }
+}
+
 fn local_asr_backend() -> (PathBuf, Arc<RecordingLocalAsrRuntime>, OpenLessBackend) {
+    local_asr_backend_with_credentials(Arc::new(InMemoryCredentialStore::default()), None)
+}
+
+fn local_asr_backend_with_credentials(
+    credentials: Arc<dyn CredentialStore>,
+    active_provider: Option<&str>,
+) -> (PathBuf, Arc<RecordingLocalAsrRuntime>, OpenLessBackend) {
     let data_dir = std::env::temp_dir().join(format!(
         "openless-core-local-asr-contract-{}",
         uuid::Uuid::new_v4()
     ));
     std::fs::create_dir_all(&data_dir).unwrap();
+    if let Some(active_provider) = active_provider {
+        let preferences = PreferencesStore::open(data_dir.join("preferences.json")).unwrap();
+        let mut value = preferences.get();
+        value.active_asr_provider = active_provider.to_string();
+        preferences.set(value).unwrap();
+    }
     let runtime = Arc::new(RecordingLocalAsrRuntime::default());
     let mut dependencies = BackendDependencies::unsupported();
     dependencies.local_asr_runtime = Some(runtime.clone());
+    dependencies.credential_store = credentials;
     let backend = OpenLessBackend::new(
         BackendConfig {
             data_dir: data_dir.clone(),
@@ -233,6 +380,472 @@ fn local_asr_backend() -> (PathBuf, Arc<RecordingLocalAsrRuntime>, OpenLessBacke
     )
     .unwrap();
     (data_dir, runtime, backend)
+}
+
+#[tokio::test]
+async fn local_asr_activation_prepares_before_committing_provider_and_preferences() {
+    let (data_dir, runtime, backend) = local_asr_backend_with_credentials(
+        Arc::new(InMemoryCredentialStore::default()),
+        Some("openai-compatible"),
+    );
+    backend
+        .set_active_provider(ProviderSlot::Asr, "openai-compatible".into())
+        .await
+        .unwrap();
+    let target = LocalAsrTarget::parse(LocalAsrRuntime::Foundry, "whisper-medium").unwrap();
+
+    let result = backend
+        .activate_local_asr(LocalAsrActivationRequest {
+            target: target.clone(),
+            provider_id: "foundry-local-whisper".into(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result.target, target);
+    assert_eq!(result.provider_id, "foundry-local-whisper");
+    assert_eq!(result.generation, 1);
+    assert_eq!(result.prepared_model, "whisper-medium");
+    assert_eq!(
+        backend.get_preferences().active_asr_provider,
+        result.provider_id
+    );
+    assert_eq!(
+        backend.get_preferences().foundry_local_asr_model,
+        "whisper-medium"
+    );
+    assert_eq!(
+        backend.active_provider(ProviderSlot::Asr).await.unwrap(),
+        "foundry-local-whisper"
+    );
+    assert_eq!(
+        runtime.operations.lock().unwrap().as_slice(),
+        ["prepare:whisper-medium", "preload:whisper-medium"]
+    );
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
+async fn local_asr_activation_rejects_a_provider_from_another_runtime() {
+    let (data_dir, runtime, backend) = local_asr_backend();
+    let target = LocalAsrTarget::parse(LocalAsrRuntime::Foundry, "whisper-medium").unwrap();
+
+    let error = backend
+        .activate_local_asr(LocalAsrActivationRequest {
+            target,
+            provider_id: "local-qwen3".into(),
+        })
+        .await
+        .expect_err("provider and runtime must be one atomic selection");
+
+    assert_eq!(error.code, BackendErrorCode::InvalidArgument);
+    assert!(runtime.operations.lock().unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
+async fn local_asr_activation_keeps_channel_id_and_provider_type_distinct() {
+    let (data_dir, _, backend) = local_asr_backend();
+    let first = backend
+        .create_channel(
+            ChannelKind::Asr,
+            "foundry-local-whisper".into(),
+            "Foundry A".into(),
+        )
+        .await
+        .unwrap();
+    let second = backend
+        .create_channel(
+            ChannelKind::Asr,
+            "foundry-local-whisper".into(),
+            "Foundry B".into(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(first, second);
+    let target = LocalAsrTarget::parse(LocalAsrRuntime::Foundry, "whisper-medium").unwrap();
+
+    let result = backend
+        .activate_local_asr(LocalAsrActivationRequest {
+            target,
+            provider_id: second.clone(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result.provider_id, second);
+    assert_eq!(
+        backend.active_provider(ProviderSlot::Asr).await.unwrap(),
+        result.provider_id
+    );
+    assert_eq!(
+        backend.get_preferences().active_asr_provider,
+        "foundry-local-whisper"
+    );
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
+async fn local_asr_activation_rolls_back_runtime_when_preload_fails() {
+    let (data_dir, runtime, backend) = local_asr_backend_with_credentials(
+        Arc::new(InMemoryCredentialStore::default()),
+        Some("openai-compatible"),
+    );
+    backend
+        .set_active_provider(ProviderSlot::Asr, "openai-compatible".into())
+        .await
+        .unwrap();
+    runtime
+        .fail_preload
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let target = LocalAsrTarget::parse(LocalAsrRuntime::Foundry, "whisper-medium").unwrap();
+
+    let error = backend
+        .activate_local_asr(LocalAsrActivationRequest {
+            target,
+            provider_id: "foundry-local-whisper".into(),
+        })
+        .await
+        .expect_err("preload failure must abort the transaction");
+
+    assert_eq!(error.code, BackendErrorCode::Platform);
+    assert_eq!(
+        backend.get_preferences().active_asr_provider,
+        "openai-compatible"
+    );
+    assert_eq!(
+        backend.active_provider(ProviderSlot::Asr).await.unwrap(),
+        "openai-compatible"
+    );
+    assert_eq!(
+        runtime.operations.lock().unwrap().as_slice(),
+        [
+            "prepare:whisper-medium",
+            "preload:whisper-medium",
+            "release-lease:whisper-medium:1"
+        ]
+    );
+    assert!(!runtime.status.lock().unwrap().as_ref().unwrap().loaded);
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
+async fn local_asr_activation_rolls_back_runtime_when_prepare_fails() {
+    let (data_dir, runtime, backend) = local_asr_backend_with_credentials(
+        Arc::new(InMemoryCredentialStore::default()),
+        Some("openai-compatible"),
+    );
+    backend
+        .set_active_provider(ProviderSlot::Asr, "openai-compatible".into())
+        .await
+        .unwrap();
+    runtime
+        .fail_prepare
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let target = LocalAsrTarget::parse(LocalAsrRuntime::Foundry, "whisper-medium").unwrap();
+
+    let error = backend
+        .activate_local_asr(LocalAsrActivationRequest {
+            target,
+            provider_id: "foundry-local-whisper".into(),
+        })
+        .await
+        .expect_err("prepare failure must abort the transaction");
+
+    assert_eq!(error.code, BackendErrorCode::Platform);
+    assert_eq!(
+        backend.get_preferences().active_asr_provider,
+        "openai-compatible"
+    );
+    assert_eq!(
+        runtime.operations.lock().unwrap().as_slice(),
+        ["prepare:whisper-medium", "release-lease:whisper-medium:1"]
+    );
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
+async fn local_asr_activation_rolls_back_when_active_provider_commit_fails() {
+    let credentials = Arc::new(FailingActiveCredentialStore::default());
+    credentials
+        .inner
+        .set_active_provider(ProviderSlot::Asr, "openai-compatible".into())
+        .await
+        .unwrap();
+    let (data_dir, runtime, backend) =
+        local_asr_backend_with_credentials(credentials.clone(), Some("openai-compatible"));
+    credentials
+        .fail_set
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let target = LocalAsrTarget::parse(LocalAsrRuntime::Foundry, "whisper-medium").unwrap();
+
+    let error = backend
+        .activate_local_asr(LocalAsrActivationRequest {
+            target,
+            provider_id: "foundry-local-whisper".into(),
+        })
+        .await
+        .expect_err("credential commit failure must abort the transaction");
+
+    assert_eq!(error.code, BackendErrorCode::Platform);
+    assert_eq!(
+        backend.get_preferences().active_asr_provider,
+        "openai-compatible"
+    );
+    assert_eq!(
+        credentials
+            .active_provider(ProviderSlot::Asr)
+            .await
+            .unwrap(),
+        "openai-compatible"
+    );
+    assert_eq!(
+        runtime.operations.lock().unwrap().as_slice(),
+        [
+            "prepare:whisper-medium",
+            "preload:whisper-medium",
+            "release-lease:whisper-medium:1"
+        ]
+    );
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
+async fn local_asr_activation_releases_the_previous_runtime_lease_after_commit() {
+    let (data_dir, runtime, backend) = local_asr_backend_with_credentials(
+        Arc::new(InMemoryCredentialStore::default()),
+        Some("openai-compatible"),
+    );
+    let qwen = LocalAsrTarget::parse(LocalAsrRuntime::Generic, "qwen3-asr-0.6b").unwrap();
+    let qwen_dir = data_dir.join("models").join(qwen.model_id());
+    std::fs::create_dir_all(&qwen_dir).unwrap();
+    std::fs::write(qwen_dir.join(openless_core::MODEL_READY_SENTINEL), b"ready").unwrap();
+    let first = backend
+        .activate_local_asr(LocalAsrActivationRequest {
+            target: qwen.clone(),
+            provider_id: "local-qwen3".into(),
+        })
+        .await
+        .unwrap();
+    let foundry = LocalAsrTarget::parse(LocalAsrRuntime::Foundry, "whisper-medium").unwrap();
+
+    let second = backend
+        .activate_local_asr(LocalAsrActivationRequest {
+            target: foundry.clone(),
+            provider_id: "foundry-local-whisper".into(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!((first.generation, second.generation), (1, 2));
+    assert_eq!(second.target, foundry);
+    assert_eq!(
+        runtime.operations.lock().unwrap().as_slice(),
+        [
+            "prepare:qwen3-asr-0.6b",
+            "preload:qwen3-asr-0.6b",
+            "prepare:whisper-medium",
+            "preload:whisper-medium",
+            "release-lease:qwen3-asr-0.6b:1"
+        ]
+    );
+    assert_eq!(
+        runtime
+            .status
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .model_id
+            .as_deref(),
+        Some("whisper-medium")
+    );
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
+async fn local_asr_activation_switches_qwen_and_whisper_without_releasing_the_new_generic_lease() {
+    let (data_dir, runtime, backend) = local_asr_backend_with_credentials(
+        Arc::new(InMemoryCredentialStore::default()),
+        Some("openai-compatible"),
+    );
+    let qwen = LocalAsrTarget::parse(LocalAsrRuntime::Generic, "qwen3-asr-0.6b").unwrap();
+    let whisper = LocalAsrTarget::parse(LocalAsrRuntime::Generic, "whisper-small").unwrap();
+    let qwen_dir = data_dir.join("models").join(qwen.model_id());
+    let whisper_dir = data_dir.join("models").join(whisper.model_id());
+    std::fs::create_dir_all(&qwen_dir).unwrap();
+    std::fs::create_dir_all(&whisper_dir).unwrap();
+    std::fs::write(qwen_dir.join(openless_core::MODEL_READY_SENTINEL), b"ready").unwrap();
+    std::fs::write(
+        whisper_dir.join(openless_core::MODEL_READY_SENTINEL),
+        b"ready",
+    )
+    .unwrap();
+    std::fs::write(whisper_dir.join("ggml-small.bin"), b"model").unwrap();
+
+    let first = backend
+        .activate_local_asr(LocalAsrActivationRequest {
+            target: qwen,
+            provider_id: "local-qwen3".into(),
+        })
+        .await
+        .unwrap();
+    let second = backend
+        .activate_local_asr(LocalAsrActivationRequest {
+            target: whisper.clone(),
+            provider_id: "local-whisper".into(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!((first.generation, second.generation), (1, 2));
+    assert_eq!(
+        runtime.operations.lock().unwrap().as_slice(),
+        [
+            "prepare:qwen3-asr-0.6b",
+            "preload:qwen3-asr-0.6b",
+            "prepare:whisper-small",
+            "preload:whisper-small"
+        ]
+    );
+    assert_eq!(
+        runtime
+            .status
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .model_id
+            .as_deref(),
+        Some(whisper.model_id())
+    );
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
+async fn local_asr_activation_restores_state_when_the_previous_lease_cannot_release() {
+    let (data_dir, runtime, backend) = local_asr_backend_with_credentials(
+        Arc::new(InMemoryCredentialStore::default()),
+        Some("openai-compatible"),
+    );
+    let qwen = LocalAsrTarget::parse(LocalAsrRuntime::Generic, "qwen3-asr-0.6b").unwrap();
+    let qwen_dir = data_dir.join("models").join(qwen.model_id());
+    std::fs::create_dir_all(&qwen_dir).unwrap();
+    std::fs::write(qwen_dir.join(openless_core::MODEL_READY_SENTINEL), b"ready").unwrap();
+    backend
+        .activate_local_asr(LocalAsrActivationRequest {
+            target: qwen.clone(),
+            provider_id: "local-qwen3".into(),
+        })
+        .await
+        .unwrap();
+    runtime
+        .fail_release
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let foundry = LocalAsrTarget::parse(LocalAsrRuntime::Foundry, "whisper-medium").unwrap();
+
+    let error = backend
+        .activate_local_asr(LocalAsrActivationRequest {
+            target: foundry,
+            provider_id: "foundry-local-whisper".into(),
+        })
+        .await
+        .expect_err("old runtime release must be part of the transaction");
+
+    assert_eq!(error.code, BackendErrorCode::Platform);
+    assert_eq!(backend.get_preferences().active_asr_provider, "local-qwen3");
+    assert_eq!(
+        backend.active_provider(ProviderSlot::Asr).await.unwrap(),
+        "local-qwen3"
+    );
+    assert_eq!(
+        runtime
+            .status
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .model_id
+            .as_deref(),
+        Some(qwen.model_id())
+    );
+    assert_eq!(
+        runtime.operations.lock().unwrap().as_slice(),
+        [
+            "prepare:qwen3-asr-0.6b",
+            "preload:qwen3-asr-0.6b",
+            "prepare:whisper-medium",
+            "preload:whisper-medium",
+            "release-lease:qwen3-asr-0.6b:1",
+            "release-lease:whisper-medium:2",
+            "prepare:qwen3-asr-0.6b",
+            "preload:qwen3-asr-0.6b"
+        ]
+    );
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[test]
+fn backend_startup_migrates_default_and_current_model_roots() {
+    let data_dir = std::env::temp_dir().join(format!(
+        "openless-core-local-asr-two-roots-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let default_root = data_dir.join("models");
+    let custom_base = data_dir.join("custom-volume");
+    let current_root = custom_base.join("OpenLess").join("models");
+    let default_legacy = default_root.join("qwen3-asr/qwen3-asr-0.6b");
+    let current_legacy = current_root.join("qwen3-asr/qwen3-asr-1.7b");
+    for legacy in [&default_legacy, &current_legacy] {
+        std::fs::create_dir_all(legacy).unwrap();
+        std::fs::write(legacy.join("config.json"), b"{}").unwrap();
+        std::fs::write(legacy.join(".ready"), b"ready").unwrap();
+    }
+    let preferences = PreferencesStore::open(data_dir.join("preferences.json")).unwrap();
+    let mut value = preferences.get();
+    value.local_asr_models_base_dir = custom_base.to_string_lossy().into_owned();
+    preferences.set(value).unwrap();
+
+    let model_store =
+        Arc::new(ModelStore::new(ModelStoreConfig::new(current_root.clone()).unwrap()).unwrap());
+    let runtime = Arc::new(RecordingLocalAsrRuntime::default());
+    let mut dependencies = BackendDependencies::unsupported();
+    dependencies.local_asr_runtime = Some(runtime);
+    dependencies
+        .services
+        .configure_model_store(Arc::clone(&model_store));
+
+    let backend = OpenLessBackend::new(
+        BackendConfig {
+            data_dir: data_dir.clone(),
+            ..BackendConfig::default()
+        },
+        dependencies,
+    )
+    .unwrap();
+
+    assert!(current_root.join("qwen3-asr-0.6b/config.json").is_file());
+    assert!(current_root.join("qwen3-asr-1.7b/config.json").is_file());
+    assert!(!default_legacy.exists());
+    assert!(!current_legacy.exists());
+    drop(backend);
+
+    let mut dependencies = BackendDependencies::unsupported();
+    dependencies.local_asr_runtime = Some(Arc::new(RecordingLocalAsrRuntime::default()));
+    dependencies.services.configure_model_store(Arc::new(
+        ModelStore::new(ModelStoreConfig::new(current_root.clone()).unwrap()).unwrap(),
+    ));
+    let _restarted = OpenLessBackend::new(
+        BackendConfig {
+            data_dir: data_dir.clone(),
+            ..BackendConfig::default()
+        },
+        dependencies,
+    )
+    .unwrap();
+    assert!(current_root.join("qwen3-asr-0.6b/config.json").is_file());
+    assert!(current_root.join("qwen3-asr-1.7b/config.json").is_file());
+    let _ = std::fs::remove_dir_all(data_dir);
 }
 
 #[tokio::test]

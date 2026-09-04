@@ -41,6 +41,32 @@ export interface LocalAsrModelStatus {
     isDownloaded: boolean
 }
 
+export type LocalAsrRuntime = "generic" | "foundry" | "sherpa_onnx"
+
+export interface LocalAsrActivationResult {
+    target: { runtime: LocalAsrRuntime; modelId: string }
+    providerId: string
+    generation: number
+    preparedModel: string
+}
+
+export function activateLocalAsr(
+    runtime: LocalAsrRuntime,
+    modelId: string,
+    providerId: string,
+): Promise<LocalAsrActivationResult> {
+    return invokeOrMock(
+        "local_asr_activate",
+        { request: { target: { runtime, modelId }, providerId } },
+        () => ({
+            target: { runtime, modelId },
+            providerId,
+            generation: 1,
+            preparedModel: modelId,
+        }),
+    )
+}
+
 export interface LocalAsrRemoteFile {
     path: string
     size: number

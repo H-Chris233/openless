@@ -117,6 +117,7 @@ pub struct PolishHistoryTurn {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DictationInsertionContext {
     pub enabled: bool,
+    pub observe_edits: bool,
     pub streaming: bool,
     pub save_streamed_text_to_clipboard: bool,
     pub restore_clipboard_after_paste: bool,
@@ -129,11 +130,21 @@ pub struct DictationInsertionContext {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordingPlan {
+    pub microphone_device_name: Option<String>,
+    pub mute_during_recording: bool,
+    pub archive_successful_recording: bool,
+    pub retention_days: u32,
+    pub max_entries: Option<u32>,
+    pub silence_after_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DictationContext {
     pub audio_source: DictationAudioSource,
-    pub microphone_device_name: Option<String>,
-    pub record_audio_for_debug: bool,
+    pub recording: RecordingPlan,
     pub pipeline_mode: PipelineMode,
+    pub correction_rules: Vec<crate::types::CorrectionRule>,
     pub asr: ProviderInvocation,
     pub llm: ProviderInvocation,
     pub omni: ProviderInvocation,
@@ -225,9 +236,21 @@ impl DictationContext {
             eligible_polish_context_turns(recent_history, &style_pack.id, translation_active);
         Self {
             audio_source: options.audio_source,
-            microphone_device_name: non_blank(&preferences.microphone_device_name),
-            record_audio_for_debug: preferences.record_audio_for_debug,
-            pipeline_mode: preferences.pipeline_mode,
+            recording: RecordingPlan {
+                microphone_device_name: non_blank(&preferences.microphone_device_name),
+                mute_during_recording: preferences.mute_during_recording,
+                archive_successful_recording: preferences.record_audio_for_debug,
+                retention_days: preferences.history_retention_days,
+                max_entries: preferences.history_max_entries,
+                silence_after_ms: (preferences.silence_auto_stop_enabled
+                    && preferences.hotkey.mode == crate::shared_types::HotkeyMode::Toggle)
+                    .then(|| (preferences.silence_auto_stop_seconds * 1_000.0).round() as u64),
+            },
+            pipeline_mode: crate::shared_types::effective_pipeline_mode(
+                preferences.multimodal_pipeline_enabled,
+                preferences.pipeline_mode,
+            ),
+            correction_rules: Vec::new(),
             asr,
             llm,
             omni,
@@ -249,13 +272,17 @@ impl DictationContext {
             },
             insertion: DictationInsertionContext {
                 enabled: options.insert_text,
+                observe_edits: preferences.cursor_context_enabled,
                 streaming: preferences.streaming_insert,
                 save_streamed_text_to_clipboard: preferences.streaming_insert_save_clipboard,
                 restore_clipboard_after_paste: preferences.restore_clipboard_after_paste,
                 paste_shortcut: preferences.paste_shortcut,
                 windows_insertion_mode: preferences.windows_insertion_mode,
                 windows_sendinput_newline_mode: preferences.windows_sendinput_newline_mode,
-                macos_newline_mode: preferences.macos_newline_mode,
+                macos_newline_mode: crate::streaming_insert::resolve_macos_newline_mode(
+                    preferences.macos_newline_mode,
+                    options.front_app.as_deref(),
+                ),
                 allow_non_tsf_fallback: preferences.allow_non_tsf_insertion_fallback,
                 android_insert_strategy: preferences.android_insert_strategy,
             },
@@ -463,7 +490,7 @@ mod tests {
         preferences.microphone_device_name = "changed".to_string();
         preferences.active_asr_provider = "changed".to_string();
         assert_eq!(
-            context.microphone_device_name.as_deref(),
+            context.recording.microphone_device_name.as_deref(),
             Some("USB microphone")
         );
         assert_eq!(context.asr.provider_id, "local-qwen3");

@@ -3,18 +3,14 @@
 > 本文是 Linux egui 组与共享 Rust 后端之间的交付契约。egui 组负责
 > `eframe::App`、布局、控件、绘制和 UI 测试；本文不规定视觉实现。
 >
-> 当前状态：facade、共享 repository、听写 Pipeline、云/实时 ASR、OpenAI-compatible/Gemini/Codex
-> LLM、Omni、完整 prompt compose、每会话配置快照、会话固定的 provider router 和全部业务领域
-> Interface 已建立；Tauri 与 Linux 共用 Core 的云 ASR/LLM/Omni/Auxiliary Implementation，Tauri
-> 另行注入 native/local ASR 和平台 Adapter，
-> Selection、QA、Remote Input、Marketplace、Coding Agent、Local ASR、Auxiliary 与设置事务已有共享 Core + 宿主 Adapter；
-> QA 生产构造已使用 `QaService + TauriQaRuntimeAdapter`；Remote WebSocket lifecycle、Less Computer
-> replay/resync 和完整 frontend/Tauri 本地门禁已覆盖，其余协议迁移、旧 Coordinator 宿主耦合与
-> Linux 原生证明仍按 [`linux-egui-shared-backend-plan.md`](./linux-egui-shared-backend-plan.md) 的 M4–M8 收口；
-> 2.0.0 Interface 已完成移交，Selection/Selection Voice 的完整 headless 场景、Linux
-> preview/revert `Unsupported`、Marketplace production factory/filesystem sink 与当前公共面门禁均已覆盖。
-> Provider 的运行时请求以及验证连通性/模型列表管理面均由 Core `ProviderService` 提供；Tauri
-> 与 Linux factory 注入同一实现。未注入的其他领域仍稳定返回 `Unsupported`，UI 不得据此显示为可用。
+> 2026-09-04 当前状态：2.0.0 facade、repository、Provider/Credential、听写 Pipeline、Local ASR
+> 原子激活、主热键仲裁、录音生命周期、上下文/手改观察、静默重试、插入 reconciliation、
+> Transcript reducer、Less Computer/Coding Agent 以及全部领域 Interface 均由 Core 持有。
+> Tauri 与 Linux 共用云 ASR/LLM/Omni/Auxiliary Implementation；平台 Host 只注入原生录音、
+> 凭据、窗口、进程、焦点和插入 Adapter。Linux production factory 已注入真实 QA、Remote Input、
+> Selection preview/revert 与打包的 Qwen runtime；AppImage 会在 listener 前安装 fcitx5 插件。
+> 自动 contract 不替代真实平台证据：Ubuntu/Windows/macOS/Android 的设备、安装、升级和签名
+> 结果仍须按 [`linux-egui-shared-backend-plan.md`](./linux-egui-shared-backend-plan.md) 单独记录。
 
 ## 1. 依赖与职责
 
@@ -520,18 +516,19 @@ outcome-unknown，返回明确的 `BackendError` 且不得再次插入。Core �
 - `AudioRecorder` / `ActiveRecording`：宿主采集设备音频并输出规范化的
   16 kHz / mono / signed Int16 little-endian PCM；`ActiveRecording::stop(self)` 消费句柄，
   保证 finish/cancel 竞争时最多释放一次。可恢复录音通过 `RecordingArchive` 精确表示，
-  `is_available()` 报告真实状态，`discard()` 删除该会话的实际归档；不得仅按 preferences
-  猜测 `hasAudioRecording`。
+  `is_available()` 报告真实状态，`read_pcm()` 支持冻结 provider 的 silent retry，`discard()`
+  删除实际归档；`RecordingEvent::Fatal` 实时进入 Core controller，不得仅按 preferences 猜测
+  `hasAudioRecording` 或等到 stop 才报错。
 - `TranscriptionEngine` / `TranscriptionSession`：在录音前建立 ASR session，持续消费 PCM，
   `finish()` 返回最终原文，`cancel()` 终止 provider 请求。
 - `TextPolisher`：接收最终原文并产生润色结果/可选增量；失败是否回退原文由
   `PolishFailurePolicy` 统一决定，宿主不得另写一套 fallback 判断。
 - `TextInserter`：fcitx5、AX、TSF 或 clipboard fallback 的统一会话接口：
-  `prepare(session, context)` 在录音/ASR 启动前准备平台输入状态，
-  `insert(session, context, text)` 消费同一会话的准备状态，
-  `cancel(session)` 在启动失败、ASR/润色失败、用户取消或 shutdown 时恢复平台状态。
-  `prepare`/`cancel` 默认幂等；实现会话准备的 Adapter 必须让重复取消和 prepare/cancel 竞态
-  都不会遗留输入法、剪贴板或焦点状态。
+  `begin(session, context)` 在录音/ASR 启动前捕获 opaque target 并返回
+  `TextInsertionSession::{write,copy,finish,cancel}`。Core `ActiveTextInsertion` 独占 streamed prefix、
+  Unicode tail、final divergence 与 clipboard fallback reconciliation；Host 只报告已确认写入字符数。
+  target 无法恢复时必须返回明确 copied/error，不能向当前焦点盲写；所有终态都要恢复输入法、
+  剪贴板和平台资源。
 - `HostActions`：`ShowDictationFeedback`、`HideDictationFeedback`、打开系统设置、
   外部 URL 和通知等语义动作；不传窗口 label。
 
@@ -543,8 +540,8 @@ outcome-unknown，返回明确的 `BackendError` 且不得再次插入。Core �
 - `BackendServices`：复杂领域 Adapter 集合，缺失时使用稳定的 unsupported 实现。
 - `QaRuntimeAdapter`：捕获 selection host context、持有 recorder/ASR/LLM/Coding Agent 资源并执行
   `prepare_text/start_recording/finish_recording/answer/cancel`；Core 拥有 session、phase、messages
-  和迟到结果 guard，Adapter 不得复制这些状态。Tauri 生产已通过 `TauriQaRuntimeAdapter` 接线；
-  Linux 未提供等价 runtime 时仍返回稳定 `Unsupported`。
+  和迟到结果 guard，Adapter 不得复制这些状态。Tauri 与 Linux production factory 均注入真实
+  runtime；编辑/回答路由继续由 `QaService` 决定，Adapter 只执行上下文、录音和 provider effect。
 - `RemoteInputRuntimeAdapter`：PIN secret persistence、TLS/socket/WSS/H5、local IP 与共享听写桥接；
   Core 拥有配置、连接/session 关联、PCM 校验和 transport 生命周期规则。
 - `TranscriptionRouter` / `TextPolisherRouter` / `DictationEngineRouter`：分别按会话快照中的
@@ -567,18 +564,20 @@ outcome-unknown，返回明确的 `BackendError` 且不得再次插入。Core �
 发布最终润色 delta → 返回结果。ASR 失败和空转写保留可恢复录音；非空 ASR 成功且
 `recordAudioForDebug == false` 时请求 Adapter 删除归档；删除失败时继续报告真实的
 `hasAudioRecording == true`，不能产生“历史显示无录音但文件仍在”的假状态。
-Facade 在 engine 返回非空结果后、文本插入前加载启用的 correction rules，并把纠正后的最终
-文本统一用于插入、`DictationResult.polishedText`、history、activity 计数和 fallback；禁用或
-格式无效的规则不生效，规则存储读取失败时记录非敏感 warning 并保持未纠正结果，不让一次
-辅助规则故障丢失整段听写。
+Facade 在 session capture 时冻结启用的 correction rules；Pipeline 在 ASR 成功后、任何
+Less Computer/polisher 调用前先应用，并只在实际变化时把规则前文本写入 `asrTranscript`。
+非流式最终文本在插入前按同一规则收口；已流式落字的路径不得事后改写 history 制造屏幕/记录
+不一致。禁用或格式无效的规则不生效，读取失败只记录非敏感 warning，不丢整段听写。
 
 History 的 provider 归因也由 facade 统一完成：traditional 流程从冻结 context 记录 ASR
 channel/model，并仅在实际使用 LLM 时记录 LLM channel/model；multimodal 流程的 ASR 字段和
 `asrMs` 为 `None`，LLM 字段记录冻结的 Omni channel/model，`polishMs` 保留 Omni 调用耗时。
 成功和失败记录遵循同一规则，宿主不得自行重写归因。
 这些细分 ports 只用于宿主组装和测试注入，不是 UI use-case；egui view model 只调用 facade。
-热键状态通过 `PlatformApi` 查询，物理 press/release/combined 边沿由 facade 统一解释
-Toggle/Hold/Auto/DoubleClick。只有存在真实实现差异或测试替身时才新增 seam。
+热键状态通过 `PlatformApi` 查询；Host 只发送携带同一 `press_id` 和单调时间的
+pressed/released/combined 边沿。Core `HotkeyInterpreter` 统一解释 Toggle/Hold/Auto、modifier
+grace、250ms debounce 和 450ms terminal cooldown；组合键在 start await 前后均能取消同一代次。
+Host 不得再保存 cooldown、began-session 或重复的 mode policy。
 
 ## 8. Linux 非 UI Adapter 契约
 
@@ -601,8 +600,8 @@ Toggle/Hold/Auto/DoubleClick。只有存在真实实现差异或测试替身时�
   dictation/QA/Selection Polish/translation，并通过 Linux credential metadata 同步 active ASR
   provider；不支持能力返回稳定 `Unsupported`，失败按 receipt 逆序恢复；
 - `LinuxCpalRecorder`：选择偏好设备或默认输入设备，在专用线程持有 cpal stream，把常见
-  sample format 下混、重采样和量化为 core PCM 契约，并报告 `0..=1` level；runtime 错误在
-  stop 时返回。
+  sample format 下混、重采样和量化为 core PCM 契约，并报告 `0..=1` level；runtime fault
+  实时进入 Core recording controller，不等待用户 stop。
 - `Fcitx5HotkeyListener`：监听 dictation press/release/combined、QA、selection polish 和
   translation signals，提供非阻塞 `drain()`、`take_error()` 和可停止/join 生命周期；
   selection 信号调用共享 `SelectionApi`，空闲态先到达的 translation 信号会固定到下一次
@@ -610,8 +609,9 @@ Toggle/Hold/Auto/DoubleClick。只有存在真实实现差异或测试替身时�
 - `SingleInstanceBroker`：私有 Unix socket + process lock；第二实例把 typed launch intent 转发
   给 primary 并等待 acknowledgement，primary 非阻塞 drain 后通过 `LinuxHost` 调用 core。
 - `LinuxBackendBuilder::from_shared_providers(config)`：唯一生产 factory，组装 Core 共享云
-  ASR/LLM/Omni/Auxiliary router、Marketplace、传统 `PipelineDictationEngine`、recorder、inserter、credentials、
-  platform services、host actions 与 settings runtime，返回不包含 egui 类型的
+  ASR/LLM/Omni/Auxiliary router、Marketplace、QA、Remote Input、Selection、打包 Qwen runtime、
+  传统 `PipelineDictationEngine`、recorder、inserter、credentials、platform services、host actions
+  与 settings runtime，返回不包含 egui 类型的
   `LinuxBackendRuntime`；`new(...)` 只用于测试/特殊宿主。
 - `LinuxHost::download_marketplace_archive`：保存 Core 已校验归档；只接受绝对 filesystem path，
   不创建缺失父目录、不覆盖已有文件，失败时不遗留部分文件。
@@ -629,8 +629,8 @@ hotkey 与 Single Instance Adapter；UI 不读取 Core 私有模块，也不复�
 - `FixtureDictationEngine::successful/failing`：在不测试细分 Pipeline 时提供固定结果；
 - `FixtureTextInserter::with_outcome/failing`：覆盖 inserted、fallback、unknown 和失败，并通过
   `actions()` 暴露 prepare/insert/cancel 的 session-scoped 调用顺序。
-- `FixtureSelectionRuntime::successful/linux_preview_unsupported`：记录 capture、preview、apply、
-  revert、cancel，并确定性表达 Linux retained preview/revert `Unsupported`。
+- `FixtureSelectionRuntime`：记录 capture、preview、apply、revert、cancel；Linux production
+  Adapter 以 fcitx5 ticket 实现可见 preview、confirm/cancel/revert 与 stale guard。
 - `RecordingRemoteInputRuntime`：不绑定 socket 的内存 transport，记录 server/audio
   start/stop/cancel 次数和 PCM frame，用于验证单 connection 单 stream、restart 取消、stale
   lease 与 secret-surface 契约；它不代表生产宿主具备 WSS 能力。
@@ -730,31 +730,32 @@ egui 组发现缺少能力时，应提交一个只依赖 facade/DTO/event 的可
 | --- | --- |
 | `openless-core` package 和无 Tauri 依赖门禁 | 已建立 |
 | facade 生命周期、听写状态机、事件 sequence | 已建立 |
-| headless Linux host 示例 | 已完成，位于 `linux-egui/examples/headless_host.rs`；实际执行覆盖生命周期、数据领域、unsupported 能力、Less Computer capture lease/cancel/abort、听写、Selection direct apply、Linux preview/revert `Unsupported`、Selection Voice preview/confirm/cancel/stale/copied-fallback |
-| fake host/recorder/transcription/polisher/engine/inserter/selection/remote transport | 已建立；Selection fixture 表达完整宿主动作与 Linux 降级，Remote fixture 记录 lifecycle/PCM 但不绑定 socket |
-| preferences/history/activity/vocabulary/correction/style-pack/credentials 共享实现 | 已建立，并由 Tauri compatibility commands 逐步复用 |
+| headless Linux host 示例 | 已完成，位于 `linux-egui/examples/headless_host.rs`；覆盖生命周期、数据领域、Less Computer、听写、Selection/Selection Voice、QA 与 Remote Input contract；真实 socket/窗口/设备证据另记 |
+| fake host/recorder/transcription/polisher/engine/inserter/selection/remote transport | 已建立；fixture 固定完整业务状态，Linux production Adapter 另实现真实 TLS/WS、fcitx5 preview/revert 与 cpal effect |
+| preferences/history/activity/vocabulary/correction/style-pack/credentials 共享实现 | 已建立；Tauri/Linux persistence Adapter 使用同一 Core mutation 与 active policy |
 | Linux validated settings Interface | 已建立；`save_settings`/`update_settings_strict` 强制携带 snapshot revision，Core 统一校验、协调、持久化、事件和补偿，Linux Adapter 只消费显式 target |
 | 全部复杂领域 DTO/Interface 与 unsupported 语义 | 已建立，位于 `domains.rs` / `BackendServices` |
 | 2.0 公共 re-export 边界 | 已冻结；`openless-core`/`openless-linux-egui` 只公开 facade/DTO/event/host Interface/fixture，repository 与内部状态机不属于 UI 契约；`check-linux-public-surface.ps1` 防止边界回退 |
 | Tauri command/event 完整迁移 | Core 业务路径已收口；React/CLI/Android JNI/Remote Input/桌面听写使用 2.0 contract，Tauri 仅保留 command/event wire 与平台 Adapter |
-| 复杂领域真实共享 Adapter | Core `ModelStore`、`CodingAgentRunner`、Voice session、Provider policy、Remote Input 与 Style Pack 已接入；Foundry/Sherpa 原生 runtime、真实设备和发布物仍需平台证据 |
+| 复杂领域真实共享 Adapter | Core `ModelStore`、`CodingAgentRunner`、Voice session、Provider policy、Remote Input 与 Style Pack 已接入；Linux Qwen runtime 已进入打包链，Foundry/Sherpa 与真实设备/发布物仍需平台证据 |
 | 会话级 provider router | 已建立；ID/type/model 在 session 开始时固定，Core 持有云 ASR/LLM/Omni 协议 Implementation；Tauri 与 Linux 注册同一共享实现，Tauri 另行追加 native/local ASR |
 | provider 验证/模型列表管理面 | 已建立；Core `ProviderService` 统一 channel-scoped credential、静态/远端模型列表、验证探活和错误脱敏；Tauri command 只做 wire 转换，Linux shared factory 注入同一 service；真实网络/keyring 和平台 runner 仍按主计划 M9/M10 留证 |
 | Linux credentials/resources/fcitx5/capabilities/host-actions | 已建立非 UI Adapter 和 contract tests；WSL Ubuntu 已显式通过真实 Secret Service set/read/remove、fcitx5 plugin/method/listener/signal contract；无焦点输入时 plugin 不抛异常导致 fcitx5 崩溃 |
 | Linux cpal 录音、共享 Pipeline builder、热键 listener、第二实例 intent 转发 | 已建立；selection/translation 已路由到共享 Interface；WSL 当前无 ALSA 设备时 cpal contract 已证明稳定分类错误，真实设备和桌面 runtime 生命周期仍见计划 M8/M9 |
 | Linux 打包 workflow/manifest 契约 | 已建立但正式发布仍需真实 Ubuntu 安装、运行、升级和回滚证明 |
-| egui UI | 已使用真实 `eframe::run_native`，覆盖 startup/error、听写、Less Computer/approval、模型、Provider 状态、history 与 settings；视觉深化不属于 2.0 Core 收口 |
+| egui UI | 已使用真实 `eframe::run_native`，覆盖 startup/error、听写、QA、Remote Input、Selection preview/revert、Less Computer/approval、Provider/Credential、模型、history 与 settings；视觉深化不属于 2.0 Core 收口 |
 
 完整验收以主计划第 12 节为准；本契约证明 Linux UI 可以在不依赖 Tauri 的前提下使用冻结的
 2.0.0 Interface。真实 Ubuntu 原生能力、发行包与安装升级回滚仍由 Linux runner 门禁证明。
 
 ## Less Computer 语音接口（2.0）
 
-`OpenLessBackend::start_less_computer_voice(session_id)` 返回 Core-owned
+`OpenLessBackend::start_less_computer_voice(session_id, recording_control)` 返回 Core-owned
 `LessComputerVoiceSession`。Host 必须只发送 16 kHz、mono、signed 16-bit little-endian
 PCM；空帧、奇数长度和累计超过 provider 上限会返回 `InvalidArgument`。`finish` 只允许调用
 一次，ASR 失败或空 transcript 不会启动 Agent，并释放 capture lease；`cancel` 同时取消
-ASR/Agent 并释放尚未提升的 lease。
+ASR/Agent 并释放尚未提升的 lease。`recording_control` 是窄平台 effect：Core 的共享
+`SilenceAutoStop`/fault controller 决定 stop 或 cancel，Host 只关闭自己持有的 capture handle。
 
 实时 provider 的 interim 文本通过既有 `BackendEventKind::TranscriptDelta` 发布，使用同一
 `session_id` 且 `offset` 单调递增；批式 provider 只发布一次 `is_final=true`。Agent 阶段继续

@@ -33,6 +33,25 @@ impl LinuxNativeRuntime {
     ) -> Result<Self, BackendError> {
         let startup = backend.backend.start().await?;
         openless_core::require_backend_contract_version(&startup.contract_version)?;
+        let preferences = backend.backend.get_preferences();
+        backend
+            .backend
+            .services()
+            .remote_input
+            .set_locale(
+                crate::remote_input::remote_input_locale(&backend.backend.config().locale)
+                    .to_string(),
+            )
+            .await?;
+        backend
+            .backend
+            .services()
+            .remote_input
+            .configure(openless_core::RemoteInputConfig {
+                enabled: preferences.remote_input_enabled,
+                port: preferences.remote_input_port,
+            })
+            .await?;
         Ok(Self {
             host: std::sync::Arc::new(LinuxHost::with_settings_runtime(
                 backend.backend,
@@ -127,10 +146,11 @@ mod tests {
 
     use openless_core::testing::{
         FixtureDictationEngine, FixtureTextInserter, RecordingHostActions,
+        RecordingRemoteInputRuntime,
     };
     use openless_core::{
-        BackendConfig, BackendDependencies, InMemoryCredentialStore, InsertOutcome,
-        OpenLessBackend, TokioTaskSpawner,
+        BackendConfig, BackendDependencies, BackendServices, InMemoryCredentialStore,
+        InsertOutcome, OpenLessBackend, RemoteInputService, TokioTaskSpawner,
     };
 
     use super::*;
@@ -143,6 +163,15 @@ mod tests {
             uuid::Uuid::new_v4().simple()
         ));
         let host_actions = Arc::new(LinuxHostActions::default());
+        // LinuxNativeRuntime is a production shell: even when Remote Input is
+        // disabled it synchronizes locale/config through the real Core service.
+        // Supplying that boundary here keeps the test honest and prevents an
+        // Unsupported fallback from silently returning to production startup.
+        let mut services = BackendServices::unsupported();
+        services.remote_input = Arc::new(
+            RemoteInputService::new(Arc::new(RecordingRemoteInputRuntime::default()), 8443, "en")
+                .unwrap(),
+        );
         let backend = Arc::new(
             OpenLessBackend::new(
                 BackendConfig {
@@ -159,7 +188,7 @@ mod tests {
                     )),
                     task_spawner: Arc::new(TokioTaskSpawner),
                     credential_store: Arc::new(InMemoryCredentialStore::default()),
-                    services: openless_core::BackendServices::unsupported(),
+                    services,
                     local_asr_runtime: None,
                     marketplace_config: None,
                     selection_runtime: None,

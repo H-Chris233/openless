@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use crate::credentials::{
-    ChannelKind, CredentialKey, CredentialNamespace, CredentialStore, ProviderSlot,
+    ChannelKind, CredentialKey, CredentialNamespace, CredentialStore, ProviderChannelId,
+    ProviderSlot, ProviderType,
 };
 use crate::dictation_context::ProviderInvocation;
 use crate::errors::{BackendError, BackendErrorCode};
@@ -45,15 +46,17 @@ pub(crate) async fn resolve_session_provider(
     } else {
         provider_id.clone()
     };
+    let provider_id = ProviderChannelId::new(provider_id)?;
+    let provider_type = ProviderType::new(provider_type)?;
     let (namespace, channel_id, account) = match slot {
         ProviderSlot::Asr => (
             CredentialNamespace::Asr,
-            Some(provider_id.clone()),
+            Some(provider_id.as_str().to_string()),
             "asr.model",
         ),
         ProviderSlot::Llm => (
             CredentialNamespace::Llm,
-            Some(provider_id.clone()),
+            Some(provider_id.as_str().to_string()),
             "ark.model_id",
         ),
         ProviderSlot::Omni => (CredentialNamespace::Omni, None, "omni.model"),
@@ -67,8 +70,8 @@ pub(crate) async fn resolve_session_provider(
         Err(error) => return Err(error),
     };
     Ok(ProviderInvocation {
-        provider_id,
-        provider_type,
+        provider_id: provider_id.into_inner(),
+        provider_type: provider_type.into_inner(),
         model,
         language: None,
         prompt: None,

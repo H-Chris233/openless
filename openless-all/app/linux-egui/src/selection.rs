@@ -7,26 +7,60 @@ use openless_core::{
 };
 
 trait LinuxSelectionBridge: Send + Sync + 'static {
-    fn selection_text(&self) -> Result<String, BackendError>;
-    fn commit_text(&self, text: &str) -> Result<(), BackendError>;
+    fn capture_target(&self, session_id: SessionId) -> Result<String, BackendError>;
+    fn apply_target(
+        &self,
+        session_id: SessionId,
+        source: &str,
+        replacement: &str,
+    ) -> Result<(), BackendError>;
+    fn revert_target(&self, session_id: SessionId) -> Result<(), BackendError>;
+    fn cancel_target(&self, session_id: SessionId) -> Result<(), BackendError>;
 }
 
 struct Fcitx5SelectionBridge;
 
 impl LinuxSelectionBridge for Fcitx5SelectionBridge {
-    fn selection_text(&self) -> Result<String, BackendError> {
-        crate::fcitx5::selection_text()
+    fn capture_target(&self, session_id: SessionId) -> Result<String, BackendError> {
+        crate::fcitx5::capture_selection_target(&session_id.to_string())
     }
 
-    fn commit_text(&self, text: &str) -> Result<(), BackendError> {
-        crate::fcitx5::commit_text(text)
+    fn apply_target(
+        &self,
+        session_id: SessionId,
+        source: &str,
+        replacement: &str,
+    ) -> Result<(), BackendError> {
+        crate::fcitx5::apply_selection_target(&session_id.to_string(), source, replacement)
     }
+
+    fn revert_target(&self, session_id: SessionId) -> Result<(), BackendError> {
+        crate::fcitx5::revert_selection_target(&session_id.to_string())
+    }
+
+    fn cancel_target(&self, session_id: SessionId) -> Result<(), BackendError> {
+        crate::fcitx5::cancel_selection_target(&session_id.to_string())
+    }
+}
+
+#[derive(Clone)]
+struct LinuxSelectionTarget {
+    // The UUID is the Core session/ticket generation. Every Host effect checks
+    // it before touching the retained native input context in the plugin.
+    session_id: SessionId,
+    source_text: String,
+    // Retained only after an acknowledged apply, so revert cannot delete text
+    // for a preview that was never committed.
+    replacement_text: Option<String>,
 }
 
 #[derive(Clone)]
 pub struct LinuxSelectionRuntime {
     bridge: Arc<dyn LinuxSelectionBridge>,
-    target: Arc<Mutex<Option<(SessionId, String)>>>,
+    // Core owns Capturing/Preview/Applying/Completed. This mutex serializes the
+    // single opaque fcitx5 target and prevents stale async calls from replacing
+    // the ticket installed by a newer session.
+    target: Arc<Mutex<Option<LinuxSelectionTarget>>>,
 }
 
 impl Default for LinuxSelectionRuntime {
@@ -64,18 +98,25 @@ impl SelectionRuntimeAdapter for LinuxSelectionRuntime {
                 ));
             }
             tokio::task::spawn_blocking(move || {
-                let text = bridge.selection_text()?;
                 let mut target = target.lock().expect("Linux selection target lock poisoned");
                 if target
                     .as_ref()
-                    .is_some_and(|(active_session, _)| *active_session == session_id)
+                    .is_some_and(|active| active.session_id == session_id)
                 {
                     return Err(BackendError::new(
                         BackendErrorCode::Busy,
                         "the Linux selection session is already captured",
                     ));
                 }
-                *target = Some((session_id, text.clone()));
+                if let Some(previous) = target.take() {
+                    let _ = bridge.cancel_target(previous.session_id);
+                }
+                let text = bridge.capture_target(session_id)?;
+                *target = Some(LinuxSelectionTarget {
+                    session_id,
+                    source_text: text.clone(),
+                    replacement_text: None,
+                });
                 Ok(SelectionCapture {
                     text,
                     source_app: None,
@@ -101,25 +142,21 @@ impl SelectionRuntimeAdapter for LinuxSelectionRuntime {
         let target = Arc::clone(&self.target);
         Box::pin(async move {
             tokio::task::spawn_blocking(move || {
-                let selected_text = bridge.selection_text()?;
                 let mut target = target.lock().expect("Linux selection target lock poisoned");
-                let Some((active_session, captured_text)) = target.as_ref() else {
+                let Some(active) = target.as_mut() else {
                     return Err(BackendError::new(
                         BackendErrorCode::Cancelled,
                         "the Linux selection target is no longer active",
                     ));
                 };
-                if *active_session != session_id
-                    || captured_text != &source_text
-                    || selected_text != source_text
-                {
+                if active.session_id != session_id || active.source_text != source_text {
                     return Err(BackendError::new(
                         BackendErrorCode::Cancelled,
                         "the Linux selection changed before replacement",
                     ));
                 }
-                bridge.commit_text(&replacement_text)?;
-                *target = None;
+                bridge.apply_target(session_id, &source_text, &replacement_text)?;
+                active.replacement_text = Some(replacement_text);
                 Ok(InsertOutcome::Inserted)
             })
             .await
@@ -134,39 +171,88 @@ impl SelectionRuntimeAdapter for LinuxSelectionRuntime {
 
     fn prepare_preview(
         &self,
-        _session_id: SessionId,
+        session_id: SessionId,
     ) -> BoxFuture<'static, Result<(), BackendError>> {
-        Box::pin(async {
-            Err(BackendError::new(
-                BackendErrorCode::Unsupported,
-                "Linux selection preview cannot safely retain an fcitx5 target",
-            ))
+        let target = Arc::clone(&self.target);
+        Box::pin(async move {
+            let target = target.lock().expect("Linux selection target lock poisoned");
+            if target
+                .as_ref()
+                .is_some_and(|active| active.session_id == session_id)
+            {
+                Ok(())
+            } else {
+                Err(BackendError::new(
+                    BackendErrorCode::Cancelled,
+                    "the Linux selection preview target is stale",
+                ))
+            }
         })
     }
 
     fn revert(
         &self,
-        _session_id: SessionId,
+        session_id: SessionId,
     ) -> BoxFuture<'static, Result<InsertOutcome, BackendError>> {
-        Box::pin(async {
-            Err(BackendError::new(
-                BackendErrorCode::Unsupported,
-                "Linux selection replacement cannot be safely reverted",
-            ))
+        let bridge = Arc::clone(&self.bridge);
+        let target = Arc::clone(&self.target);
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                let mut target = target.lock().expect("Linux selection target lock poisoned");
+                let active = target.as_ref().ok_or_else(|| {
+                    BackendError::new(
+                        BackendErrorCode::Cancelled,
+                        "the Linux selection target is no longer active",
+                    )
+                })?;
+                if active.session_id != session_id {
+                    return Err(BackendError::new(
+                        BackendErrorCode::Cancelled,
+                        "the Linux selection revert ticket is stale",
+                    ));
+                }
+                active.replacement_text.as_deref().ok_or_else(|| {
+                    BackendError::new(
+                        BackendErrorCode::InvalidState,
+                        "the Linux selection has not been applied",
+                    )
+                })?;
+                bridge.revert_target(session_id)?;
+                *target = None;
+                Ok(InsertOutcome::Inserted)
+            })
+            .await
+            .map_err(|error| {
+                BackendError::new(
+                    BackendErrorCode::Platform,
+                    format!("Linux selection revert task failed: {error}"),
+                )
+            })?
         })
     }
 
     fn cancel(&self, session_id: SessionId) -> BoxFuture<'static, Result<(), BackendError>> {
+        let bridge = Arc::clone(&self.bridge);
         let target = Arc::clone(&self.target);
         Box::pin(async move {
-            let mut target = target.lock().expect("Linux selection target lock poisoned");
-            if target
-                .as_ref()
-                .is_some_and(|(active_session, _)| *active_session == session_id)
-            {
-                *target = None;
-            }
-            Ok(())
+            tokio::task::spawn_blocking(move || {
+                let mut target = target.lock().expect("Linux selection target lock poisoned");
+                if target
+                    .as_ref()
+                    .is_some_and(|active| active.session_id == session_id)
+                {
+                    bridge.cancel_target(session_id)?;
+                    *target = None;
+                }
+                Ok(())
+            })
+            .await
+            .map_err(|error| {
+                BackendError::new(
+                    BackendErrorCode::Platform,
+                    format!("Linux selection cancel task failed: {error}"),
+                )
+            })?
         })
     }
 }
@@ -179,15 +265,41 @@ mod tests {
     struct TestSelectionBridge {
         selected_text: Mutex<String>,
         committed: Mutex<Vec<String>>,
+        reverted: Mutex<Vec<(String, String)>>,
     }
 
     impl LinuxSelectionBridge for TestSelectionBridge {
-        fn selection_text(&self) -> Result<String, openless_core::BackendError> {
+        fn capture_target(
+            &self,
+            _session_id: SessionId,
+        ) -> Result<String, openless_core::BackendError> {
             Ok(self.selected_text.lock().unwrap().clone())
         }
 
-        fn commit_text(&self, text: &str) -> Result<(), openless_core::BackendError> {
-            self.committed.lock().unwrap().push(text.to_string());
+        fn apply_target(
+            &self,
+            _session_id: SessionId,
+            source: &str,
+            replacement: &str,
+        ) -> Result<(), openless_core::BackendError> {
+            if *self.selected_text.lock().unwrap() != source {
+                return Err(BackendError::new(
+                    BackendErrorCode::Cancelled,
+                    "selection changed",
+                ));
+            }
+            self.committed.lock().unwrap().push(replacement.to_string());
+            Ok(())
+        }
+
+        fn revert_target(&self, _session_id: SessionId) -> Result<(), openless_core::BackendError> {
+            let original = self.selected_text.lock().unwrap().clone();
+            let replacement = self.committed.lock().unwrap().last().cloned().unwrap();
+            self.reverted.lock().unwrap().push((original, replacement));
+            Ok(())
+        }
+
+        fn cancel_target(&self, _session_id: SessionId) -> Result<(), openless_core::BackendError> {
             Ok(())
         }
     }
@@ -197,6 +309,7 @@ mod tests {
         let bridge = Arc::new(TestSelectionBridge {
             selected_text: Mutex::new("source".to_string()),
             committed: Mutex::new(Vec::new()),
+            reverted: Mutex::new(Vec::new()),
         });
         let runtime = LinuxSelectionRuntime::with_bridge(bridge.clone());
         let session_id = SessionId::new();
@@ -219,6 +332,7 @@ mod tests {
         let bridge = Arc::new(TestSelectionBridge {
             selected_text: Mutex::new("source".to_string()),
             committed: Mutex::new(Vec::new()),
+            reverted: Mutex::new(Vec::new()),
         });
         let runtime = LinuxSelectionRuntime::with_bridge(bridge.clone());
         let session_id = SessionId::new();
@@ -239,6 +353,7 @@ mod tests {
         let bridge = Arc::new(TestSelectionBridge {
             selected_text: Mutex::new("source".to_string()),
             committed: Mutex::new(Vec::new()),
+            reverted: Mutex::new(Vec::new()),
         });
         let runtime = LinuxSelectionRuntime::with_bridge(bridge.clone());
         let session_id = SessionId::new();
@@ -259,6 +374,7 @@ mod tests {
         let bridge = Arc::new(TestSelectionBridge {
             selected_text: Mutex::new("first".to_string()),
             committed: Mutex::new(Vec::new()),
+            reverted: Mutex::new(Vec::new()),
         });
         let runtime = LinuxSelectionRuntime::with_bridge(bridge.clone());
         let first = SessionId::new();
@@ -289,6 +405,7 @@ mod tests {
         let bridge = Arc::new(TestSelectionBridge {
             selected_text: Mutex::new("original".to_string()),
             committed: Mutex::new(Vec::new()),
+            reverted: Mutex::new(Vec::new()),
         });
         let runtime = LinuxSelectionRuntime::with_bridge(bridge.clone());
         let session_id = SessionId::new();
@@ -330,26 +447,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn preview_target_retention_is_explicitly_unsupported() {
-        let runtime = LinuxSelectionRuntime::with_bridge(Arc::new(TestSelectionBridge::default()));
+    async fn preview_retains_only_the_captured_session_target() {
+        let bridge = Arc::new(TestSelectionBridge {
+            selected_text: Mutex::new("source".to_string()),
+            ..TestSelectionBridge::default()
+        });
+        let runtime = LinuxSelectionRuntime::with_bridge(bridge);
+        let session_id = SessionId::new();
+        runtime.capture(session_id, None).await.unwrap();
 
-        let error = runtime
-            .prepare_preview(SessionId::new())
-            .await
-            .expect_err("fcitx5 cannot prove a retained preview target");
-
-        assert_eq!(error.code, BackendErrorCode::Unsupported);
+        runtime.prepare_preview(session_id).await.unwrap();
+        assert_eq!(
+            runtime
+                .prepare_preview(SessionId::new())
+                .await
+                .unwrap_err()
+                .code,
+            BackendErrorCode::Cancelled
+        );
     }
 
     #[tokio::test]
-    async fn revert_is_explicitly_unsupported() {
-        let runtime = LinuxSelectionRuntime::with_bridge(Arc::new(TestSelectionBridge::default()));
-
-        let error = runtime
-            .revert(SessionId::new())
+    async fn revert_uses_the_same_session_and_exact_applied_text() {
+        let bridge = Arc::new(TestSelectionBridge {
+            selected_text: Mutex::new("source".to_string()),
+            ..TestSelectionBridge::default()
+        });
+        let runtime = LinuxSelectionRuntime::with_bridge(bridge.clone());
+        let session_id = SessionId::new();
+        runtime.capture(session_id, None).await.unwrap();
+        runtime
+            .apply(session_id, "source".into(), "replacement".into())
             .await
-            .expect_err("fcitx5 replacement has no safe undo contract");
+            .unwrap();
 
-        assert_eq!(error.code, BackendErrorCode::Unsupported);
+        assert_eq!(
+            runtime.revert(session_id).await.unwrap(),
+            InsertOutcome::Inserted
+        );
+        assert_eq!(
+            bridge.reverted.lock().unwrap().as_slice(),
+            &[("source".to_string(), "replacement".to_string())]
+        );
     }
 }

@@ -331,7 +331,7 @@ pub fn get_selection_text() -> Result<String, String> {
 #[cfg(target_os = "linux")]
 pub fn start_dictation_signal_listener(
     tx: std::sync::mpsc::Sender<crate::hotkey::HotkeyEvent>,
-    combo_tx: std::sync::mpsc::Sender<u64>,
+    combo_tx: std::sync::mpsc::Sender<crate::hotkey::HotkeyCombinedEdge>,
     binding: crate::types::HotkeyBinding,
     qa_trigger: Option<crate::types::HotkeyTrigger>,
     selection_polish_trigger: Option<crate::types::HotkeyTrigger>,
@@ -381,18 +381,32 @@ pub fn start_dictation_signal_listener(
                     if member == "DictationKeyEvent" {
                         let at = std::time::Instant::now();
                         let event = if is_press {
-                            let press_id = crate::hotkey::next_press_id();
-                            current_press_id_for_match.store(press_id, Ordering::SeqCst);
+                            // fcitx5 may repeat a down signal while the trigger is
+                            // held. Reuse the physical generation so Core treats
+                            // repeats as duplicates instead of Toggle stop presses.
+                            let press_id = match current_press_id_for_match.load(Ordering::SeqCst) {
+                                0 => {
+                                    let press_id = crate::hotkey::next_press_id();
+                                    current_press_id_for_match.store(press_id, Ordering::SeqCst);
+                                    press_id
+                                }
+                                press_id => press_id,
+                            };
                             crate::hotkey::HotkeyEvent::Pressed { at, press_id }
                         } else {
-                            current_press_id_for_match.store(0, Ordering::SeqCst);
-                            crate::hotkey::HotkeyEvent::Released { at }
+                            // swap pairs key-up with the same generation and makes
+                            // a duplicated/late key-up carry zero (Core no-op).
+                            let press_id = current_press_id_for_match.swap(0, Ordering::SeqCst);
+                            crate::hotkey::HotkeyEvent::Released { at, press_id }
                         };
                         let _ = tx.send(event);
                     } else if member == "DictationKeyCombined" && is_press {
                         let press_id = current_press_id_for_match.load(Ordering::SeqCst);
                         if press_id != 0 {
-                            let _ = combo_tx.send(press_id);
+                            let _ = combo_tx.send(crate::hotkey::HotkeyCombinedEdge {
+                                at: std::time::Instant::now(),
+                                press_id,
+                            });
                         }
                     } else if member == "QaShortcutEvent" {
                         if is_press {

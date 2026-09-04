@@ -16,6 +16,8 @@ use crate::types::SessionId;
 
 pub const REMOTE_INPUT_MAX_PCM_FRAME_BYTES: usize = 64 * 1024;
 pub const REMOTE_INPUT_PAIRING_PIN_LEN: usize = 6;
+const REMOTE_AUDIO_FRAME_HEADER_BYTES: usize = 4 + 16 + 8;
+const REMOTE_AUDIO_FRAME_MAGIC: &[u8; 4] = b"OL20";
 const SUPPORTED_LOCALES: [&str; 5] = ["zh-CN", "zh-TW", "en", "ja", "ko"];
 const PIN_MAX_FAILS: u32 = 5;
 const PIN_LOCK_SECS: u64 = 60;
@@ -35,6 +37,52 @@ pub fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
         diff |= left.get(index).copied().unwrap_or(0) ^ right.get(index).copied().unwrap_or(0);
     }
     diff == 0
+}
+
+pub struct RemoteFrameCodec;
+
+impl RemoteFrameCodec {
+    pub fn encode(
+        session_id: SessionId,
+        sequence: u64,
+        pcm_s16le: &[u8],
+    ) -> Result<Vec<u8>, BackendError> {
+        validate_remote_pcm(pcm_s16le)?;
+        let mut frame = Vec::with_capacity(REMOTE_AUDIO_FRAME_HEADER_BYTES + pcm_s16le.len());
+        frame.extend_from_slice(REMOTE_AUDIO_FRAME_MAGIC);
+        frame.extend_from_slice(session_id.as_uuid().as_bytes());
+        frame.extend_from_slice(&sequence.to_be_bytes());
+        frame.extend_from_slice(pcm_s16le);
+        Ok(frame)
+    }
+
+    pub fn decode(frame: &[u8]) -> Result<(SessionId, u64, Vec<u8>), BackendError> {
+        if frame.len() <= REMOTE_AUDIO_FRAME_HEADER_BYTES
+            || frame.len() > REMOTE_AUDIO_FRAME_HEADER_BYTES + REMOTE_INPUT_MAX_PCM_FRAME_BYTES
+            || &frame[..4] != REMOTE_AUDIO_FRAME_MAGIC
+        {
+            return Err(BackendError::new(
+                BackendErrorCode::InvalidArgument,
+                "remote binary frame header or size is invalid",
+            ));
+        }
+        let session_id = uuid::Uuid::from_slice(&frame[4..20])
+            .map(SessionId::from_uuid)
+            .map_err(|error| {
+                BackendError::new(
+                    BackendErrorCode::InvalidArgument,
+                    format!("remote binary frame session UUID is invalid: {error}"),
+                )
+            })?;
+        let sequence = u64::from_be_bytes(
+            frame[20..28]
+                .try_into()
+                .expect("validated remote frame header has a complete sequence"),
+        );
+        let pcm_s16le = frame[REMOTE_AUDIO_FRAME_HEADER_BYTES..].to_vec();
+        validate_remote_pcm(&pcm_s16le)?;
+        Ok((session_id, sequence, pcm_s16le))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -452,15 +500,7 @@ impl RemoteInputService {
         sequence: u64,
         pcm_s16le: Vec<u8>,
     ) -> Result<(), BackendError> {
-        if pcm_s16le.len() < 2
-            || !pcm_s16le.len().is_multiple_of(2)
-            || pcm_s16le.len() > REMOTE_INPUT_MAX_PCM_FRAME_BYTES
-        {
-            return Err(BackendError::new(
-                BackendErrorCode::InvalidArgument,
-                "remote PCM frame must be non-empty signed Int16LE and at most 65536 bytes",
-            ));
-        }
+        validate_remote_pcm(&pcm_s16le)?;
         let _lifecycle = self.lifecycle.lock().await;
         {
             let mut state = self.state.lock().expect("remote input state lock poisoned");
@@ -714,6 +754,19 @@ fn validate_remote_port(port: u16) -> Result<(), BackendError> {
         return Err(BackendError::new(
             BackendErrorCode::InvalidArgument,
             "remote input port must be between 1 and 65535",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_remote_pcm(pcm_s16le: &[u8]) -> Result<(), BackendError> {
+    if pcm_s16le.len() < 2
+        || !pcm_s16le.len().is_multiple_of(2)
+        || pcm_s16le.len() > REMOTE_INPUT_MAX_PCM_FRAME_BYTES
+    {
+        return Err(BackendError::new(
+            BackendErrorCode::InvalidArgument,
+            "remote PCM frame must be non-empty signed Int16LE and at most 65536 bytes",
         ));
     }
     Ok(())

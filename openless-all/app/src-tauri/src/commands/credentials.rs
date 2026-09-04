@@ -8,16 +8,53 @@ const MARKETPLACE_GITHUB_TOKEN_ACCOUNT: &str = "github.oauth_token";
 
 /// Tauri host adapter for the framework-independent core credential port.
 ///
-/// The implementation deliberately keeps the existing system vault format and
-/// provider-channel lookup rules in this host. Core only sees typed keys,
-/// redacted status and [`openless_core::SecretValue`].
+/// The implementation keeps the existing system vault format while Core's
+/// [`openless_core::credentials::CredentialDirectory`] owns channel policy.
+/// Secrets cross the boundary only as [`openless_core::SecretValue`].
 pub(crate) struct SystemCredentialStore {
     model_store: Option<std::sync::Arc<openless_core::ModelStore>>,
+    directory: openless_core::credentials::CredentialDirectory,
 }
 
 impl SystemCredentialStore {
     pub(crate) fn new(model_store: Option<std::sync::Arc<openless_core::ModelStore>>) -> Self {
-        Self { model_store }
+        let metadata_store: std::sync::Arc<
+            dyn openless_core::credentials::CredentialMetadataStore,
+        > = std::sync::Arc::new(SystemCredentialMetadataStore);
+        Self {
+            model_store,
+            directory: openless_core::credentials::CredentialDirectory::new(metadata_store),
+        }
+    }
+}
+
+struct SystemCredentialMetadataStore;
+
+impl openless_core::credentials::CredentialMetadataStore for SystemCredentialMetadataStore {
+    fn load_metadata(
+        &self,
+    ) -> futures_util::future::BoxFuture<
+        'static,
+        Result<openless_core::CredentialMetadata, openless_core::BackendError>,
+    > {
+        run_credential_task(|| Ok(CredentialsVault::load_metadata()))
+    }
+
+    fn save_metadata(
+        &self,
+        metadata: openless_core::CredentialMetadata,
+    ) -> futures_util::future::BoxFuture<'static, Result<(), openless_core::BackendError>> {
+        run_credential_task(move || {
+            CredentialsVault::save_metadata(metadata).map_err(credential_persistence_error)
+        })
+    }
+
+    fn channel_has_secrets(
+        &self,
+        kind: openless_core::ChannelKind,
+        channel_id: String,
+    ) -> futures_util::future::BoxFuture<'static, Result<bool, openless_core::BackendError>> {
+        run_credential_task(move || Ok(CredentialsVault::channel_has_secrets(kind, &channel_id)))
     }
 }
 
@@ -110,7 +147,8 @@ impl openless_core::CredentialStore for SystemCredentialStore {
         'static,
         Result<Vec<openless_core::ChannelSummary>, openless_core::BackendError>,
     > {
-        run_credential_task(move || Ok(CredentialsVault::list_channels(kind)))
+        let directory = self.directory.clone();
+        Box::pin(async move { directory.list_channels(kind).await })
     }
 
     fn mutate_channel(
@@ -120,20 +158,16 @@ impl openless_core::CredentialStore for SystemCredentialStore {
         'static,
         Result<openless_core::ChannelMutationResult, openless_core::BackendError>,
     > {
-        run_credential_task(move || mutate_vault_channel(mutation))
+        let directory = self.directory.clone();
+        Box::pin(async move { directory.mutate_channel(mutation).await })
     }
 
     fn active_provider(
         &self,
         slot: openless_core::ProviderSlot,
     ) -> futures_util::future::BoxFuture<'static, Result<String, openless_core::BackendError>> {
-        run_credential_task(move || {
-            Ok(match slot {
-                openless_core::ProviderSlot::Asr => CredentialsVault::get_active_asr(),
-                openless_core::ProviderSlot::Llm => CredentialsVault::get_active_llm(),
-                openless_core::ProviderSlot::Omni => CredentialsVault::get_active_omni(),
-            })
-        })
+        let directory = self.directory.clone();
+        Box::pin(async move { directory.active_provider(slot).await })
     }
 
     fn set_active_provider(
@@ -141,20 +175,8 @@ impl openless_core::CredentialStore for SystemCredentialStore {
         slot: openless_core::ProviderSlot,
         provider_id: String,
     ) -> futures_util::future::BoxFuture<'static, Result<(), openless_core::BackendError>> {
-        run_credential_task(move || {
-            let result = match slot {
-                openless_core::ProviderSlot::Asr => {
-                    CredentialsVault::set_active_asr_provider(&provider_id)
-                }
-                openless_core::ProviderSlot::Llm => {
-                    CredentialsVault::set_active_llm_provider(&provider_id)
-                }
-                openless_core::ProviderSlot::Omni => {
-                    CredentialsVault::set_active_omni_provider(&provider_id)
-                }
-            };
-            result.map_err(credential_persistence_error)
-        })
+        let directory = self.directory.clone();
+        Box::pin(async move { directory.set_active_provider(slot, provider_id).await })
     }
 }
 
@@ -177,7 +199,13 @@ fn credentials_status(
     preferences: UserPreferences,
     model_store: Option<&openless_core::ModelStore>,
 ) -> CredentialsStatus {
-    let snap = CredentialsVault::snapshot();
+    let pipeline_mode = openless_core::shared_types::effective_pipeline_mode(
+        preferences.multimodal_pipeline_enabled,
+        preferences.pipeline_mode,
+    );
+    let snap = CredentialsVault::snapshot_for_pipeline(
+        pipeline_mode == openless_core::shared_types::PipelineMode::Multimodal,
+    );
     let active_asr_provider = CredentialsVault::get_active_asr();
     let active_llm_provider = CredentialsVault::get_active_llm();
     let configuration = credential_configuration(
@@ -194,12 +222,15 @@ fn credentials_status(
     );
     let llm_configured =
         openless_core::provider_rules::llm_configured(&active_llm_provider, &configuration);
-    let omni_configured =
-        openless_core::provider_rules::omni_configured(&snap.active_omni_provider, &configuration);
+    let omni_configured = pipeline_mode == openless_core::shared_types::PipelineMode::Multimodal
+        && openless_core::provider_rules::omni_configured(
+            &snap.active_omni_provider,
+            &configuration,
+        );
     CredentialsStatus {
         active_asr_provider,
         active_llm_provider,
-        pipeline_mode: preferences.pipeline_mode,
+        pipeline_mode,
         asr_configured,
         llm_configured,
         omni_configured,
@@ -342,55 +373,6 @@ fn write_vault_credential(
         }
     };
     result.map_err(credential_persistence_error)
-}
-
-fn mutate_vault_channel(
-    mutation: openless_core::ChannelMutation,
-) -> Result<openless_core::ChannelMutationResult, openless_core::BackendError> {
-    use openless_core::{ChannelMutation, ChannelMutationResult};
-
-    match mutation {
-        ChannelMutation::Create {
-            kind,
-            provider_type,
-            name,
-        } => CredentialsVault::create_channel(kind, &provider_type, &name)
-            .map(ChannelMutationResult::Created),
-        ChannelMutation::SetProviderType {
-            kind,
-            id,
-            provider_type,
-        } => CredentialsVault::set_channel_provider_type(kind, &id, &provider_type)
-            .map(|_| ChannelMutationResult::Applied),
-        ChannelMutation::DeleteIfBlank { kind, id } => {
-            CredentialsVault::delete_channel_if_blank(kind, &id)
-                .map(ChannelMutationResult::DeletedIfBlank)
-        }
-        ChannelMutation::Rename { kind, id, name } => {
-            CredentialsVault::rename_channel(kind, &id, &name)
-                .map(|_| ChannelMutationResult::Applied)
-        }
-        ChannelMutation::Delete { kind, id } => {
-            CredentialsVault::delete_channel(kind, &id).map(|_| ChannelMutationResult::Applied)
-        }
-        ChannelMutation::SetEnabled { kind, id, enabled } => {
-            CredentialsVault::set_channel_enabled(kind, &id, enabled)
-                .map(|_| ChannelMutationResult::Applied)
-        }
-        ChannelMutation::Reorder { kind, ids } => {
-            CredentialsVault::reorder_channels(kind, &ids).map(|_| ChannelMutationResult::Applied)
-        }
-        ChannelMutation::RecordTest {
-            kind,
-            id,
-            ok,
-            latency_ms,
-            at,
-            error,
-        } => CredentialsVault::record_channel_test(kind, &id, ok, latency_ms, at, error)
-            .map(|_| ChannelMutationResult::Applied),
-    }
-    .map_err(credential_persistence_error)
 }
 
 fn parse_vault_account(

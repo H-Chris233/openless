@@ -20,6 +20,17 @@ fn display_path(path: PathBuf) -> String {
     path.display().to_string()
 }
 
+#[tauri::command]
+pub async fn local_asr_activate(
+    backend: CoreState<'_>,
+    request: openless_core::LocalAsrActivationRequest,
+) -> Result<openless_core::LocalAsrActivationResult, String> {
+    backend
+        .activate_local_asr(request)
+        .await
+        .map_err(core_error)
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalAsrSettings {

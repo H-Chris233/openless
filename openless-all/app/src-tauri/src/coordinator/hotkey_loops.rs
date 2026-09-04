@@ -41,14 +41,14 @@ fn esc_cancel_bridge_loop_with(
 /// 误取消下一次按下开启的会话。
 pub(super) fn combo_abort_bridge_loop(
     inner: Arc<Inner>,
-    rx: mpsc::Receiver<u64>,
-    handler: fn(&Arc<Inner>, u64),
+    rx: mpsc::Receiver<crate::hotkey::HotkeyCombinedEdge>,
+    handler: fn(&Arc<Inner>, crate::hotkey::HotkeyCombinedEdge),
 ) {
-    while let Ok(press_id) = rx.recv() {
+    while let Ok(edge) = rx.recv() {
         if inner.shortcut_recording_active.load(Ordering::SeqCst) {
             continue;
         }
-        handler(&inner, press_id);
+        handler(&inner, edge);
     }
 }
 
@@ -68,9 +68,9 @@ pub(super) fn spawn_esc_cancel_bridge(inner: &Arc<Inner>) -> mpsc::Sender<()> {
 
 pub(super) fn spawn_combo_abort_bridge(
     inner: &Arc<Inner>,
-    handler: fn(&Arc<Inner>, u64),
-) -> mpsc::Sender<u64> {
-    let (combo_tx, combo_rx) = mpsc::channel::<u64>();
+    handler: fn(&Arc<Inner>, crate::hotkey::HotkeyCombinedEdge),
+) -> mpsc::Sender<crate::hotkey::HotkeyCombinedEdge> {
+    let (combo_tx, combo_rx) = mpsc::channel();
     let bridge_inner = Arc::clone(inner);
     std::thread::Builder::new()
         .name("openless-combo-abort-bridge".into())
@@ -719,11 +719,12 @@ async fn handle_less_computer_modifier_pressed(inner: &Arc<Inner>, press_id: u64
         .compare_exchange(press_id, 0, Ordering::SeqCst, Ordering::SeqCst)
         .is_ok()
     {
-        cancel_less_computer_voice_session(inner);
+        cancel_less_computer_voice_session(inner, press_id, std::time::Instant::now());
     }
 }
 
-fn cancel_less_computer_press(inner: &Arc<Inner>, press_id: u64) {
+fn cancel_less_computer_press(inner: &Arc<Inner>, edge: crate::hotkey::HotkeyCombinedEdge) {
+    let press_id = edge.press_id;
     if press_id == 0 {
         return;
     }
@@ -733,18 +734,127 @@ fn cancel_less_computer_press(inner: &Arc<Inner>, press_id: u64) {
     if inner.less_computer_press_generation.load(Ordering::SeqCst) != press_id {
         return;
     }
-    cancel_less_computer_voice_session(inner);
+    cancel_less_computer_voice_session(inner, press_id, edge.at);
 }
 
-fn cancel_less_computer_voice_session(inner: &Arc<Inner>) {
-    let _ = inner
-        .less_computer_combo_pending_press
-        .swap(0, Ordering::SeqCst);
-    let _ = inner
-        .backend
-        .dispatch_less_computer_hotkey_edge(openless_core::DictationHotkeyEdge::Combined);
-    log::info!("[less-computer] 触发键与其他键组合按下 —— 取消本次按下开出的会话");
-    let session = inner.less_computer_voice.lock().take();
+/// Tauri half of the Core-owned Less Computer recording controller.
+///
+/// Core decides whether silence/fault means Stop or Cancel. This adapter only
+/// reaches the opaque capture handle kept by the coordinator and performs that
+/// exact effect. Requests can arrive while `start_less_computer_voice` is still
+/// returning; they are queued by session id and flushed immediately after the
+/// handle enters the slot, so a cold ASR startup cannot lose an early directive.
+struct LessComputerRecordingControl {
+    inner: std::sync::Weak<Inner>,
+    pending: Mutex<
+        Vec<(
+            openless_core::SessionId,
+            openless_core::RecordingControlAction,
+        )>,
+    >,
+}
+
+impl LessComputerRecordingControl {
+    fn new(inner: &Arc<Inner>) -> Self {
+        Self {
+            inner: Arc::downgrade(inner),
+            pending: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn apply(
+        inner: &Arc<Inner>,
+        session_id: openless_core::SessionId,
+        action: openless_core::RecordingControlAction,
+    ) {
+        match action {
+            openless_core::RecordingControlAction::Stop => {
+                let task_inner = Arc::clone(inner);
+                inner.host.spawn(async move {
+                    finish_less_computer_voice_session(&task_inner, Some(session_id)).await;
+                });
+            }
+            openless_core::RecordingControlAction::Cancel => {
+                cancel_less_computer_capture(inner, Some(session_id));
+            }
+        }
+    }
+
+    fn flush(&self, session_id: openless_core::SessionId) {
+        let requests = {
+            let mut pending = self.pending.lock();
+            let mut requests = Vec::new();
+            let mut index = 0;
+            while index < pending.len() {
+                if pending[index].0 == session_id {
+                    requests.push(pending.remove(index));
+                } else {
+                    index += 1;
+                }
+            }
+            requests
+        };
+        let Some(inner) = self.inner.upgrade() else {
+            return;
+        };
+        for (_, action) in requests {
+            Self::apply(&inner, session_id, action);
+        }
+    }
+}
+
+impl openless_core::RecordingControlSink for LessComputerRecordingControl {
+    fn request(
+        &self,
+        session_id: openless_core::SessionId,
+        action: openless_core::RecordingControlAction,
+    ) -> Result<(), openless_core::BackendError> {
+        let inner = self.inner.upgrade().ok_or_else(|| {
+            openless_core::BackendError::new(
+                openless_core::BackendErrorCode::Cancelled,
+                "Less Computer host session is no longer available",
+            )
+        })?;
+        let ready = inner
+            .less_computer_voice
+            .lock()
+            .as_ref()
+            .is_some_and(|session| session.session_id() == session_id);
+        if ready {
+            Self::apply(&inner, session_id, action);
+        } else {
+            self.pending.lock().push((session_id, action));
+        }
+        Ok(())
+    }
+}
+
+/// Take only the expected capture generation. A late Core directive must never
+/// finish or cancel a newer Less Computer session that reused the same Host slot.
+fn take_less_computer_capture(
+    inner: &Arc<Inner>,
+    expected_session_id: Option<openless_core::SessionId>,
+) -> Option<openless_core::LessComputerVoiceSession> {
+    let mut slot = inner.less_computer_voice.lock();
+    if let Some(expected_session_id) = expected_session_id {
+        if slot.as_ref().map(|session| session.session_id()) != Some(expected_session_id) {
+            return None;
+        }
+    }
+    slot.take()
+}
+
+/// Cancel only the native capture/session handle. The product decision has
+/// already been made either by Core or by the hotkey interpreter above.
+fn cancel_less_computer_capture(
+    inner: &Arc<Inner>,
+    expected_session_id: Option<openless_core::SessionId>,
+) {
+    let session = take_less_computer_capture(inner, expected_session_id);
+    if session.is_none() && expected_session_id.is_some() {
+        // Stale Core directive: the current glow belongs to another session.
+        return;
+    }
     let spawner = inner.host.clone();
     let host = inner.host.clone();
     spawner.spawn(async move {
@@ -757,12 +867,29 @@ fn cancel_less_computer_voice_session(inner: &Arc<Inner>) {
     });
 }
 
-async fn finish_less_computer_voice_session(inner: &Arc<Inner>) {
-    let session = inner.less_computer_voice.lock().take();
+fn cancel_less_computer_voice_session(inner: &Arc<Inner>, press_id: u64, at: std::time::Instant) {
+    let _ = inner
+        .less_computer_combo_pending_press
+        .swap(0, Ordering::SeqCst);
+    let _ = inner.backend.dispatch_less_computer_hotkey_edge(
+        openless_core::DictationHotkeyEdge::Combined { press_id, at },
+    );
+    log::info!("[less-computer] 触发键与其他键组合按下 —— 取消本次按下开出的会话");
+    cancel_less_computer_capture(inner, None);
+}
+
+async fn finish_less_computer_voice_session(
+    inner: &Arc<Inner>,
+    expected_session_id: Option<openless_core::SessionId>,
+) {
+    let session = take_less_computer_capture(inner, expected_session_id);
     if let Some(session) = session {
         if let Err(error) = session.finish().await {
             log::warn!("[less-computer] finish failed: {error}");
         }
+    } else if expected_session_id.is_some() {
+        // A later session owns both the slot and the glow now.
+        return;
     }
     inner.host.hide_less_computer_glow();
 }
@@ -797,6 +924,7 @@ pub(super) async fn handle_less_computer_pressed(inner: &Arc<Inner>) {
     }
     let action = inner.backend.dispatch_less_computer_hotkey_edge(
         openless_core::DictationHotkeyEdge::Pressed {
+            press_id: 0,
             at: std::time::Instant::now(),
         },
     );
@@ -805,40 +933,48 @@ pub(super) async fn handle_less_computer_pressed(inner: &Arc<Inner>) {
     }
     if !matches!(action, openless_core::LessComputerHotkeyAction::Start) {
         if matches!(action, openless_core::LessComputerHotkeyAction::Finish) {
-            finish_less_computer_voice_session(inner).await;
+            finish_less_computer_voice_session(inner, None).await;
         } else if matches!(action, openless_core::LessComputerHotkeyAction::Cancel) {
-            cancel_less_computer_voice_session(inner);
+            cancel_less_computer_voice_session(inner, 0, std::time::Instant::now());
         }
         return;
     }
     let session_id = openless_core::SessionId::new();
-    let started = match inner.backend.start_less_computer_voice(session_id).await {
+    let recording_control = Arc::new(LessComputerRecordingControl::new(inner));
+    match inner
+        .backend
+        .start_less_computer_voice(
+            session_id,
+            Arc::clone(&recording_control) as Arc<dyn openless_core::RecordingControlSink>,
+        )
+        .await
+    {
         Ok(session) => {
             *inner.less_computer_voice.lock() = Some(session);
+            // Make the visible capture state observable before flushing an
+            // early Stop/Cancel. Otherwise a queued effect could hide the glow
+            // first and this function would immediately show it again.
+            inner.host.show_less_computer_glow();
+            recording_control.flush(session_id);
             log::info!("[less-computer] voice session started (session={session_id})");
-            true
         }
         Err(error) => {
             log::warn!("[less-computer] voice session startup failed: {error}");
-            false
         }
-    };
-    // 一按下键（开始录音）就点亮整屏彩虹描边，贯穿 录音 → 处理 → 出结果，完成/关闭才熄灭。
-    if started {
-        inner.host.show_less_computer_glow();
     }
 }
 
 pub(super) async fn handle_less_computer_released(inner: &Arc<Inner>) {
     let action = inner.backend.dispatch_less_computer_hotkey_edge(
         openless_core::DictationHotkeyEdge::Released {
+            press_id: 0,
             at: std::time::Instant::now(),
         },
     );
     if !matches!(action, openless_core::LessComputerHotkeyAction::Finish) {
         return;
     }
-    finish_less_computer_voice_session(inner).await;
+    finish_less_computer_voice_session(inner, None).await;
 }
 
 pub(super) fn take_coding_agent_hotkeys_on_main_thread(inner: &Arc<Inner>) {
@@ -972,6 +1108,7 @@ pub(super) fn combo_hotkey_supervisor_loop(inner: Arc<Inner>) {
 }
 
 pub(super) fn combo_hotkey_bridge_loop(inner: Arc<Inner>, rx: mpsc::Receiver<ComboHotkeyEvent>) {
+    let mut current_press_id = 0;
     while let Ok(evt) = rx.recv() {
         if inner.shortcut_recording_active.load(Ordering::SeqCst) {
             continue;
@@ -981,13 +1118,15 @@ pub(super) fn combo_hotkey_bridge_loop(inner: Arc<Inner>, rx: mpsc::Receiver<Com
             // P0 #468/#475: 同 hotkey_bridge_loop —— Pressed/Released 必须串行 await，
             // 否则 latch 竞态导致 combo 快捷键二次按键失效。
             ComboHotkeyEvent::Pressed { at } => {
+                current_press_id = crate::hotkey::next_press_id();
                 inner.host.block_on(async {
-                    handle_pressed_edge(&inner_cloned, at, 0).await;
+                    handle_pressed_edge(&inner_cloned, at, current_press_id).await;
                 });
             }
             ComboHotkeyEvent::Released { at } => {
+                let press_id = std::mem::take(&mut current_press_id);
                 inner.host.block_on(async {
-                    handle_released_edge(&inner_cloned, at).await;
+                    handle_released_edge(&inner_cloned, at, press_id).await;
                 });
             }
         }
@@ -1634,7 +1773,7 @@ pub(super) fn hotkey_bridge_loop(inner: Arc<Inner>, rx: mpsc::Receiver<HotkeyEve
         match evt {
             // P0 #468/#475: Pressed/Released 必须串行处理，否则在 Windows 上 WH_KEYBOARD_LL
             // 边沿间隔微秒级 → 两个独立 spawn 的 task 被 work-stealing 调度器并行执行 →
-            // `hotkey_trigger_held` latch 翻转顺序错乱 → 下次按键被静默吞掉
+            // 同一物理按键的边沿顺序错乱 → 下次按键被静默吞掉
             // (UI 关不掉 / 录音停不下来)。改为 bridge 线程内 block_on 顺序 await，
             // recv 的 FIFO 顺序就是 handler 执行顺序。
             // 注意：handle_pressed_edge / handle_released_edge 内部走 .await（含网络
@@ -1647,9 +1786,9 @@ pub(super) fn hotkey_bridge_loop(inner: Arc<Inner>, rx: mpsc::Receiver<HotkeyEve
                     handle_pressed_edge(&inner_cloned, at, press_id).await;
                 });
             }
-            HotkeyEvent::Released { at } => {
+            HotkeyEvent::Released { at, press_id } => {
                 inner.host.block_on(async {
-                    handle_released_edge(&inner_cloned, at).await;
+                    handle_released_edge(&inner_cloned, at, press_id).await;
                 });
             }
             // Esc 取消与组合键撤销都不在此枚举里：分别走 esc_cancel_bridge_loop /
@@ -1699,7 +1838,6 @@ fn emit_fn_recording_pressed(inner: &Arc<Inner>) {
 }
 
 pub(super) fn reset_shortcut_held_state(inner: &Arc<Inner>) {
-    inner.hotkey_trigger_held.store(false, Ordering::SeqCst);
     if let Some(monitor) = inner.hotkey.lock().as_ref() {
         monitor.reset_held_state();
     }
@@ -1809,11 +1947,16 @@ pub(super) async fn handle_window_hotkey_event(
                 log::info!(
                     "[window-hotkey] pressed trigger={trigger:?} code={code} repeat={repeat}"
                 );
-                handle_pressed_edge(inner, std::time::Instant::now(), 0).await;
+                let press_id = crate::hotkey::next_press_id();
+                inner
+                    .window_hotkey_press_id
+                    .store(press_id, Ordering::SeqCst);
+                handle_pressed_edge(inner, std::time::Instant::now(), press_id).await;
             }
             "keyup" => {
                 log::info!("[window-hotkey] released trigger={trigger:?} code={code}");
-                handle_released_edge(inner, std::time::Instant::now()).await;
+                let press_id = inner.window_hotkey_press_id.swap(0, Ordering::SeqCst);
+                handle_released_edge(inner, std::time::Instant::now(), press_id).await;
             }
             _ => {}
         }

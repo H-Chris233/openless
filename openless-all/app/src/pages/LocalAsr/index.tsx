@@ -22,12 +22,12 @@ import {
     isTauri,
     listChannels,
     reorderChannels,
-    setActiveAsrProvider,
     setChannelEnabled,
 } from "../../lib/ipc"
 import {
     FOUNDRY_LOCAL_ASR_MODELS,
     SHERPA_ONNX_ASR_MODELS,
+    activateLocalAsr,
     cancelFoundryLocalAsrPrepare,
     cancelSherpaOnnxAsrDownload,
     cancelSherpaOnnxAsrPrepare,
@@ -50,8 +50,6 @@ import {
     getSherpaOnnxAsrModelDir,
     getSherpaOnnxAsrStatus,
     listLocalAsrModels,
-    prepareFoundryLocalAsr,
-    prepareSherpaOnnxAsr,
     preloadLocalAsr,
     releaseFoundryLocalAsr,
     releaseLocalAsrEngine,
@@ -62,13 +60,10 @@ import {
     revealSherpaOnnxAsrModelDir,
     setLocalAsrModelsBaseDir,
     setFoundryLocalAsrLanguageHint,
-    setFoundryLocalAsrModel,
     setFoundryLocalRuntimeSource,
-    setLocalAsrActiveModel,
     setLocalAsrKeepLoadedSecs,
     setLocalAsrMirror,
     setSherpaOnnxAsrLanguageHint,
-    setSherpaOnnxAsrModel,
     testLocalAsrModel,
     type FoundryLocalAsrCatalogModel,
     type FoundryLocalAsrLanguageHint,
@@ -115,25 +110,29 @@ import {
 import type { RemoteSize } from "./types"
 
 // 渠道化后「当前生效」由渠道列表第一个启用卡派生（见 docs/provider-channels-plan.md）。
-// 本页直接 setActiveAsrProvider 激活本地引擎，会被 save_credentials 里的
-// sync_active_channels 覆盖回列表第一张云端卡——激活前确保本地引擎卡存在、
-// 已启用且置顶，让两处心智一致。
-async function ensureLocalAsrChannel(providerType: string): Promise<void> {
+// Core 原子 activation 同步 preferences、credential active channel 与 runtime；
+// UI 只负责确保目标渠道存在并发起一个 use-case。
+async function ensureLocalAsrChannel(providerType: string): Promise<string> {
     let channels = await listChannels("asr")
-    if (!channels.some(c => c.id === providerType)) {
-        await createChannel("asr", providerType, "")
+    let current = channels.find(c => c.providerType === providerType)
+    if (!current) {
+        const id = await createChannel("asr", providerType, "")
         channels = await listChannels("asr")
+        current = channels.find(c => c.id === id)
     }
-    const current = channels.find(c => c.id === providerType)
-    if (current && !current.enabled) {
-        await setChannelEnabled("asr", providerType, true)
+    if (!current) {
+        throw new Error(`local ASR channel was not created: ${providerType}`)
     }
-    if (channels[0]?.id !== providerType) {
+    if (!current.enabled) {
+        await setChannelEnabled("asr", current.id, true)
+    }
+    if (channels[0]?.id !== current.id) {
         await reorderChannels(
             "asr",
-            [providerType, ...channels.filter(c => c.id !== providerType).map(c => c.id)],
+            [current.id, ...channels.filter(c => c.id !== current.id).map(c => c.id)],
         )
     }
+    return current.id
 }
 
 // Foundry Local Whisper 后端只在 Windows 编译实体（foundry_local_sdk 仅 Windows），
@@ -1035,28 +1034,6 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
         }
     }
 
-    const syncFoundryPrefs = async (
-        modelAlias: FoundryLocalAsrModelAlias,
-        enableProvider: boolean,
-    ) => {
-        await updatePrefs((current) => {
-            const nextProvider = enableProvider
-                ? "foundry-local-whisper"
-                : current.activeAsrProvider
-            if (
-                current.activeAsrProvider === nextProvider &&
-                current.foundryLocalAsrModel === modelAlias
-            ) {
-                return current
-            }
-            return {
-                ...current,
-                activeAsrProvider: nextProvider,
-                foundryLocalAsrModel: modelAlias,
-            }
-        })
-    }
-
     const handleFoundryLanguageChange = async (
         languageHint: FoundryLocalAsrLanguageHint,
         restoreScroll?: () => void,
@@ -1108,10 +1085,8 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
         setFoundryBusy("enable")
         try {
             setError(null)
-            await setFoundryLocalAsrModel(alias)
-            await ensureLocalAsrChannel("foundry-local-whisper")
-            await setActiveAsrProvider("foundry-local-whisper")
-            await syncFoundryPrefs(alias, true)
+            const providerId = await ensureLocalAsrChannel("foundry-local-whisper")
+            await activateLocalAsr("foundry", alias, providerId)
             foundrySelectionDirty.current = false
             await refreshFoundryStatus()
         } catch (e) {
@@ -1135,9 +1110,8 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
         })
         try {
             setError(null)
-            await setFoundryLocalAsrModel(alias)
-            await syncFoundryPrefs(alias, false)
-            await prepareFoundryLocalAsr(alias)
+            const providerId = await ensureLocalAsrChannel("foundry-local-whisper")
+            await activateLocalAsr("foundry", alias, providerId)
             foundrySelectionDirty.current = false
             await refreshFoundryStatus()
             await refreshFoundryCatalog()
@@ -1152,11 +1126,9 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
     }
 
     // 侧栏「下载」动作：先启用（切供应商 + 写模型），再顺序准备/下载/加载。
-    // 不能并行跑 handleEnableFoundry + handlePrepareFoundry——两者都写 foundryBusy
-    // 与 syncFoundryPrefs，竞态会留下互相矛盾的启用状态（pr-agent #922）。
+    // 原子激活已包含 prepare/preload；侧栏动作不得再串联第二套设置写入。
     const handleEnableAndPrepareFoundry = async (alias: FoundryLocalAsrModelAlias) => {
         await handleEnableFoundry(alias)
-        await handlePrepareFoundry(alias)
     }
 
     const handleCancelFoundryPrepare = async () => {
@@ -1226,33 +1198,9 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
         }
     }
 
-    const syncSherpaPrefs = async (
-        modelAlias: SherpaOnnxModelAlias,
-        enableProvider: boolean,
-    ) => {
-        await updatePrefs((current) => {
-            const nextProvider = enableProvider
-                ? "sherpa-onnx-local"
-                : current.activeAsrProvider
-            if (
-                current.activeAsrProvider === nextProvider &&
-                current.sherpaOnnxModel === modelAlias
-            ) {
-                return current
-            }
-            return {
-                ...current,
-                activeAsrProvider: nextProvider,
-                sherpaOnnxModel: modelAlias,
-            }
-        })
-    }
-
     const activateSherpaProvider = async (modelAlias: SherpaOnnxModelAlias) => {
-        await setSherpaOnnxAsrModel(modelAlias)
-        await ensureLocalAsrChannel("sherpa-onnx-local")
-        await setActiveAsrProvider("sherpa-onnx-local")
-        await syncSherpaPrefs(modelAlias, true)
+        const providerId = await ensureLocalAsrChannel("sherpa-onnx-local")
+        await activateLocalAsr("sherpa_onnx", modelAlias, providerId)
         sherpaSelectionDirty.current = false
     }
 
@@ -1320,7 +1268,6 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
         try {
             setError(null)
             await activateSherpaProvider(selectedSherpaAlias)
-            await prepareSherpaOnnxAsr(selectedSherpaAlias)
             sherpaSelectionDirty.current = false
             await refreshSherpaStatus()
             await refreshSherpaCatalog()
@@ -1431,8 +1378,8 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
         }))
         try {
             setError(null)
-            await activateSherpaProvider(modelAlias)
             await downloadSherpaOnnxAsrModel(modelAlias, settings?.mirror)
+            await activateSherpaProvider(modelAlias)
         } catch (e) {
             const message = e instanceof Error ? e.message : String(e)
             setError(message)
@@ -1615,23 +1562,8 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                   : "local-qwen3-c",
     ) => {
         try {
-            await setLocalAsrActiveModel(modelId)
-            await ensureLocalAsrChannel(provider)
-            await setActiveAsrProvider(provider)
-            await updatePrefs((current) =>
-                current.activeAsrProvider === provider &&
-                (provider === "local-whisper"
-                    ? current.localWhisperActiveModel === modelId
-                    : current.localAsrActiveModel === modelId)
-                    ? current
-                    : {
-                          ...current,
-                          activeAsrProvider: provider,
-                          ...(provider === "local-whisper"
-                              ? { localWhisperActiveModel: modelId }
-                              : { localAsrActiveModel: modelId }),
-                      },
-            )
+            const providerId = await ensureLocalAsrChannel(provider)
+            await activateLocalAsr("generic", modelId, providerId)
             await refresh()
         } catch (e) {
             setError(e instanceof Error ? e.message : String(e))

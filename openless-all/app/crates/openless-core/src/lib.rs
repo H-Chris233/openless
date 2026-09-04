@@ -27,6 +27,7 @@ pub mod events;
 pub mod external_audio;
 pub mod history;
 pub mod host_document;
+mod hotkey_interpreter;
 mod less_computer;
 pub mod llm_gemini;
 mod marketplace;
@@ -53,6 +54,7 @@ pub mod selection_voice_intent;
 mod selection_voice_service;
 pub mod settings;
 pub mod shared_types;
+pub mod silence_auto_stop;
 pub mod streaming_insert;
 mod style_pack_archive;
 pub mod style_pack_store;
@@ -125,7 +127,8 @@ pub mod contract {
         WindowSpan,
     };
     pub use crate::local_asr_service::{
-        ModelPrepareProgressSink, ModelRuntimeAdapter, NativeModelState, StorageRebind,
+        LocalAsrRuntimeLease, ModelPrepareProgressSink, ModelRuntimeAdapter, NativeModelState,
+        StorageRebind,
     };
     pub use crate::model_store::{
         extract_archive_safely, merge_hf_tree_pages, merge_hf_tree_pages_with_base,
@@ -136,12 +139,14 @@ pub mod contract {
         ModelManifest, ModelStore, ModelStoreConfig, ModelTransport, ModelTransportRequest,
         ModelTransportResponse, ReqwestModelTransport,
     };
+    pub use crate::provider_rules::{AuthRequirement, ProviderDescriptor, ValidationProbe};
     pub use crate::provider_transport::{
         ProviderCancellation, ProviderTransport, ProviderTransportError, ProviderTransportRequest,
         ProviderTransportResponse, ReqwestProviderTransport,
     };
     pub use crate::remote_input_service::{
-        constant_time_eq, validate_pairing_pin, RemoteStreamSequence, REMOTE_INPUT_PAIRING_PIN_LEN,
+        constant_time_eq, validate_pairing_pin, RemoteFrameCodec, RemoteStreamSequence,
+        REMOTE_INPUT_PAIRING_PIN_LEN,
     };
     pub use crate::shared_types::{
         ChineseScriptPreference, ComboBinding, HotkeyBinding, HotkeyMode, HotkeyTrigger,
@@ -167,23 +172,24 @@ pub mod contract {
         DictationStartOptions, DictationStateSnapshot, DictionaryEntry, DirectoryResourceResolver,
         DownloadProgress, EngineFailure, EngineFailureStage, EngineProgress, EngineProgressSink,
         EngineResult, EngineStage, EventRecvError, EventSubscription, HistoryChange,
-        HistoryInsertStatus, HistorySource, HostAction, HostActions, HotkeyRuntimeTarget,
-        HotkeyStatus, InMemoryCredentialStore, InsertFallbackPayload, InsertOutcome,
-        LessComputerEvent, LessComputerEventKind, LessComputerHotkeyAction,
-        LessComputerVoiceSession, LocalAsrMirror, LocalAsrModelId, LocalAsrRuntime, LocalAsrTarget,
-        NotificationLevel, NotificationPayload, OpenLessBackend, PendingCorrection,
-        PermissionSnapshot, PermissionState, PlatformCapabilities, PolishDelta,
+        HistoryInsertStatus, HistorySource, HostAction, HostActions, HostContextAdapter,
+        HostContextCapture, HotkeyRuntimeTarget, HotkeyStatus, InMemoryCredentialStore,
+        InsertFallbackPayload, InsertOutcome, LessComputerEvent, LessComputerEventKind,
+        LessComputerHotkeyAction, LessComputerVoiceSession, LocalAsrMirror, LocalAsrModelId,
+        LocalAsrRuntime, LocalAsrTarget, NotificationLevel, NotificationPayload, OpenLessBackend,
+        PendingCorrection, PermissionSnapshot, PermissionState, PlatformCapabilities, PolishDelta,
         PolishFailurePolicy, PolishMode, PolishOutput, ProviderService, QaVoiceCaptureResult,
-        QaVoiceCaptureSession, RecordingArchive, RecordingProgressSink, ResourceResolver,
-        RuleSource, SecretValue, SelectionPolishOutputMode, SelectionVoiceIntentMode,
-        SelectionVoiceManualIntent, SessionId, SettingsCollisionPolicy, SettingsEffectFailure,
-        SettingsEffectKind, SettingsEffectPlan, SettingsEffectReceipt, SettingsRuntime,
-        SettingsUpdateOptions, SettingsUpdateOutcome, SettingsValueChange, StartupSnapshot,
-        StylePack, StylePackChange, StylePackExample, StylePackKind, TaskSpawner, TextInserter,
-        TextPolisher, TextStreamChunk, TextStreamSink, TokioTaskSpawner, TranscriptDelta,
-        TranscriptOutput, TranscriptionEngine, TranscriptionSession, VocabPreset, VocabPresetStore,
-        VocabularyChange, VoiceTranscriptionSession, BACKEND_CONTRACT_VERSION,
-        DICTATION_SAMPLE_RATE,
+        QaVoiceCaptureSession, RecordingArchive, RecordingControlAction, RecordingControlRequest,
+        RecordingControlSink, RecordingEvent, RecordingPlan, RecordingProgressSink,
+        ResourceResolver, RuleSource, SecretValue, SelectionPolishOutputMode,
+        SelectionVoiceIntentMode, SelectionVoiceManualIntent, SessionId, SettingsCollisionPolicy,
+        SettingsEffectFailure, SettingsEffectKind, SettingsEffectPlan, SettingsEffectReceipt,
+        SettingsRuntime, SettingsUpdateOptions, SettingsUpdateOutcome, SettingsValueChange,
+        StartupSnapshot, StylePack, StylePackChange, StylePackExample, StylePackKind, TaskSpawner,
+        TextInserter, TextPolisher, TextStreamChunk, TextStreamSink, TokioTaskSpawner,
+        TranscriptAccumulator, TranscriptDelta, TranscriptOutput, TranscriptionEngine,
+        TranscriptionSession, VocabPreset, VocabPresetStore, VocabularyChange,
+        VoiceTranscriptionSession, BACKEND_CONTRACT_VERSION, DICTATION_SAMPLE_RATE,
     };
 }
 
@@ -213,13 +219,14 @@ pub use config::{
 pub use correction::{apply_correction_rules, CorrectionRuleStore};
 pub use credentials::{
     ChannelKind, ChannelMutation, ChannelMutationResult, ChannelSummary, ChannelTestSummary,
-    CredentialKey, CredentialMetadata, CredentialNamespace, CredentialStore,
-    InMemoryCredentialStore, ProviderSlot, SecretValue, UnsupportedCredentialStore,
+    CredentialDirectory, CredentialKey, CredentialMetadata, CredentialMetadataStore,
+    CredentialNamespace, CredentialStore, InMemoryCredentialStore, ProviderChannelId, ProviderSlot,
+    ProviderType, SecretValue, UnsupportedCredentialStore,
 };
 pub use dictation_context::{
     build_asr_prompt, eligible_polish_context_turns, DictationAudioSource, DictationContext,
     DictationInsertionContext, DictationPolishContext, DictationStartOptions, DictationStopOptions,
-    PolishHistoryTurn, ProviderInvocation, ASR_PROMPT_CHAR_BUDGET,
+    PolishHistoryTurn, ProviderInvocation, RecordingPlan, ASR_PROMPT_CHAR_BUDGET,
 };
 pub use dictation_engine::{PipelineDictationEngine, PolishFailurePolicy};
 pub use domains::*;
@@ -232,8 +239,8 @@ pub use events::{
     BackendEvent, BackendEventKind, BackendEventPublisher, CodingAgentStreamEvent, EventRecvError,
     EventReplay, EventSubscription, LessComputerEvent, LessComputerEventKind,
     LocalAsrDownloadPhase, LocalAsrDownloadProgress, LocalAsrPreparePhase, LocalAsrPrepareProgress,
-    LocalAsrRuntimeKind, QaRecordingLevel, QaStateEvent, QaStateKind, RemoteInputErrorEvent,
-    RemoteInputRuntimeEvent,
+    LocalAsrRuntimeKind, QaRecordingLevel, QaStateEvent, QaStateKind, RecordingControlAction,
+    RecordingControlRequest, RemoteInputErrorEvent, RemoteInputRuntimeEvent,
 };
 pub use external_audio::{AudioRecorderRouter, ExternalAudioRecorder};
 pub use history::{HistoryStore, HISTORY_CAP};
@@ -244,7 +251,8 @@ pub use local_asr_catalog::{
     SherpaModelFamily,
 };
 pub use local_asr_service::{
-    ModelPrepareProgressSink, ModelRuntimeAdapter, NativeModelState, StorageRebind,
+    LocalAsrRuntimeLease, ModelPrepareProgressSink, ModelRuntimeAdapter, NativeModelState,
+    StorageRebind,
 };
 pub use marketplace::{MarketplaceConfig, MARKETPLACE_BASE_URL, MARKETPLACE_GITHUB_TOKEN_ACCOUNT};
 pub use model_store::{
@@ -258,11 +266,13 @@ pub use model_store::{
 };
 pub use ports::{
     ActiveRecording, AudioConsumer, AudioRecorder, DictationEngine, DirectoryResourceResolver,
-    EngineFailure, EngineFailureStage, EngineProgress, EngineProgressSink, EngineResult,
-    EngineStage, HostAction, HostActions, InsertOutcome, InsertWriteResult, NoopHostActions,
-    PolishOutput, RecordingArchive, RecordingProgressSink, ResourceResolver, TextInserter,
-    TextInsertionSession, TextPolisher, TextStreamChunk, TextStreamSink, TranscriptOutput,
-    TranscriptionEngine, TranscriptionSession, UnsupportedTextInserter, VoiceCapture,
+    EditObservationAdapter, EditObservationSink, EngineFailure, EngineFailureStage, EngineProgress,
+    EngineProgressSink, EngineResult, EngineStage, HostAction, HostActions, HostContextAdapter,
+    HostContextCapture, InsertOutcome, InsertWriteResult, NoopEditObservationAdapter,
+    NoopHostActions, NoopHostContextAdapter, PolishOutput, RecordingArchive, RecordingControlSink,
+    RecordingEvent, RecordingProgressSink, ResourceResolver, TextInserter, TextInsertionSession,
+    TextPolisher, TextStreamChunk, TextStreamSink, TranscriptOutput, TranscriptionEngine,
+    TranscriptionSession, UnsupportedTextInserter, VoiceCapture,
 };
 pub use preferences::PreferencesStore;
 pub use prompt_compose::{
@@ -273,6 +283,7 @@ pub use prompt_compose::{
     POLISH_TRANSLATE_TGT_MARKER,
 };
 pub use provider_registry::{DictationEngineRouter, TextPolisherRouter, TranscriptionRouter};
+pub use provider_rules::{AuthRequirement, ProviderDescriptor, ValidationProbe};
 pub use provider_service::ProviderService;
 pub use provider_transport::{
     ProviderCancellation, ProviderTransport, ProviderTransportError, ProviderTransportRequest,
@@ -284,8 +295,8 @@ pub use providers::{
 };
 pub use qa_service::QaService;
 pub use remote_input_service::{
-    constant_time_eq, validate_pairing_pin, RemoteInputService, RemoteStreamSequence,
-    REMOTE_INPUT_MAX_PCM_FRAME_BYTES, REMOTE_INPUT_PAIRING_PIN_LEN,
+    constant_time_eq, validate_pairing_pin, RemoteFrameCodec, RemoteInputService,
+    RemoteStreamSequence, REMOTE_INPUT_MAX_PCM_FRAME_BYTES, REMOTE_INPUT_PAIRING_PIN_LEN,
 };
 pub use selection_voice_intent::SelectionVoiceIntent;
 pub use settings::*;
@@ -306,6 +317,7 @@ pub use shortcut_types::{
     sync_dictation_hotkey_legacy_fields, validate_shortcut_binding, ShortcutBindingError,
     SIDE_SPECIFIC_NON_DICTATION_MSG,
 };
+pub use silence_auto_stop::{SilenceAutoStop, SilenceDecision};
 pub use streaming_insert::{
     append_typed_prefix, streaming_insert_eligible, StreamingInsertState,
     STREAMING_FLUSH_INTERVAL_MS,
@@ -325,6 +337,6 @@ pub use types::{
     InsertFallbackPayload, NotificationLevel, NotificationPayload, PermissionSnapshot,
     PermissionState, PolishDelta, PolishMode, PreferencesChange, RuleSource,
     SelectionVoiceIntentMode, SelectionVoiceManualIntent, SessionId, StylePackChange,
-    TranscriptDelta, VocabPreset, VocabPresetStore, VocabularyChange,
+    TranscriptAccumulator, TranscriptDelta, VocabPreset, VocabPresetStore, VocabularyChange,
 };
 pub use vocabulary::{list_vocab_presets, save_vocab_presets, DictionaryStore};

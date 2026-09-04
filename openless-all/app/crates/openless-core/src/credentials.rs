@@ -7,6 +7,55 @@ use futures_util::future::BoxFuture;
 use crate::errors::{BackendError, BackendErrorCode};
 use crate::shared_types::{CredentialsStatus, UserPreferences};
 
+macro_rules! provider_identifier {
+    ($name:ident, $label:literal) => {
+        #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize)]
+        #[serde(transparent)]
+        pub struct $name(String);
+
+        impl $name {
+            pub fn new(value: impl Into<String>) -> Result<Self, BackendError> {
+                let value = value.into();
+                let value = value.trim();
+                if value.is_empty() {
+                    return Err(BackendError::new(
+                        BackendErrorCode::InvalidArgument,
+                        concat!($label, " must not be blank"),
+                    ));
+                }
+                Ok(Self(value.to_string()))
+            }
+
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+
+            pub fn into_inner(self) -> String {
+                self.0
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str(&self.0)
+            }
+        }
+
+        impl<'de> serde::Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+                Self::new(value).map_err(serde::de::Error::custom)
+            }
+        }
+    };
+}
+
+provider_identifier!(ProviderChannelId, "provider channel id");
+provider_identifier!(ProviderType, "provider type");
+
 pub const ASR_API_KEY_ACCOUNT: &str = "asr.api_key";
 pub const ASR_ENDPOINT_ACCOUNT: &str = "asr.endpoint";
 pub const ASR_MODEL_ACCOUNT: &str = "asr.model";
@@ -249,6 +298,83 @@ pub trait CredentialStore: Send + Sync {
     }
 }
 
+/// Persistence-only seam for non-secret channel metadata.
+///
+/// Implementations project their existing secure payload into
+/// [`CredentialMetadata`]; mutation, ordering and active-channel policy stay in
+/// [`CredentialDirectory`].
+pub trait CredentialMetadataStore: Send + Sync {
+    fn load_metadata(&self) -> BoxFuture<'static, Result<CredentialMetadata, BackendError>>;
+
+    fn save_metadata(
+        &self,
+        metadata: CredentialMetadata,
+    ) -> BoxFuture<'static, Result<(), BackendError>>;
+
+    fn channel_has_secrets(
+        &self,
+        kind: ChannelKind,
+        channel_id: String,
+    ) -> BoxFuture<'static, Result<bool, BackendError>>;
+}
+
+/// Core-owned channel directory. Hosts provide storage; this type owns every
+/// channel mutation and persists one metadata revision per successful change.
+#[derive(Clone)]
+pub struct CredentialDirectory {
+    store: std::sync::Arc<dyn CredentialMetadataStore>,
+}
+
+impl CredentialDirectory {
+    pub fn new(store: std::sync::Arc<dyn CredentialMetadataStore>) -> Self {
+        Self { store }
+    }
+
+    pub async fn list_channels(
+        &self,
+        kind: ChannelKind,
+    ) -> Result<Vec<ChannelSummary>, BackendError> {
+        Ok(self.store.load_metadata().await?.list_channels(kind))
+    }
+
+    pub async fn active_provider(&self, slot: ProviderSlot) -> Result<String, BackendError> {
+        Ok(self.store.load_metadata().await?.active_provider(slot))
+    }
+
+    pub async fn mutate_channel(
+        &self,
+        mutation: ChannelMutation,
+    ) -> Result<ChannelMutationResult, BackendError> {
+        let mut metadata = self.store.load_metadata().await?;
+        let has_credentials = match &mutation {
+            ChannelMutation::DeleteIfBlank { kind, id } => {
+                self.store.channel_has_secrets(*kind, id.clone()).await?
+            }
+            _ => false,
+        };
+        let result = metadata.apply_channel_mutation(mutation, |_| has_credentials)?;
+        if !matches!(result, ChannelMutationResult::DeletedIfBlank(false)) {
+            self.store.save_metadata(metadata).await?;
+        }
+        Ok(result)
+    }
+
+    pub async fn set_active_provider(
+        &self,
+        slot: ProviderSlot,
+        provider_id: String,
+    ) -> Result<(), BackendError> {
+        let mut metadata = self.store.load_metadata().await?;
+        let revision = metadata.revision();
+        metadata.select_active_provider(slot, provider_id)?;
+        if metadata.revision() == revision {
+            Ok(())
+        } else {
+            self.store.save_metadata(metadata).await
+        }
+    }
+}
+
 /// Non-secret provider/channel metadata that can be persisted by any host.
 /// Secret values remain in the platform credential vault and are represented
 /// here only through the `has_credentials` callback used for blank cleanup.
@@ -259,11 +385,41 @@ pub struct CredentialMetadata {
     channels: HashMap<ChannelKind, Vec<ChannelSummary>>,
     #[serde(default)]
     active_providers: HashMap<ProviderSlot, String>,
+    #[serde(default)]
+    revision: u64,
 }
 
 impl CredentialMetadata {
+    pub fn from_parts(
+        asr_channels: Vec<ChannelSummary>,
+        llm_channels: Vec<ChannelSummary>,
+        active_asr: impl Into<String>,
+        active_llm: impl Into<String>,
+        active_omni: impl Into<String>,
+        revision: u64,
+    ) -> Self {
+        let mut channels = HashMap::new();
+        channels.insert(ChannelKind::Asr, asr_channels);
+        channels.insert(ChannelKind::Llm, llm_channels);
+        let mut active_providers = HashMap::new();
+        active_providers.insert(ProviderSlot::Asr, active_asr.into());
+        active_providers.insert(ProviderSlot::Llm, active_llm.into());
+        active_providers.insert(ProviderSlot::Omni, active_omni.into());
+        Self {
+            channels,
+            active_providers,
+            revision,
+        }
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
     pub fn list_channels(&self, kind: ChannelKind) -> Vec<ChannelSummary> {
-        self.channels.get(&kind).cloned().unwrap_or_default()
+        let mut channels = self.channels.get(&kind).cloned().unwrap_or_default();
+        normalize_channel_order(&mut channels);
+        channels
     }
 
     pub fn active_provider(&self, slot: ProviderSlot) -> String {
@@ -273,8 +429,70 @@ impl CredentialMetadata {
             .unwrap_or_default()
     }
 
-    pub fn set_active_provider(&mut self, slot: ProviderSlot, provider_id: String) {
-        self.active_providers.insert(slot, provider_id);
+    fn assign_active_provider(&mut self, slot: ProviderSlot, provider_id: String) {
+        if self.active_providers.get(&slot) != Some(&provider_id) {
+            self.active_providers.insert(slot, provider_id);
+            self.revision = self.revision.saturating_add(1);
+        }
+    }
+
+    pub fn select_active_provider(
+        &mut self,
+        slot: ProviderSlot,
+        provider_id: String,
+    ) -> Result<(), BackendError> {
+        let provider_id = provider_id.trim();
+        if provider_id.is_empty() {
+            return Err(BackendError::new(
+                BackendErrorCode::InvalidArgument,
+                "provider channel id must not be blank",
+            ));
+        }
+        let kind = match slot {
+            ProviderSlot::Asr => Some(ChannelKind::Asr),
+            ProviderSlot::Llm => Some(ChannelKind::Llm),
+            ProviderSlot::Omni => None,
+        };
+        let mut reordered = false;
+        if let Some(kind) = kind {
+            let channels = self.channels.entry(kind).or_default();
+            if let Some(selected) = channels.iter().find(|channel| channel.id == provider_id) {
+                if !selected.enabled {
+                    return Err(BackendError::new(
+                        BackendErrorCode::InvalidState,
+                        "the selected provider channel is disabled",
+                    ));
+                }
+                normalize_channel_order(channels);
+                let previous = channels
+                    .iter()
+                    .map(|channel| channel.id.clone())
+                    .collect::<Vec<_>>();
+                let mut ids = vec![provider_id.to_string()];
+                ids.extend(
+                    channels
+                        .iter()
+                        .filter(|channel| channel.id != provider_id)
+                        .map(|channel| channel.id.clone()),
+                );
+                for (order, id) in ids.iter().enumerate() {
+                    if let Some(channel) = channels.iter_mut().find(|channel| &channel.id == id) {
+                        channel.order = order as u32;
+                    }
+                }
+                normalize_channel_order(channels);
+                reordered = channels
+                    .iter()
+                    .map(|channel| channel.id.as_str())
+                    .ne(previous.iter().map(String::as_str));
+            }
+        }
+        let revision = self.revision;
+        self.assign_active_provider(slot, provider_id.to_string());
+        if reordered && self.revision == revision {
+            self.revision = self.revision.saturating_add(1);
+        }
+        Ok(())
     }
 
     pub fn apply_channel_mutation(
@@ -282,6 +500,23 @@ impl CredentialMetadata {
         mutation: ChannelMutation,
         has_credentials: impl Fn(&str) -> bool,
     ) -> Result<ChannelMutationResult, BackendError> {
+        let mutation_kind = match &mutation {
+            ChannelMutation::Create { kind, .. }
+            | ChannelMutation::SetProviderType { kind, .. }
+            | ChannelMutation::DeleteIfBlank { kind, .. }
+            | ChannelMutation::Rename { kind, .. }
+            | ChannelMutation::Delete { kind, .. }
+            | ChannelMutation::SetEnabled { kind, .. }
+            | ChannelMutation::Reorder { kind, .. }
+            | ChannelMutation::RecordTest { kind, .. } => *kind,
+        };
+        let slot = slot_for_kind(mutation_kind);
+        let active = self.active_provider(slot);
+        let active_was_managed = active.is_empty()
+            || self
+                .channels
+                .get(&mutation_kind)
+                .is_some_and(|channels| channels.iter().any(|channel| channel.id == active));
         let (kind, result) = match mutation {
             ChannelMutation::Create {
                 kind,
@@ -296,13 +531,20 @@ impl CredentialMetadata {
                     ));
                 }
                 let channels = self.channels.entry(kind).or_default();
-                let id = uuid::Uuid::new_v4().to_string();
+                let id = allocate_channel_id(channels, provider_type);
+                let order = channels
+                    .iter()
+                    .filter(|channel| channel.enabled)
+                    .map(|channel| channel.order)
+                    .max()
+                    .map(|order| order.saturating_add(1))
+                    .unwrap_or(0);
                 channels.push(ChannelSummary {
                     id: id.clone(),
                     name: name.trim().to_string(),
                     provider_type: provider_type.to_string(),
                     enabled: true,
-                    order: channels.len() as u32,
+                    order,
                     last_test: None,
                 });
                 (kind, ChannelMutationResult::Created(id))
@@ -342,19 +584,55 @@ impl CredentialMetadata {
                 (kind, ChannelMutationResult::Applied)
             }
             ChannelMutation::Delete { kind, id } => {
-                self.channels
-                    .entry(kind)
-                    .or_default()
-                    .retain(|channel| channel.id != id);
+                let channels = self.channels.entry(kind).or_default();
+                let before = channels.len();
+                channels.retain(|channel| channel.id != id);
+                if channels.len() == before {
+                    return Err(unknown_channel(kind, &id));
+                }
                 (kind, ChannelMutationResult::Applied)
             }
             ChannelMutation::SetEnabled { kind, id, enabled } => {
-                find_channel_mut(&mut self.channels, kind, &id)?.enabled = enabled;
+                let channels = self.channels.entry(kind).or_default();
+                let target_order = if enabled {
+                    channels
+                        .iter()
+                        .filter(|channel| channel.id != id && channel.enabled)
+                        .map(|channel| channel.order)
+                        .max()
+                } else {
+                    channels
+                        .iter()
+                        .filter(|channel| channel.id != id)
+                        .map(|channel| channel.order)
+                        .max()
+                }
+                .map(|order| order.saturating_add(1))
+                .unwrap_or(0);
+                let channel = channels
+                    .iter_mut()
+                    .find(|channel| channel.id == id)
+                    .ok_or_else(|| unknown_channel(kind, &id))?;
+                channel.enabled = enabled;
+                channel.order = target_order;
                 (kind, ChannelMutationResult::Applied)
             }
             ChannelMutation::Reorder { kind, ids } => {
                 let channels = self.channels.entry(kind).or_default();
-                for (order, id) in ids.iter().enumerate() {
+                normalize_channel_order(channels);
+                let mut ordered_ids = Vec::with_capacity(channels.len());
+                for id in ids {
+                    if channels.iter().any(|channel| channel.id == id) && !ordered_ids.contains(&id)
+                    {
+                        ordered_ids.push(id);
+                    }
+                }
+                for channel in channels.iter() {
+                    if !ordered_ids.contains(&channel.id) {
+                        ordered_ids.push(channel.id.clone());
+                    }
+                }
+                for (order, id) in ordered_ids.iter().enumerate() {
                     if let Some(channel) = channels.iter_mut().find(|channel| &channel.id == id) {
                         channel.order = order as u32;
                     }
@@ -380,7 +658,31 @@ impl CredentialMetadata {
             }
         };
         normalize_channel_order(self.channels.entry(kind).or_default());
+        if !matches!(result, ChannelMutationResult::DeletedIfBlank(false)) {
+            self.revision = self.revision.saturating_add(1);
+            if active_was_managed {
+                self.sync_active(kind);
+            }
+        }
         Ok(result)
+    }
+
+    fn sync_active(&mut self, kind: ChannelKind) {
+        let slot = slot_for_kind(kind);
+        let active = self
+            .channels
+            .get(&kind)
+            .and_then(|channels| channels.iter().find(|channel| channel.enabled))
+            .map(|channel| channel.id.clone())
+            .unwrap_or_default();
+        self.active_providers.insert(slot, active);
+    }
+}
+
+fn slot_for_kind(kind: ChannelKind) -> ProviderSlot {
+    match kind {
+        ChannelKind::Asr => ProviderSlot::Asr,
+        ChannelKind::Llm => ProviderSlot::Llm,
     }
 }
 
@@ -410,7 +712,13 @@ impl CredentialStore for InMemoryCredentialStore {
             .read()
             .expect("credential status lock poisoned")
             .clone();
-        status.pipeline_mode = preferences.pipeline_mode;
+        status.pipeline_mode = crate::shared_types::effective_pipeline_mode(
+            preferences.multimodal_pipeline_enabled,
+            preferences.pipeline_mode,
+        );
+        if status.pipeline_mode != crate::shared_types::PipelineMode::Multimodal {
+            status.omni_configured = false;
+        }
         Box::pin(async move { Ok(status) })
     }
 
@@ -493,11 +801,48 @@ impl CredentialStore for InMemoryCredentialStore {
         slot: ProviderSlot,
         provider_id: String,
     ) -> BoxFuture<'static, Result<(), BackendError>> {
-        self.metadata
+        let result = self
+            .metadata
             .write()
             .expect("credential metadata lock poisoned")
-            .set_active_provider(slot, provider_id);
+            .select_active_provider(slot, provider_id);
+        Box::pin(async move { result })
+    }
+}
+
+impl CredentialMetadataStore for InMemoryCredentialStore {
+    fn load_metadata(&self) -> BoxFuture<'static, Result<CredentialMetadata, BackendError>> {
+        let metadata = self
+            .metadata
+            .read()
+            .expect("credential metadata lock poisoned")
+            .clone();
+        Box::pin(async move { Ok(metadata) })
+    }
+
+    fn save_metadata(
+        &self,
+        metadata: CredentialMetadata,
+    ) -> BoxFuture<'static, Result<(), BackendError>> {
+        *self
+            .metadata
+            .write()
+            .expect("credential metadata lock poisoned") = metadata;
         Box::pin(async { Ok(()) })
+    }
+
+    fn channel_has_secrets(
+        &self,
+        _kind: ChannelKind,
+        channel_id: String,
+    ) -> BoxFuture<'static, Result<bool, BackendError>> {
+        let has_secrets = self
+            .values
+            .read()
+            .expect("credential values lock poisoned")
+            .keys()
+            .any(|key| key.provider_id.as_deref() == Some(channel_id.as_str()));
+        Box::pin(async move { Ok(has_secrets) })
     }
 }
 
@@ -511,12 +856,27 @@ fn find_channel_mut<'a>(
         .or_default()
         .iter_mut()
         .find(|channel| channel.id == id)
-        .ok_or_else(|| {
-            BackendError::new(
-                BackendErrorCode::InvalidArgument,
-                format!("unknown {kind:?} channel: {id}"),
-            )
-        })
+        .ok_or_else(|| unknown_channel(kind, id))
+}
+
+fn unknown_channel(kind: ChannelKind, id: &str) -> BackendError {
+    BackendError::new(
+        BackendErrorCode::InvalidArgument,
+        format!("unknown {kind:?} channel: {id}"),
+    )
+}
+
+fn allocate_channel_id(channels: &[ChannelSummary], provider_type: &str) -> String {
+    if !channels.iter().any(|channel| channel.id == provider_type) {
+        return provider_type.to_string();
+    }
+    for suffix in 2..u32::MAX {
+        let candidate = format!("{provider_type}-{suffix}");
+        if !channels.iter().any(|channel| channel.id == candidate) {
+            return candidate;
+        }
+    }
+    unreachable!("channel id space exhausted")
 }
 
 fn normalize_channel_order(channels: &mut [ChannelSummary]) {
@@ -535,7 +895,10 @@ impl CredentialStore for UnsupportedCredentialStore {
     ) -> BoxFuture<'static, Result<CredentialsStatus, BackendError>> {
         Box::pin(async move {
             Ok(CredentialsStatus {
-                pipeline_mode: preferences.pipeline_mode,
+                pipeline_mode: crate::shared_types::effective_pipeline_mode(
+                    preferences.multimodal_pipeline_enabled,
+                    preferences.pipeline_mode,
+                ),
                 ..CredentialsStatus::default()
             })
         })
@@ -573,6 +936,158 @@ fn unsupported_credentials<T>() -> BoxFuture<'static, Result<T, BackendError>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn summary(id: &str, order: u32, enabled: bool) -> ChannelSummary {
+        ChannelSummary {
+            id: id.to_string(),
+            name: String::new(),
+            provider_type: id.to_string(),
+            enabled,
+            order,
+            last_test: None,
+        }
+    }
+
+    #[test]
+    fn channel_ids_and_active_order_match_the_legacy_directory_contract() {
+        let mut metadata = CredentialMetadata::default();
+
+        let first = metadata
+            .apply_channel_mutation(
+                ChannelMutation::Create {
+                    kind: ChannelKind::Llm,
+                    provider_type: "deepseek".to_string(),
+                    name: "primary".to_string(),
+                },
+                |_| false,
+            )
+            .unwrap();
+        let second = metadata
+            .apply_channel_mutation(
+                ChannelMutation::Create {
+                    kind: ChannelKind::Llm,
+                    provider_type: "deepseek".to_string(),
+                    name: "backup".to_string(),
+                },
+                |_| false,
+            )
+            .unwrap();
+
+        assert_eq!(
+            first,
+            ChannelMutationResult::Created("deepseek".to_string())
+        );
+        assert_eq!(
+            second,
+            ChannelMutationResult::Created("deepseek-2".to_string())
+        );
+        assert_eq!(metadata.active_provider(ProviderSlot::Llm), "deepseek");
+        assert_eq!(metadata.revision(), 2);
+
+        metadata
+            .apply_channel_mutation(
+                ChannelMutation::Reorder {
+                    kind: ChannelKind::Llm,
+                    ids: vec!["deepseek-2".to_string(), "deepseek".to_string()],
+                },
+                |_| false,
+            )
+            .unwrap();
+        assert_eq!(metadata.active_provider(ProviderSlot::Llm), "deepseek-2");
+
+        metadata
+            .apply_channel_mutation(
+                ChannelMutation::SetEnabled {
+                    kind: ChannelKind::Llm,
+                    id: "deepseek-2".to_string(),
+                    enabled: false,
+                },
+                |_| false,
+            )
+            .unwrap();
+        assert_eq!(metadata.active_provider(ProviderSlot::Llm), "deepseek");
+        assert_eq!(
+            metadata
+                .list_channels(ChannelKind::Llm)
+                .into_iter()
+                .map(|channel| (channel.id, channel.enabled))
+                .collect::<Vec<_>>(),
+            vec![
+                ("deepseek".to_string(), true),
+                ("deepseek-2".to_string(), false)
+            ]
+        );
+
+        metadata
+            .apply_channel_mutation(
+                ChannelMutation::Delete {
+                    kind: ChannelKind::Llm,
+                    id: "deepseek".to_string(),
+                },
+                |_| false,
+            )
+            .unwrap();
+        assert_eq!(metadata.active_provider(ProviderSlot::Llm), "");
+        metadata
+            .apply_channel_mutation(
+                ChannelMutation::SetEnabled {
+                    kind: ChannelKind::Llm,
+                    id: "deepseek-2".to_string(),
+                    enabled: true,
+                },
+                |_| false,
+            )
+            .unwrap();
+        assert_eq!(metadata.active_provider(ProviderSlot::Llm), "deepseek-2");
+    }
+
+    #[test]
+    fn partial_reorder_preserves_unlisted_channel_order_and_blank_delete_is_safe() {
+        let mut metadata = CredentialMetadata::from_parts(
+            vec![],
+            vec![
+                summary("a", 0, true),
+                summary("b", 1, true),
+                summary("c", 2, true),
+            ],
+            "",
+            "a",
+            "custom",
+            7,
+        );
+
+        metadata
+            .apply_channel_mutation(
+                ChannelMutation::Reorder {
+                    kind: ChannelKind::Llm,
+                    ids: vec!["c".to_string(), "a".to_string()],
+                },
+                |_| false,
+            )
+            .unwrap();
+        assert_eq!(
+            metadata
+                .list_channels(ChannelKind::Llm)
+                .into_iter()
+                .map(|channel| channel.id)
+                .collect::<Vec<_>>(),
+            vec!["c".to_string(), "a".to_string(), "b".to_string()]
+        );
+
+        assert_eq!(
+            metadata
+                .apply_channel_mutation(
+                    ChannelMutation::DeleteIfBlank {
+                        kind: ChannelKind::Llm,
+                        id: "a".to_string(),
+                    },
+                    |id| id == "a",
+                )
+                .unwrap(),
+            ChannelMutationResult::DeletedIfBlank(false)
+        );
+        assert_eq!(metadata.revision(), 8);
+    }
 
     #[tokio::test]
     async fn in_memory_store_round_trips_secrets_without_exposing_debug_or_serde() {
@@ -614,5 +1129,64 @@ mod tests {
                 .code,
             BackendErrorCode::InvalidArgument
         );
+    }
+
+    #[test]
+    fn provider_identifiers_are_distinct_validated_wire_values() {
+        let channel = ProviderChannelId::new(" channel-a ").unwrap();
+        let provider = ProviderType::new(" openai ").unwrap();
+        assert_eq!(channel.as_str(), "channel-a");
+        assert_eq!(provider.as_str(), "openai");
+        assert_eq!(serde_json::to_string(&channel).unwrap(), r#""channel-a""#);
+        assert!(serde_json::from_str::<ProviderChannelId>(r#"" ""#).is_err());
+        assert!(serde_json::from_str::<ProviderType>(r#""""#).is_err());
+    }
+
+    #[tokio::test]
+    async fn credential_directory_owns_mutation_while_repository_only_persists() {
+        let repository = std::sync::Arc::new(InMemoryCredentialStore::default());
+        let metadata_store: std::sync::Arc<dyn CredentialMetadataStore> = repository.clone();
+        let directory = CredentialDirectory::new(metadata_store);
+
+        let created = directory
+            .mutate_channel(ChannelMutation::Create {
+                kind: ChannelKind::Asr,
+                provider_type: "openai-compatible".into(),
+                name: "Local".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            created,
+            ChannelMutationResult::Created("openai-compatible".into())
+        );
+        assert_eq!(
+            directory.active_provider(ProviderSlot::Asr).await.unwrap(),
+            "openai-compatible"
+        );
+        let second = directory
+            .mutate_channel(ChannelMutation::Create {
+                kind: ChannelKind::Asr,
+                provider_type: "openai-compatible".into(),
+                name: "Backup".into(),
+            })
+            .await
+            .unwrap();
+        let ChannelMutationResult::Created(second) = second else {
+            panic!("second channel was not created");
+        };
+        directory
+            .set_active_provider(ProviderSlot::Asr, second.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            directory.active_provider(ProviderSlot::Asr).await.unwrap(),
+            second
+        );
+        assert_eq!(
+            directory.list_channels(ChannelKind::Asr).await.unwrap()[0].name,
+            "Backup"
+        );
+        assert_eq!(repository.load_metadata().await.unwrap().revision(), 3);
     }
 }

@@ -1,7 +1,7 @@
 {
   "schemaVersion": "1.0",
   "contractVersion": "2.0.0",
-  "observedAt": "2026-08-29",
+  "observedAt": "2026-09-04",
   "purpose": "M0 compatibility baseline for the Tauri adapter and the Linux egui host",
   "sourceOfTruth": {
     "commands": "openless-all/app/src-tauri/src/lib.rs app_invoke_handler_* macros",
@@ -101,10 +101,12 @@
     "list_history",
     "list_local_ips",
     "list_microphone_devices",
+    "list_provider_descriptors",
     "list_provider_models",
     "list_style_packs",
     "list_vocab",
     "list_vocab_presets",
+    "local_asr_activate",
     "local_asr_cancel_download",
     "local_asr_delete_model",
     "local_asr_download_model",
@@ -317,6 +319,7 @@
     "transcript_delta",
     "polish_delta",
     "dictation_completed",
+    "recording_control_requested",
     "selection_state_changed",
     "selection_voice_state_changed",
     "insert_fallback",
@@ -395,16 +398,16 @@
     "additiveChange": "new optional fields require a default"
   },
   "counts": {
-    "tauriCommandsObserved": 197,
+    "tauriCommandsObserved": 199,
     "legacyEventsObserved": 30,
-    "coreEventKindsDefined": 29
+    "coreEventKindsDefined": 30
   },
   "implementationStatus": {
     "sharedRepositories": "preferences, history, activity, vocabulary, correction, style packs",
-    "sharedCredentialContract": "CredentialStore plus SecretValue and provider channel metadata",
-    "complexDomains": "stable interfaces exist; missing adapters return Unsupported",
-    "linuxAdapters": "credentials, resources, fcitx5 insertion and hotkeys, capabilities, cpal recording, host actions, provider routing, single-instance intent broker and native runtime lifecycle",
+    "sharedCredentialContract": "CredentialDirectory owns provider channel mutation, ordering and active selection; Host stores metadata and SecretValue",
+    "complexDomains": "stable interfaces exist; Linux production injects QA, Remote Input, Selection, Provider, Model and Coding Agent adapters",
+    "linuxAdapters": "credentials/provider UI, resources, packaged Qwen runtime, fcitx5 insertion/hotkeys/selection preview, capabilities, cpal recording, QA, TLS Remote Input, host actions, single-instance intent broker and native runtime lifecycle",
     "releaseGate": "Linux release requires successful artifacts and real Ubuntu audio, focus/input, install, upgrade, and rollback evidence"
   },
-  "status": "all 30 legacy events and 29 Core events are classified under contract 2.0.0; real-platform release evidence remains gated"
+  "status": "all 30 legacy events and 30 Core events are classified under contract 2.0.0; real-platform release evidence remains gated"
 }

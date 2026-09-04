@@ -328,6 +328,20 @@ pub struct RemoteInputErrorEvent {
     pub port: u16,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordingControlAction {
+    Stop,
+    Cancel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingControlRequest {
+    pub session_id: SessionId,
+    pub action: RecordingControlAction,
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum BackendEventKind {
@@ -337,6 +351,7 @@ pub enum BackendEventKind {
     TranscriptDelta(TranscriptDelta),
     PolishDelta(PolishDelta),
     DictationCompleted(DictationResult),
+    RecordingControlRequested(RecordingControlRequest),
     SelectionStateChanged(SelectionSnapshot),
     SelectionVoiceStateChanged(SelectionVoiceSnapshot),
     InsertFallback(InsertFallbackPayload),

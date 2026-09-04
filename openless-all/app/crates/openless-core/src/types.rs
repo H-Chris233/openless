@@ -250,6 +250,7 @@ pub struct DictationResult {
 #[serde(rename_all = "camelCase")]
 pub enum InsertStatus {
     Inserted,
+    PasteSent,
     CopiedFallback,
     NotRequested,
 }
@@ -260,6 +261,36 @@ pub struct TranscriptDelta {
     pub text: String,
     pub offset: u64,
     pub is_final: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TranscriptAccumulator {
+    text: String,
+}
+
+impl TranscriptAccumulator {
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub fn apply(&mut self, delta: &TranscriptDelta) -> Result<(), crate::errors::BackendError> {
+        let offset = usize::try_from(delta.offset).map_err(|_| {
+            crate::errors::BackendError::new(
+                crate::errors::BackendErrorCode::InvalidArgument,
+                "transcript offset exceeds this platform's address space",
+            )
+        })?;
+        if offset > self.text.chars().count() {
+            return Err(crate::errors::BackendError::new(
+                crate::errors::BackendErrorCode::InvalidArgument,
+                "transcript delta starts after the current text",
+            ));
+        }
+        let mut next = self.text.chars().take(offset).collect::<String>();
+        next.push_str(&delta.text);
+        self.text = next;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -349,6 +380,41 @@ pub struct StylePackChange {
 mod tests {
     use super::*;
     use crate::shared_types::PlatformCapabilities;
+
+    #[test]
+    fn transcript_accumulator_applies_unicode_replace_from_offsets() {
+        let mut transcript = TranscriptAccumulator::default();
+        transcript
+            .apply(&TranscriptDelta {
+                text: "你".into(),
+                offset: 0,
+                is_final: false,
+            })
+            .unwrap();
+        transcript
+            .apply(&TranscriptDelta {
+                text: "你好🙂".into(),
+                offset: 0,
+                is_final: true,
+            })
+            .unwrap();
+        assert_eq!(transcript.text(), "你好🙂");
+        transcript
+            .apply(&TranscriptDelta {
+                text: "们".into(),
+                offset: 1,
+                is_final: true,
+            })
+            .unwrap();
+        assert_eq!(transcript.text(), "你们");
+        assert!(transcript
+            .apply(&TranscriptDelta {
+                text: "gap".into(),
+                offset: 3,
+                is_final: false,
+            })
+            .is_err());
+    }
 
     #[test]
     fn host_dto_serialization_names_and_units_are_stable() {

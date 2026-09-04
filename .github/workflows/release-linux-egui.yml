@@ -50,6 +50,7 @@ jobs:
             libfcitx5config-dev \
             libfcitx5core-dev \
             libfcitx5utils-dev \
+            libopenblas-dev \
             libssl-dev \
             libwayland-dev \
             libx11-dev \
@@ -89,6 +90,16 @@ jobs:
           cmake --build build --parallel
           test -s build/libopenless.so
           test -s build/openless.conf
+
+      - name: Checkout pinned Qwen ASR runtime source
+        run: git submodule update --init --depth 1 -- openless-all/app/src-tauri/vendor/qwen-asr
+
+      - name: Build portable Qwen ASR runtime
+        working-directory: openless-all/app/src-tauri/vendor/qwen-asr
+        run: |
+          make blas CFLAGS_BASE="-Wall -Wextra -O3 -ffast-math -mtune=generic"
+          test -x qwen_asr
+          ./qwen_asr --help >/dev/null 2>&1
 
       - name: Verify framework-independent Linux contract
         working-directory: openless-all/app
@@ -167,13 +178,19 @@ jobs:
           test "$(find "$OUTPUT" -maxdepth 1 -name '*.AppImage' | wc -l)" -eq 1
           ! ldd target/release/openless-linux-egui | grep -q 'not found'
           ! ldd target/release/openless-linux-egui | grep -Eqi 'webkit|wry|tauri'
+          ! ldd src-tauri/vendor/qwen-asr/qwen_asr | grep -q 'not found'
           dpkg-deb -c "$OUTPUT"/*.deb | grep -q 'usr/bin/openless'
           dpkg-deb -c "$OUTPUT"/*.deb | grep -q 'fcitx5/libopenless.so'
+          dpkg-deb -c "$OUTPUT"/*.deb | grep -q 'usr/lib/openless/resources/qwen-asr/qwen_asr'
           rpm -qlp "$OUTPUT"/*.rpm | grep -q '/usr/bin/openless'
           rpm -qlp "$OUTPUT"/*.rpm | grep -q '/usr/lib64/fcitx5/libopenless.so'
+          rpm -qlp "$OUTPUT"/*.rpm | grep -q '/usr/lib/openless/resources/qwen-asr/qwen_asr'
           "$OUTPUT"/*.AppImage --appimage-extract >/dev/null
           test -x squashfs-root/usr/bin/openless
           test -s squashfs-root/usr/lib/openless/resources/linux-fcitx5-plugin/libopenless.so
+          test -x squashfs-root/usr/lib/openless/resources/qwen-asr/qwen_asr
+          ! ldd squashfs-root/usr/lib/openless/resources/qwen-asr/qwen_asr | grep -q 'not found'
+          squashfs-root/usr/lib/openless/resources/qwen-asr/qwen_asr --help >/dev/null 2>&1
           rm -rf squashfs-root
 
       - name: Sign AppImage and write independent updater manifest

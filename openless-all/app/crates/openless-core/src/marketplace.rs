@@ -64,6 +64,15 @@ impl MarketplaceConfig {
     }
 }
 
+fn is_loopback_url(url: &reqwest::Url) -> bool {
+    url.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    })
+}
+
 #[derive(Clone)]
 struct SecretDeviceCode(String);
 
@@ -244,21 +253,36 @@ impl MarketplaceService {
         events: BackendEventPublisher,
         style_pack_revision: Arc<AtomicU64>,
     ) -> Result<Self, BackendError> {
+        let bypass_proxy = [
+            &config.base_url,
+            &config.github_device_code_url,
+            &config.github_access_token_url,
+            &config.github_user_url,
+        ]
+        .into_iter()
+        .all(is_loopback_url);
         let client = || {
-            reqwest::Client::builder()
+            let builder = reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(8))
                 .pool_idle_timeout(Duration::from_secs(90))
                 .pool_max_idle_per_host(8)
                 .tcp_keepalive(Duration::from_secs(30))
                 .redirect(reqwest::redirect::Policy::none())
-                .user_agent(concat!("OpenLess/", env!("CARGO_PKG_VERSION")))
-                .build()
-                .map_err(|error| {
-                    BackendError::new(
-                        BackendErrorCode::Internal,
-                        format!("build Marketplace HTTP client failed: {error}"),
-                    )
-                })
+                .user_agent(concat!("OpenLess/", env!("CARGO_PKG_VERSION")));
+            // Loopback-only configs back deterministic contract servers and
+            // local development services. Proxying OAuth device codes away
+            // from localhost is both incorrect and a secret-boundary leak.
+            let builder = if bypass_proxy {
+                builder.no_proxy()
+            } else {
+                builder
+            };
+            builder.build().map_err(|error| {
+                BackendError::new(
+                    BackendErrorCode::Internal,
+                    format!("build Marketplace HTTP client failed: {error}"),
+                )
+            })
         };
         Ok(Self {
             config,

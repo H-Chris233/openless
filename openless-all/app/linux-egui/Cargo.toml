@@ -9,7 +9,7 @@ publish = false
 
 [dependencies]
 openless-core = { path = "../crates/openless-core" }
-tokio = { version = "1", features = ["io-util", "macros", "process", "rt-multi-thread", "time"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 fs2 = "0.4"
 futures-util = "0.3"
 log = "0.4"
@@ -24,3 +24,9 @@ keyring = { version = "3.6.3", default-features = false, features = ["linux-nati
 cpal = "0.15"
 eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 libc = "0.2"
+axum = { version = "0.7", default-features = false, features = ["ws", "http1", "tokio"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto", "server", "http1"] }
+local-ip-address = "0.6"
+rcgen = "0.13"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }

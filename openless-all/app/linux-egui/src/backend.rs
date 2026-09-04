@@ -14,6 +14,7 @@ use openless_core::{
     SHARED_OMNI_PROVIDER_TYPES,
 };
 
+use crate::qa::LinuxQaRuntime;
 use crate::{
     Fcitx5TextInserter, LinuxCpalRecorder, LinuxCredentialStore, LinuxHostActions,
     LinuxPlatformApi, LinuxSelectionRuntime, LinuxSettingsRuntime,
@@ -25,25 +26,157 @@ pub struct LinuxBackendRuntime {
     pub settings_runtime: Arc<dyn SettingsRuntime>,
 }
 
-fn augment_linux_path(command: &mut std::process::Command) {
-    let Some(home) = std::env::var_os("HOME") else {
-        return;
-    };
-    let mut paths = vec![
-        std::path::PathBuf::from(&home).join(".local/bin"),
-        std::path::PathBuf::from(&home).join(".npm-global/bin"),
-        std::path::PathBuf::from(&home).join(".bun/bin"),
-    ];
-    paths.extend(std::env::split_paths(
-        &std::env::var_os("PATH").unwrap_or_default(),
-    ));
-    if let Ok(path) = std::env::join_paths(paths) {
-        command.env("PATH", path);
+const QWEN_PREPARE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const QWEN_TRANSCRIBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+#[derive(Debug)]
+struct QwenProcessOutput {
+    status: std::process::ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+async fn run_qwen_process(
+    executable: std::path::PathBuf,
+    args: Vec<std::ffi::OsString>,
+    stdin: Option<Vec<u8>>,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+    timeout: std::time::Duration,
+) -> Result<QwenProcessOutput, BackendError> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+        return Err(BackendError::new(
+            BackendErrorCode::Cancelled,
+            "Qwen ASR operation cancelled",
+        ));
     }
+    let mut command = tokio::process::Command::new(&executable);
+    command
+        .args(args)
+        .stdin(if stdin.is_some() {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::null()
+        })
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    crate::coding_agent::isolate_process_group(&mut command);
+    let mut child = command.spawn().map_err(|error| {
+        BackendError::new(
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+            ) {
+                BackendErrorCode::Unsupported
+            } else {
+                BackendErrorCode::Platform
+            },
+            format!("Qwen ASR runtime unavailable: {error}"),
+        )
+    })?;
+    let stdin_task = stdin.map(|input| {
+        let mut pipe = child.stdin.take().expect("piped Qwen stdin");
+        tokio::spawn(async move {
+            pipe.write_all(&input).await?;
+            pipe.shutdown().await
+        })
+    });
+    let mut stdout = child.stdout.take().expect("piped Qwen stdout");
+    let mut stderr = child.stderr.take().expect("piped Qwen stderr");
+    let stdout_task = tokio::spawn(async move {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).await.map(|_| bytes)
+    });
+    let stderr_task = tokio::spawn(async move {
+        let mut bytes = Vec::new();
+        stderr.read_to_end(&mut bytes).await.map(|_| bytes)
+    });
+    let started = tokio::time::Instant::now();
+    let status = loop {
+        tokio::select! {
+            status = child.wait() => break Ok(status.map_err(qwen_platform_error)?),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {
+                let error = if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                    Some(BackendError::new(
+                        BackendErrorCode::Cancelled,
+                        "Qwen ASR operation cancelled",
+                    ))
+                } else if started.elapsed() >= timeout {
+                    Some(BackendError::new(
+                        BackendErrorCode::Provider,
+                        "Qwen ASR operation timed out",
+                    ).retryable(true))
+                } else {
+                    None
+                };
+                if let Some(error) = error {
+                    crate::coding_agent::kill_process_group(&mut child)?;
+                    let _ = child.wait().await;
+                    break Err(error);
+                }
+            }
+        }
+    };
+    let stdin_result = match stdin_task {
+        Some(task) => Some(task.await.map_err(qwen_internal_error)?),
+        None => None,
+    };
+    let stdout = stdout_task
+        .await
+        .map_err(qwen_internal_error)?
+        .map_err(qwen_platform_error)?;
+    let stderr = stderr_task
+        .await
+        .map_err(qwen_internal_error)?
+        .map_err(qwen_platform_error)?;
+    let status = status?;
+    if status.success() {
+        if let Some(result) = stdin_result {
+            result.map_err(qwen_platform_error)?;
+        }
+    }
+    Ok(QwenProcessOutput {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+fn qwen_platform_error(error: impl std::fmt::Display) -> BackendError {
+    BackendError::new(BackendErrorCode::Platform, error.to_string())
+}
+
+fn qwen_internal_error(error: impl std::fmt::Display) -> BackendError {
+    BackendError::new(BackendErrorCode::Internal, error.to_string())
+}
+
+fn qwen_executable() -> Option<std::path::PathBuf> {
+    crate::resources::detect_qwen_runtime_path()
+        .ok()
+        .filter(|path| qwen_executable_is_available(path))
+}
+
+fn qwen_executable_is_available(path: &std::path::Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(target_os = "linux"))]
+    true
 }
 
 struct LinuxGenericAsrEngine {
     root: std::sync::Arc<std::sync::Mutex<std::path::PathBuf>>,
+    executable: Option<std::path::PathBuf>,
 }
 
 struct LinuxGenericLocalAsrRuntime {
@@ -51,15 +184,12 @@ struct LinuxGenericLocalAsrRuntime {
     loaded_model: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     // ponytail: one shared cancellation flag serializes model operations; per-model tokens if parallel downloads are needed.
     cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    executable: Option<std::path::PathBuf>,
 }
 
 impl Default for LinuxGenericLocalAsrRuntime {
     fn default() -> Self {
-        Self {
-            root: std::sync::Arc::new(std::sync::Mutex::new(Self::default_root())),
-            loaded_model: std::sync::Arc::new(std::sync::Mutex::new(None)),
-            cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        }
+        Self::from_models_root(Self::default_root(), qwen_executable())
     }
 }
 
@@ -81,16 +211,13 @@ impl LinuxGenericLocalAsrRuntime {
             .join("models")
     }
 
-    fn from_models_root(root: std::path::PathBuf) -> Self {
+    fn from_models_root(root: std::path::PathBuf, executable: Option<std::path::PathBuf>) -> Self {
         Self {
             root: std::sync::Arc::new(std::sync::Mutex::new(root)),
             loaded_model: std::sync::Arc::new(std::sync::Mutex::new(None)),
             cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            executable,
         }
-    }
-
-    fn executable() -> String {
-        std::env::var("OPENLESS_QWEN_ASR_BIN").unwrap_or_else(|_| "qwen_asr".into())
     }
 
     fn is_ready_dir(dir: &std::path::Path) -> bool {
@@ -113,28 +240,16 @@ impl LinuxGenericLocalAsrRuntime {
 }
 
 pub(crate) fn qwen_engine_available() -> bool {
-    match std::env::var_os("OPENLESS_QWEN_ASR_BIN") {
-        Some(path) => {
-            let path = std::path::Path::new(&path);
-            if path.is_absolute() {
-                path.is_file()
-            } else {
-                std::process::Command::new(path)
-                    .arg("--version")
-                    .output()
-                    .is_ok()
-            }
-        }
-        None => std::process::Command::new("qwen_asr")
-            .arg("--version")
-            .output()
-            .is_ok(),
-    }
+    qwen_executable().is_some()
 }
 
 impl openless_core::ModelRuntimeAdapter for LinuxGenericLocalAsrRuntime {
     fn engine_available(&self, runtime: openless_core::LocalAsrRuntime) -> bool {
-        runtime == openless_core::LocalAsrRuntime::Generic && qwen_engine_available()
+        runtime == openless_core::LocalAsrRuntime::Generic
+            && self
+                .executable
+                .as_deref()
+                .is_some_and(qwen_executable_is_available)
     }
 
     fn supports_model(&self, target: &openless_core::LocalAsrTarget) -> bool {
@@ -161,6 +276,7 @@ impl openless_core::ModelRuntimeAdapter for LinuxGenericLocalAsrRuntime {
                 .lock()
                 .expect("Linux ASR loaded lock poisoned")
                 .clone();
+            let loaded = available.then_some(loaded).flatten();
             Ok(openless_core::LocalAsrRuntimeStatus {
                 runtime: settings.runtime,
                 provider_id: settings.provider_id,
@@ -172,7 +288,7 @@ impl openless_core::ModelRuntimeAdapter for LinuxGenericLocalAsrRuntime {
                 runtime_source: settings.runtime_source,
                 endpoint: None,
                 operation: None,
-                error: (!available).then(|| "qwen_asr executable is not available".into()),
+                error: (!available).then(|| "packaged Qwen ASR runtime is not available".into()),
                 last_error: None,
                 last_prepare_ms: None,
                 last_transcribe_ms: None,
@@ -194,6 +310,7 @@ impl openless_core::ModelRuntimeAdapter for LinuxGenericLocalAsrRuntime {
         if let Some(root) = dir.parent() {
             *self.root.lock().expect("Linux ASR root lock poisoned") = root.to_path_buf();
         }
+        let executable = self.executable.clone();
         let loaded = std::sync::Arc::clone(&self.loaded_model);
         let cancelled = std::sync::Arc::clone(&self.cancelled);
         Box::pin(async move {
@@ -204,10 +321,30 @@ impl openless_core::ModelRuntimeAdapter for LinuxGenericLocalAsrRuntime {
                     format!("local ASR model is not downloaded: {}", target.model_id()),
                 ));
             }
+            let executable = executable.ok_or_else(|| {
+                BackendError::new(
+                    BackendErrorCode::Unsupported,
+                    "packaged Qwen ASR runtime is not available",
+                )
+            })?;
+            let output = run_qwen_process(
+                executable,
+                vec!["--help".into()],
+                None,
+                Arc::clone(&cancelled),
+                QWEN_PREPARE_TIMEOUT,
+            )
+            .await?;
+            if !output.status.success() {
+                return Err(BackendError::new(
+                    BackendErrorCode::Unsupported,
+                    "packaged Qwen ASR runtime failed its self-check",
+                ));
+            }
             if cancelled.load(std::sync::atomic::Ordering::Acquire) {
                 return Err(BackendError::new(
                     BackendErrorCode::Cancelled,
-                    "local ASR prepare cancelled",
+                    "Qwen ASR operation cancelled",
                 ));
             }
             *loaded.lock().expect("Linux ASR loaded lock poisoned") =
@@ -230,6 +367,20 @@ impl openless_core::ModelRuntimeAdapter for LinuxGenericLocalAsrRuntime {
         })
     }
 
+    fn release_lease(
+        &self,
+        lease: openless_core::LocalAsrRuntimeLease,
+    ) -> BoxFuture<'static, Result<(), BackendError>> {
+        let loaded = Arc::clone(&self.loaded_model);
+        Box::pin(async move {
+            let mut current = loaded.lock().expect("Linux ASR loaded lock poisoned");
+            if current.as_deref() == Some(lease.target.model_id()) {
+                *current = None;
+            }
+            Ok(())
+        })
+    }
+
     fn preload(
         &self,
         target: openless_core::LocalAsrTarget,
@@ -246,11 +397,12 @@ impl openless_core::ModelRuntimeAdapter for LinuxGenericLocalAsrRuntime {
             if loaded
                 .lock()
                 .expect("Linux ASR loaded lock poisoned")
-                .is_none()
+                .as_deref()
+                != Some(target.model_id())
             {
                 return Err(BackendError::new(
                     BackendErrorCode::InvalidState,
-                    "prepare a local ASR model before preloading",
+                    "prepare the selected local ASR model before preloading",
                 ));
             }
             Ok(())
@@ -282,6 +434,8 @@ impl openless_core::ModelRuntimeAdapter for LinuxGenericLocalAsrRuntime {
         if let Err(error) = Self::ensure_qwen_target(&target) {
             return Box::pin(async move { Err(error) });
         }
+        let executable = self.executable.clone();
+        let cancelled = Arc::clone(&self.cancelled);
         Box::pin(async move {
             if !Self::is_ready_dir(&dir) {
                 return Err(BackendError::new(
@@ -298,24 +452,34 @@ impl openless_core::ModelRuntimeAdapter for LinuxGenericLocalAsrRuntime {
                         "set OPENLESS_QWEN_ASR_TEST_AUDIO to an audio fixture for model testing",
                     )
                 })?;
-            let executable = Self::executable();
+            let executable = executable.ok_or_else(|| {
+                BackendError::new(
+                    BackendErrorCode::Unsupported,
+                    "packaged Qwen ASR runtime is not available",
+                )
+            })?;
+            cancelled.store(false, std::sync::atomic::Ordering::Release);
             let started = std::time::Instant::now();
-            let output = tokio::task::spawn_blocking({
-                let executable = executable.clone();
-                move || {
-                    let mut command = std::process::Command::new(&executable);
-                    augment_linux_path(&mut command);
-                    command
-                        .args(["-d", dir.to_string_lossy().as_ref()])
-                        .arg(audio)
-                        .output()
-                        .map_err(|error| {
-                            BackendError::new(BackendErrorCode::Unsupported, error.to_string())
-                        })
-                }
-            })
-            .await
-            .map_err(|error| BackendError::new(BackendErrorCode::Internal, error.to_string()))??;
+            let output = run_qwen_process(
+                executable.clone(),
+                vec![
+                    "-d".into(),
+                    dir.into_os_string(),
+                    "-i".into(),
+                    audio.into_os_string(),
+                    "--silent".into(),
+                ],
+                None,
+                Arc::clone(&cancelled),
+                QWEN_TRANSCRIBE_TIMEOUT,
+            )
+            .await?;
+            if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                return Err(BackendError::new(
+                    BackendErrorCode::Cancelled,
+                    "Qwen ASR operation cancelled",
+                ));
+            }
             if !output.status.success() {
                 return Err(BackendError::new(
                     BackendErrorCode::Provider,
@@ -324,7 +488,7 @@ impl openless_core::ModelRuntimeAdapter for LinuxGenericLocalAsrRuntime {
             }
             Ok(openless_core::LocalAsrTestResult {
                 target,
-                backend: executable,
+                backend: executable.to_string_lossy().into_owned(),
                 expected_text: std::env::var("OPENLESS_QWEN_ASR_TEST_EXPECTED").unwrap_or_default(),
                 transcribed_text: String::from_utf8_lossy(&output.stdout).trim().to_string(),
                 audio_ms: 0,
@@ -340,6 +504,7 @@ struct LinuxGenericAsrSession {
     root: std::sync::Arc<std::sync::Mutex<std::path::PathBuf>>,
     pcm: std::sync::Mutex<Vec<u8>>,
     cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    executable: std::path::PathBuf,
 }
 
 impl TranscriptionEngine for LinuxGenericAsrEngine {
@@ -349,12 +514,21 @@ impl TranscriptionEngine for LinuxGenericAsrEngine {
         context: std::sync::Arc<openless_core::DictationContext>,
         _partials: std::sync::Arc<dyn TextStreamSink>,
     ) -> BoxFuture<'static, Result<std::sync::Arc<dyn TranscriptionSession>, BackendError>> {
+        let Some(executable) = self.executable.clone() else {
+            return Box::pin(async {
+                Err(BackendError::new(
+                    BackendErrorCode::Unsupported,
+                    "packaged Qwen ASR runtime is not available",
+                ))
+            });
+        };
         let session: std::sync::Arc<dyn TranscriptionSession> =
             std::sync::Arc::new(LinuxGenericAsrSession {
                 model: context.asr.model.clone(),
                 root: std::sync::Arc::clone(&self.root),
                 pcm: std::sync::Mutex::new(Vec::new()),
                 cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                executable,
             });
         Box::pin(async move { Ok(session) })
     }
@@ -382,6 +556,7 @@ impl TranscriptionSession for LinuxGenericAsrSession {
         let model = self.model.clone();
         let root = std::sync::Arc::clone(&self.root);
         let cancelled = std::sync::Arc::clone(&self.cancelled);
+        let executable = self.executable.clone();
         Box::pin(async move {
             if cancelled.load(std::sync::atomic::Ordering::Acquire) {
                 return Err(BackendError::new(
@@ -396,66 +571,55 @@ impl TranscriptionSession for LinuxGenericAsrSession {
                     duration_ms,
                 });
             }
-            let result = tokio::task::spawn_blocking(move || {
-                let executable = std::env::var("OPENLESS_QWEN_ASR_BIN")
-                    .unwrap_or_else(|_| "qwen_asr".to_string());
-                let mut command = std::process::Command::new(&executable);
-                augment_linux_path(&mut command);
-                command.args(["--stdin", "--silent"]);
-                if let Some(model) = model.filter(|model| !model.trim().is_empty()) {
-                    let model_dir = root
-                        .lock()
-                        .expect("Linux ASR root lock poisoned")
-                        .join(&model);
-                    if !LinuxGenericLocalAsrRuntime::is_ready_dir(&model_dir) {
-                        return Err(BackendError::new(
-                            BackendErrorCode::InvalidState,
-                            format!("Linux local ASR model is not prepared: {model}"),
-                        ));
-                    }
-                    command.args(["-d", model_dir.to_string_lossy().as_ref()]);
-                }
-                let mut child = command
-                    .stdin(std::process::Stdio::piped())
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
-                    .spawn()
-                    .map_err(|error| {
-                        BackendError::new(
-                            BackendErrorCode::Unsupported,
-                            format!("Linux Generic/Qwen ASR runtime unavailable: {error}"),
-                        )
-                    })?;
-                let wav = openless_core::encode_dictation_wav(&pcm)?;
-                use std::io::Write;
-                child
-                    .stdin
-                    .take()
-                    .ok_or_else(|| {
-                        BackendError::new(BackendErrorCode::Internal, "ASR stdin unavailable")
-                    })?
-                    .write_all(&wav)
-                    .map_err(|error| {
-                        BackendError::new(BackendErrorCode::Provider, error.to_string())
-                    })?;
-                let output = child.wait_with_output().map_err(|error| {
-                    BackendError::new(BackendErrorCode::Provider, error.to_string())
+            let model = model
+                .filter(|model| !model.trim().is_empty())
+                .ok_or_else(|| {
+                    BackendError::new(
+                        BackendErrorCode::InvalidState,
+                        "Qwen ASR model is not selected",
+                    )
                 })?;
-                if !output.status.success() {
-                    let message = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                    return Err(BackendError::new(
-                        BackendErrorCode::Provider,
-                        if message.is_empty() {
-                            "Linux Generic/Qwen ASR failed".into()
-                        } else {
-                            message
-                        },
-                    ));
-                }
-                Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-            })
-            .await
-            .map_err(|error| BackendError::new(BackendErrorCode::Internal, error.to_string()))??;
+            let model_dir = root
+                .lock()
+                .expect("Linux ASR root lock poisoned")
+                .join(&model);
+            if !LinuxGenericLocalAsrRuntime::is_ready_dir(&model_dir) {
+                return Err(BackendError::new(
+                    BackendErrorCode::InvalidState,
+                    format!("Linux local ASR model is not prepared: {model}"),
+                ));
+            }
+            let output = run_qwen_process(
+                executable,
+                vec![
+                    "--stdin".into(),
+                    "--silent".into(),
+                    "-d".into(),
+                    model_dir.into_os_string(),
+                ],
+                Some(openless_core::encode_dictation_wav(&pcm)?),
+                Arc::clone(&cancelled),
+                QWEN_TRANSCRIBE_TIMEOUT,
+            )
+            .await?;
+            if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                return Err(BackendError::new(
+                    BackendErrorCode::Cancelled,
+                    "ASR cancelled",
+                ));
+            }
+            if !output.status.success() {
+                let message = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                return Err(BackendError::new(
+                    BackendErrorCode::Provider,
+                    if message.is_empty() {
+                        "Linux Generic/Qwen ASR failed".into()
+                    } else {
+                        message
+                    },
+                ));
+            }
+            let result = String::from_utf8_lossy(&output.stdout).trim().to_string();
             Ok(TranscriptOutput {
                 text: result,
                 duration_ms,
@@ -525,11 +689,14 @@ impl LinuxBackendBuilder {
                 .filter(|base| base.is_absolute())
                 .map(|base| base.join("OpenLess").join("models"))
                 .unwrap_or_else(LinuxGenericLocalAsrRuntime::default_root);
+        let qwen_executable = qwen_executable();
         let linux_local_runtime = Arc::new(LinuxGenericLocalAsrRuntime::from_models_root(
             configured_models_root,
+            qwen_executable.clone(),
         ));
         let linux_local_asr: Arc<dyn TranscriptionEngine> = Arc::new(LinuxGenericAsrEngine {
             root: Arc::clone(&linux_local_runtime.root),
+            executable: qwen_executable,
         });
         for provider_id in ["local-qwen3", "local-qwen3-c"] {
             transcription.register(provider_id, Arc::clone(&linux_local_asr))?;
@@ -703,7 +870,22 @@ impl LinuxBackendBuilder {
         for provider_type in SHARED_OMNI_PROVIDER_TYPES {
             dictation_engine.register_omni(*provider_type, Arc::clone(&omni))?;
         }
-        let backend = OpenLessBackend::new_with_repositories(
+        let backend_slot = crate::qa::backend_slot();
+        let qa_runtime = Arc::new(LinuxQaRuntime::new(
+            Arc::clone(&backend_slot),
+            Arc::clone(&credential_store),
+        ));
+        let remote_runtime = Arc::new(crate::remote_input::LinuxRemoteInputRuntime::new(
+            Arc::clone(&backend_slot),
+            Arc::clone(&credential_store),
+            self.config.data_dir.clone(),
+        ));
+        services.remote_input = Arc::new(openless_core::RemoteInputService::new(
+            remote_runtime,
+            8443,
+            crate::remote_input::remote_input_locale(&self.config.locale),
+        )?);
+        let backend = Arc::new(OpenLessBackend::new_with_repositories(
             self.config,
             BackendDependencies {
                 host_actions: host_actions.clone(),
@@ -719,12 +901,13 @@ impl LinuxBackendBuilder {
                 marketplace_config: self.marketplace_config,
                 selection_runtime: Some(Arc::new(LinuxSelectionRuntime::new())),
                 selection_polisher: Some(selection_polisher),
-                qa_runtime: None,
+                qa_runtime: Some(qa_runtime),
             },
             repositories,
-        )?;
+        )?);
+        crate::qa::bind_backend(&backend_slot, &backend);
         Ok(LinuxBackendRuntime {
-            backend: Arc::new(backend),
+            backend,
             host_actions,
             settings_runtime,
         })
@@ -848,14 +1031,86 @@ mod tests {
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn production_builder_wires_qa_and_https_remote_input() -> Result<(), BackendError> {
+        let data_dir = std::env::temp_dir().join(format!(
+            "openless-linux-domain-builder-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let credentials = Arc::new(InMemoryCredentialStore::default());
+        let runtime = LinuxBackendBuilder::new(
+            BackendConfig {
+                data_dir: data_dir.clone(),
+                locale: "en-US".into(),
+                ..BackendConfig::default()
+            },
+            Arc::new(FixtureTranscriptionEngine::successful("question", 20)),
+            Arc::new(FixtureTextPolisher::successful("answer")),
+        )
+        .with_recorder(Arc::new(FixtureAudioRecorder::new(
+            vec![vec![1, 0, 2, 0]],
+            vec![(20, 0.5)],
+        )))
+        .with_text_inserter(Arc::new(FixtureTextInserter::with_outcome(
+            InsertOutcome::Inserted,
+        )))
+        .with_credential_store(credentials)
+        .build()?;
+        runtime.backend.start().await?;
+
+        runtime.backend.services().qa.show().await?;
+        runtime.backend.services().qa.toggle_recording().await?;
+        assert_eq!(
+            runtime.backend.services().qa.snapshot().await?.phase,
+            openless_core::QaPhase::Recording
+        );
+        runtime.backend.services().qa.cancel(None).await?;
+
+        let probe = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .map_err(|error| BackendError::new(BackendErrorCode::Platform, error.to_string()))?;
+        let port = probe
+            .local_addr()
+            .map_err(|error| BackendError::new(BackendErrorCode::Platform, error.to_string()))?
+            .port();
+        drop(probe);
+        runtime
+            .backend
+            .services()
+            .remote_input
+            .configure(openless_core::RemoteInputConfig {
+                enabled: true,
+                port,
+            })
+            .await?;
+        assert!(runtime.backend.services().remote_input.status()?.running);
+        runtime
+            .backend
+            .services()
+            .remote_input
+            .configure(openless_core::RemoteInputConfig {
+                enabled: false,
+                port,
+            })
+            .await?;
+
+        runtime.backend.shutdown().await?;
+        let _ = std::fs::remove_dir_all(data_dir);
+        Ok(())
+    }
+
     #[tokio::test]
     async fn generic_local_asr_runtime_tracks_real_model_files_and_lifecycle() {
         let root = std::env::temp_dir().join(format!(
             "openless-linux-local-asr-{}",
             uuid::Uuid::new_v4().simple()
         ));
-        let runtime = LinuxGenericLocalAsrRuntime::default();
         let models_root = root.join("OpenLess").join("models");
+        let runtime = LinuxGenericLocalAsrRuntime::from_models_root(
+            models_root.clone(),
+            Some(std::env::current_exe().unwrap()),
+        );
         let store = openless_core::ModelStore::new(
             openless_core::ModelStoreConfig::new(models_root.clone()).unwrap(),
         )
@@ -916,12 +1171,161 @@ mod tests {
                 .unwrap()
                 .loaded
         );
+        let next_target = openless_core::LocalAsrTarget::parse(
+            openless_core::LocalAsrRuntime::Generic,
+            "qwen3-asr-1.7b",
+        )
+        .unwrap();
+        let next_model_dir = models_root.join(next_target.model_id());
+        std::fs::create_dir_all(&next_model_dir).unwrap();
+        std::fs::write(
+            next_model_dir.join(LinuxGenericLocalAsrRuntime::READY_SENTINEL),
+            b"ready",
+        )
+        .unwrap();
+        runtime
+            .prepare(
+                next_target.clone(),
+                openless_core::FoundryRuntimeSource::Auto,
+                next_model_dir,
+                Arc::new(|_| {}),
+            )
+            .await
+            .unwrap();
+        runtime
+            .release_lease(openless_core::LocalAsrRuntimeLease {
+                target: target.clone(),
+                generation: 1,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            runtime.loaded_model.lock().unwrap().as_deref(),
+            Some(next_target.model_id())
+        );
         runtime
             .release(openless_core::LocalAsrRuntime::Generic)
             .await
             .unwrap();
         store.delete_model(&target).unwrap();
         assert!(!model_dir.exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn missing_qwen_runtime_never_reports_a_prepared_model() {
+        let root = std::env::temp_dir().join(format!(
+            "openless-linux-missing-qwen-runtime-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let target = openless_core::LocalAsrTarget::parse(
+            openless_core::LocalAsrRuntime::Generic,
+            "qwen3-asr-0.6b",
+        )
+        .unwrap();
+        let model_dir = root.join(target.model_id());
+        std::fs::create_dir_all(&model_dir).unwrap();
+        std::fs::write(
+            model_dir.join(LinuxGenericLocalAsrRuntime::READY_SENTINEL),
+            b"ready",
+        )
+        .unwrap();
+        let runtime = LinuxGenericLocalAsrRuntime::from_models_root(root.clone(), None);
+
+        let error = runtime
+            .prepare(
+                target,
+                openless_core::FoundryRuntimeSource::Auto,
+                model_dir,
+                Arc::new(|_| {}),
+            )
+            .await
+            .expect_err("model files alone must not fake a loaded runtime");
+
+        assert_eq!(error.code, BackendErrorCode::Unsupported);
+        assert!(runtime.loaded_model.lock().unwrap().is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn wait_for_pid(path: &std::path::Path) -> i32 {
+        for _ in 0..100 {
+            if let Ok(value) = std::fs::read_to_string(path) {
+                if let Ok(pid) = value.trim().parse() {
+                    return pid;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("fixture child PID was not written");
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn assert_process_exited(pid: i32) {
+        for _ in 0..100 {
+            // SAFETY: signal 0 only checks whether the fixture process still exists.
+            if unsafe { libc::kill(pid, 0) } == -1 {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("fixture child process {pid} survived");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn qwen_runtime_cancellation_kills_the_process_group() {
+        let root = std::env::temp_dir().join(format!(
+            "openless-qwen-cancel-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let pid_file = root.join("pid");
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let task = tokio::spawn(run_qwen_process(
+            std::path::PathBuf::from("/bin/sh"),
+            vec![
+                "-c".into(),
+                format!("sleep 30 & echo $! > '{}'; wait", pid_file.display()).into(),
+            ],
+            None,
+            Arc::clone(&cancelled),
+            std::time::Duration::from_secs(30),
+        ));
+        let child_pid = wait_for_pid(&pid_file).await;
+        cancelled.store(true, std::sync::atomic::Ordering::Release);
+
+        let error = task.await.unwrap().unwrap_err();
+        assert_eq!(error.code, BackendErrorCode::Cancelled);
+        assert_process_exited(child_pid).await;
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn qwen_runtime_timeout_kills_the_process_group() {
+        let root = std::env::temp_dir().join(format!(
+            "openless-qwen-timeout-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let pid_file = root.join("pid");
+
+        let error = run_qwen_process(
+            std::path::PathBuf::from("/bin/sh"),
+            vec![
+                "-c".into(),
+                format!("sleep 30 & echo $! > '{}'; wait", pid_file.display()).into(),
+            ],
+            None,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            std::time::Duration::from_millis(100),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.message.contains("timed out"));
+        assert_process_exited(wait_for_pid(&pid_file).await).await;
         let _ = std::fs::remove_dir_all(root);
     }
 

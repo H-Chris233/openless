@@ -20,6 +20,11 @@
  *    SetAuxDown(s: text)                 — 在候选词列表下方显示状态文本
  *    ClearAuxDown()                      — 清除候选词列表下方文本
  *    GetSelectionText() -> s             — 读取当前 PRIMARY 选区文本（由 clipboard addon 维护）
+ *    CaptureSelectionTarget(s: ticket) -> s — 捕获选区和原输入上下文
+ *    ApplySelectionTarget(sss: ticket, source, replacement) -> b — 校验后替换
+ *    RevertSelectionTarget(s: ticket) -> b — 校验光标前文本后撤销替换
+ *    RekeySelectionTarget(ss: oldTicket, newTicket) -> b — 把 QA 目标交给 Core 预览
+ *    CancelSelectionTarget(s: ticket) -> b — 释放未使用的目标
  *  信号:
  *    DictationKeyEvent(uub: sym, states, isPress) — 听写热键按下/抬起
  *    LessComputerKeyEvent(uub: sym, states, isPress) — Less Computer 热键按下/抬起
@@ -31,6 +36,7 @@
 
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <fcitx-config/configuration.h>
@@ -42,6 +48,7 @@
 #include <fcitx-utils/i18n.h>
 #include <fcitx-utils/key.h>
 #include <fcitx-utils/log.h>
+#include <fcitx-utils/utf8.h>
 #include <fcitx/addonfactory.h>
 #include <fcitx/addoninstance.h>
 #include <fcitx/addonmanager.h>
@@ -85,7 +92,8 @@ public:
           dictationTriggerCombined_(false),
           lessComputerTriggerHeld_(false),
           lessComputerTriggerCombined_(false),
-          savedIc_(nullptr) {
+          savedIc_(nullptr),
+          selectionIc_(nullptr) {
 
         // 1. 读取配置
         reloadConfig();
@@ -202,6 +210,7 @@ public:
                     }
                     if (qaRawSym_ != 0 && sym == qaRawSym_ &&
                         states == qaRawStates_) {
+                        if (isPress) selectionIc_ = keyEvent.inputContext();
                         FCITX_LOGC(openless, Debug)
                             << "QA shortcut";
                         qaShortcutEvent(qaRawSym_, qaRawStates_, isPress);
@@ -211,6 +220,7 @@ public:
                     if (selectionPolishRawSym_ != 0 &&
                         sym == selectionPolishRawSym_ &&
                         states == selectionPolishRawStates_) {
+                        if (isPress) selectionIc_ = keyEvent.inputContext();
                         FCITX_LOGC(openless, Debug)
                             << "Selection polish shortcut";
                         selectionPolishEvent(selectionPolishRawSym_,
@@ -241,6 +251,17 @@ public:
                     auto &icEvent = static_cast<InputContextEvent &>(event);
                     if (icEvent.inputContext() == savedIc_) {
                         savedIc_ = nullptr;
+                    }
+                    if (icEvent.inputContext() == selectionIc_) {
+                        selectionIc_ = nullptr;
+                    }
+                    for (auto it = selectionTargets_.begin();
+                         it != selectionTargets_.end();) {
+                        if (it->second.inputContext == icEvent.inputContext()) {
+                            it = selectionTargets_.erase(it);
+                        } else {
+                            ++it;
+                        }
                     }
                 }));
 
@@ -310,6 +331,106 @@ public:
         }
         FCITX_LOGC(openless, Debug) << "CommitText: " << text;
         ic->commitString(text);
+        return true;
+    }
+
+    std::string captureSelectionTarget(const std::string &ticket) {
+        if (ticket.empty() || !selectionIc_) {
+            return std::string();
+        }
+        std::string source;
+        const auto &surrounding = selectionIc_->surroundingText();
+        if (surrounding.isValid()) {
+            source = surrounding.selectedText();
+        }
+        if (source.empty()) {
+            source = getSelectionText();
+        }
+        if (source.empty()) {
+            return std::string();
+        }
+        selectionTargets_[ticket] = {selectionIc_, source, std::string()};
+        return source;
+    }
+
+    bool applySelectionTarget(const std::string &ticket,
+                              const std::string &source,
+                              const std::string &replacement) {
+        // The ticket is the Core session generation. Never fall back to the
+        // current focus here: a preview may have focused the OpenLess window,
+        // and writing there would corrupt a different application.
+        auto found = selectionTargets_.find(ticket);
+        if (found == selectionTargets_.end() || source != found->second.source ||
+            replacement.empty()) {
+            return false;
+        }
+        auto *ic = found->second.inputContext;
+        std::string selected;
+        const auto &surrounding = ic->surroundingText();
+        if (surrounding.isValid()) {
+            selected = surrounding.selectedText();
+        }
+        if (selected.empty()) {
+            selected = getSelectionText();
+        }
+        if (selected != source) {
+            return false;
+        }
+        ic->commitString(replacement);
+        found->second.replacement = replacement;
+        return true;
+    }
+
+    bool revertSelectionTarget(const std::string &ticket) {
+        auto found = selectionTargets_.find(ticket);
+        if (found == selectionTargets_.end() || found->second.replacement.empty()) {
+            return false;
+        }
+        auto *ic = found->second.inputContext;
+        const auto &replacement = found->second.replacement;
+        const auto &surrounding = ic->surroundingText();
+        if (!surrounding.isValid()) {
+            FCITX_LOGC(openless, Warn)
+                << "RevertSelectionTarget: surrounding text is unavailable";
+            return false;
+        }
+        const auto replacementChars = utf8::lengthValidated(replacement);
+        const auto textChars = utf8::lengthValidated(surrounding.text());
+        if (replacementChars == utf8::INVALID_LENGTH ||
+            textChars == utf8::INVALID_LENGTH ||
+            surrounding.cursor() > textChars ||
+            surrounding.cursor() < replacementChars) {
+            return false;
+        }
+        auto end = utf8::nextNChar(
+            surrounding.text().begin(), surrounding.cursor());
+        auto begin = utf8::nextNChar(
+            surrounding.text().begin(), surrounding.cursor() - replacementChars);
+        if (std::string(begin, end) != replacement) {
+            FCITX_LOGC(openless, Warn)
+                << "RevertSelectionTarget: text changed after replacement";
+            return false;
+        }
+        ic->deleteSurroundingText(-static_cast<int>(replacementChars),
+                                  static_cast<unsigned int>(replacementChars));
+        ic->commitString(found->second.source);
+        selectionTargets_.erase(found);
+        return true;
+    }
+
+    bool cancelSelectionTarget(const std::string &ticket) {
+        return selectionTargets_.erase(ticket) > 0;
+    }
+
+    bool rekeySelectionTarget(const std::string &oldTicket,
+                              const std::string &newTicket) {
+        auto found = selectionTargets_.find(oldTicket);
+        if (found == selectionTargets_.end() || newTicket.empty()) {
+            return false;
+        }
+        auto target = std::move(found->second);
+        selectionTargets_.erase(found);
+        selectionTargets_[newTicket] = std::move(target);
         return true;
     }
 
@@ -514,6 +635,11 @@ public:
     }
 
     FCITX_OBJECT_VTABLE_METHOD(commitText, "CommitText", "s", "b");
+    FCITX_OBJECT_VTABLE_METHOD(captureSelectionTarget, "CaptureSelectionTarget", "s", "s");
+    FCITX_OBJECT_VTABLE_METHOD(applySelectionTarget, "ApplySelectionTarget", "sss", "b");
+    FCITX_OBJECT_VTABLE_METHOD(revertSelectionTarget, "RevertSelectionTarget", "s", "b");
+    FCITX_OBJECT_VTABLE_METHOD(rekeySelectionTarget, "RekeySelectionTarget", "ss", "b");
+    FCITX_OBJECT_VTABLE_METHOD(cancelSelectionTarget, "CancelSelectionTarget", "s", "b");
     FCITX_OBJECT_VTABLE_METHOD(setAuxDown, "SetAuxDown", "s", "");
     FCITX_OBJECT_VTABLE_METHOD(clearAuxDown, "ClearAuxDown", "", "");
     FCITX_OBJECT_VTABLE_METHOD(setHotkey, "SetHotkey", "as", "");
@@ -596,6 +722,12 @@ public:
     }
 
 private:
+    struct SelectionTarget {
+        InputContext *inputContext;
+        std::string source;
+        std::string replacement;
+    };
+
     static constexpr const char *configFile() {
         return "conf/openless.conf";
     }
@@ -639,6 +771,12 @@ private:
     /// 事件处理线程和 DBus 处理线程都是 fcitx5 主事件循环，无竞态。
     /// 通过 InputContextDestroyed 事件监听 IC 销毁时自动清空指针。
     InputContext *savedIc_;
+    /// QA/Selection 快捷键按下时的原输入上下文。该指针只能由 fcitx5 主事件循环
+    /// 访问，并在 InputContextDestroyed 中与所有关联 ticket 一起失效。
+    InputContext *selectionIc_;
+    /// Core session UUID -> Host 原生目标。map 只保存 effect 所需的句柄和回滚文本；
+    /// Preview/Apply/Completed/Cancelled 状态仍由 Core 独占。
+    std::unordered_map<std::string, SelectionTarget> selectionTargets_;
     /// 上一次 SetAuxDown 的文本；焦点切换时用于自动补到新 IC。
     std::string lastAuxText_;
     std::vector<std::unique_ptr<HandlerTableEntry<EventHandler>>>

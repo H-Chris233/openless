@@ -299,7 +299,9 @@ mod tests {
             asr_api_key: Some("key".into()),
             ..snapshot()
         };
-        assert!(!asr_configured_for_provider("whisper", &whisper_key_only));
+        // endpoint/model 默认值现在来自 Core descriptor，因此公共 Whisper 渠道只要具备
+        // 必需的 key 就已经完成配置。
+        assert!(asr_configured_for_provider("whisper", &whisper_key_only));
         assert!(asr_configured_for_provider(
             crate::asr::bailian::PROVIDER_ID,
             &whisper_key_only
@@ -310,7 +312,9 @@ mod tests {
             asr_model: Some("whisper-1".into()),
             ..snapshot()
         };
-        assert!(asr_configured_for_provider(
+        // 显式 endpoint/model 不能免除公共 Whisper provider 的 key；只有
+        // `openai-compatible` 允许可选鉴权。
+        assert!(!asr_configured_for_provider(
             "whisper",
             &whisper_keyless_ready
         ));

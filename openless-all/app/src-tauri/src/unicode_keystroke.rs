@@ -103,6 +103,8 @@ mod macos_impl {
     pub(super) enum MacKeystroke {
         /// 换行：发真实的 Shift+Return 按键（聊天框软换行）。
         ShiftReturn,
+        /// 换行：发送 Unicode U+000A（Terminal/TUI 中作为 Ctrl+J 软换行）。
+        LineFeed,
         /// 换行：发真实的 Return 按键（聊天框里等于发送）。
         Return,
         /// CR：不发任何键。`\r\n` 里它只是 `\n` 的前缀，发了会变成两个换行；
@@ -128,7 +130,9 @@ mod macos_impl {
     pub(super) fn classify_mac_keystroke(ch: char, mode: MacosNewlineMode) -> MacKeystroke {
         match ch {
             '\n' => match mode {
+                MacosNewlineMode::Auto => MacKeystroke::ShiftReturn,
                 MacosNewlineMode::ShiftReturn => MacKeystroke::ShiftReturn,
+                MacosNewlineMode::LineFeed => MacKeystroke::LineFeed,
                 MacosNewlineMode::Return => MacKeystroke::Return,
             },
             '\r' => MacKeystroke::Swallow,
@@ -162,6 +166,7 @@ mod macos_impl {
         for ch in text.chars() {
             let sent = match classify_mac_keystroke(ch, newline_mode) {
                 MacKeystroke::ShiftReturn => send_shift_return(),
+                MacKeystroke::LineFeed => send_line_feed(),
                 MacKeystroke::Return => send_return(),
                 // 吞掉的 char 也要计数：调用方（`flush_streaming_insert_buffer_with`）
                 // 拿 `typed_chars` 和 `delta.chars().count()` 比对，少一个就判定
@@ -202,6 +207,10 @@ mod macos_impl {
     /// 详见 [`classify_mac_keystroke`]。
     fn send_shift_return() -> Result<(), TypeError> {
         post_key_event(KEY_RETURN, KCG_EVENT_FLAG_MASK_SHIFT, None)
+    }
+
+    fn send_line_feed() -> Result<(), TypeError> {
+        send_one_codepoint('\n')
     }
 
     /// 发一次不带修饰键的 Return。聊天框里这等于「发送」——只有用户在设置里明确选了
@@ -670,16 +679,12 @@ mod tests {
     /// 「发送」，一条带空行的两段话会被从中间劈开发出去。
     #[test]
     #[cfg(target_os = "macos")]
-    fn newline_defaults_to_shift_return() {
+    fn newline_defaults_to_safe_auto_fallback() {
         use super::macos_impl::{classify_mac_keystroke, MacKeystroke};
         use crate::types::MacosNewlineMode;
 
         let mode = MacosNewlineMode::default();
-        assert_eq!(
-            mode,
-            MacosNewlineMode::ShiftReturn,
-            "默认必须是不发送的那个"
-        );
+        assert_eq!(mode, MacosNewlineMode::Auto, "默认必须按前台应用解析");
         assert_eq!(
             classify_mac_keystroke('\n', mode),
             MacKeystroke::ShiftReturn
@@ -714,6 +719,18 @@ mod tests {
         );
     }
 
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn line_feed_mode_sends_unicode_newline_for_terminal_tuis() {
+        use super::macos_impl::{classify_mac_keystroke, MacKeystroke};
+        use crate::types::MacosNewlineMode;
+
+        assert_eq!(
+            classify_mac_keystroke('\n', MacosNewlineMode::LineFeed),
+            MacKeystroke::LineFeed
+        );
+    }
+
     /// 计数契约：`type_unicode_chunk` 返回的 typed_chars 必须等于输入的 char 数，
     /// 连被吞掉的 `\r` 也要算 —— 调用方拿它跟 `delta.chars().count()` 比对，
     /// 少一个就判定「部分失败」并丢弃后面所有 delta。
@@ -723,7 +740,12 @@ mod tests {
         use super::macos_impl::classify_mac_keystroke;
         use crate::types::MacosNewlineMode;
 
-        for mode in [MacosNewlineMode::ShiftReturn, MacosNewlineMode::Return] {
+        for mode in [
+            MacosNewlineMode::Auto,
+            MacosNewlineMode::ShiftReturn,
+            MacosNewlineMode::LineFeed,
+            MacosNewlineMode::Return,
+        ] {
             let text = "上半句\r\n\r\n下半句";
             // 每个 char 都会被分类成某一种处理方式，没有漏网的。
             let counted = text

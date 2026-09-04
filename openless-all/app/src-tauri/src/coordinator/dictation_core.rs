@@ -69,8 +69,6 @@ async fn dispatch(
 
 fn finish_bookkeeping(inner: &Arc<Inner>) {
     inner.translation_active.store(false, Ordering::SeqCst);
-    *inner.session_cooldown_until.lock() =
-        Some(std::time::Instant::now() + std::time::Duration::from_millis(450));
 }
 
 pub(super) async fn handle_pressed_edge(
@@ -78,29 +76,6 @@ pub(super) async fn handle_pressed_edge(
     pressed_at: std::time::Instant,
     press_id: u64,
 ) {
-    if inner.hotkey_trigger_held.swap(true, Ordering::SeqCst) {
-        return;
-    }
-    inner
-        .hotkey_press_generation
-        .store(press_id, Ordering::SeqCst);
-    inner.hotkey_press_began_session.store(0, Ordering::SeqCst);
-
-    let now = std::time::Instant::now();
-    let debounced = {
-        let mut last = inner.last_hotkey_dispatch_at.lock();
-        let debounced = last.is_some_and(|last| {
-            now.saturating_duration_since(last) < std::time::Duration::from_millis(250)
-        });
-        if !debounced {
-            *last = Some(now);
-        }
-        debounced
-    };
-    if debounced {
-        return;
-    }
-
     if inner.qa_context.is_panel_visible()
         && inner.backend.snapshot().dictation.phase == openless_core::DictationPhase::Idle
     {
@@ -109,15 +84,13 @@ pub(super) async fn handle_pressed_edge(
     }
     match dispatch(
         inner,
-        openless_core::DictationHotkeyEdge::Pressed { at: pressed_at },
+        openless_core::DictationHotkeyEdge::Pressed {
+            press_id,
+            at: pressed_at,
+        },
     )
     .await
     {
-        Ok(openless_core::CliDispatchOutcome::DictationStarted(_)) => {
-            inner
-                .hotkey_press_began_session
-                .store(press_id, Ordering::SeqCst);
-        }
         Ok(openless_core::CliDispatchOutcome::DictationCompleted(_))
         | Ok(openless_core::CliDispatchOutcome::DictationCancelled) => finish_bookkeeping(inner),
         Ok(_) => {}
@@ -125,13 +98,22 @@ pub(super) async fn handle_pressed_edge(
     }
 }
 
-pub(super) async fn handle_released_edge(inner: &Arc<Inner>, released_at: std::time::Instant) {
-    if !inner.hotkey_trigger_held.swap(false, Ordering::SeqCst) {
+pub(super) async fn handle_released_edge(
+    inner: &Arc<Inner>,
+    released_at: std::time::Instant,
+    press_id: u64,
+) {
+    if inner.qa_context.is_panel_visible()
+        && inner.backend.snapshot().dictation.phase == openless_core::DictationPhase::Idle
+    {
         return;
     }
     match dispatch(
         inner,
-        openless_core::DictationHotkeyEdge::Released { at: released_at },
+        openless_core::DictationHotkeyEdge::Released {
+            press_id,
+            at: released_at,
+        },
     )
     .await
     {
@@ -142,21 +124,19 @@ pub(super) async fn handle_released_edge(inner: &Arc<Inner>, released_at: std::t
     }
 }
 
-pub(super) fn handle_trigger_combined(inner: &Arc<Inner>, press_id: u64) {
-    if inner.hotkey_press_generation.load(Ordering::SeqCst) != press_id
-        || inner.hotkey_press_began_session.swap(0, Ordering::SeqCst) != press_id
-    {
-        return;
-    }
-    inner.hotkey_trigger_held.store(false, Ordering::SeqCst);
+pub(super) fn handle_trigger_combined(inner: &Arc<Inner>, edge: crate::hotkey::HotkeyCombinedEdge) {
     let result = inner.host.block_on(dispatch(
         inner,
-        openless_core::DictationHotkeyEdge::Combined,
+        openless_core::DictationHotkeyEdge::Combined {
+            press_id: edge.press_id,
+            at: edge.at,
+        },
     ));
-    if let Err(error) = result {
-        log::warn!("[coord] core dictation combo cancel failed: {error}");
+    match result {
+        Ok(openless_core::CliDispatchOutcome::DictationCancelled) => finish_bookkeeping(inner),
+        Ok(_) => {}
+        Err(error) => log::warn!("[coord] core dictation combo cancel failed: {error}"),
     }
-    finish_bookkeeping(inner);
 }
 
 #[cfg(any(debug_assertions, test))]
@@ -169,46 +149,18 @@ pub(super) async fn handle_pressed(
 }
 
 #[cfg(any(debug_assertions, test))]
-pub(super) async fn handle_released(inner: &Arc<Inner>, released_at: std::time::Instant) {
-    handle_released_edge(inner, released_at).await;
+pub(super) async fn handle_released(
+    inner: &Arc<Inner>,
+    released_at: std::time::Instant,
+    press_id: u64,
+) {
+    handle_released_edge(inner, released_at, press_id).await;
 }
 
 pub(super) async fn cancel_active_session(inner: &Arc<Inner>) -> bool {
-    let less_computer = inner.less_computer_voice.lock().take();
-    if let Some(session) = less_computer {
-        let _ = session.cancel().await;
-        inner.host.hide_less_computer_glow();
-        return true;
-    }
-    #[cfg(all(not(mobile), target_os = "windows"))]
-    {
-        let capture = inner.selection_voice_capture.lock().take();
-        if let Some(capture) = capture {
-            let session_id = capture.session_id();
-            let _ = capture.cancel().await;
-            let _ = inner
-                .backend
-                .services()
-                .selection_voice
-                .cancel(Some(session_id))
-                .await;
-            return true;
-        }
-    }
-    if let Ok(snapshot) = inner.backend.services().qa.snapshot().await {
-        if snapshot.phase != openless_core::QaPhase::Idle {
-            let _ = inner
-                .backend
-                .services()
-                .qa
-                .cancel(snapshot.session_id)
-                .await;
-            return true;
-        }
-    }
-    let session_id = inner.backend.snapshot().dictation.session_id;
-    match inner.backend.cancel_dictation(session_id).await {
+    match inner.backend.cancel_active_voice_session(None).await {
         Ok(()) => {
+            inner.host.hide_less_computer_glow();
             finish_bookkeeping(inner);
             true
         }

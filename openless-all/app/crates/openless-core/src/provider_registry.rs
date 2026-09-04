@@ -623,6 +623,7 @@ mod tests {
             Box::pin(async move {
                 Ok(EngineResult {
                     raw_text: tag.clone(),
+                    asr_transcript: None,
                     polished_text: tag,
                     polish_source: None,
                     duration_ms: 0,
@@ -630,6 +631,8 @@ mod tests {
                     asr_ms: None,
                     polish_ms: None,
                     has_audio_recording: None,
+                    asr_call_label: None,
+                    llm_call_label: None,
                 })
             })
         }

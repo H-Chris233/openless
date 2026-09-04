@@ -406,6 +406,7 @@ impl SelectionServiceInner {
             crate::shared_types::split_front_app_opt(context.polish.front_app.as_deref());
         let insert_status = match outcome {
             crate::ports::InsertOutcome::Inserted => HistoryInsertStatus::Inserted,
+            crate::ports::InsertOutcome::PasteSent => HistoryInsertStatus::PasteSent,
             crate::ports::InsertOutcome::CopiedFallback => HistoryInsertStatus::CopiedFallback,
         };
         let preferences = self.preferences.get();

@@ -234,6 +234,28 @@ impl LessComputerService {
             })
     }
 
+    fn current_cancel_info(
+        &self,
+        session_id: Option<SessionId>,
+    ) -> Option<(SessionId, Arc<AtomicBool>, bool)> {
+        self.state
+            .active_lease
+            .lock()
+            .expect("Less Computer active-lease lock poisoned")
+            .as_ref()
+            .and_then(|lease| match lease {
+                ActiveLease::Capture(capture)
+                    if session_id.is_none_or(|id| id == capture.session_id) =>
+                {
+                    Some((capture.session_id, Arc::clone(&capture.cancel), true))
+                }
+                ActiveLease::Run(run) if session_id.is_none_or(|id| id == run.session_id) => {
+                    Some((run.session_id, Arc::clone(&run.cancel), false))
+                }
+                _ => None,
+            })
+    }
+
     fn active_session_inner(&self) -> Option<SessionId> {
         self.state
             .active_lease
@@ -391,6 +413,56 @@ impl LessComputerApi for LessComputerService {
         Ok(())
     }
 
+    fn capture_fault(
+        &self,
+        session_id: SessionId,
+        _error: BackendError,
+    ) -> BoxFuture<'static, Result<(), BackendError>> {
+        let service = self.clone();
+        Box::pin(async move {
+            let Some((active_session, cancel, capture)) =
+                service.current_cancel_info(Some(session_id))
+            else {
+                return Err(BackendError::new(
+                    BackendErrorCode::Cancelled,
+                    "Less Computer capture fault belongs to a stale session",
+                ));
+            };
+            if !capture {
+                return Err(BackendError::new(
+                    BackendErrorCode::InvalidState,
+                    "Less Computer capture has already entered the Agent run",
+                ));
+            }
+
+            // The recorder callback can race with Esc or another native fault.
+            // Only the first terminal reporter owns the visible Error event;
+            // every path may still call abort because lease release is
+            // idempotent and scoped to `active_session`.
+            let first = !cancel.swap(true, Ordering::AcqRel);
+            service.cancel_pending();
+            if !first {
+                service.abort_capture_inner(active_session);
+                return Err(BackendError::new(
+                    BackendErrorCode::Cancelled,
+                    "Less Computer capture already has a terminal outcome",
+                ));
+            }
+            let publisher = service.publisher();
+            service.abort_capture_inner(active_session);
+            publisher?.publish(
+                Some(active_session),
+                BackendEventKind::LessComputerEvent(LessComputerEvent {
+                    seq: None,
+                    kind: LessComputerEventKind::Error {
+                        message: "Less Computer recording failed".to_string(),
+                    },
+                }),
+            );
+            Ok(())
+        })
+    }
+
     fn submit(
         &self,
         request: LessComputerRunRequest,
@@ -405,9 +477,22 @@ impl LessComputerApi for LessComputerService {
     ) -> BoxFuture<'static, Result<(), BackendError>> {
         let service = self.clone();
         Box::pin(async move {
-            if let Some(cancel) = service.current_cancel(session_id) {
-                cancel.store(true, Ordering::Release);
+            if let Some((active_session, cancel, capture)) = service.current_cancel_info(session_id)
+            {
+                let first = !cancel.swap(true, Ordering::AcqRel);
                 service.cancel_pending();
+                if first && capture {
+                    if let Ok(publisher) = service.publisher() {
+                        publisher.publish(
+                            Some(active_session),
+                            BackendEventKind::LessComputerEvent(LessComputerEvent {
+                                seq: None,
+                                kind: LessComputerEventKind::Cancelled,
+                            }),
+                        );
+                    }
+                    service.abort_capture_inner(active_session);
+                }
             }
             Ok(())
         })
@@ -464,7 +549,7 @@ impl LessComputerApi for LessComputerService {
                 token: token.clone(),
             };
             publisher.publish(
-                None,
+                service.active_session_inner(),
                 BackendEventKind::LessComputerEvent(LessComputerEvent {
                     seq: None,
                     kind: LessComputerEventKind::Approval {
@@ -561,7 +646,7 @@ impl LessComputerService {
         request.continuation_context =
             self.continuation_context(request.provider, continue_session);
         publisher.publish(
-            None,
+            Some(request.session_id),
             BackendEventKind::LessComputerEvent(LessComputerEvent {
                 seq: None,
                 kind: LessComputerEventKind::User {
@@ -617,7 +702,7 @@ impl LessComputerService {
                 })
             }
         };
-        publisher.publish(None, final_event);
+        publisher.publish(Some(request.session_id), final_event);
         self.remember_turn(transcript, outcome.clone());
         self.clear_active_lease(request.session_id);
         Ok(LessComputerRunResult {
@@ -724,7 +809,7 @@ impl LessComputerService {
         match event {
             CodingAgentStreamEvent::Started { session_id: actual } if actual == expected => {
                 publisher.publish(
-                    None,
+                    Some(session_id),
                     BackendEventKind::LessComputerEvent(LessComputerEvent {
                         seq: None,
                         kind: LessComputerEventKind::Started,
@@ -736,7 +821,7 @@ impl LessComputerService {
                 text,
             } if actual == expected => {
                 publisher.publish(
-                    None,
+                    Some(session_id),
                     BackendEventKind::LessComputerEvent(LessComputerEvent {
                         seq: None,
                         kind: LessComputerEventKind::Delta { text },
@@ -748,7 +833,7 @@ impl LessComputerService {
                 name,
             } if actual == expected => {
                 publisher.publish(
-                    None,
+                    Some(session_id),
                     BackendEventKind::LessComputerEvent(LessComputerEvent {
                         seq: None,
                         kind: LessComputerEventKind::Tool { name },
@@ -757,7 +842,7 @@ impl LessComputerService {
             }
             CodingAgentStreamEvent::Compaction { session_id: actual } if actual == expected => {
                 publisher.publish(
-                    None,
+                    Some(session_id),
                     BackendEventKind::LessComputerEvent(LessComputerEvent {
                         seq: None,
                         kind: LessComputerEventKind::Compaction,
@@ -1220,19 +1305,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capture_cancellation_is_visible_until_the_host_releases_the_lease() {
-        let service = LessComputerService::new();
+    async fn capture_cancellation_releases_the_lease_and_publishes_one_terminal() {
+        let (service, mut events) = service_with_events();
         let session_id = SessionId::new();
         service.begin_capture(session_id).unwrap();
 
         service.cancel(Some(SessionId::new())).await.unwrap();
         assert!(!service.capture_cancelled(session_id));
         service.cancel(Some(session_id)).await.unwrap();
-        assert!(service.capture_cancelled(session_id));
-        assert_eq!(service.active_session(), Some(session_id));
-
-        service.abort_capture(session_id).unwrap();
         assert_eq!(service.active_session(), None);
+        let event = events.recv().await.unwrap();
+        assert_eq!(event.session_id, Some(session_id));
+        assert!(matches!(
+            event.kind,
+            BackendEventKind::LessComputerEvent(LessComputerEvent {
+                kind: LessComputerEventKind::Cancelled,
+                ..
+            })
+        ));
+        assert!(events.try_recv().is_err());
     }
 
     #[tokio::test]

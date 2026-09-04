@@ -183,23 +183,6 @@ fn hide_vocab_suggestion_card(inner: &Arc<Inner>) {
     });
 }
 
-/// 解除手改观察器 —— **唯一的解除入口，三条路径都必须走它。**
-///
-/// 两步缺一不可，而这正是它必须收口成一个函数的原因：
-///
-/// 1. `*slot = None` 丢掉 `EditWatcher`，其 `Drop` 置位停止 flag；
-/// 2. 推进代次，让还在路上的上报当场失效。
-///
-/// 只做第 1 步是不够的：解除是**异步**的，观察线程要到下一次 runloop 轮转（≤1s）才看得见
-/// flag，而 AX 通知回调正跑在那次轮转里面。漏掉第 2 步，一条属于上一轮的建议就会在新会话
-/// 进行中弹出卡片 —— 而卡片会把胶囊窗口缩到卡片大小，等于把正在进行的那次听写的胶囊
-/// 弄没了（真机踩过，表现是「热键像是坏了」）。
-///
-fn disarm_edit_watch(inner: &Arc<Inner>) {
-    *inner.edit_watcher.lock() = None;
-    inner.edit_watch_generation.fetch_add(1, Ordering::SeqCst);
-}
-
 /// 兜底卡片的窗口宽度（逻辑点）。比词条卡片宽一点 —— 这张要放一整段话。
 const FALLBACK_CARD_WIDTH: f64 = 360.0;
 /// Webview 首次渲染前的安全高度。真实高度由卡片 DOM 测量后通过 IPC 回报。
@@ -465,24 +448,6 @@ struct Inner {
     /// 防止两个命令把显式 runtime target 乱序安装。
     settings_host_gate: Mutex<()>,
     inserter: TextInserter,
-    /// 上一次落字之后武装的手改监听（macOS）。
-    ///
-    /// 存在 `Inner` 上只为了「下一次听写开始时解除上一次的」这一条生命周期规则 ——
-    /// 覆盖这个 Option 会 drop 掉旧的 watcher，drop 即解除。另外三条（60 秒超时、
-    /// 前台 app 切换、焦点元素消失）由观察线程自己负责。
-    edit_watcher: Mutex<Option<crate::host_document::EditWatcher>>,
-    /// 观察器代次。每武装一次 +1；上报时对不上号的一律丢弃。
-    ///
-    /// 解除是**异步**的：drop `EditWatcher` 只是置一个 flag，观察线程要到下一次 runloop
-    /// 轮转（≤1s）才看得见，而 AX 通知回调正跑在那次轮转**里面**。也就是说「已解除」和
-    /// 「还能再上报一次」有一段重叠 —— 光靠 flag 只能缩小这个窗口，关不死它。
-    ///
-    /// 迟到的上报不是小事：卡片会把胶囊窗口缩到卡片大小，一条属于上一轮的建议在**新
-    /// 会话进行中**弹出来，等于把正在进行的那次听写的胶囊弄没了。真机上踩过一次，
-    /// 表现是「热键像是坏了」。
-    ///
-    /// 所以判据不放在线程那边，放在这里：只有代次对得上的上报才算数。
-    edit_watch_generation: std::sync::atomic::AtomicU64,
     /// 建议卡片是不是正占着胶囊窗口。
     ///
     /// 门控 `hide_vocab_suggestion_card`：没有卡片时它必须什么都不做，否则每次听写
@@ -490,26 +455,8 @@ struct Inner {
     vocab_card_visible: AtomicBool,
     hotkey: Mutex<Option<HotkeyMonitor>>,
     hotkey_status: Arc<Mutex<HotkeyStatus>>,
-    hotkey_trigger_held: AtomicBool,
-    /// 当前主听写热键按下的代次。组合键撤销通道使用同一代次，避免迟到事件
-    /// 误取消下一次按下开启的会话。
-    hotkey_press_generation: AtomicU64,
-    /// 当前代次是否真的开出了会话；0 表示没有可撤销的会话。
-    hotkey_press_began_session: AtomicU64,
-    /// 组合键事件可能先于 Pressed 事件抵达协调器，暂存其代次供仲裁窗口消费。
-    /// 用队列而不是单个槽，避免主 bridge 忙于上一轮仲裁时覆盖连续按下的事件。
-    /// 防抖时间戳：handle_pressed_edge 入口检查与本字段的距离，< 250ms 的边沿直接
-    /// 丢弃（误触双击 / 微动开关回弹 / 用户连点过快造成的空转写报错）。
-    /// 与 `hotkey_trigger_held` 互补 —— held 防 press-without-release，本字段防
-    /// press-release-press 三连过快。
-    last_hotkey_dispatch_at: Mutex<Option<std::time::Instant>>,
-    /// Auto 模式下这次会话「按下」的事件时刻。松手时用按下/松开的事件时间戳差值
-    /// 判定短按（Toggle 锁存）还是长按（Hold 松手即停）。见 dictation.rs 的
-    /// AUTO_HOLD_THRESHOLD。
-    /// 会话收尾（成功 / 取消 / 失败）将 phase 设为 Idle 时记录的时间戳 + POST_SESSION_COOLDOWN_MS。
-    /// handle_pressed 在 (Toggle, Idle) 分支检查此字段：未过期则忽略该次按键，防止胶囊离场
-    /// 动画期间误激活新听写（issue #545）；也让识别中排队的热键按下在收尾后一律静默丢弃（issue #856）。
-    session_cooldown_until: Mutex<Option<std::time::Instant>>,
+    /// Webview fallback only: pairs one raw keydown/up edge with the same Core press id.
+    window_hotkey_press_id: AtomicU64,
     shortcut_recording_active: AtomicBool,
     /// Less Computer modifier 热键的按下代次与待处理组合键事件。
     less_computer_press_generation: AtomicU64,
@@ -669,16 +616,10 @@ impl Coordinator {
                 hotkey_runtime_target: Mutex::new(hotkey_runtime_target),
                 settings_host_gate: Mutex::new(()),
                 inserter: TextInserter::new(),
-                edit_watcher: Mutex::new(None),
-                edit_watch_generation: std::sync::atomic::AtomicU64::new(0),
                 vocab_card_visible: AtomicBool::new(false),
                 hotkey: Mutex::new(None),
                 hotkey_status,
-                hotkey_trigger_held: AtomicBool::new(false),
-                hotkey_press_generation: AtomicU64::new(0),
-                hotkey_press_began_session: AtomicU64::new(0),
-                last_hotkey_dispatch_at: Mutex::new(None),
-                session_cooldown_until: Mutex::new(None),
+                window_hotkey_press_id: AtomicU64::new(0),
                 shortcut_recording_active: AtomicBool::new(false),
                 less_computer_press_generation: AtomicU64::new(0),
                 less_computer_combo_pending_press: AtomicU64::new(0),
@@ -785,16 +726,10 @@ impl Coordinator {
             hotkey_runtime_target: Mutex::new(hotkey_runtime_target),
             settings_host_gate: Mutex::new(()),
             inserter: TextInserter::new(),
-            edit_watcher: Mutex::new(None),
-            edit_watch_generation: std::sync::atomic::AtomicU64::new(0),
             vocab_card_visible: AtomicBool::new(false),
             hotkey: Mutex::new(None),
             hotkey_status,
-            hotkey_trigger_held: AtomicBool::new(false),
-            hotkey_press_generation: AtomicU64::new(0),
-            hotkey_press_began_session: AtomicU64::new(0),
-            last_hotkey_dispatch_at: Mutex::new(None),
-            session_cooldown_until: Mutex::new(None),
+            window_hotkey_press_id: AtomicU64::new(0),
             shortcut_recording_active: AtomicBool::new(false),
             less_computer_press_generation: AtomicU64::new(0),
             less_computer_combo_pending_press: AtomicU64::new(0),
@@ -835,6 +770,20 @@ impl Coordinator {
             _ => crate::types::INSERT_FALLBACK_REASON_INSERT_FAILED,
         };
         show_insert_fallback_card(&self.inner, text, reason);
+    }
+
+    pub fn present_core_capsule(&self, payload: CapsulePayload) {
+        emit_capsule(
+            &self.inner,
+            payload.state,
+            payload.level,
+            payload.elapsed_ms,
+            payload.message,
+            payload.inserted_chars,
+        );
+        if let Some(delay_ms) = core_capsule_hide_delay(payload.state) {
+            schedule_capsule_idle(&self.inner, delay_ms);
+        }
     }
 
     pub(crate) fn tauri_host(&self) -> crate::tauri_coordinator_host::TauriCoordinatorHost {
@@ -1397,17 +1346,6 @@ impl Coordinator {
         report_insert_fallback_card_height(&self.inner, presentation_id, height)
     }
 
-    /// 用户关掉了「光标上下文」开关 —— 立刻停掉一切还在跑的观察，别等它自己超时。
-    ///
-    /// 置空即解除：`EditWatcher` 的 `Drop` 会把停止 flag 置位，观察线程在下一次
-    /// runloop 轮转（≤1s）时退出并反注册 AXObserver。同时把还挂着的建议卡片收掉 ——
-    /// 那些建议是这条链路的产物，开关关了就不该再让用户看见。
-    pub fn disarm_edit_watch(&self) {
-        disarm_edit_watch(&self.inner);
-        hide_vocab_suggestion_card(&self.inner);
-        log::info!("[cursor-context] edit watch disarmed: feature switched off");
-    }
-
     pub(crate) fn update_hotkey_binding(&self) {
         let target = hotkey_runtime_target(&self.inner);
         let dictation_trigger = crate::shortcut_binding::legacy_modifier_trigger(&target.dictation);
@@ -1633,14 +1571,25 @@ impl Coordinator {
     #[cfg(any(debug_assertions, test))]
     pub async fn inject_hotkey_click_for_dev(&self) -> Result<(), String> {
         log::info!("[coord] dev hotkey injection started");
-        handle_pressed(&self.inner, std::time::Instant::now(), 0).await;
-        handle_released(&self.inner, std::time::Instant::now()).await;
+        let press_id = crate::hotkey::next_press_id();
+        handle_pressed(&self.inner, std::time::Instant::now(), press_id).await;
+        handle_released(&self.inner, std::time::Instant::now(), press_id).await;
         let _ = self.inner.backend.cancel_dictation(None).await;
         Ok(())
     }
 }
 
 const CAPSULE_AUTO_HIDE_DELAY_MS: u64 = 2000;
+
+/// Core 终态事件只描述语义，原生胶囊保持多久由 Tauri Host 负责。把映射集中成纯函数，
+/// 可以明确锁定成功、失败、取消三条时序，并让测试不依赖真实窗口与计时器。
+fn core_capsule_hide_delay(state: CapsuleState) -> Option<u64> {
+    match state {
+        CapsuleState::Done | CapsuleState::Error => Some(CAPSULE_AUTO_HIDE_DELAY_MS),
+        CapsuleState::Cancelled => Some(0),
+        _ => None,
+    }
+}
 
 fn schedule_capsule_idle(inner: &Arc<Inner>, delay_ms: u64) {
     let expected = inner.last_capsule_state.lock().as_ref().copied();
@@ -1652,6 +1601,19 @@ fn schedule_capsule_idle(inner: &Arc<Inner>, delay_ms: u64) {
             hide_capsule_if_all_sessions_idle(&inner);
         }
     });
+}
+
+#[cfg(test)]
+mod core_capsule_tests {
+    use super::*;
+
+    #[test]
+    fn core_terminal_capsule_timing_preserves_the_legacy_contract() {
+        assert_eq!(core_capsule_hide_delay(CapsuleState::Done), Some(2000));
+        assert_eq!(core_capsule_hide_delay(CapsuleState::Error), Some(2000));
+        assert_eq!(core_capsule_hide_delay(CapsuleState::Cancelled), Some(0));
+        assert_eq!(core_capsule_hide_delay(CapsuleState::Recording), None);
+    }
 }
 
 #[cfg(not(mobile))]

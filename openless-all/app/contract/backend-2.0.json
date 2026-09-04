@@ -31,21 +31,6 @@
       }
     }
   },
-  "command": {
-    "requestFields": ["command", "payload", "contractVersion"],
-    "responseFields": ["ok", "payload", "error", "contractVersion"],
-    "sampleRequest": {
-      "command": "startDictation",
-      "payload": {"translationRequested": false},
-      "contractVersion": "2.0.0"
-    },
-    "sampleResponse": {
-      "ok": true,
-      "payload": {"sessionId": "00000000-0000-4000-8000-000000000000"},
-      "error": null,
-      "contractVersion": "2.0.0"
-    }
-  },
   "backendEvent": {
     "fields": ["sequence", "sessionId", "kind"],
     "kinds": [
@@ -55,6 +40,7 @@
       "transcript_delta",
       "polish_delta",
       "dictation_completed",
+      "recording_control_requested",
       "selection_state_changed",
       "selection_voice_state_changed",
       "insert_fallback",
@@ -86,6 +72,7 @@
       "transcript_delta": {"sequence": 1, "sessionId": null, "kind": {"type": "transcript_delta", "payload": {"text": "delta", "offset": 0, "isFinal": false}}},
       "polish_delta": {"sequence": 1, "sessionId": null, "kind": {"type": "polish_delta", "payload": {"text": "delta", "offset": 0, "isFinal": false}}},
       "dictation_completed": {"sequence": 1, "sessionId": null, "kind": {"type": "dictation_completed", "payload": {"sessionId": "00000000-0000-4000-8000-000000000000", "rawText": "raw", "polishedText": "final", "polishSource": null, "durationMs": 0, "inserted": "inserted"}}},
+      "recording_control_requested": {"sequence": 1, "sessionId": "00000000-0000-4000-8000-000000000000", "kind": {"type": "recording_control_requested", "payload": {"sessionId": "00000000-0000-4000-8000-000000000000", "action": "stop"}}},
       "selection_state_changed": {"sequence": 1, "sessionId": null, "kind": {"type": "selection_state_changed", "payload": {"phase": "idle"}}},
       "selection_voice_state_changed": {"sequence": 1, "sessionId": null, "kind": {"type": "selection_voice_state_changed", "payload": {"phase": "idle"}}},
       "insert_fallback": {"sequence": 1, "sessionId": null, "kind": {"type": "insert_fallback", "payload": {"reason": "clipboard_fallback", "copiedText": null}}},
@@ -120,7 +107,7 @@
     "eventFields": ["sequence", "sessionId", "kind"]
   },
   "enums": {
-    "insertStatus": ["inserted", "copiedFallback", "notRequested"],
+    "insertStatus": ["inserted", "pasteSent", "copiedFallback", "notRequested"],
     "remoteAuthResult": ["ok", "bad_pin", "locked"]
   }
 }

@@ -168,6 +168,11 @@ fn atomic_write(path: &Path, bytes: &[u8], executable: bool) -> Result<(), Backe
     }
     #[cfg(not(unix))]
     let _ = executable;
+    // POSIX rename replaces an existing file atomically, so the previously
+    // working plugin remains available if staging or commit fails. The
+    // non-Unix branch exists only for portable unit tests/tooling, where the
+    // platform rename API may require explicitly removing the destination.
+    #[cfg(not(unix))]
     if path.exists() {
         std::fs::remove_file(path).map_err(|error| {
             BackendError::new(
@@ -221,8 +226,6 @@ impl TextInserter for Fcitx5TextInserter {
         Box::pin(async move {
             Ok(std::sync::Arc::new(Fcitx5InsertionSession {
                 clipboard_fallback,
-                streamed_text: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
-                stream_failed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 closed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             }) as std::sync::Arc<dyn TextInsertionSession>)
         })
@@ -232,8 +235,6 @@ impl TextInserter for Fcitx5TextInserter {
 #[derive(Clone)]
 struct Fcitx5InsertionSession {
     clipboard_fallback: bool,
-    streamed_text: std::sync::Arc<std::sync::Mutex<String>>,
-    stream_failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -261,15 +262,6 @@ impl Fcitx5InsertionSession {
                 )
             })?;
             let written = if result.is_ok() { expected } else { 0 };
-            if written == 0 {
-                self.stream_failed
-                    .store(true, std::sync::atomic::Ordering::Release);
-            } else {
-                self.streamed_text
-                    .lock()
-                    .expect("fcitx5 streamed text lock poisoned")
-                    .push_str(&text);
-            }
             Ok(InsertWriteResult {
                 written_chars: written,
             })
@@ -365,6 +357,11 @@ impl TextInsertionSession for Fcitx5InsertionSession {
         Box::pin(async move { session.write_chunk(text).await })
     }
 
+    fn copy(&self, text: String) -> BoxFuture<'static, Result<(), BackendError>> {
+        let session = self.clone();
+        Box::pin(async move { session.copy_only(text).await.map(|_| ()) })
+    }
+
     fn finish(
         &self,
         final_text: String,
@@ -380,36 +377,10 @@ impl TextInsertionSession for Fcitx5InsertionSession {
                     "fcitx5 insertion session is already closed",
                 ));
             }
-            let streamed = session
-                .streamed_text
-                .lock()
-                .expect("fcitx5 streamed text lock poisoned")
-                .clone();
-            if streamed.is_empty()
-                && !session
-                    .stream_failed
-                    .load(std::sync::atomic::Ordering::Acquire)
-            {
-                return session.insert_or_copy(final_text).await;
-            }
-            if session
-                .stream_failed
-                .load(std::sync::atomic::Ordering::Acquire)
-                || !final_text.starts_with(&streamed)
-            {
-                if session.clipboard_fallback {
-                    return session.copy_only(final_text).await;
-                }
-                return Err(BackendError::new(
-                    BackendErrorCode::Platform,
-                    "streamed text no longer matches the final output",
-                ));
-            }
-            let remaining = final_text[streamed.len()..].to_string();
-            if remaining.is_empty() {
+            if final_text.is_empty() {
                 Ok(InsertOutcome::Inserted)
             } else {
-                session.insert_or_copy(remaining).await
+                session.insert_or_copy(final_text).await
             }
         })
     }
@@ -458,6 +429,24 @@ fn send_bool_message(
 }
 
 #[cfg(target_os = "linux")]
+fn send_string_message(
+    method: &str,
+    append: impl FnOnce(dbus::Message) -> dbus::Message,
+) -> Result<String, BackendError> {
+    use dbus::blocking::BlockingSender;
+    let connection = dbus::blocking::Connection::new_session().map_err(dbus_error)?;
+    let message = dbus::Message::new_method_call(DESTINATION, OBJECT_PATH, INTERFACE, method)
+        .map_err(|error| {
+            platform_error(format!("failed to build fcitx5 {method} call: {error}"))
+        })?;
+    connection
+        .send_with_reply_and_block(append(message), TIMEOUT)
+        .map_err(dbus_error)?
+        .read1::<String>()
+        .map_err(|error| platform_error(format!("invalid fcitx5 {method} reply: {error}")))
+}
+
+#[cfg(target_os = "linux")]
 pub(crate) fn set_raw_hotkey(method: &str, symbol: u32, states: u32) -> Result<(), BackendError> {
     send_message(method, |message| message.append2(symbol, states))
 }
@@ -500,6 +489,105 @@ pub fn commit_text(text: &str) -> Result<(), BackendError> {
 
 #[cfg(not(target_os = "linux"))]
 pub fn commit_text(_: &str) -> Result<(), BackendError> {
+    Err(BackendError::new(
+        BackendErrorCode::Unsupported,
+        "fcitx5 is only available on Linux",
+    ))
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn capture_selection_target(session_id: &str) -> Result<String, BackendError> {
+    send_string_message("CaptureSelectionTarget", |message| {
+        message.append1(session_id)
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn capture_selection_target(_: &str) -> Result<String, BackendError> {
+    Err(BackendError::new(
+        BackendErrorCode::Unsupported,
+        "fcitx5 is only available on Linux",
+    ))
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn apply_selection_target(
+    session_id: &str,
+    source: &str,
+    replacement: &str,
+) -> Result<(), BackendError> {
+    if send_bool_message("ApplySelectionTarget", |message| {
+        message.append3(session_id, source, replacement)
+    })? {
+        Ok(())
+    } else {
+        Err(BackendError::new(
+            BackendErrorCode::Cancelled,
+            "fcitx5 selection target changed before replacement",
+        ))
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn apply_selection_target(_: &str, _: &str, _: &str) -> Result<(), BackendError> {
+    Err(BackendError::new(
+        BackendErrorCode::Unsupported,
+        "fcitx5 is only available on Linux",
+    ))
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn revert_selection_target(session_id: &str) -> Result<(), BackendError> {
+    if send_bool_message("RevertSelectionTarget", |message| {
+        message.append1(session_id)
+    })? {
+        Ok(())
+    } else {
+        Err(BackendError::new(
+            BackendErrorCode::Cancelled,
+            "fcitx5 selection text changed before revert",
+        ))
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn revert_selection_target(_: &str) -> Result<(), BackendError> {
+    Err(BackendError::new(
+        BackendErrorCode::Unsupported,
+        "fcitx5 is only available on Linux",
+    ))
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn cancel_selection_target(session_id: &str) -> Result<(), BackendError> {
+    let _ = send_bool_message("CancelSelectionTarget", |message| {
+        message.append1(session_id)
+    })?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn cancel_selection_target(_: &str) -> Result<(), BackendError> {
+    Err(BackendError::new(
+        BackendErrorCode::Unsupported,
+        "fcitx5 is only available on Linux",
+    ))
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn rekey_selection_target(from: &str, to: &str) -> Result<(), BackendError> {
+    if send_bool_message("RekeySelectionTarget", |message| message.append2(from, to))? {
+        Ok(())
+    } else {
+        Err(BackendError::new(
+            BackendErrorCode::Cancelled,
+            "fcitx5 selection target is no longer active",
+        ))
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn rekey_selection_target(_: &str, _: &str) -> Result<(), BackendError> {
     Err(BackendError::new(
         BackendErrorCode::Unsupported,
         "fcitx5 is only available on Linux",
@@ -637,5 +725,50 @@ mod tests {
         assert!(!plan.copy_required);
         assert!(plan.source_library.is_none());
         assert!(plan.source_config.is_none());
+    }
+
+    #[test]
+    fn appimage_installer_copies_then_reports_ready() {
+        let root = std::env::temp_dir().join(format!(
+            "openless-fcitx-appimage-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let resources = root.join("resources");
+        let home = root.join("home");
+        std::fs::create_dir_all(resources.join("linux-fcitx5-plugin")).unwrap();
+        std::fs::write(resources.join(FCITX_PLUGIN_LIBRARY), b"plugin").unwrap();
+        std::fs::write(resources.join(FCITX_PLUGIN_CONFIG), b"config").unwrap();
+        let plan = FcitxPluginInstallPlan::for_layout(
+            &LinuxResourceLayout {
+                package_kind: LinuxPackageKind::AppImage,
+                resource_root: resources,
+            },
+            &home,
+        )
+        .unwrap();
+
+        assert_eq!(
+            ensure_plugin_installed(&plan).unwrap(),
+            FcitxPluginStatus::Updated
+        );
+        assert_eq!(std::fs::read(&plan.target_library).unwrap(), b"plugin");
+        assert_eq!(std::fs::read(&plan.target_config).unwrap(), b"config");
+        assert_eq!(
+            ensure_plugin_installed(&plan).unwrap(),
+            FcitxPluginStatus::Ready
+        );
+
+        std::fs::write(plan.source_library.as_ref().unwrap(), b"updated plugin").unwrap();
+        assert_eq!(
+            ensure_plugin_installed(&plan).unwrap(),
+            FcitxPluginStatus::Updated
+        );
+        assert_eq!(
+            std::fs::read(&plan.target_library).unwrap(),
+            b"updated plugin"
+        );
+        assert_eq!(std::fs::read(&plan.target_config).unwrap(), b"config");
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }
