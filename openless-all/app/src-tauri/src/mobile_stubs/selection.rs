@@ -21,6 +21,19 @@ pub struct SelectionCaptureOutcome {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SelectionInsertionTarget;
 
+/// 普通听写在所有 Host 都先创建一个 insertion session。移动端没有可恢复的桌面焦点，
+/// 因此只返回不携带状态的 opaque token；真正落字仍由 Android accessibility/Shizuku
+/// Adapter 决定，不能把这个 token 当作 Selection Polish 的可校验目标。
+pub(crate) fn capture_selection_insertion_target() -> SelectionInsertionTarget {
+    SelectionInsertionTarget
+}
+
+/// 移动端普通落字无需切回另一个桌面应用，恢复动作是成功的 no-op。Selection Polish
+/// 仍通过 `selection_insertion_target_is_captured == false` 保持不可用，二者语义不可混用。
+pub(crate) fn reactivate_selection_insertion_target(_target: &SelectionInsertionTarget) -> bool {
+    true
+}
+
 pub(crate) fn resolve_selection_workspace_capture(
 ) -> (Option<SelectionContext>, SelectionInsertionTarget) {
     (capture_selection(), SelectionInsertionTarget)

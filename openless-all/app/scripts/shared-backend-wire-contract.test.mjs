@@ -42,6 +42,8 @@ const [
   hostDocumentMacos,
   linuxFcitx,
   localAsrPage,
+  mobileHotkey,
+  mobileSelection,
 ] =
   await Promise.all([
     read('src/lib/types.ts'),
@@ -83,6 +85,8 @@ const [
     read('src-tauri/src/host_document/macos.rs'),
     read('linux-egui/src/fcitx5.rs'),
     read('src/pages/LocalAsr/index.tsx'),
+    read('src-tauri/src/mobile_stubs/hotkey.rs'),
+    read('src-tauri/src/mobile_stubs/selection.rs'),
   ]);
 
 for (const kind of ['awaiting_approval', 'cancelled', 'error']) {
@@ -564,6 +568,16 @@ assert.match(
   androidOverlayService,
   /onCreate\(\)[\s\S]*?OpenLessNative\.requireBackendContract\(\)[\s\S]*?stopSelf\(\)/,
   'Android overlay startup must execute the JNI contract handshake before accepting actions',
+);
+assert.match(
+  mobileHotkey,
+  /pub fn next_press_id\(\) -> u64/,
+  'the mobile hotkey stub must preserve the Core press-identity shape',
+);
+assert.match(
+  mobileSelection,
+  /capture_selection_insertion_target[^]*?reactivate_selection_insertion_target[^]*?true/,
+  'mobile dictation insertion must provide a no-op target restore without enabling Selection Polish',
 );
 
 console.log('shared-backend-wire-contract.test.mjs passed');

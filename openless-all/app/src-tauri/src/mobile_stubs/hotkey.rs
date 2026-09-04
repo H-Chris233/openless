@@ -1,5 +1,6 @@
 //! Mobile stub — global hotkeys are unavailable on Android/iOS.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::time::Instant;
 
@@ -21,6 +22,15 @@ pub enum HotkeyEvent {
 pub struct HotkeyCombinedEdge {
     pub at: Instant,
     pub press_id: u64,
+}
+
+/// 窗口内开发注入仍需与桌面端使用同一种 press identity。移动端没有全局监听器，
+/// 但生成单调 id 的纯规则不能因此缺席，否则 Android 条件编译会出现另一套事件形状。
+pub fn next_press_id() -> u64 {
+    static NEXT_PRESS_ID: AtomicU64 = AtomicU64::new(0);
+    NEXT_PRESS_ID
+        .fetch_add(1, Ordering::Relaxed)
+        .wrapping_add(1)
 }
 
 /// Mobile 无全局键盘监听，Esc 独占为 no-op。
