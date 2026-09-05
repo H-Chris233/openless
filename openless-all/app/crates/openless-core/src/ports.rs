@@ -483,6 +483,14 @@ pub trait TextInserter: Send + Sync {
 }
 
 pub trait TextInsertionSession: Send + Sync {
+    /// Native preparation can decline streaming while retaining final paste
+    /// support (for example when macOS cannot switch the keyboard input source).
+    /// Core owns the fallback decision; adapters must never acknowledge chunks
+    /// they did not consume just to keep the stream alive.
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
     fn write(&self, text: String) -> BoxFuture<'static, Result<InsertWriteResult, BackendError>>;
     fn copy(&self, text: String) -> BoxFuture<'static, Result<(), BackendError>>;
     fn finish(&self, final_text: String)

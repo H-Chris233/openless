@@ -40,6 +40,10 @@ pub(crate) fn backend_slot() -> BackendSlot {
 pub(crate) struct TauriNativeAsrDependencies {
     foundry: Arc<crate::asr::local::FoundryLocalRuntime>,
     sherpa: Arc<crate::asr::local::SherpaOnnxRuntime>,
+    #[cfg(target_os = "windows")]
+    foundry_generation: Arc<AtomicU64>,
+    #[cfg(target_os = "windows")]
+    sherpa_generation: Arc<AtomicU64>,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     qwen_cache: Arc<crate::asr::local::LocalAsrCache>,
     #[cfg(target_os = "macos")]
@@ -52,7 +56,12 @@ impl TauriNativeAsrDependencies {
         foundry: Arc<crate::asr::local::FoundryLocalRuntime>,
         sherpa: Arc<crate::asr::local::SherpaOnnxRuntime>,
     ) -> Self {
-        Self { foundry, sherpa }
+        Self {
+            foundry,
+            sherpa,
+            foundry_generation: Arc::new(AtomicU64::new(0)),
+            sherpa_generation: Arc::new(AtomicU64::new(0)),
+        }
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -269,6 +278,16 @@ impl TauriLocalAsrRuntimeAdapter {
             preferences,
             foundry_rebind_pending: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn invalidate_release(&self, runtime: openless_core::LocalAsrRuntime) {
+        match runtime {
+            openless_core::LocalAsrRuntime::Foundry => &self.native.foundry_generation,
+            openless_core::LocalAsrRuntime::SherpaOnnx => &self.native.sherpa_generation,
+            openless_core::LocalAsrRuntime::Generic => return,
+        }
+        .fetch_add(1, Ordering::AcqRel);
     }
 }
 
@@ -499,6 +518,8 @@ impl openless_core::ModelRuntimeAdapter for TauriLocalAsrRuntimeAdapter {
         model_dir: PathBuf,
         progress: openless_core::ModelPrepareProgressSink,
     ) -> BoxFuture<'static, Result<String, BackendError>> {
+        #[cfg(target_os = "windows")]
+        self.invalidate_release(target.runtime);
         let foundry = Arc::clone(&self.native.foundry);
         let sherpa = Arc::clone(&self.native.sherpa);
         let foundry_rebind_pending = Arc::clone(&self.foundry_rebind_pending);
@@ -594,10 +615,20 @@ impl openless_core::ModelRuntimeAdapter for TauriLocalAsrRuntimeAdapter {
                             )
                         })
                 }
-                openless_core::LocalAsrRuntime::Generic => Err(BackendError::new(
-                    BackendErrorCode::Unsupported,
-                    "generic local ASR uses preload rather than explicit prepare",
-                )),
+                // Generic 模型文件已由 Core ModelStore 校验完整性。与 Foundry/Sherpa
+                // 不同，它没有额外的 native runtime 安装阶段；真正加载留给 preload，
+                // 此时才能拿到本次激活的 MLX/C provider，不能偷读尚未提交的旧偏好。
+                openless_core::LocalAsrRuntime::Generic => {
+                    let model = native_local_asr_model(&target)?;
+                    if cfg!(target_os = "macos") || (cfg!(target_os = "linux") && model.is_qwen()) {
+                        Ok(target.model_id().to_string())
+                    } else {
+                        Err(BackendError::new(
+                            BackendErrorCode::Unsupported,
+                            "generic local ASR model is unavailable on this platform",
+                        ))
+                    }
+                }
             }?;
             let _ = model_dir;
             Ok(loaded)
@@ -629,6 +660,8 @@ impl openless_core::ModelRuntimeAdapter for TauriLocalAsrRuntimeAdapter {
         &self,
         runtime: openless_core::LocalAsrRuntime,
     ) -> BoxFuture<'static, Result<(), BackendError>> {
+        #[cfg(target_os = "windows")]
+        self.invalidate_release(runtime);
         let foundry = Arc::clone(&self.native.foundry);
         let sherpa = Arc::clone(&self.native.sherpa);
         #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -662,23 +695,53 @@ impl openless_core::ModelRuntimeAdapter for TauriLocalAsrRuntimeAdapter {
         &self,
         target: openless_core::LocalAsrTarget,
         model_dir: PathBuf,
+        provider_type: String,
     ) -> BoxFuture<'static, Result<(), BackendError>> {
-        let preferences = Arc::clone(&self.preferences);
+        #[cfg(target_os = "windows")]
+        let foundry = Arc::clone(&self.native.foundry);
+        #[cfg(target_os = "windows")]
+        let sherpa = Arc::clone(&self.native.sherpa);
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         let qwen_cache = Arc::clone(&self.native.qwen_cache);
         #[cfg(target_os = "macos")]
         let whisper_cache = Arc::clone(&self.native.whisper_cache);
         Box::pin(async move {
             if target.runtime != openless_core::LocalAsrRuntime::Generic {
-                return Err(BackendError::new(
-                    BackendErrorCode::Unsupported,
-                    "Foundry and Sherpa require an explicit model for prepare",
-                ));
+                // Windows 的 prepare 已完成加载；统一 preload 阶段只验证回执。
+                // preload 也可被单独调用，所以必须核对真实已加载 alias，不能虚报
+                // 成功，也不能像旧实现那样用 Unsupported 推翻成功的 prepare。
+                #[cfg(target_os = "windows")]
+                {
+                    let ready = match target.runtime {
+                        openless_core::LocalAsrRuntime::Foundry => {
+                            foundry.is_loaded_for(target.model_id())
+                        }
+                        openless_core::LocalAsrRuntime::SherpaOnnx => {
+                            let status = sherpa.status_snapshot(target.model_id()).await;
+                            status.runtime_ready
+                                && status.loaded_model_id.as_deref() == Some(target.model_id())
+                        }
+                        openless_core::LocalAsrRuntime::Generic => unreachable!(),
+                    };
+                    return ready.then_some(()).ok_or_else(|| {
+                        BackendError::new(
+                            BackendErrorCode::InvalidState,
+                            "prepare the selected native ASR model before preload",
+                        )
+                    });
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    return Err(BackendError::new(
+                        BackendErrorCode::Unsupported,
+                        "Foundry and Sherpa are only available on Windows",
+                    ));
+                }
             }
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             {
-                let preferences = preferences.get();
-                let provider = preferences.active_asr_provider.as_str();
+                let provider = provider_type.as_str();
+                let model = native_local_asr_model(&target)?;
                 if crate::asr::local::is_local_qwen3(provider) {
                     let backend = crate::asr::local::qwen_backend_for_provider(provider)
                         .ok_or_else(|| {
@@ -687,16 +750,12 @@ impl openless_core::ModelRuntimeAdapter for TauriLocalAsrRuntimeAdapter {
                                 format!("Qwen backend is unavailable: {provider}"),
                             )
                         })?;
-                    let model = crate::asr::local::ModelId::from_wire_id(
-                        &preferences.local_asr_active_model,
-                    )
-                    .filter(|model| model.is_qwen())
-                    .ok_or_else(|| {
-                        BackendError::new(
+                    if !model.is_qwen() {
+                        return Err(BackendError::new(
                             BackendErrorCode::InvalidArgument,
-                            "local Qwen model is not configured",
-                        )
-                    })?;
+                            "Qwen provider requires a Qwen model",
+                        ));
+                    }
                     let model_id = model.as_str().to_string();
                     tauri::async_runtime::spawn_blocking(move || {
                         qwen_cache.get_or_load(backend, &model_id, &model_dir)
@@ -709,7 +768,7 @@ impl openless_core::ModelRuntimeAdapter for TauriLocalAsrRuntimeAdapter {
 
                 #[cfg(target_os = "macos")]
                 if crate::asr::local::is_local_whisper(provider) {
-                    let model_id = preferences.local_whisper_active_model;
+                    let model_id = target.model_id().to_string();
                     let model_path =
                         crate::asr::local::whisper_model_path_for_model(&model_id, &model_dir)
                             .map_err(map_native_asr_error)?;
@@ -719,11 +778,15 @@ impl openless_core::ModelRuntimeAdapter for TauriLocalAsrRuntimeAdapter {
                     .await
                     .map_err(map_native_asr_error)?
                     .map_err(map_native_asr_error)?;
+                    return Ok(());
                 }
             }
             #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-            let _ = (preferences, model_dir);
-            Ok(())
+            let _ = model_dir;
+            Err(BackendError::new(
+                BackendErrorCode::Unsupported,
+                format!("generic local ASR provider is unavailable: {provider_type}"),
+            ))
         })
     }
 
@@ -1338,7 +1401,6 @@ impl openless_core::PlatformApi for TauriPlatformApi {
 struct TauriNativeTranscriptionEngine {
     dependencies: TauriNativeAsrDependencies,
     model_store: Option<Arc<openless_core::ModelStore>>,
-    generation: Arc<AtomicU64>,
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
@@ -1350,7 +1412,6 @@ impl TauriNativeTranscriptionEngine {
         Self {
             dependencies,
             model_store,
-            generation: Arc::new(AtomicU64::new(0)),
         }
     }
 }
@@ -1389,6 +1450,7 @@ enum TauriNativeTranscriptionSessionKind {
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+#[derive(Clone)]
 struct TauriNativeTranscriptionSession {
     kind: TauriNativeTranscriptionSessionKind,
     asr_call_label: openless_core::AsrCallLabel,
@@ -1397,9 +1459,12 @@ struct TauriNativeTranscriptionSession {
     partials: Arc<dyn TextStreamSink>,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     next_offset: Arc<AtomicU64>,
+    #[cfg(target_os = "windows")]
     generation: u64,
+    #[cfg(target_os = "windows")]
     current_generation: Arc<AtomicU64>,
     keep_loaded_secs: u32,
+    released: Arc<AtomicBool>,
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
@@ -1410,8 +1475,18 @@ impl TranscriptionEngine for TauriNativeTranscriptionEngine {
         context: Arc<DictationContext>,
         partials: Arc<dyn TextStreamSink>,
     ) -> BoxFuture<'static, Result<Arc<dyn TranscriptionSession>, BackendError>> {
-        let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
-        let current_generation = Arc::clone(&self.generation);
+        // 两个 Windows runtime 独立计代；切到 Sherpa 不能让 Foundry 的释放永久失效。
+        // 设置页 prepare/release 也共享这些代次，旧会话不能卸载新启用的模型。
+        #[cfg(target_os = "windows")]
+        let current_generation = Arc::clone(
+            if context.asr.provider_type == openless_core::LocalAsrRuntime::Foundry.provider_id() {
+                &self.dependencies.foundry_generation
+            } else {
+                &self.dependencies.sherpa_generation
+            },
+        );
+        #[cfg(target_os = "windows")]
+        let generation = current_generation.fetch_add(1, Ordering::AcqRel) + 1;
         let keep_loaded_secs = context.asr.keep_loaded_secs.unwrap_or(0);
 
         #[cfg(target_os = "windows")]
@@ -1687,9 +1762,12 @@ impl TranscriptionEngine for TauriNativeTranscriptionEngine {
                 partials,
                 #[cfg(any(target_os = "macos", target_os = "linux"))]
                 next_offset: Arc::new(AtomicU64::new(0)),
+                #[cfg(target_os = "windows")]
                 generation,
+                #[cfg(target_os = "windows")]
                 current_generation,
                 keep_loaded_secs,
+                released: Arc::new(AtomicBool::new(false)),
             }) as Arc<dyn TranscriptionSession>)
         })
     }
@@ -1734,20 +1812,27 @@ impl TranscriptionSession for TauriNativeTranscriptionSession {
     }
 
     fn finish(&self) -> BoxFuture<'static, Result<TranscriptOutput, BackendError>> {
+        #[cfg(target_os = "windows")]
+        use crate::asr::local::foundry_runtime as foundry;
+
+        let session = self.clone();
         let kind = self.kind.clone();
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         let partials = Arc::clone(&self.partials);
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         let next_offset = Arc::clone(&self.next_offset);
-        let generation = self.generation;
-        let current_generation = Arc::clone(&self.current_generation);
-        let keep_loaded_secs = self.keep_loaded_secs;
         let notifications = Arc::clone(&self.notifications);
         Box::pin(async move {
+            #[cfg(target_os = "windows")]
+            let mut recovery = None;
+            // 不在各分支的 ? 前安排释放：所有结果统一从这里经过。cancel 与 finish
+            // 可能并发，released 保证资源收尾只安排一次；旧 generation 不清掉新会话。
+            let result = async {
             let output = match kind {
                 #[cfg(target_os = "windows")]
-                TauriNativeTranscriptionSessionKind::Foundry { provider, runtime } => {
-                    let timeout = windows_native_asr_timeout(provider.buffer_duration_ms());
+                TauriNativeTranscriptionSessionKind::Foundry { provider, .. } => {
+                    let timeout = openless_core::provider_rules::native_transcribe_timeout(
+                        "foundry-local-whisper", provider.buffer_duration_ms());
                     let fallback_notifications = Arc::clone(&notifications);
                     let result = match provider
                         .transcribe_with_fallback_notice(
@@ -1765,7 +1850,7 @@ impl TranscriptionSession for TauriNativeTranscriptionSession {
                     {
                         Ok(result) => result,
                         Err(error)
-                            if crate::asr::local::foundry_runtime::is_terminal_foundry_fallback_error(
+                            if foundry::is_terminal_foundry_fallback_error(
                                 &error,
                             ) =>
                         {
@@ -1774,7 +1859,7 @@ impl TranscriptionSession for TauriNativeTranscriptionSession {
                             );
                             let mut backend_error = BackendError::new(
                                 BackendErrorCode::Provider,
-                                crate::asr::local::foundry_runtime::FOUNDRY_FALLBACK_TERMINAL_USER_MESSAGE,
+                                foundry::FOUNDRY_FALLBACK_TERMINAL_USER_MESSAGE,
                             );
                             backend_error.details = Some(serde_json::json!({
                                 "terminal": "foundry_fallback"
@@ -1783,34 +1868,23 @@ impl TranscriptionSession for TauriNativeTranscriptionSession {
                         }
                         Err(error) => return Err(map_native_asr_error(error).retryable(true)),
                     };
-                    schedule_foundry_release(
-                        runtime,
-                        result.primary_recovery,
-                        keep_loaded_secs,
-                        generation,
-                        current_generation,
-                    );
+                    recovery = result.primary_recovery;
                     result.raw
                 }
                 #[cfg(target_os = "windows")]
-                TauriNativeTranscriptionSessionKind::Sherpa { provider, runtime } => {
-                    let timeout = windows_native_asr_timeout(provider.buffer_duration_ms());
+                TauriNativeTranscriptionSessionKind::Sherpa { provider, .. } => {
+                    let timeout = openless_core::provider_rules::native_transcribe_timeout(
+                        "sherpa-onnx-local", provider.buffer_duration_ms());
                     let output = provider
                         .transcribe(timeout)
                         .await
                         .map_err(map_native_asr_error)?;
-                    schedule_sherpa_release(
-                        runtime,
-                        keep_loaded_secs,
-                        generation,
-                        current_generation,
-                    );
                     output
                 }
                 #[cfg(any(target_os = "macos", target_os = "linux"))]
                 TauriNativeTranscriptionSessionKind::Qwen {
                     engine,
-                    cache,
+                    cache: _,
                     pcm,
                     cancelled,
                     operation_id,
@@ -1822,7 +1896,10 @@ impl TranscriptionSession for TauriNativeTranscriptionSession {
                     let offset = Arc::clone(&next_offset);
                     let worker_cancelled = Arc::clone(&cancelled);
                     let cancelled_for_tokens = Arc::clone(&cancelled);
-                    let text = tauri::async_runtime::spawn_blocking(move || {
+                    let timeout = openless_core::provider_rules::native_transcribe_timeout(
+                        "local-qwen3", duration_ms);
+                    let text = await_native_transcription(timeout, async move {
+                        tauri::async_runtime::spawn_blocking(move || {
                         engine.transcribe_dictation_with_handler(
                             operation_id,
                             worker_cancelled.as_ref(),
@@ -1839,21 +1916,20 @@ impl TranscriptionSession for TauriNativeTranscriptionSession {
                                 });
                             },
                         )
-                    })
+                        })
                     .await
                     .map_err(map_native_asr_error)?
-                    .map_err(map_native_asr_error)?;
+                    .map_err(map_native_asr_error)
+                    }).await?;
                     if cancelled.load(Ordering::Acquire) {
                         return Err(cancelled_native_asr_error());
                     }
-                    cache.touch();
-                    schedule_qwen_release(cache, keep_loaded_secs);
                     crate::asr::RawTranscript { text, duration_ms }
                 }
                 #[cfg(target_os = "macos")]
                 TauriNativeTranscriptionSessionKind::Whisper {
                     engine,
-                    cache,
+                    cache: _,
                     language,
                     pcm,
                     cancelled,
@@ -1861,68 +1937,164 @@ impl TranscriptionSession for TauriNativeTranscriptionSession {
                     let bytes = std::mem::take(&mut *pcm.lock());
                     let duration_ms = pcm_duration_ms(&bytes);
                     let samples = pcm_i16_to_f32(&bytes);
-                    let text = tauri::async_runtime::spawn_blocking(move || {
-                        engine.transcribe(&samples, &language)
-                    })
-                    .await
-                    .map_err(map_native_asr_error)?
-                    .map_err(map_native_asr_error)?;
+                    let timeout = openless_core::provider_rules::native_transcribe_timeout(
+                        "local-whisper", duration_ms);
+                    let text = await_native_transcription(timeout, async move {
+                        tauri::async_runtime::spawn_blocking(move || {
+                            engine.transcribe(&samples, &language)
+                        })
+                        .await
+                        .map_err(map_native_asr_error)?
+                        .map_err(map_native_asr_error)
+                    }).await?;
                     if cancelled.load(Ordering::Acquire) {
                         return Err(cancelled_native_asr_error());
                     }
-                    cache.touch();
-                    schedule_whisper_release(cache, keep_loaded_secs);
                     crate::asr::RawTranscript { text, duration_ms }
                 }
                 #[cfg(target_os = "macos")]
                 TauriNativeTranscriptionSessionKind::AppleSpeech(provider) => {
-                    provider.transcribe().await.map_err(map_native_asr_error)?
+                    let timeout = openless_core::provider_rules::native_transcribe_timeout(
+                        "apple-speech", provider.buffer_duration_ms());
+                    await_native_transcription(timeout, async {
+                        provider.transcribe().await.map_err(map_native_asr_error)
+                    }).await?
                 }
             };
             Ok(TranscriptOutput {
                 text: output.text,
                 duration_ms: output.duration_ms,
             })
+            }.await;
+            if result.is_err() {
+                session.cancel_native();
+            }
+            #[cfg(target_os = "windows")]
+            session.release_native(result.is_err(), recovery);
+            #[cfg(not(target_os = "windows"))]
+            session.release_native(result.is_err());
+            result
         })
     }
 
     fn cancel(&self) -> BoxFuture<'static, Result<(), BackendError>> {
-        let kind = self.kind.clone();
+        let session = self.clone();
         Box::pin(async move {
-            match kind {
-                #[cfg(target_os = "windows")]
-                TauriNativeTranscriptionSessionKind::Foundry { provider, .. } => provider.cancel(),
-                #[cfg(target_os = "windows")]
-                TauriNativeTranscriptionSessionKind::Sherpa { provider, .. } => provider.cancel(),
-                #[cfg(any(target_os = "macos", target_os = "linux"))]
-                TauriNativeTranscriptionSessionKind::Qwen {
-                    engine,
-                    pcm,
-                    cancelled,
-                    operation_id,
-                    ..
-                } => {
-                    cancelled.store(true, Ordering::Release);
-                    pcm.lock().clear();
-                    engine.cancel_operation(operation_id);
-                }
-                #[cfg(target_os = "macos")]
-                TauriNativeTranscriptionSessionKind::Whisper { pcm, cancelled, .. } => {
-                    cancelled.store(true, Ordering::Release);
-                    pcm.lock().clear();
-                }
-                #[cfg(target_os = "macos")]
-                TauriNativeTranscriptionSessionKind::AppleSpeech(provider) => provider.cancel(),
-            }
+            session.cancel_native();
+            #[cfg(target_os = "windows")]
+            session.release_native(true, None);
+            #[cfg(not(target_os = "windows"))]
+            session.release_native(true);
             Ok(())
         })
     }
 }
 
-#[cfg(target_os = "windows")]
-fn windows_native_asr_timeout(duration_ms: u64) -> std::time::Duration {
-    let seconds = duration_ms.div_ceil(1_000).saturating_add(20).max(30);
-    std::time::Duration::from_secs(seconds)
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+impl TauriNativeTranscriptionSession {
+    fn cancel_native(&self) {
+        match &self.kind {
+            #[cfg(target_os = "windows")]
+            TauriNativeTranscriptionSessionKind::Foundry { provider, .. } => provider.cancel(),
+            #[cfg(target_os = "windows")]
+            TauriNativeTranscriptionSessionKind::Sherpa { provider, .. } => provider.cancel(),
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            TauriNativeTranscriptionSessionKind::Qwen {
+                engine,
+                pcm,
+                cancelled,
+                operation_id,
+                ..
+            } => {
+                cancelled.store(true, Ordering::Release);
+                pcm.lock().clear();
+                engine.cancel_operation(*operation_id);
+            }
+            #[cfg(target_os = "macos")]
+            TauriNativeTranscriptionSessionKind::Whisper { pcm, cancelled, .. } => {
+                cancelled.store(true, Ordering::Release);
+                pcm.lock().clear();
+            }
+            #[cfg(target_os = "macos")]
+            TauriNativeTranscriptionSessionKind::AppleSpeech(provider) => provider.cancel(),
+        }
+    }
+
+    fn release_native(
+        &self,
+        discard: bool,
+        #[cfg(target_os = "windows")] recovery: Option<
+            crate::asr::local::foundry_runtime::FoundryPrimaryRecoveryToken,
+        >,
+    ) {
+        if self.released.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        match &self.kind {
+            #[cfg(target_os = "windows")]
+            TauriNativeTranscriptionSessionKind::Foundry { runtime, .. } => {
+                schedule_foundry_release(
+                    Arc::clone(runtime),
+                    recovery,
+                    self.keep_loaded_secs,
+                    self.generation,
+                    Arc::clone(&self.current_generation),
+                );
+            }
+            #[cfg(target_os = "windows")]
+            TauriNativeTranscriptionSessionKind::Sherpa { runtime, .. } => {
+                schedule_sherpa_release(
+                    Arc::clone(runtime),
+                    self.keep_loaded_secs,
+                    self.generation,
+                    Arc::clone(&self.current_generation),
+                );
+            }
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            TauriNativeTranscriptionSessionKind::Qwen { engine, cache, .. } => {
+                cache.finish_use(engine, discard);
+                if !discard {
+                    schedule_qwen_release(
+                        Arc::clone(cache),
+                        Arc::downgrade(engine),
+                        self.keep_loaded_secs,
+                    );
+                }
+            }
+            #[cfg(target_os = "macos")]
+            TauriNativeTranscriptionSessionKind::Whisper { engine, cache, .. } => {
+                cache.finish_use(engine, discard);
+                if !discard {
+                    schedule_whisper_release(
+                        Arc::clone(cache),
+                        Arc::downgrade(engine),
+                        self.keep_loaded_secs,
+                    );
+                }
+            }
+            #[cfg(target_os = "macos")]
+            TauriNativeTranscriptionSessionKind::AppleSpeech(_) => {}
+        }
+        let _ = discard;
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
+async fn await_native_transcription<T>(
+    timeout: std::time::Duration,
+    operation: impl std::future::Future<Output = Result<T, BackendError>>,
+) -> Result<T, BackendError> {
+    // timeout 只停止等待。调用者必须 cancel_native 并驱逐自己的 cache；
+    // spawn_blocking / Whisper C API 不会因 future 被 drop 而自动停止执行。
+    tokio::time::timeout(timeout, operation)
+        .await
+        .map_err(|_| {
+            BackendError::new(
+                BackendErrorCode::Provider,
+                "native ASR transcription timed out",
+            )
+            .retryable(true)
+        })?
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -1947,6 +2119,9 @@ fn schedule_foundry_release(
     current_generation: Arc<AtomicU64>,
 ) {
     tauri::async_runtime::spawn(async move {
+        if current_generation.load(Ordering::Acquire) != generation {
+            return;
+        }
         if let Some(recovery) = recovery.as_ref() {
             if keep_loaded_secs > 0 {
                 if !runtime
@@ -1969,7 +2144,10 @@ fn schedule_foundry_release(
                 .release_primary_if_current(recovery)
                 .await
                 .map(|_| ()),
-            None => runtime.release_now().await,
+            None => runtime
+                .release_if_generation(&current_generation, generation)
+                .await
+                .map(|_| ()),
         };
         if let Err(error) = result {
             log::warn!("[core-adapter] release Foundry runtime failed: {error:#}");
@@ -1989,7 +2167,10 @@ fn schedule_sherpa_release(
             tokio::time::sleep(std::time::Duration::from_secs(keep_loaded_secs as u64)).await;
         }
         if current_generation.load(Ordering::Acquire) == generation {
-            if let Err(error) = runtime.release_now().await {
+            if let Err(error) = runtime
+                .release_if_generation(&current_generation, generation)
+                .await
+            {
                 log::warn!("[core-adapter] release sherpa runtime failed: {error:#}");
             }
         }
@@ -1997,19 +2178,9 @@ fn schedule_sherpa_release(
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-fn schedule_qwen_release(cache: Arc<crate::asr::local::LocalAsrCache>, keep_loaded_secs: u32) {
-    tauri::async_runtime::spawn(async move {
-        let threshold = std::time::Duration::from_secs(keep_loaded_secs as u64);
-        if !threshold.is_zero() {
-            tokio::time::sleep(threshold).await;
-        }
-        cache.release_if_idle(threshold);
-    });
-}
-
-#[cfg(target_os = "macos")]
-fn schedule_whisper_release(
-    cache: Arc<crate::asr::local::LocalWhisperCache>,
+fn schedule_qwen_release(
+    cache: Arc<crate::asr::local::LocalAsrCache>,
+    engine: std::sync::Weak<crate::asr::local::LocalQwenEngine>,
     keep_loaded_secs: u32,
 ) {
     tauri::async_runtime::spawn(async move {
@@ -2017,7 +2188,22 @@ fn schedule_whisper_release(
         if !threshold.is_zero() {
             tokio::time::sleep(threshold).await;
         }
-        cache.release_if_idle(threshold);
+        cache.release_current_if_idle(&engine, threshold);
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn schedule_whisper_release(
+    cache: Arc<crate::asr::local::LocalWhisperCache>,
+    engine: std::sync::Weak<crate::asr::local::WhisperEngine>,
+    keep_loaded_secs: u32,
+) {
+    tauri::async_runtime::spawn(async move {
+        let threshold = std::time::Duration::from_secs(keep_loaded_secs as u64);
+        if !threshold.is_zero() {
+            tokio::time::sleep(threshold).await;
+        }
+        cache.release_current_if_idle(&engine, threshold);
     });
 }
 
@@ -2307,6 +2493,30 @@ impl TauriTextInserter {
     }
 }
 
+/// 只有实际流式输入才切 ABC。TIS 失败是平台能力降级，不能阻断无需 TIS 的
+/// 一次性粘贴；Core 读取 supports_streaming 回执，仍独占 reconciliation 策略。
+#[cfg(any(target_os = "macos", test))]
+async fn prepare_streaming_input_source<T: Default, E: std::fmt::Display, F>(
+    streaming: bool,
+    switch: impl FnOnce() -> F,
+) -> (T, bool)
+where
+    F: std::future::Future<Output = Result<T, E>>,
+{
+    if !streaming {
+        return (T::default(), false);
+    }
+    match switch().await {
+        Ok(previous) => (previous, true),
+        Err(error) => {
+            log::warn!(
+                "[core-adapter] ASCII input source unavailable; use one-shot insertion: {error}"
+            );
+            (T::default(), false)
+        }
+    }
+}
+
 impl CoreTextInserter for TauriTextInserter {
     fn begin(
         &self,
@@ -2341,19 +2551,25 @@ impl CoreTextInserter for TauriTextInserter {
                 None
             };
             #[cfg(target_os = "macos")]
-            let (app_handle, previous_input_source) = {
+            let (app_handle, previous_input_source, streaming_ready) = {
                 let app_handle = app.lock().clone().ok_or_else(|| {
                     BackendError::new(
                         BackendErrorCode::InvalidState,
                         "Tauri AppHandle is not bound yet",
                     )
                 })?;
-                let previous = crate::unicode_keystroke::switch_to_ascii(&app_handle)
-                    .await
-                    .map_err(|error| {
-                        BackendError::new(BackendErrorCode::Platform, error.to_string())
-                    })?;
-                (app_handle, previous)
+                let (previous, streaming_ready) = prepare_streaming_input_source(
+                    openless_core::streaming_insert::streaming_insert_eligible(
+                        context.insertion.streaming,
+                        context.polish.translation_active,
+                        context.polish.chinese_script_preference
+                            == openless_core::shared_types::ChineseScriptPreference::Traditional,
+                        false,
+                    ),
+                    || crate::unicode_keystroke::switch_to_ascii(&app_handle),
+                )
+                .await;
+                (app_handle, previous, streaming_ready)
             };
             #[cfg(not(target_os = "macos"))]
             let _ = app;
@@ -2370,6 +2586,8 @@ impl CoreTextInserter for TauriTextInserter {
                 app: app_handle,
                 #[cfg(target_os = "macos")]
                 previous_input_source: Arc::new(Mutex::new(previous_input_source)),
+                #[cfg(target_os = "macos")]
+                streaming_ready,
             }) as Arc<dyn TextInsertionSession>)
         })
     }
@@ -2389,6 +2607,8 @@ struct TauriTextInsertionSession {
     app: AppHandle,
     #[cfg(target_os = "macos")]
     previous_input_source: Arc<Mutex<Option<crate::unicode_keystroke::PreviousInputSource>>>,
+    #[cfg(target_os = "macos")]
+    streaming_ready: bool,
 }
 
 impl TauriTextInsertionSession {
@@ -2567,6 +2787,17 @@ impl TauriTextInsertionSession {
 }
 
 impl TextInsertionSession for TauriTextInsertionSession {
+    fn supports_streaming(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            self.streaming_ready
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            cfg!(any(target_os = "windows", target_os = "linux"))
+        }
+    }
+
     fn write(&self, text: String) -> BoxFuture<'static, Result<InsertWriteResult, BackendError>> {
         if self.finished.load(Ordering::Acquire) {
             return Box::pin(async {
@@ -2602,11 +2833,12 @@ impl TextInsertionSession for TauriTextInsertionSession {
             } else {
                 session.insert_final(final_text).await
             };
-            let restore = session.restore_platform_state().await;
-            match (result, restore) {
-                (Err(error), _) | (Ok(_), Err(error)) => Err(error),
-                (Ok(outcome), Ok(())) => Ok(outcome),
+            if let Err(error) = session.restore_platform_state().await {
+                // 恢复输入源失败并不能撤销已经落下的文字。保留真实交付结果，
+                // 避免历史误报失败后诱导用户重试造成重复；无论插入成败都记录恢复错误。
+                log::warn!("[core-adapter] restore input state after insertion failed: {error}");
             }
+            result
         })
     }
 
@@ -2800,6 +3032,111 @@ mod tests {
     }
 
     struct IgnoreTextStreamSink;
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn windows_preload_requires_the_requested_model_to_be_prepared() {
+        use openless_core::{LocalAsrRuntime, LocalAsrTarget, ModelRuntimeAdapter};
+
+        let adapter = TauriLocalAsrRuntimeAdapter::new(
+            TauriNativeAsrDependencies::new(
+                Arc::new(crate::asr::local::FoundryLocalRuntime::new()),
+                Arc::new(crate::asr::local::SherpaOnnxRuntime::new()),
+            ),
+            Arc::new(openless_core::PreferencesStore::in_memory()),
+        );
+        // 这是生产 Adapter 的真实未准备状态；preload 独立调用不能虚报成功，
+        // 也不能声称整个 Windows runtime Unsupported。测试不下载/加载设备模型。
+        for runtime in [LocalAsrRuntime::Foundry, LocalAsrRuntime::SherpaOnnx] {
+            let target = LocalAsrTarget::parse(runtime, runtime.default_model()).unwrap();
+            let error = adapter
+                .preload(target, PathBuf::new(), runtime.provider_id().to_string())
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, BackendErrorCode::InvalidState);
+        }
+        adapter.invalidate_release(LocalAsrRuntime::Foundry);
+        assert_eq!(adapter.native.foundry_generation.load(Ordering::Acquire), 1);
+        assert_eq!(adapter.native.sherpa_generation.load(Ordering::Acquire), 0);
+        adapter.invalidate_release(LocalAsrRuntime::SherpaOnnx);
+        assert_eq!(adapter.native.foundry_generation.load(Ordering::Acquire), 1);
+        assert_eq!(adapter.native.sherpa_generation.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn input_source_preparation_skips_one_shot_and_degrades_on_tis_failure() {
+        let (previous, streaming) = prepare_streaming_input_source(false, || async {
+            panic!("one-shot insertion must not access TIS");
+            #[allow(unreachable_code)]
+            Ok::<Option<u8>, &str>(Some(1))
+        })
+        .await;
+        assert_eq!(previous, None);
+        assert!(!streaming);
+        let (previous, streaming) = prepare_streaming_input_source(true, || async {
+            Err::<Option<u8>, _>("TIS select failed")
+        })
+        .await;
+        assert_eq!(previous, None);
+        assert!(!streaming);
+        assert_eq!(
+            prepare_streaming_input_source(true, || async { Ok::<_, &str>(Some(7_u8)) }).await,
+            (Some(7), true)
+        );
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[tokio::test]
+    async fn generic_activation_uses_the_requested_target_before_preferences_commit() {
+        use openless_core::{LocalAsrRuntime, LocalAsrTarget, ModelRuntimeAdapter};
+        let adapter = TauriLocalAsrRuntimeAdapter::new(
+            TauriNativeAsrDependencies::new(),
+            Arc::new(openless_core::PreferencesStore::in_memory()),
+        );
+        let target = LocalAsrTarget::parse(LocalAsrRuntime::Generic, "qwen3-asr-0.6b").unwrap();
+        assert_eq!(
+            adapter
+                .prepare(
+                    target.clone(),
+                    openless_core::FoundryRuntimeSource::Auto,
+                    PathBuf::new(),
+                    Arc::new(|_| {})
+                )
+                .await
+                .unwrap(),
+            target.model_id()
+        );
+        // Preferences 仍是旧的云端渠道。若错误读取它会返回虚假的 Ok；本次指定
+        // Qwen provider + Whisper target 必须在进入任何 native loader 前明确拒绝。
+        let wrong_target =
+            LocalAsrTarget::parse(LocalAsrRuntime::Generic, "whisper-large-v3-turbo").unwrap();
+        let error = adapter
+            .preload(wrong_target, PathBuf::new(), "local-qwen3-c".into())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, BackendErrorCode::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn native_transcription_timeout_is_retryable_and_drops_pending_wait() {
+        let error = await_native_transcription(
+            std::time::Duration::from_millis(1),
+            std::future::pending::<Result<(), BackendError>>(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, BackendErrorCode::Provider);
+        assert!(error.message.contains("timed out"));
+        assert!(error.retryable);
+        assert_eq!(
+            await_native_transcription(std::time::Duration::from_secs(1), async {
+                Ok::<_, BackendError>("transcript")
+            })
+            .await
+            .unwrap(),
+            "transcript"
+        );
+    }
 
     impl TextStreamSink for IgnoreTextStreamSink {
         fn publish(&self, _chunk: TextStreamChunk) -> Result<(), BackendError> {

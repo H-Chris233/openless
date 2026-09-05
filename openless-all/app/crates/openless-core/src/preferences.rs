@@ -153,6 +153,27 @@ impl PreferencesStore {
         Ok(())
     }
 
+    /// Change only a domain's owned fields while holding the persistence lock.
+    /// Long-running model preparation must not write back the whole snapshot
+    /// taken before an await: another settings request may have committed since.
+    /// Work on a clone so a failed disk write leaves the live state unchanged.
+    pub(crate) fn update<R>(
+        &self,
+        update: impl FnOnce(&mut UserPreferences) -> R,
+    ) -> Result<R, BackendError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut next = state.clone();
+        let result = update(&mut next);
+        let json = serde_json::to_vec_pretty(&next)
+            .map_err(|_| persistence_error("encode preferences"))?;
+        atomic_write(&self.path, &json)?;
+        *state = next;
+        Ok(result)
+    }
+
     pub fn set_preserving_current_style_preferences(
         &self,
         mut preferences: UserPreferences,

@@ -314,6 +314,23 @@ impl SherpaOnnxRuntime {
         Ok(())
     }
 
+    /// 自动收尾只释放仍属于本次使用的实例。代次在生命周期锁内复核，避免
+    /// 定时器等待旧推理结束期间，误清掉用户刚切换或新会话刚加载的模型。
+    pub(crate) async fn release_if_generation(
+        &self,
+        generation: &std::sync::atomic::AtomicU64,
+        expected: u64,
+    ) -> Result<bool> {
+        let _lifecycle = self.lifecycle.lock().await;
+        if generation.load(Ordering::Acquire) != expected {
+            return Ok(false);
+        }
+        let mut state = self.state.lock();
+        state.offline_loaded = None;
+        state.online_loaded = None;
+        Ok(true)
+    }
+
     fn cached_loaded_alias(&self, alias: &str) -> Option<String> {
         let state = self.state.lock();
         if state
@@ -766,6 +783,27 @@ fn pcm_s16le_to_f32(pcm: &[u8]) -> Result<Vec<f32>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn release_generation_is_rechecked_after_waiting_for_native_lifecycle() {
+        let runtime = SherpaOnnxRuntime::new();
+        let generation = std::sync::atomic::AtomicU64::new(1);
+        let guard = runtime.lifecycle.lock().await;
+        let release = runtime.release_if_generation(&generation, 1);
+        tokio::pin!(release);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(1), &mut release)
+                .await
+                .is_err()
+        );
+        generation.store(2, Ordering::Release);
+        drop(guard);
+        assert!(
+            !release.await.unwrap(),
+            "stale cleanup must leave the newly-owned runtime intact"
+        );
+        assert!(runtime.release_if_generation(&generation, 2).await.unwrap());
+    }
 
     #[tokio::test]
     async fn new_runtime_reports_offline_batch_status_shape() {

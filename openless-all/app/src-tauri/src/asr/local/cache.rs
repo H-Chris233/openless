@@ -113,6 +113,40 @@ impl LocalAsrCache {
         }
     }
 
+    /// Session 只允许清理自己实际借出的引擎。异步旧会话结束时，设置页可能已经
+    /// 加载另一个模型；比较 Arc 身份可以防止旧 timeout/cancel 把新模型驱逐。
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    pub fn finish_use(&self, engine: &Arc<LocalQwenEngine>, discard: bool) {
+        let mut slot = self.inner.lock();
+        if slot
+            .as_ref()
+            .is_some_and(|cached| Arc::ptr_eq(&cached.engine, engine))
+        {
+            if discard {
+                slot.take();
+            } else if let Some(cached) = slot.as_mut() {
+                cached.last_used = Instant::now();
+            }
+        }
+    }
+
+    /// Timer 只保留 Weak，用户“立即释放”后不会被旧定时器额外占用数分钟 RAM。
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    pub fn release_current_if_idle(
+        &self,
+        engine: &std::sync::Weak<LocalQwenEngine>,
+        threshold: Duration,
+    ) {
+        let mut slot = self.inner.lock();
+        if slot.as_ref().is_some_and(|cached| {
+            std::sync::Weak::ptr_eq(&Arc::downgrade(&cached.engine), engine)
+                && cached.last_used.elapsed() >= threshold
+        }) {
+            slot.take();
+            pressure_relief();
+        }
+    }
+
     /// 如果空闲时长 ≥ threshold，释放引擎。返回是否真释放了。
     pub fn release_if_idle(&self, idle_threshold: Duration) -> bool {
         #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -158,10 +192,7 @@ impl LocalAsrCache {
             let taken = self.inner.lock().take();
             if let Some(cached) = taken {
                 let action = if abort_in_use { "release" } else { "evict" };
-                log::info!(
-                    "[local-asr cache] {action} engine {}",
-                    cached.model_id,
-                );
+                log::info!("[local-asr cache] {action} engine {}", cached.model_id,);
                 if abort_in_use && Arc::strong_count(&cached.engine) > 1 {
                     cached.engine.cancel();
                 }

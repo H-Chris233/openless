@@ -834,6 +834,23 @@ pub fn volc_resource_history_label(resource_id: &str) -> Option<String> {
     allowed.then(|| id.to_string())
 }
 
+/// 1.x native ASR 的动态预算保留在 Core，Host 只负责执行 deadline 后的原生取消。
+/// MLX/C 和 Apple Speech 给短音频 30 秒余量；Whisper Metal 保留 15 秒地板；
+/// Windows batch 的 CPU/GPU 回退各自消费完整预算，不能再套一个更短的外层计时器。
+pub fn native_transcribe_timeout(provider_type: &str, duration_ms: u64) -> Duration {
+    let (numerator, denominator, extra, minimum) = match provider_type {
+        "local-whisper" | "apple-whisper" => (1_u64, 2_000_u64, 10, 15),
+        "local-qwen3" | "local-qwen3-mlx" | "local-qwen3-c" | "apple-speech" => (3, 5_000, 10, 30),
+        _ => (1, 1_000, 20, 30),
+    };
+    let seconds = duration_ms
+        .saturating_mul(numerator)
+        .div_ceil(denominator)
+        .saturating_add(extra)
+        .max(minimum);
+    Duration::from_secs(seconds)
+}
+
 pub fn whisper_transcribe_timeout(audio_secs: f64) -> Duration {
     let secs = ((audio_secs * 0.5).ceil() as u64)
         .saturating_add(20)
@@ -1028,5 +1045,43 @@ mod tests {
         );
         assert_eq!(volc_resource_history_label("my-secret-tenant"), None);
         assert_eq!(volc_resource_history_label("volc.a b"), None);
+    }
+    #[test]
+    fn native_asr_deadlines_preserve_short_floor_and_long_audio_budget() {
+        for provider in [
+            "local-qwen3",
+            "local-qwen3-mlx",
+            "local-qwen3-c",
+            "apple-speech",
+        ] {
+            assert_eq!(
+                native_transcribe_timeout(provider, 1_000),
+                Duration::from_secs(30)
+            );
+            assert_eq!(
+                native_transcribe_timeout(provider, 60_001),
+                Duration::from_secs(47)
+            );
+        }
+        for provider in ["local-whisper", "apple-whisper"] {
+            assert_eq!(
+                native_transcribe_timeout(provider, 1_000),
+                Duration::from_secs(15)
+            );
+            assert_eq!(
+                native_transcribe_timeout(provider, 60_001),
+                Duration::from_secs(41)
+            );
+        }
+        for provider in ["foundry-local-whisper", "sherpa-onnx-local"] {
+            assert_eq!(
+                native_transcribe_timeout(provider, 1_000),
+                Duration::from_secs(30)
+            );
+            assert_eq!(
+                native_transcribe_timeout(provider, 60_001),
+                Duration::from_secs(81)
+            );
+        }
     }
 }

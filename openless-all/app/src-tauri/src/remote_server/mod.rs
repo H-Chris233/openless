@@ -22,7 +22,7 @@ use axum::{
 };
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use serde::Serialize;
-use tauri::{AppHandle, Listener, Manager};
+use tauri::{AppHandle, Manager};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 
@@ -271,7 +271,6 @@ fn build_server_config(
 
 struct WsState {
     backend: Arc<openless_core::OpenLessBackend>,
-    app: AppHandle,
     /// 自签名证书的 DER 原始字节，供 /cert.cer 下载给手机安装信任。
     cert_der: Vec<u8>,
     /// 服务关停广播的接收端，每条 WS 连接 clone 一份并在主循环 select 监听。
@@ -438,7 +437,6 @@ pub async fn start(cfg: RemoteServerConfig) -> Result<RemoteServerHandle, String
     let (conn_shutdown_tx, conn_shutdown_rx) = tokio::sync::watch::channel(false);
     let state = Arc::new(WsState {
         backend: cfg.backend,
-        app: cfg.app,
         cert_der,
         conn_shutdown_rx,
     });
@@ -510,46 +508,62 @@ fn send_json<T: Serialize>(value: &T) -> Message {
     Message::Text(serde_json::to_string(value).unwrap_or_else(|_| "{}".into()))
 }
 
-/// 把后端 capsule 事件 payload 映射成手机端 status / level JSON 文本。
-fn capsule_payload_to_phone(payload: &str) -> Vec<String> {
-    let v: serde_json::Value = match serde_json::from_str(payload) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-    let state = v.get("state").and_then(|s| s.as_str()).unwrap_or("");
-    let kind = match state {
-        s if s.eq_ignore_ascii_case("recording") => "recording",
-        s if s.eq_ignore_ascii_case("transcribing") => "transcribing",
-        s if s.eq_ignore_ascii_case("polishing") => "polishing",
-        s if s.eq_ignore_ascii_case("done") => "done",
-        s if s.eq_ignore_ascii_case("error") => "error",
-        s if s.eq_ignore_ascii_case("cancelled") => "done",
-        _ => "",
-    };
-    let mut out = Vec::new();
-    if !kind.is_empty() {
-        let inserted = v
-            .get("insertedChars")
-            .or_else(|| v.get("inserted_chars"))
-            .and_then(|n| n.as_u64());
-        let message = v.get("message").and_then(|m| m.as_str());
-        out.push(
-            serde_json::json!({
-                "type": "status",
-                "kind": kind,
-                "insertedChars": inserted,
-                "message": message,
-            })
-            .to_string(),
-        );
+/// 手机只接收本连接开出的 Core 会话。全局 capsule/纯文本广播没有 owner，
+/// 会把电脑本地听写或另一台手机的内容发给所有已配对连接，不能作为网络出口。
+fn backend_event_to_phone(
+    event: &openless_core::BackendEvent,
+    remote_session_id: &mut Option<openless_core::SessionId>,
+) -> Vec<String> {
+    use openless_core::{BackendEventKind, DictationPhase};
+    if remote_session_id.is_none() || event.session_id != *remote_session_id {
+        return Vec::new();
     }
-    if let Some(level) = v.get("level").and_then(|l| l.as_f64()) {
-        if state.eq_ignore_ascii_case("recording") {
-            out.push(serde_json::json!({"type": "level", "value": level}).to_string());
+    match &event.kind {
+        BackendEventKind::DictationCompleted(result) => {
+            // Completed 状态先于结果发布，所以只能在收到结果后释放下行 owner。
+            // stop future 完成也不清 owner，避免 select 顺序让最后一条结果丢失。
+            *remote_session_id = None;
+            vec![
+                serde_json::json!({"type":"status", "kind":"done",
+                    "insertedChars":result.polished_text.chars().count(), "message":null})
+                .to_string(),
+                serde_json::json!({"type":"result", "text":result.polished_text}).to_string(),
+            ]
         }
+        BackendEventKind::DictationStateChanged(snapshot) => {
+            let kind = match snapshot.phase {
+                DictationPhase::Starting | DictationPhase::Recording => "recording",
+                DictationPhase::Transcribing => "transcribing",
+                DictationPhase::Polishing | DictationPhase::Inserting => "polishing",
+                DictationPhase::Failed => "error",
+                DictationPhase::Cancelled => "done",
+                DictationPhase::Idle | DictationPhase::Completed => return Vec::new(),
+            };
+            if matches!(
+                snapshot.phase,
+                DictationPhase::Failed | DictationPhase::Cancelled
+            ) {
+                *remote_session_id = None;
+            }
+            let mut messages = vec![serde_json::json!({
+                "type":"status", "kind":kind, "insertedChars":null,
+                "message":snapshot.message,
+            })
+            .to_string()];
+            if snapshot.phase == DictationPhase::Recording {
+                messages
+                    .push(serde_json::json!({"type":"level", "value":snapshot.level}).to_string());
+            }
+            messages
+        }
+        _ => Vec::new(),
     }
-    out
 }
+
+// stop 包含 ASR/润色/插入，可能持续数十秒。让 socket select 持有并轮询 future，
+// 期间仍能收 cancel/Close/关停信号；断开时先撤销 Core lease，再丢弃此 future。
+type PendingRemoteStop =
+    futures_util::future::BoxFuture<'static, Result<(), openless_core::BackendError>>;
 
 async fn handle_ws(mut socket: WebSocket, state: Arc<WsState>, peer_ip: IpAddr) {
     // 1) 握手：等第一帧 hello + PIN。
@@ -600,32 +614,9 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<WsState>, peer_ip: IpAddr) 
         }
     }
 
-    // 2) 订阅 capsule 事件，转发给手机做状态显示。
-    let (evt_tx, mut evt_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-    let listener_id = {
-        let tx = evt_tx.clone();
-        // 必须用 listen_any:capsule 状态是通过 emit_to("capsule", …) 定向发给胶囊
-        // 窗口的,普通 app.listen(target=App) 收不到定向事件 —— 那样手机永远收不到
-        // done/polishing 等状态,会一直卡在前端本地设的"识别中"。listen_any 接收
-        // 所有 target 的事件,把胶囊状态如实转发给手机。
-        state.app.listen_any("capsule:state", move |event| {
-            for msg in capsule_payload_to_phone(event.payload()) {
-                let _ = tx.send(msg);
-            }
-        })
-    };
-
-    // 听写完成后 PC 端把最终文字 emit 到 "remote:result"。手机用户看不到电脑屏幕,
-    // 所以把这次落下的完整文字转发过去,H5 在状态区下方显示(type=result)。
-    let result_listener_id = {
-        let tx = evt_tx.clone();
-        state.app.listen_any("remote:result", move |event| {
-            // emit 的是 String,payload 是带引号的 JSON 字符串,反序列化回纯文本。
-            if let Ok(text) = serde_json::from_str::<String>(event.payload()) {
-                let _ = tx.send(serde_json::json!({ "type": "result", "text": text }).to_string());
-            }
-        })
-    };
+    // 在 start 控制帧之前订阅，确保快速会话的起始事件也能在 owner 建立后转发。
+    let mut events = state.backend.subscribe();
+    let mut last_event_sequence = 0;
 
     // 3) 主循环：手机上行（控制 / PCM） + 后端状态下行 + keepalive 探活 + 关停广播。
     let mut conn_shutdown_rx = state.conn_shutdown_rx.clone();
@@ -633,7 +624,8 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<WsState>, peer_ip: IpAddr) 
     keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_rx = Instant::now();
     let mut remote_session_id = None;
-    loop {
+    let mut pending_stop: Option<PendingRemoteStop> = None;
+    'connection: loop {
         tokio::select! {
             incoming = socket.recv() => {
                 last_rx = Instant::now();
@@ -663,6 +655,7 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<WsState>, peer_ip: IpAddr) 
                             connection_id,
                             &mut socket,
                             &mut remote_session_id,
+                            &mut pending_stop,
                         )
                         .await
                         {
@@ -673,14 +666,36 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<WsState>, peer_ip: IpAddr) 
                     _ => {}
                 }
             }
-            Some(msg) = evt_rx.recv() => {
-                if socket.send(Message::Text(msg)).await.is_err() {
-                    break;
+            received = events.recv() => {
+                let received = match received {
+                    Ok(event) => vec![event],
+                    Err(openless_core::EventRecvError::Lagged(_)) => {
+                        state.backend.replay_events_after(last_event_sequence).events
+                    }
+                    Err(openless_core::EventRecvError::Closed) => break,
+                    Err(openless_core::EventRecvError::Empty) => continue,
+                };
+                for event in received {
+                    if event.sequence <= last_event_sequence {
+                        continue;
+                    }
+                    last_event_sequence = event.sequence;
+                    for msg in backend_event_to_phone(&event, &mut remote_session_id) {
+                        if socket.send(Message::Text(msg)).await.is_err() {
+                            break 'connection;
+                        }
+                    }
+                }
+            }
+            stopped = async { pending_stop.as_mut().expect("guarded stop future").await }, if pending_stop.is_some() => {
+                pending_stop = None;
+                if let Err(error) = stopped {
+                    log::warn!("[remote-input] stop stream failed: {error}");
                 }
             }
             _ = keepalive.tick() => {
                 // 半开探活：浏览器收到 Ping 自动回 Pong（上面 recv 收到即刷新 last_rx）。
-                // 超时无任何上行 → 死链，break 走下方统一收尾（cancel + unlisten），
+                // 超时无任何上行 → 死链，break 走下方统一收尾（撤销 Core lease），
                 // 避免录音中掉线时远程会话与标志悬挂。
                 if last_rx.elapsed() > Duration::from_secs(IDLE_TIMEOUT_SECS) {
                     log::info!("[remote-input] 连接 {}s 无上行（含 Pong），按半开死链断开", IDLE_TIMEOUT_SECS);
@@ -703,14 +718,13 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<WsState>, peer_ip: IpAddr) 
 
     // 4) 收尾：断连即取消未完成的远程会话，避免 ASR 句柄悬挂。
     log::info!("[remote-input] WS 连接已关闭");
-    state.app.unlisten(listener_id);
-    state.app.unlisten(result_listener_id);
     let _ = state
         .backend
         .services()
         .remote_input
         .disconnect(connection_id)
         .await;
+    drop(pending_stop);
 }
 
 /// 返回 false 表示应断开连接。
@@ -720,12 +734,14 @@ async fn handle_control(
     connection_id: openless_core::SessionId,
     socket: &mut WebSocket,
     remote_session_id: &mut Option<openless_core::SessionId>,
+    pending_stop: &mut Option<PendingRemoteStop>,
 ) -> bool {
     if let Some(reply) = apply_remote_control(
         txt,
         state.backend.services().remote_input.as_ref(),
         connection_id,
         remote_session_id,
+        pending_stop,
     )
     .await
     {
@@ -739,6 +755,7 @@ async fn apply_remote_control(
     remote_input: &dyn openless_core::RemoteInputApi,
     connection_id: openless_core::SessionId,
     remote_session_id: &mut Option<openless_core::SessionId>,
+    pending_stop: &mut Option<PendingRemoteStop>,
 ) -> Option<serde_json::Value> {
     let v: serde_json::Value = match serde_json::from_str(txt) {
         Ok(v) => v,
@@ -767,14 +784,20 @@ async fn apply_remote_control(
         }
         "stop" => {
             log::info!("[remote-input] 收到「结束录音」");
-            if let Some(session_id) = remote_session_id.take() {
-                let _ = remote_input.stop_stream(connection_id, session_id).await;
+            if pending_stop.is_none() {
+                if let Some(session_id) = *remote_session_id {
+                    *pending_stop = Some(remote_input.stop_stream(connection_id, session_id));
+                }
             }
         }
         "cancel" => {
             if let Some(session_id) = remote_session_id.take() {
                 let _ = remote_input.cancel_stream(connection_id, session_id).await;
+                *pending_stop = None;
             }
+            // 结果事件可能先于 Core stop 的最后几步清理到达。此时 owner 已释放，
+            // 不能因为迟到的 cancel 把尚未返回的 stop future 丢掉，否则会遗留
+            // Core finishing lease；让 select 正常把它轮询至完成即可。
         }
         "set_insert" => {
             // 手机端「电脑落字」开关：value=true 表示要落字。no_insert = !value。
@@ -818,7 +841,7 @@ mod tests {
         RemoteInputConfig, RemoteInputService, SessionId,
     };
 
-    use super::{apply_remote_control, parse_audio_frame, parse_hello_pin};
+    use super::{apply_remote_control, backend_event_to_phone, parse_audio_frame, parse_hello_pin};
 
     fn backend() -> (
         OpenLessBackend,
@@ -867,12 +890,14 @@ mod tests {
             RemoteAuthResult::Ok
         );
         let mut session_id = None;
+        let mut pending_stop = None;
 
         let started = apply_remote_control(
             r#"{"type":"start"}"#,
             remote.as_ref(),
             connection_id,
             &mut session_id,
+            &mut pending_stop,
         )
         .await
         .expect("start must return its typed session identity");
@@ -883,6 +908,7 @@ mod tests {
             remote.as_ref(),
             connection_id,
             &mut session_id,
+            &mut pending_stop,
         )
         .await
         .expect("duplicate start must return a busy response");
@@ -895,10 +921,16 @@ mod tests {
             remote.as_ref(),
             connection_id,
             &mut session_id,
+            &mut pending_stop,
         )
         .await
         .is_none());
-        assert_eq!(session_id, None);
+        assert_eq!(
+            session_id,
+            Some(first_session),
+            "stop 必须保留可取消的会话，直到终态"
+        );
+        pending_stop.take().unwrap().await.unwrap();
         assert_eq!(runtime.audio_stop_count(), 1);
 
         apply_remote_control(
@@ -906,6 +938,7 @@ mod tests {
             remote.as_ref(),
             connection_id,
             &mut session_id,
+            &mut pending_stop,
         )
         .await;
         remote
@@ -920,6 +953,7 @@ mod tests {
             remote.as_ref(),
             connection_id,
             &mut session_id,
+            &mut pending_stop,
         )
         .await
         .expect("stale connection must be rejected");
@@ -931,6 +965,115 @@ mod tests {
             BackendErrorCode::Cancelled
         );
         let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn websocket_stop_returns_to_the_control_loop_and_remains_cancellable() {
+        let (backend, runtime, data_dir) = backend();
+        let remote = &backend.services().remote_input;
+        remote
+            .configure(RemoteInputConfig {
+                enabled: true,
+                port: 8443,
+            })
+            .await
+            .unwrap();
+        let connection = SessionId::new();
+        remote
+            .authenticate(
+                connection,
+                "127.0.0.1".into(),
+                remote.read_pairing_pin().await.unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut owner = None;
+        let mut pending_stop = None;
+        apply_remote_control(
+            r#"{"type":"start"}"#,
+            remote.as_ref(),
+            connection,
+            &mut owner,
+            &mut pending_stop,
+        )
+        .await;
+        let session = owner.unwrap();
+        apply_remote_control(
+            r#"{"type":"stop"}"#,
+            remote.as_ref(),
+            connection,
+            &mut owner,
+            &mut pending_stop,
+        )
+        .await;
+        assert_eq!(owner, Some(session));
+        assert!(pending_stop.is_some(), "ASR stop 交由 socket select 轮询");
+        apply_remote_control(
+            r#"{"type":"cancel"}"#,
+            remote.as_ref(),
+            connection,
+            &mut owner,
+            &mut pending_stop,
+        )
+        .await;
+        assert_eq!(owner, None);
+        assert!(pending_stop.is_none());
+        assert_eq!(runtime.audio_cancel_count(), 1);
+
+        // 下行结果已经清 owner，但 stop 仍在做最后清理时，迟到 cancel 不得
+        // 销毁这个 cleanup future。否则 Core 的 finishing lease 会永久悬挂。
+        pending_stop = Some(Box::pin(async { Ok(()) }));
+        apply_remote_control(
+            r#"{"type":"cancel"}"#,
+            remote.as_ref(),
+            connection,
+            &mut owner,
+            &mut pending_stop,
+        )
+        .await;
+        pending_stop
+            .take()
+            .expect("已完成会话的清理仍须被轮询")
+            .await
+            .unwrap();
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn websocket_events_only_reveal_the_owned_session_and_keep_its_final_result() {
+        use openless_core::{
+            BackendEvent, BackendEventKind, DictationInsertStatus, DictationResult,
+        };
+        let session = SessionId::new();
+        let mut owner = Some(session);
+        let result = |id| BackendEvent {
+            sequence: 1,
+            session_id: Some(id),
+            kind: BackendEventKind::DictationCompleted(DictationResult {
+                session_id: id,
+                raw_text: "private".into(),
+                polished_text: "自己的结果".into(),
+                polish_source: None,
+                duration_ms: 1,
+                inserted: DictationInsertStatus::NotRequested,
+            }),
+        };
+        assert!(
+            backend_event_to_phone(&result(SessionId::new()), &mut owner).is_empty(),
+            "其他手机/本机结果不可转发"
+        );
+        assert_eq!(owner, Some(session));
+        let messages = backend_event_to_phone(&result(session), &mut owner);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&messages[1]).unwrap(),
+            serde_json::json!({"type":"result", "text":"自己的结果"})
+        );
+        assert_eq!(owner, None);
+        assert!(
+            backend_event_to_phone(&result(session), &mut owner).is_empty(),
+            "取消/终态之后的迟到结果不可转发"
+        );
     }
 
     #[test]

@@ -11,6 +11,10 @@
 > Selection preview/revert 与打包的 Qwen runtime；AppImage 会在 listener 前安装 fcitx5 插件。
 > 自动 contract 不替代真实平台证据：Ubuntu/Windows/macOS/Android 的设备、安装、升级和签名
 > 结果仍须按 [`linux-egui-shared-backend-plan.md`](./linux-egui-shared-backend-plan.md) 单独记录。
+>
+> 2026-09-05 复核补充：最新生产行为修复见 [`pr1019-2.0-final-review.md`](./pr1019-2.0-final-review.md)。
+> 原生预加载必须使用请求的 target/provider type；平台无法准备流式时以 `supports_streaming=false`
+> 保留一次性落字。Remote stop 保持可取消的 session，socket 下行只转发本连接所属 session 的事件。
 
 ## 1. 依赖与职责
 
@@ -276,8 +280,8 @@ revision 不匹配时返回 `BackendErrorCode::Busy`、`retryable = true`，`det
 `expectedPreferencesRevision` 和 `actualPreferencesRevision`。UI 必须重新读取 snapshot/偏好、合并
 用户仍想保留的编辑后再提交；不得无条件重放陈旧整表。
 
-Linux settings Adapter 当前支持 dictation、QA、Selection Polish、translation 的 fcitx5 热键和
-active ASR provider metadata。修改 switch-style、open-app、Coding Agent、style-pack hotkey 或
+Linux settings Adapter 当前支持 dictation、QA、Selection Polish、translation、Coding Agent 的 fcitx5 热键和
+active ASR provider metadata；启动时同步保存的热键，禁用 Coding Agent 时解绑其语音键。修改 switch-style、open-app、style-pack hotkey 或
 Windows keyboard effect 会稳定返回 `Unsupported`，且不写偏好、不增加 revision、不发布事件。
 UI 不得直接调用 `OpenLessBackend::set_preferences*`；这些低层兼容方法不属于 Linux UI Interface，
 也不能绕过 `LinuxHost` 的 revision、冲突和补偿契约。
@@ -525,8 +529,8 @@ outcome-unknown，返回明确的 `BackendError` 且不得再次插入。Core �
   `PolishFailurePolicy` 统一决定，宿主不得另写一套 fallback 判断。
 - `TextInserter`：fcitx5、AX、TSF 或 clipboard fallback 的统一会话接口：
   `begin(session, context)` 在录音/ASR 启动前捕获 opaque target 并返回
-  `TextInsertionSession::{write,copy,finish,cancel}`。Core `ActiveTextInsertion` 独占 streamed prefix、
-  Unicode tail、final divergence 与 clipboard fallback reconciliation；Host 只报告已确认写入字符数。
+  `TextInsertionSession::{supports_streaming,write,copy,finish,cancel}`。Core `ActiveTextInsertion` 独占 streamed prefix、
+  Unicode tail、final divergence 与 clipboard fallback reconciliation；Host 报告已消费源 Unicode scalar 前缀长度，包含按约定吞掉的 CR，失败字符不计入。平台准备不能流式时返回 `supports_streaming=false`，仍可一次性落字。
   target 无法恢复时必须返回明确 copied/error，不能向当前焦点盲写；所有终态都要恢复输入法、
   剪贴板和平台资源。
 - `HostActions`：`ShowDictationFeedback`、`HideDictationFeedback`、打开系统设置、
@@ -588,6 +592,9 @@ Host 不得再保存 cooldown、began-session 或重复的 mode policy。
 - `LinuxResourceLayout` / `LinuxResourceResolver`：分别定义 development、AppImage、deb、rpm
   的资源根与 fcitx5 插件相对路径；
 - fcitx5 Adapter：availability、DBus commit、selection read、hotkey sync、clipboard fallback；
+  普通听写使用 `CaptureDictationTarget(s: session) -> b`、`CommitDictationTarget(ss: session, text) -> b`、
+  `CancelDictationTarget(s: session) -> b` 冻结并释放原输入上下文；新目标不能替换活动 session 的原目标。
+  Selection 同时冻结原上下文及 surrounding text/cursor/anchor；取消选中、移动光标或修改文本后拒绝替换，全局 PRIMARY 不能证明原选区仍存在。
   `CommitText(s: text) -> b` 的 `true` 才表示文字已提交到输入上下文，`false` 表示当前没有
   可用焦点输入上下文（例如启动或无焦点/headless 场景）。Rust Adapter 必须把 `false` 转为
   明确的插入失败/平台错误并按策略决定 clipboard fallback，不能向 Core 或 UI 报告假成功；
@@ -597,7 +604,7 @@ Host 不得再保存 cooldown、began-session 或重复的 mode policy。
   updater 和麦克风能力；未知权限返回 `Unknown`/`Unsupported`，不伪造 granted；
 - `LinuxHostActions`：线程安全队列、非阻塞 drain 与可选 wake/repaint callback；
 - `LinuxSettingsRuntime`：只执行 Core `SettingsEffectPlan` 的显式目标，通过 fcitx5 DBus 同步
-  dictation/QA/Selection Polish/translation，并通过 Linux credential metadata 同步 active ASR
+  dictation/QA/Selection Polish/translation/Coding Agent，并通过 Linux credential metadata 同步 active ASR
   provider；不支持能力返回稳定 `Unsupported`，失败按 receipt 逆序恢复；
 - `LinuxCpalRecorder`：选择偏好设备或默认输入设备，在专用线程持有 cpal stream，把常见
   sample format 下混、重采样和量化为 core PCM 契约，并报告 `0..=1` level；runtime fault

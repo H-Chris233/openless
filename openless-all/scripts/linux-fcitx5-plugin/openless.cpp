@@ -263,6 +263,13 @@ public:
                             ++it;
                         }
                     }
+                    for (auto it = dictationTargets_.begin(); it != dictationTargets_.end();) {
+                        if (it->second == icEvent.inputContext()) {
+                            it = dictationTargets_.erase(it);
+                        } else {
+                            ++it;
+                        }
+                    }
                 }));
 
         // 5. 监听焦点切换：用户切窗口时把上次 auxDown 自动补到新 IC，
@@ -349,8 +356,27 @@ public:
         if (source.empty()) {
             return std::string();
         }
-        selectionTargets_[ticket] = {selectionIc_, source, std::string()};
+        selectionTargets_[ticket] = {selectionIc_, source, std::string(), surrounding};
         return source;
+    }
+
+    bool captureDictationTarget(const std::string &ticket) {
+        if (ticket.empty() || !savedIc_) return false;
+        // A session keeps its own native target even when later key events
+        // update savedIc_. Destruction invalidates the ticket instead of
+        // redirecting the remaining transcript to a different application.
+        return dictationTargets_.emplace(ticket, savedIc_).second;
+    }
+
+    bool commitDictationTarget(const std::string &ticket, const std::string &text) {
+        auto found = dictationTargets_.find(ticket);
+        if (found == dictationTargets_.end()) return false;
+        found->second->commitString(text);
+        return true;
+    }
+
+    bool cancelDictationTarget(const std::string &ticket) {
+        return dictationTargets_.erase(ticket) > 0;
     }
 
     bool applySelectionTarget(const std::string &ticket,
@@ -365,15 +391,18 @@ public:
             return false;
         }
         auto *ic = found->second.inputContext;
-        std::string selected;
         const auto &surrounding = ic->surroundingText();
-        if (surrounding.isValid()) {
-            selected = surrounding.selectedText();
-        }
-        if (selected.empty()) {
-            selected = getSelectionText();
-        }
-        if (selected != source) {
+        const auto &captured = found->second.surrounding;
+        // PRIMARY can outlive the selection, and the same selected string may
+        // occur at several offsets. Only the original IC's complete surrounding
+        // snapshot proves that this exact range is still the intended target.
+        // Without surrounding-text support, preview/read remains possible but
+        // destructive replacement must fail safely.
+        if (!captured.isValid() || !surrounding.isValid() ||
+            captured.text() != surrounding.text() ||
+            captured.cursor() != surrounding.cursor() ||
+            captured.anchor() != surrounding.anchor() ||
+            surrounding.selectedText() != source) {
             return false;
         }
         ic->commitString(replacement);
@@ -400,6 +429,11 @@ public:
             textChars == utf8::INVALID_LENGTH ||
             surrounding.cursor() > textChars ||
             surrounding.cursor() < replacementChars) {
+            return false;
+        }
+        const auto &captured = found->second.surrounding;
+        if (surrounding.cursor() != std::min(captured.cursor(), captured.anchor()) + replacementChars ||
+            surrounding.anchor() != surrounding.cursor()) {
             return false;
         }
         auto end = utf8::nextNChar(
@@ -534,6 +568,7 @@ public:
         RawConfig raw;
         raw.setValueByPath("TriggerRawSym", std::to_string(sym));
         raw.setValueByPath("TriggerRawStates", std::to_string(states));
+        raw.setValueByPath("CustomDictationKey", "");
         config_.save(raw);
         safeSaveAsIni(raw, configFile());
         rebuildTriggerKeys();
@@ -562,6 +597,9 @@ public:
             config_.save(raw);
             raw.setValueByPath("TriggerRawSym", "0");
             raw.setValueByPath("TriggerRawStates", "0");
+            // Persist the actual custom binding, not only removal of the old
+            // raw binding, so an independent fcitx5 restart retains the key.
+            raw.setValueByPath("CustomDictationKey", keyString);
             safeSaveAsIni(raw, configFile());
         }
         FCITX_LOGC(openless, Info)
@@ -635,6 +673,9 @@ public:
     }
 
     FCITX_OBJECT_VTABLE_METHOD(commitText, "CommitText", "s", "b");
+    FCITX_OBJECT_VTABLE_METHOD(captureDictationTarget, "CaptureDictationTarget", "s", "b");
+    FCITX_OBJECT_VTABLE_METHOD(commitDictationTarget, "CommitDictationTarget", "ss", "b");
+    FCITX_OBJECT_VTABLE_METHOD(cancelDictationTarget, "CancelDictationTarget", "s", "b");
     FCITX_OBJECT_VTABLE_METHOD(captureSelectionTarget, "CaptureSelectionTarget", "s", "s");
     FCITX_OBJECT_VTABLE_METHOD(applySelectionTarget, "ApplySelectionTarget", "sss", "b");
     FCITX_OBJECT_VTABLE_METHOD(revertSelectionTarget, "RevertSelectionTarget", "s", "b");
@@ -709,6 +750,16 @@ public:
         lessComputerTriggerHeld_ = false;
         lessComputerTriggerCombined_ = false;
         rebuildTriggerKeys();
+        hasCustomDictationKey_ = false;
+        if (auto *value = raw.valueByPath("CustomDictationKey"); value && !value->empty()) {
+            Key key(*value);
+            if (key.isValid()) {
+                customDictationKey_ = key;
+                hasCustomDictationKey_ = true;
+                triggerRawSym_ = 0;
+                triggerKeyList_.clear();
+            }
+        }
     }
 
     const Configuration *getConfig() const override {
@@ -722,10 +773,14 @@ public:
     }
 
 private:
+    // The native-boundary contract fixture supplies real in-process IC handles
+    // without synthesizing DBus signals or touching the user's input devices.
+    friend struct OpenLessInputTargetContract;
     struct SelectionTarget {
         InputContext *inputContext;
         std::string source;
         std::string replacement;
+        SurroundingText surrounding;
     };
 
     static constexpr const char *configFile() {
@@ -777,6 +832,7 @@ private:
     /// Core session UUID -> Host 原生目标。map 只保存 effect 所需的句柄和回滚文本；
     /// Preview/Apply/Completed/Cancelled 状态仍由 Core 独占。
     std::unordered_map<std::string, SelectionTarget> selectionTargets_;
+    std::unordered_map<std::string, InputContext *> dictationTargets_;
     /// 上一次 SetAuxDown 的文本；焦点切换时用于自动补到新 IC。
     std::string lastAuxText_;
     std::vector<std::unique_ptr<HandlerTableEntry<EventHandler>>>

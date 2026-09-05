@@ -77,6 +77,7 @@ struct RecordingLocalAsrRuntime {
     restart_on_rebind: std::sync::atomic::AtomicBool,
     emit_prepare_progress: std::sync::atomic::AtomicBool,
     operations: Mutex<Vec<String>>,
+    during_prepare: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl ModelRuntimeAdapter for RecordingLocalAsrRuntime {
@@ -165,6 +166,9 @@ impl ModelRuntimeAdapter for RecordingLocalAsrRuntime {
         _: PathBuf,
         progress: openless_core::ModelPrepareProgressSink,
     ) -> BoxFuture<'static, Result<String, BackendError>> {
+        if let Some(update) = self.during_prepare.lock().unwrap().take() {
+            update();
+        }
         self.operations
             .lock()
             .unwrap()
@@ -265,6 +269,7 @@ impl ModelRuntimeAdapter for RecordingLocalAsrRuntime {
         &self,
         target: LocalAsrTarget,
         _: PathBuf,
+        _: String,
     ) -> BoxFuture<'static, Result<(), BackendError>> {
         self.operations
             .lock()
@@ -422,6 +427,75 @@ async fn local_asr_activation_prepares_before_committing_provider_and_preference
         runtime.operations.lock().unwrap().as_slice(),
         ["prepare:whisper-medium", "preload:whisper-medium"]
     );
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
+async fn local_asr_activation_preserves_settings_edited_during_prepare_and_rollback() {
+    for fail_commit in [false, true] {
+        let credentials = Arc::new(FailingActiveCredentialStore::default());
+        let (data_dir, runtime, backend) =
+            local_asr_backend_with_credentials(credentials.clone(), Some("openai-compatible"));
+        let backend = Arc::new(backend);
+        backend
+            .set_active_provider(ProviderSlot::Asr, "openai-compatible".into())
+            .await
+            .unwrap();
+        credentials
+            .fail_set
+            .store(fail_commit, std::sync::atomic::Ordering::SeqCst);
+        let weak = Arc::downgrade(&backend);
+        *runtime.during_prepare.lock().unwrap() = Some(Box::new(move || {
+            // A settings IPC can finish while native preparation is pending.
+            // Activation and rollback own the model choice, not this setting.
+            let backend = weak.upgrade().unwrap();
+            let mut next = backend.get_preferences();
+            next.microphone_device_name = "new microphone".into();
+            backend
+                .update_settings(
+                    next,
+                    openless_core::SettingsUpdateOptions::SETTINGS_DOCUMENT,
+                    &openless_core::NoopSettingsRuntime,
+                )
+                .unwrap();
+        }));
+        let result = backend
+            .activate_local_asr(LocalAsrActivationRequest {
+                target: LocalAsrTarget::parse(LocalAsrRuntime::Foundry, "whisper-medium").unwrap(),
+                provider_id: "foundry-local-whisper".into(),
+            })
+            .await;
+        assert_eq!(result.is_err(), fail_commit);
+        assert_eq!(
+            backend.get_preferences().microphone_device_name,
+            "new microphone"
+        );
+        assert_eq!(
+            backend.get_preferences().active_asr_provider,
+            if fail_commit {
+                "openai-compatible"
+            } else {
+                "foundry-local-whisper"
+            }
+        );
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+}
+
+#[tokio::test]
+async fn queued_storage_changes_read_the_current_root_after_acquiring_the_lock() {
+    let (data_dir, _, backend) = local_asr_backend();
+    let api = &backend.services().local_asr;
+    let first = api.set_models_base_dir(Some(data_dir.join("external")));
+    let second = api.set_models_base_dir(None);
+    first.await.unwrap();
+    let result = second.await.unwrap();
+    assert!(result.is_default);
+    assert_eq!(result.models_root_dir, data_dir.join("models"));
+    assert!(backend
+        .get_preferences()
+        .local_asr_models_base_dir
+        .is_empty());
     let _ = std::fs::remove_dir_all(data_dir);
 }
 
@@ -611,7 +685,7 @@ async fn local_asr_activation_rolls_back_when_active_provider_commit_fails() {
 }
 
 #[tokio::test]
-async fn local_asr_activation_releases_the_previous_runtime_lease_after_commit() {
+async fn local_asr_activation_releases_the_previous_runtime_lease_before_channel_commit() {
     let (data_dir, runtime, backend) = local_asr_backend_with_credentials(
         Arc::new(InMemoryCredentialStore::default()),
         Some("openai-compatible"),
@@ -781,6 +855,65 @@ async fn local_asr_activation_restores_state_when_the_previous_lease_cannot_rele
             "prepare:qwen3-asr-0.6b",
             "preload:qwen3-asr-0.6b"
         ]
+    );
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
+async fn failed_activation_restores_the_channel_selected_during_native_preparation() {
+    use futures_util::FutureExt;
+    let credentials = Arc::new(InMemoryCredentialStore::default());
+    let (data_dir, runtime, backend) =
+        local_asr_backend_with_credentials(credentials.clone(), Some("local-qwen3"));
+    let qwen = LocalAsrTarget::parse(LocalAsrRuntime::Generic, "qwen3-asr-0.6b").unwrap();
+    let qwen_dir = data_dir.join("models").join(qwen.model_id());
+    std::fs::create_dir_all(&qwen_dir).unwrap();
+    std::fs::write(qwen_dir.join(openless_core::MODEL_READY_SENTINEL), b"ready").unwrap();
+    backend
+        .activate_local_asr(LocalAsrActivationRequest {
+            target: qwen,
+            provider_id: "local-qwen3".into(),
+        })
+        .await
+        .unwrap();
+    let backend = Arc::new(backend);
+    let weak = Arc::downgrade(&backend);
+    *runtime.during_prepare.lock().unwrap() = Some(Box::new(move || {
+        // The in-memory store completes synchronously. This models the user
+        // choosing C while preparation for B is still awaiting native work.
+        credentials
+            .set_active_provider(ProviderSlot::Asr, "openai-compatible".into())
+            .now_or_never()
+            .unwrap()
+            .unwrap();
+        let backend = weak.upgrade().unwrap();
+        let mut next = backend.get_preferences();
+        next.active_asr_provider = "openai-compatible".into();
+        backend
+            .update_settings(
+                next,
+                openless_core::SettingsUpdateOptions::SETTINGS_DOCUMENT,
+                &openless_core::NoopSettingsRuntime,
+            )
+            .unwrap();
+    }));
+    runtime
+        .fail_release
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(backend
+        .activate_local_asr(LocalAsrActivationRequest {
+            target: LocalAsrTarget::parse(LocalAsrRuntime::Foundry, "whisper-medium").unwrap(),
+            provider_id: "foundry-local-whisper".into(),
+        })
+        .await
+        .is_err());
+    assert_eq!(
+        backend.get_preferences().active_asr_provider,
+        "openai-compatible"
+    );
+    assert_eq!(
+        backend.active_provider(ProviderSlot::Asr).await.unwrap(),
+        "openai-compatible"
     );
     let _ = std::fs::remove_dir_all(data_dir);
 }

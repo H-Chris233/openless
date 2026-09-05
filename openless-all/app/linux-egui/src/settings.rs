@@ -58,11 +58,6 @@ impl LinuxSettingsRuntime {
             ),
             (previous.open_app != next.open_app, "open-app hotkey"),
             (
-                previous.coding_agent_enabled != next.coding_agent_enabled
-                    || previous.coding_agent_voice != next.coding_agent_voice,
-                "coding-agent hotkey",
-            ),
-            (
                 previous.style_packs != next.style_packs,
                 "style-pack hotkeys",
             ),
@@ -181,6 +176,9 @@ impl LinuxSettingsEffects for Fcitx5SettingsEffects {
         let (symbol, states) = target
             .coding_agent_voice
             .as_ref()
+            // The configured binding survives a disabled feature, but the
+            // native hook must be removed until the user enables it again.
+            .filter(|_| target.coding_agent_enabled)
             .map(shortcut_to_raw)
             .transpose()?
             .unwrap_or((0, 0));

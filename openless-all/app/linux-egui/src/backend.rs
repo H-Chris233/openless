@@ -385,6 +385,7 @@ impl openless_core::ModelRuntimeAdapter for LinuxGenericLocalAsrRuntime {
         &self,
         target: openless_core::LocalAsrTarget,
         model_dir: std::path::PathBuf,
+        _provider_type: String,
     ) -> BoxFuture<'static, Result<(), BackendError>> {
         if let Err(error) = Self::ensure_qwen_target(&target) {
             return Box::pin(async move { Err(error) });

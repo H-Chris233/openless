@@ -241,7 +241,9 @@ impl DictationContext {
                 mute_during_recording: preferences.mute_during_recording,
                 archive_successful_recording: preferences.record_audio_for_debug,
                 retention_days: preferences.history_retention_days,
-                max_entries: preferences.history_max_entries,
+                // Recordings and transcript history have independent caps in
+                // the UI; only the age limit is shared with history.
+                max_entries: preferences.audio_recording_max_entries,
                 silence_after_ms: (preferences.silence_auto_stop_enabled
                     && preferences.hotkey.mode == crate::shared_types::HotkeyMode::Toggle)
                     .then(|| (preferences.silence_auto_stop_seconds * 1_000.0).round() as u64),
@@ -465,6 +467,8 @@ mod tests {
             active_asr_provider: "local-qwen3".to_string(),
             active_llm_provider: "openai".to_string(),
             local_asr_active_model: "qwen3-asr-1.7b".to_string(),
+            history_max_entries: Some(100),
+            audio_recording_max_entries: Some(7),
             working_languages: vec!["简体中文".to_string(), "English".to_string()],
             translation_target_language: "English".to_string(),
             ..UserPreferences::default()
@@ -495,6 +499,9 @@ mod tests {
         );
         assert_eq!(context.asr.provider_id, "local-qwen3");
         assert_eq!(context.asr.model.as_deref(), Some("qwen3-asr-1.7b"));
+        // Audio archives have their own user-visible limit. History retention
+        // may be much larger and must not silently override the recording cap.
+        assert_eq!(context.recording.max_entries, Some(7));
         assert_eq!(
             context.insertion.windows_sendinput_newline_mode,
             preferences.windows_sendinput_newline_mode

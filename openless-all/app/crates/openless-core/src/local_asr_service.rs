@@ -138,6 +138,7 @@ pub trait ModelRuntimeAdapter: Send + Sync {
         &self,
         _target: LocalAsrTarget,
         _model_dir: PathBuf,
+        _provider_type: String,
     ) -> BoxFuture<'static, Result<(), BackendError>> {
         unsupported("runtime preload")
     }
@@ -190,8 +191,11 @@ impl LocalAsrService {
         }
     }
 
-    fn publish_preferences(&self, preferences: UserPreferences) -> Result<(), BackendError> {
-        self.preferences.set(preferences)?;
+    fn publish_preferences(
+        &self,
+        update: impl FnOnce(&mut UserPreferences),
+    ) -> Result<(), BackendError> {
+        self.preferences.update(update)?;
         let revision = self.preferences_revision.fetch_add(1, Ordering::SeqCst) + 1;
         self.events.publish(
             None,
@@ -446,7 +450,14 @@ async fn restore_activation_runtime(
                     .await
                 {
                     Ok(_) => {
-                        if let Err(error) = adapter.preload(previous.clone(), model_dir).await {
+                        if let Err(error) = adapter
+                            .preload(
+                                previous.clone(),
+                                model_dir,
+                                previous_preferences.active_asr_provider.clone(),
+                            )
+                            .await
+                        {
                             errors.push(error);
                         }
                     }
@@ -477,23 +488,51 @@ fn activation_error(primary: BackendError, rollback: Vec<BackendError>) -> Backe
     )
 }
 
-async fn restore_activation_persistence(
+fn restore_activation_preferences(
     preferences: &Arc<PreferencesStore>,
-    credentials: &Arc<dyn CredentialStore>,
     previous_preferences: &UserPreferences,
-    previous_provider: &str,
+    request: &LocalAsrActivationRequest,
+    provider_type: &str,
 ) -> Vec<BackendError> {
     let mut errors = Vec::new();
-    if let Err(error) = preferences.set(previous_preferences.clone()) {
-        errors.push(error);
-    }
-    if !previous_provider.is_empty() {
-        if let Err(error) = credentials
-            .set_active_provider(ProviderSlot::Asr, previous_provider.to_string())
-            .await
-        {
-            errors.push(error);
+    let mut applied = previous_preferences.clone();
+    LocalAsrService::apply_activation(&mut applied, &request.target, provider_type);
+    if let Err(error) = preferences.update(|current| {
+        // Compensation owns only fields changed by this activation. A later
+        // user edit (including to the same model field) must survive rollback.
+        for (value, before, after) in [
+            (
+                &mut current.active_asr_provider,
+                &previous_preferences.active_asr_provider,
+                &applied.active_asr_provider,
+            ),
+            (
+                &mut current.local_asr_active_model,
+                &previous_preferences.local_asr_active_model,
+                &applied.local_asr_active_model,
+            ),
+            (
+                &mut current.local_whisper_active_model,
+                &previous_preferences.local_whisper_active_model,
+                &applied.local_whisper_active_model,
+            ),
+            (
+                &mut current.foundry_local_asr_model,
+                &previous_preferences.foundry_local_asr_model,
+                &applied.foundry_local_asr_model,
+            ),
+            (
+                &mut current.sherpa_onnx_model,
+                &previous_preferences.sherpa_onnx_model,
+                &applied.sherpa_onnx_model,
+            ),
+        ] {
+            if before != after && value == after {
+                *value = before.clone();
+            }
         }
+    }) {
+        errors.push(error);
     }
     errors
 }
@@ -531,7 +570,6 @@ impl LocalAsrApi for LocalAsrService {
         Box::pin(async move {
             let _guard = activation_lock.lock().await;
             let previous_preferences = preferences.get();
-            let previous_provider = credentials.active_provider(ProviderSlot::Asr).await?;
             let provider_type = match credentials.list_channels(ChannelKind::Asr).await {
                 Ok(channels) => match channels
                     .into_iter()
@@ -595,7 +633,11 @@ impl LocalAsrApi for LocalAsrService {
                 }
             };
             if let Err(error) = adapter
-                .preload(request.target.clone(), model_dir.clone())
+                .preload(
+                    request.target.clone(),
+                    model_dir.clone(),
+                    provider_type.clone(),
+                )
                 .await
             {
                 let rollback = restore_activation_runtime(
@@ -611,47 +653,10 @@ impl LocalAsrApi for LocalAsrService {
                 return Err(activation_error(error, rollback));
             }
 
-            let mut updated = previous_preferences.clone();
-            Self::apply_activation(&mut updated, &request.target, &provider_type);
-            if let Err(error) = preferences.set(updated) {
-                let rollback = restore_activation_runtime(
-                    &adapter,
-                    &model_store,
-                    generation,
-                    &request.target,
-                    previous_target.as_ref(),
-                    &previous_preferences,
-                    progress,
-                )
-                .await;
-                return Err(activation_error(error, rollback));
-            }
-            if let Err(error) = credentials
-                .set_active_provider(ProviderSlot::Asr, request.provider_id.clone())
-                .await
-            {
-                let mut rollback = restore_activation_persistence(
-                    &preferences,
-                    &credentials,
-                    &previous_preferences,
-                    &previous_provider,
-                )
-                .await;
-                rollback.extend(
-                    restore_activation_runtime(
-                        &adapter,
-                        &model_store,
-                        generation,
-                        &request.target,
-                        previous_target.as_ref(),
-                        &previous_preferences,
-                        progress,
-                    )
-                    .await,
-                );
-                return Err(activation_error(error, rollback));
-            }
-
+            // Finish every fallible native operation before committing the
+            // selected channel. A user may choose another channel while native
+            // preparation awaits; rolling back an old channel snapshot would
+            // erase that choice. Channel persistence is the final commit point.
             let previous_lease = active_lease
                 .lock()
                 .expect("local ASR activation lease lock poisoned")
@@ -672,29 +677,66 @@ impl LocalAsrApi for LocalAsrService {
                     )
                     .await
                     {
-                        let mut rollback = restore_activation_persistence(
-                            &preferences,
-                            &credentials,
+                        let rollback = restore_activation_runtime(
+                            &adapter,
+                            &model_store,
+                            generation,
+                            &request.target,
+                            previous_target.as_ref(),
                             &previous_preferences,
-                            &previous_provider,
+                            progress,
                         )
                         .await;
-                        rollback.extend(
-                            restore_activation_runtime(
-                                &adapter,
-                                &model_store,
-                                generation,
-                                &request.target,
-                                previous_target.as_ref(),
-                                &previous_preferences,
-                                progress,
-                            )
-                            .await,
-                        );
                         return Err(activation_error(error, rollback));
                     }
                 }
             }
+
+            let committed_previous = match preferences.update(|current| {
+                let before = current.clone();
+                Self::apply_activation(current, &request.target, &provider_type);
+                before
+            }) {
+                Ok(before) => before,
+                Err(error) => {
+                    let rollback = restore_activation_runtime(
+                        &adapter,
+                        &model_store,
+                        generation,
+                        &request.target,
+                        previous_target.as_ref(),
+                        &previous_preferences,
+                        progress,
+                    )
+                    .await;
+                    return Err(activation_error(error, rollback));
+                }
+            };
+            if let Err(error) = credentials
+                .set_active_provider(ProviderSlot::Asr, request.provider_id.clone())
+                .await
+            {
+                let mut rollback = restore_activation_preferences(
+                    &preferences,
+                    &committed_previous,
+                    &request,
+                    &provider_type,
+                );
+                rollback.extend(
+                    restore_activation_runtime(
+                        &adapter,
+                        &model_store,
+                        generation,
+                        &request.target,
+                        previous_target.as_ref(),
+                        &previous_preferences,
+                        progress,
+                    )
+                    .await,
+                );
+                return Err(activation_error(error, rollback));
+            }
+
             *active_lease
                 .lock()
                 .expect("local ASR activation lease lock poisoned") = Some(LocalAsrRuntimeLease {
@@ -848,13 +890,6 @@ impl LocalAsrApi for LocalAsrService {
             Ok(path) => path,
             Err(error) => return Box::pin(async move { Err(error) }),
         };
-        let current_preferences = self.preferences.get();
-        let current = match Self::normalized_base_dir(Some(PathBuf::from(
-            current_preferences.local_asr_models_base_dir.clone(),
-        ))) {
-            Ok(path) => path,
-            Err(error) => return Box::pin(async move { Err(error) }),
-        };
         let model_store = Arc::clone(&self.model_store);
         let preferences = Arc::clone(&self.preferences);
         let events = self.events.clone();
@@ -864,6 +899,12 @@ impl LocalAsrApi for LocalAsrService {
         let activation_lock = Arc::clone(&self.activation_lock);
         Box::pin(async move {
             let _activation_guard = activation_lock.lock().await;
+            // A second directory request may be queued behind an in-flight
+            // relocation. Resolve the starting root only after owning the lock.
+            let current_preferences = preferences.get();
+            let current = Self::normalized_base_dir(Some(PathBuf::from(
+                current_preferences.local_asr_models_base_dir.clone(),
+            )))?;
             if current == next {
                 return Ok(LocalAsrStorageSettings {
                     is_default: next.is_none(),
@@ -886,12 +927,13 @@ impl LocalAsrApi for LocalAsrService {
                 adapter.release(runtime).await?;
             }
             model_store.relocate_root(next_root.clone())?;
-            let mut updated = current_preferences.clone();
-            updated.local_asr_models_base_dir = next
+            let next_preference = next
                 .as_ref()
                 .map(|path| path.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            if let Err(error) = preferences.set(updated) {
+            if let Err(error) = preferences.update(|current| {
+                current.local_asr_models_base_dir = next_preference.clone();
+            }) {
                 if let Err(rollback) = model_store.rollback_relocation(previous_root) {
                     return Err(BackendError::new(
                         BackendErrorCode::Internal,
@@ -906,7 +948,12 @@ impl LocalAsrApi for LocalAsrService {
             let rebind = match adapter.rebind_storage(next_root).await {
                 Ok(rebind) => rebind,
                 Err(error) => {
-                    if let Err(rollback) = preferences.set(current_preferences) {
+                    if let Err(rollback) = preferences.update(|current| {
+                        if current.local_asr_models_base_dir == next_preference {
+                            current.local_asr_models_base_dir =
+                                current_preferences.local_asr_models_base_dir.clone();
+                        }
+                    }) {
                         return Err(BackendError::new(
                             BackendErrorCode::Internal,
                             format!(
@@ -941,9 +988,8 @@ impl LocalAsrApi for LocalAsrService {
         &self,
         target: LocalAsrTarget,
     ) -> BoxFuture<'static, Result<(), BackendError>> {
-        let mut preferences = self.preferences.get();
         let runtime = target.runtime;
-        match runtime {
+        let result = self.publish_preferences(|preferences| match runtime {
             LocalAsrRuntime::Generic => {
                 let model = crate::LocalAsrModelId::from_wire_id(target.model_id())
                     .expect("validated target");
@@ -959,8 +1005,7 @@ impl LocalAsrApi for LocalAsrService {
             LocalAsrRuntime::SherpaOnnx => {
                 preferences.sherpa_onnx_model = target.model_id().to_string();
             }
-        }
-        let result = self.publish_preferences(preferences);
+        });
         if result.is_ok() {
             self.runtime.invalidate_route(runtime);
         }
@@ -976,9 +1021,9 @@ impl LocalAsrApi for LocalAsrService {
     }
 
     fn set_mirror(&self, mirror: LocalAsrMirror) -> BoxFuture<'static, Result<(), BackendError>> {
-        let mut preferences = self.preferences.get();
-        preferences.local_asr_mirror = mirror.as_str().to_string();
-        let result = self.publish_preferences(preferences);
+        let result = self.publish_preferences(|preferences| {
+            preferences.local_asr_mirror = mirror.as_str().to_string();
+        });
         Box::pin(async move { result })
     }
 
@@ -999,13 +1044,11 @@ impl LocalAsrApi for LocalAsrService {
             Ok(value) => value,
             Err(error) => return Box::pin(async move { Err(error) }),
         };
-        let mut preferences = self.preferences.get();
-        match runtime {
+        let result = self.publish_preferences(|preferences| match runtime {
             LocalAsrRuntime::Foundry => preferences.foundry_local_asr_language_hint = normalized,
             LocalAsrRuntime::SherpaOnnx => preferences.sherpa_onnx_language_hint = normalized,
             LocalAsrRuntime::Generic => unreachable!(),
-        }
-        let result = self.publish_preferences(preferences);
+        });
         Box::pin(async move { result })
     }
 
@@ -1013,9 +1056,9 @@ impl LocalAsrApi for LocalAsrService {
         &self,
         source: FoundryRuntimeSource,
     ) -> BoxFuture<'static, Result<(), BackendError>> {
-        let mut preferences = self.preferences.get();
-        preferences.foundry_local_runtime_source = source.as_str().to_string();
-        let result = self.publish_preferences(preferences);
+        let result = self.publish_preferences(|preferences| {
+            preferences.foundry_local_runtime_source = source.as_str().to_string();
+        });
         if result.is_ok() {
             self.runtime.invalidate_route(LocalAsrRuntime::Foundry);
         }
@@ -1042,13 +1085,11 @@ impl LocalAsrApi for LocalAsrService {
         runtime: LocalAsrRuntime,
         seconds: u32,
     ) -> BoxFuture<'static, Result<(), BackendError>> {
-        let mut preferences = self.preferences.get();
-        match runtime {
+        let result = self.publish_preferences(|preferences| match runtime {
             LocalAsrRuntime::Generic => preferences.local_asr_keep_loaded_secs = seconds,
             LocalAsrRuntime::Foundry => preferences.foundry_local_asr_keep_loaded_secs = seconds,
             LocalAsrRuntime::SherpaOnnx => preferences.sherpa_onnx_keep_loaded_secs = seconds,
-        }
-        let result = self.publish_preferences(preferences);
+        });
         let preferences = Arc::clone(&self.preferences);
         let adapter = Arc::clone(&self.runtime);
         let model_store = Arc::clone(&self.model_store);
@@ -1135,7 +1176,8 @@ impl LocalAsrApi for LocalAsrService {
             Ok(path) => path,
             Err(error) => return Box::pin(async move { Err(error) }),
         };
-        self.runtime.preload(target, model_dir)
+        self.runtime
+            .preload(target, model_dir, preferences.active_asr_provider)
     }
 
     fn delete_model(&self, target: LocalAsrTarget) -> BoxFuture<'static, Result<(), BackendError>> {

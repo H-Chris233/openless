@@ -133,6 +133,9 @@ struct RemoteConnectionState {
 struct RemoteStreamState {
     session_id: SessionId,
     sequence: RemoteStreamSequence,
+    // Finalization may await a slow provider. Keep the owner available so
+    // disconnect/cancel can still revoke it while rejecting further audio.
+    finishing: bool,
 }
 
 pub struct RemoteInputService {
@@ -476,6 +479,7 @@ impl RemoteInputService {
                     connection.stream = Some(RemoteStreamState {
                         session_id,
                         sequence: RemoteStreamSequence::new(session_id),
+                        finishing: false,
                     });
                     true
                 }
@@ -505,6 +509,12 @@ impl RemoteInputService {
         {
             let mut state = self.state.lock().expect("remote input state lock poisoned");
             let stream = ensure_remote_stream_mut(&mut state, connection_id, session_id)?;
+            if stream.finishing {
+                return Err(BackendError::new(
+                    BackendErrorCode::Cancelled,
+                    "remote audio stream is already finalizing",
+                ));
+            }
             stream.sequence.accept(sequence)?;
         }
         self.runtime
@@ -519,21 +529,52 @@ impl RemoteInputService {
         session_id: SessionId,
         cancel: bool,
     ) -> Result<(), BackendError> {
-        let _lifecycle = self.lifecycle.lock().await;
         {
+            let _lifecycle = self.lifecycle.lock().await;
             let mut state = self.state.lock().expect("remote input state lock poisoned");
-            ensure_remote_stream(&state, connection_id, session_id)?;
-            state
-                .connections
-                .get_mut(&connection_id)
-                .expect("validated remote connection must exist")
-                .stream = None;
+            let stream = ensure_remote_stream_mut(&mut state, connection_id, session_id)?;
+            if cancel {
+                state.connections.get_mut(&connection_id).unwrap().stream = None;
+            } else {
+                if stream.finishing {
+                    return Err(BackendError::new(
+                        BackendErrorCode::Busy,
+                        "remote audio stream is already finalizing",
+                    ));
+                }
+                stream.finishing = true;
+            }
         }
+        // Never hold the global lifecycle gate across ASR/LLM finalization.
+        // The socket can send cancel, disappear, or rotate its PIN meanwhile;
+        // all of those must be able to reach the still-owned audio session.
         let result = if cancel {
             self.runtime.cancel_audio_session(session_id).await
         } else {
             self.runtime.stop_audio_session(session_id).await
         };
+        if !cancel {
+            let mut state = self.state.lock().expect("remote input state lock poisoned");
+            let connection = state.connections.get_mut(&connection_id);
+            match connection {
+                Some(connection)
+                    if connection
+                        .stream
+                        .as_ref()
+                        .is_some_and(|stream| stream.session_id == session_id) =>
+                {
+                    connection.stream = None;
+                }
+                _ => {
+                    // Cancellation already removed this generation. In
+                    // particular, a late finish must not clear a newer stream.
+                    return Err(BackendError::new(
+                        BackendErrorCode::Cancelled,
+                        "remote audio stream was cancelled during finalization",
+                    ));
+                }
+            }
+        }
         self.publish_status();
         result.map_err(|error| public_remote_error(&error))
     }
@@ -705,23 +746,6 @@ impl Clone for RemoteInputService {
             lifecycle: Arc::clone(&self.lifecycle),
             state: Arc::clone(&self.state),
         }
-    }
-}
-
-fn ensure_remote_stream(
-    state: &RemoteInputState,
-    connection_id: SessionId,
-    session_id: SessionId,
-) -> Result<(), BackendError> {
-    match state.connections.get(&connection_id) {
-        Some(RemoteConnectionState {
-            stream: Some(stream),
-            ..
-        }) if stream.session_id == session_id && state.running => Ok(()),
-        _ => Err(BackendError::new(
-            BackendErrorCode::Cancelled,
-            "remote input stream is no longer active",
-        )),
     }
 }
 

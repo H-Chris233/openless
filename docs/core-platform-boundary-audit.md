@@ -2,6 +2,10 @@
 
 审计基线：OpenLess 2.0.0-Beta.1（2026-09-04 工作树）。范围覆盖 `openless-core`、Tauri、Linux egui、React/TypeScript、C++ 插件及构建脚本；vendor、生成物和纯视觉实现排除。
 
+2026-09-05 更新：下文为边界迁移索引；最新生产行为缺口、修复和证据在
+[`pr1019-2.0-final-review.md`](./pr1019-2.0-final-review.md)。有接口和通过 fixture
+不能证明对应 Host 的启用、取消、资源释放或实际输入行为正确。
+
 ## 已迁移项
 
 - Provider descriptor、Credential channel mutation/active/order、ASR/LLM/Omni、设置事务与事件位于 Core；React/egui 只渲染 descriptor 和本地化标签。

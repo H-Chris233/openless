@@ -523,6 +523,9 @@ async fn websocket_session(mut socket: WebSocket, state: Arc<WebState>, peer: Ip
 
     let mut events = state.backend.subscribe();
     let mut remote_session = None;
+    // Poll finalization beside socket input. Awaiting it in the receive arm
+    // would prevent the phone from cancelling a slow provider request.
+    let mut pending_stop: Option<(SessionId, BoxFuture<'static, Result<(), BackendError>>)> = None;
     let mut shutdown = state.connections_shutdown.clone();
     let mut keepalive = tokio::time::interval(Duration::from_secs(KEEPALIVE_PING_SECS));
     keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -544,6 +547,7 @@ async fn websocket_session(mut socket: WebSocket, state: Arc<WebState>, peer: Ip
                             state.backend.services().remote_input.as_ref(),
                             connection_id,
                             &mut remote_session,
+                            &mut pending_stop,
                         ).await {
                             if socket.send(json_message(reply)).await.is_err() { break; }
                         }
@@ -554,13 +558,31 @@ async fn websocket_session(mut socket: WebSocket, state: Arc<WebState>, peer: Ip
             }
             event = events.recv() => {
                 let Ok(event) = event else { continue };
-                if event.session_id != remote_session { continue; }
+                if remote_session.is_none() || event.session_id != remote_session { continue; }
+                let terminal = matches!(&event.kind,
+                    openless_core::BackendEventKind::DictationCompleted(_)
+                    | openless_core::BackendEventKind::DictationStateChanged(openless_core::DictationStateSnapshot {
+                        phase: openless_core::DictationPhase::Cancelled | openless_core::DictationPhase::Failed, ..
+                    }));
                 for reply in remote_event(event.kind) {
                     // A failed outbound send means this socket no longer owns
                     // a usable transport. Leave the outer loop immediately so
                     // Core disconnect cancels any active external-audio lease.
                     if socket.send(json_message(reply)).await.is_err() {
                         break 'connection;
+                    }
+                }
+                if terminal { remote_session = None; }
+            }
+            result = async { pending_stop.as_mut().expect("guarded pending stop").1.as_mut().await }, if pending_stop.is_some() => {
+                let (session_id, _) = pending_stop.take().expect("completed pending stop");
+                // Successful finalization queues done/result events. Keep their
+                // output owner until they are delivered, not merely until the
+                // future returns. Late errors after cancel must stay invisible.
+                if let Err(error) = result {
+                    if remote_session == Some(session_id) {
+                        remote_session = None;
+                        if socket.send(json_message(serde_json::json!({"type":"status", "kind":"error", "message":error.to_string()}))).await.is_err() { break; }
                     }
                 }
             }
@@ -610,9 +632,13 @@ async fn apply_control(
     remote: &dyn openless_core::RemoteInputApi,
     connection_id: SessionId,
     remote_session: &mut Option<SessionId>,
+    pending_stop: &mut Option<(SessionId, BoxFuture<'static, Result<(), BackendError>>)>,
 ) -> Option<serde_json::Value> {
     let value = serde_json::from_str::<serde_json::Value>(text).ok()?;
     match value.get("type").and_then(serde_json::Value::as_str)? {
+        "start" if pending_stop.is_some() => {
+            Some(serde_json::json!({"type":"busy", "reason":"previous stream is still finishing"}))
+        }
         "start" => match remote.start_stream(connection_id).await {
             Ok(session_id) => {
                 *remote_session = Some(session_id);
@@ -621,14 +647,24 @@ async fn apply_control(
             Err(error) => Some(serde_json::json!({"type":"busy", "reason":error.to_string()})),
         },
         "stop" => {
-            if let Some(session_id) = remote_session.take() {
-                let _ = remote.stop_stream(connection_id, session_id).await;
+            if pending_stop.is_none() {
+                if let Some(session_id) = *remote_session {
+                    *pending_stop =
+                        Some((session_id, remote.stop_stream(connection_id, session_id)));
+                }
             }
             None
         }
         "cancel" => {
             if let Some(session_id) = remote_session.take() {
                 let _ = remote.cancel_stream(connection_id, session_id).await;
+                // Core has now revoked the audio lease. A provider may leave
+                // its in-flight HTTP request pending until timeout; dropping
+                // that abandoned stop future lets the phone start immediately.
+                // If a terminal already cleared the owner, leave pending_stop
+                // alone so its remaining Core cleanup still gets polled.
+                *pending_stop = None;
+                return Some(serde_json::json!({"type":"status", "kind":"done"}));
             }
             None
         }
@@ -716,5 +752,211 @@ mod tests {
         assert!(hello_pin(r#"{"type":"other","pin":"123456"}"#)
             .expose_secret()
             .is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn connected_remote_fixture(
+        runtime: Arc<dyn RemoteInputRuntimeAdapter>,
+    ) -> (openless_core::OpenLessBackend, SessionId, PathBuf) {
+        use openless_core::{
+            BackendConfig, BackendDependencies, RemoteInputConfig, RemoteInputService,
+        };
+        let data_dir =
+            std::env::temp_dir().join(format!("openless-remote-wire-{}", uuid::Uuid::new_v4()));
+        let mut dependencies = BackendDependencies::unsupported();
+        dependencies.services.remote_input =
+            Arc::new(RemoteInputService::new(runtime, 8443, "en").unwrap());
+        let backend = openless_core::OpenLessBackend::new(
+            BackendConfig {
+                data_dir: data_dir.clone(),
+                ..Default::default()
+            },
+            dependencies,
+        )
+        .unwrap();
+        let remote = Arc::clone(&backend.services().remote_input);
+        remote
+            .configure(RemoteInputConfig {
+                enabled: true,
+                port: 8443,
+            })
+            .await
+            .unwrap();
+        let connection = SessionId::new();
+        remote
+            .authenticate(
+                connection,
+                "127.0.0.1".into(),
+                remote.read_pairing_pin().await.unwrap(),
+            )
+            .await
+            .unwrap();
+        (backend, connection, data_dir)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn stop_keeps_the_session_owner_for_terminal_websocket_events() {
+        let (backend, connection, data_dir) = connected_remote_fixture(Arc::new(
+            openless_core::testing::RecordingRemoteInputRuntime::default(),
+        ))
+        .await;
+        let remote = &backend.services().remote_input;
+        let mut owner = None;
+        let mut pending_stop = None;
+        apply_control(
+            r#"{"type":"start"}"#,
+            remote.as_ref(),
+            connection,
+            &mut owner,
+            &mut pending_stop,
+        )
+        .await
+        .unwrap();
+        let started = owner.unwrap();
+        apply_control(
+            r#"{"type":"stop"}"#,
+            remote.as_ref(),
+            connection,
+            &mut owner,
+            &mut pending_stop,
+        )
+        .await;
+        pending_stop.take().unwrap().1.await.unwrap();
+        assert_eq!(
+            owner,
+            Some(started),
+            "queued done/result must retain their outbound owner after stop"
+        );
+        remote.disconnect(connection).await.unwrap();
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[derive(Default)]
+    struct NeverFinishingRuntime(openless_core::testing::RecordingRemoteInputRuntime);
+
+    // Replace only the external provider wait. Authentication, session ownership,
+    // finalization state and cancellation still execute the real Core service.
+    #[cfg(target_os = "linux")]
+    impl RemoteInputRuntimeAdapter for NeverFinishingRuntime {
+        fn load_pairing_pin(
+            &self,
+        ) -> BoxFuture<'static, Result<Option<SecretValue>, BackendError>> {
+            self.0.load_pairing_pin()
+        }
+        fn persist_pairing_pin(
+            &self,
+            pin: SecretValue,
+        ) -> BoxFuture<'static, Result<(), BackendError>> {
+            self.0.persist_pairing_pin(pin)
+        }
+        fn start_server(
+            &self,
+            config: RemoteInputServerConfig,
+        ) -> BoxFuture<'static, Result<RemoteInputServerBinding, BackendError>> {
+            self.0.start_server(config)
+        }
+        fn stop_server(&self) -> BoxFuture<'static, Result<(), BackendError>> {
+            self.0.stop_server()
+        }
+        fn list_local_ips(&self) -> BoxFuture<'static, Result<Vec<String>, BackendError>> {
+            self.0.list_local_ips()
+        }
+        fn start_audio_session(
+            &self,
+            insert: bool,
+        ) -> BoxFuture<'static, Result<SessionId, BackendError>> {
+            self.0.start_audio_session(insert)
+        }
+        fn feed_audio(
+            &self,
+            session: SessionId,
+            pcm: Vec<u8>,
+        ) -> BoxFuture<'static, Result<(), BackendError>> {
+            self.0.feed_audio(session, pcm)
+        }
+        fn stop_audio_session(&self, _: SessionId) -> BoxFuture<'static, Result<(), BackendError>> {
+            Box::pin(std::future::pending())
+        }
+        fn cancel_audio_session(
+            &self,
+            session: SessionId,
+        ) -> BoxFuture<'static, Result<(), BackendError>> {
+            self.0.cancel_audio_session(session)
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn cancel_releases_a_never_finishing_stop_before_the_next_start() {
+        let runtime = Arc::new(NeverFinishingRuntime::default());
+        let (backend, connection, data_dir) = connected_remote_fixture(runtime.clone()).await;
+        let remote = &backend.services().remote_input;
+        let mut owner = None;
+        let mut pending_stop = None;
+        apply_control(
+            r#"{"type":"start"}"#,
+            remote.as_ref(),
+            connection,
+            &mut owner,
+            &mut pending_stop,
+        )
+        .await;
+        let first = owner.unwrap();
+        apply_control(
+            r#"{"type":"stop"}"#,
+            remote.as_ref(),
+            connection,
+            &mut owner,
+            &mut pending_stop,
+        )
+        .await;
+        // Enter the actual Core finishing state and reach the never-ready Host
+        // wait, rather than merely testing a not-yet-polled stop future.
+        assert!(futures_util::poll!(pending_stop.as_mut().unwrap().1.as_mut()).is_pending());
+        assert_eq!(remote.status().unwrap().active_session_id, Some(first));
+        apply_control(
+            r#"{"type":"cancel"}"#,
+            remote.as_ref(),
+            connection,
+            &mut owner,
+            &mut pending_stop,
+        )
+        .await;
+        assert_eq!(runtime.0.audio_cancel_count(), 1);
+        let response = apply_control(
+            r#"{"type":"start"}"#,
+            remote.as_ref(),
+            connection,
+            &mut owner,
+            &mut pending_stop,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            response["type"], "started",
+            "cancel must permit a new recording before the old HTTP timeout"
+        );
+        assert_ne!(owner, Some(first));
+
+        remote.disconnect(connection).await.unwrap();
+        owner = None;
+        pending_stop = Some((first, Box::pin(async { Ok(()) })));
+        apply_control(
+            r#"{"type":"cancel"}"#,
+            remote.as_ref(),
+            connection,
+            &mut owner,
+            &mut pending_stop,
+        )
+        .await;
+        pending_stop
+            .take()
+            .expect("a terminal already removed the owner; its cleanup must finish")
+            .1
+            .await
+            .unwrap();
+        let _ = std::fs::remove_dir_all(data_dir);
     }
 }

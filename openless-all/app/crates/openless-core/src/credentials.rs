@@ -323,11 +323,15 @@ pub trait CredentialMetadataStore: Send + Sync {
 #[derive(Clone)]
 pub struct CredentialDirectory {
     store: std::sync::Arc<dyn CredentialMetadataStore>,
+    mutation_gate: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 impl CredentialDirectory {
     pub fn new(store: std::sync::Arc<dyn CredentialMetadataStore>) -> Self {
-        Self { store }
+        Self {
+            store,
+            mutation_gate: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        }
     }
 
     pub async fn list_channels(
@@ -345,6 +349,10 @@ impl CredentialDirectory {
         &self,
         mutation: ChannelMutation,
     ) -> Result<ChannelMutationResult, BackendError> {
+        // Vault load/save are separate asynchronous effects. Serialize the
+        // complete read-modify-write, including across cloned directories, so
+        // a delayed validation/reorder cannot overwrite a newly created channel.
+        let _guard = self.mutation_gate.lock().await;
         let mut metadata = self.store.load_metadata().await?;
         let has_credentials = match &mutation {
             ChannelMutation::DeleteIfBlank { kind, id } => {
@@ -364,6 +372,7 @@ impl CredentialDirectory {
         slot: ProviderSlot,
         provider_id: String,
     ) -> Result<(), BackendError> {
+        let _guard = self.mutation_gate.lock().await;
         let mut metadata = self.store.load_metadata().await?;
         let revision = metadata.revision();
         metadata.select_active_provider(slot, provider_id)?;
@@ -1188,5 +1197,85 @@ mod tests {
             "Backup"
         );
         assert_eq!(repository.load_metadata().await.unwrap().revision(), 3);
+    }
+
+    #[tokio::test]
+    async fn credential_directory_serializes_concurrent_read_modify_write() {
+        struct YieldingMetadataStore(std::sync::Arc<InMemoryCredentialStore>);
+
+        impl CredentialMetadataStore for YieldingMetadataStore {
+            fn load_metadata(
+                &self,
+            ) -> BoxFuture<'static, Result<CredentialMetadata, BackendError>> {
+                let repository = self.0.clone();
+                Box::pin(async move {
+                    let snapshot = repository.load_metadata().await?;
+                    // Match the real vault's async I/O boundary: two callers
+                    // can read the same revision before either one saves it.
+                    tokio::task::yield_now().await;
+                    Ok(snapshot)
+                })
+            }
+
+            fn save_metadata(
+                &self,
+                metadata: CredentialMetadata,
+            ) -> BoxFuture<'static, Result<(), BackendError>> {
+                self.0.save_metadata(metadata)
+            }
+
+            fn channel_has_secrets(
+                &self,
+                kind: ChannelKind,
+                id: String,
+            ) -> BoxFuture<'static, Result<bool, BackendError>> {
+                self.0.channel_has_secrets(kind, id)
+            }
+        }
+
+        let repository = std::sync::Arc::new(InMemoryCredentialStore::default());
+        let directory =
+            CredentialDirectory::new(std::sync::Arc::new(YieldingMetadataStore(repository)));
+        let other = directory.clone();
+        let create = |name: &str| ChannelMutation::Create {
+            kind: ChannelKind::Llm,
+            provider_type: "openai".into(),
+            name: name.into(),
+        };
+        let (first, second) = tokio::join!(
+            directory.mutate_channel(create("first")),
+            other.mutate_channel(create("second")),
+        );
+        assert_ne!(
+            first.unwrap(),
+            second.unwrap(),
+            "concurrent creates need distinct channel ids"
+        );
+        let channels = directory.list_channels(ChannelKind::Llm).await.unwrap();
+        assert_eq!(
+            channels.len(),
+            2,
+            "neither channel may be lost by a stale save"
+        );
+        let (renamed, activated) = tokio::join!(
+            directory.mutate_channel(ChannelMutation::Rename {
+                kind: ChannelKind::Llm,
+                id: channels[0].id.clone(),
+                name: "renamed".into(),
+            }),
+            other.set_active_provider(ProviderSlot::Llm, channels[1].id.clone()),
+        );
+        renamed.unwrap();
+        activated.unwrap();
+        assert_eq!(
+            directory.active_provider(ProviderSlot::Llm).await.unwrap(),
+            channels[1].id
+        );
+        assert!(directory
+            .list_channels(ChannelKind::Llm)
+            .await
+            .unwrap()
+            .iter()
+            .any(|channel| channel.name == "renamed"));
     }
 }

@@ -424,6 +424,27 @@ fn linux_public_settings_contract_is_validated_transactional_and_runtime_backed(
     assert_eq!(unsupported.code, BackendErrorCode::Unsupported);
     assert_eq!(backend.snapshot().preferences_revision, revision + 1);
     assert_eq!(events.try_recv(), Err(EventRecvError::Empty));
+    for enabled in [true, false] {
+        let mut preferences = backend.get_preferences();
+        preferences.coding_agent_enabled = enabled;
+        preferences.coding_agent_voice_hotkey = Some(ShortcutBinding {
+            primary: "F10".into(),
+            modifiers: vec!["ctrl".into()],
+        });
+        host.update_settings_strict(preferences, backend.snapshot().preferences_revision)
+            .expect("Linux must allow enabling and disabling its wired Less Computer action");
+        assert_eq!(backend.get_preferences().coding_agent_enabled, enabled);
+        assert_eq!(
+            effects
+                .hotkeys
+                .lock()
+                .unwrap()
+                .last()
+                .unwrap()
+                .coding_agent_enabled,
+            enabled
+        );
+    }
     let _ = std::fs::remove_dir_all(data_dir);
 }
 

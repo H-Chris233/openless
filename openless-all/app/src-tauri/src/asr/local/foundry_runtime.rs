@@ -741,6 +741,16 @@ mod imp {
             }
         }
 
+        /// 激活事务的 prepare 回执：LoadedModel 只在 SDK load 成功后发布。
+        /// SDK model_id 可包含具体设备后缀，必须以保存的 alias 匹配用户请求。
+        pub(crate) fn is_loaded_for(&self, alias: &str) -> bool {
+            self.state
+                .lock()
+                .loaded
+                .as_ref()
+                .is_some_and(|loaded| loaded.alias == alias)
+        }
+
         pub async fn ensure_loaded(&self, alias: &str, runtime_source: &str) -> Result<String> {
             self.ensure_loaded_with_progress(alias, runtime_source, |_| {})
                 .await
@@ -906,6 +916,22 @@ mod imp {
         ) -> Result<bool> {
             let _lifecycle = self.lifecycle.lock().await;
             if self.route_epoch_snapshot() != expected_epoch {
+                return Ok(false);
+            }
+            self.release_now_locked().await?;
+            self.advance_route_epoch();
+            Ok(true)
+        }
+
+        /// 等到 native lifecycle 锁之后再次校验 Host 的使用代次。仅在排队前检查会
+        /// 留下 TOCTOU：等待旧推理释放锁期间，新会话/设置页已经开始加载新模型。
+        pub(crate) async fn release_if_generation(
+            &self,
+            generation: &AtomicU64,
+            expected: u64,
+        ) -> Result<bool> {
+            let _lifecycle = self.lifecycle.lock().await;
+            if generation.load(Ordering::Acquire) != expected {
                 return Ok(false);
             }
             self.release_now_locked().await?;
@@ -1617,6 +1643,26 @@ mod imp {
 
     #[cfg(test)]
     mod lifecycle_tests {
+        #[tokio::test]
+        async fn release_generation_is_rechecked_after_waiting_for_native_lifecycle() {
+            let runtime = super::FoundryLocalRuntime::new();
+            let generation = std::sync::atomic::AtomicU64::new(1);
+            let guard = runtime.lifecycle.lock().await;
+            let release = runtime.release_if_generation(&generation, 1);
+            tokio::pin!(release);
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(1), &mut release)
+                    .await
+                    .is_err()
+            );
+            generation.store(2, std::sync::atomic::Ordering::Release);
+            drop(guard);
+            assert!(
+                !release.await.unwrap(),
+                "stale cleanup must leave the newly-owned runtime intact"
+            );
+        }
+
         use super::{
             cpu_load_completion, foundry_native_dir_candidates, is_cuda_cudnn_failure,
             is_cuda_fallback_candidate, may_reuse_loaded_model, normalized_language_hint,

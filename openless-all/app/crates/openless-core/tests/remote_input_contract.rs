@@ -22,6 +22,8 @@ struct FixtureRemoteRuntime {
     audio_cancel_count: AtomicUsize,
     frames: Mutex<Vec<(SessionId, Vec<u8>)>>,
     insert_preferences: Mutex<Vec<bool>>,
+    stop_started: Option<Arc<tokio::sync::Notify>>,
+    release_stop: Option<Arc<tokio::sync::Notify>>,
 }
 
 impl RemoteInputRuntimeAdapter for FixtureRemoteRuntime {
@@ -102,7 +104,17 @@ impl RemoteInputRuntimeAdapter for FixtureRemoteRuntime {
         _session_id: SessionId,
     ) -> BoxFuture<'static, Result<(), BackendError>> {
         self.audio_stop_count.fetch_add(1, Ordering::AcqRel);
-        Box::pin(async { Ok(()) })
+        let started = self.stop_started.clone();
+        let release = self.release_stop.clone();
+        Box::pin(async move {
+            if let Some(started) = started {
+                started.notify_one();
+            }
+            if let Some(release) = release {
+                release.notified().await;
+            }
+            Ok(())
+        })
     }
 
     fn cancel_audio_session(
@@ -400,6 +412,68 @@ async fn stream_association_validates_frames_and_rejects_duplicates_and_late_pcm
         BackendErrorCode::Cancelled
     );
     let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
+async fn slow_finalization_remains_cancellable_and_cannot_clear_a_new_stream() {
+    for disconnect in [false, true] {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let runtime = Arc::new(FixtureRemoteRuntime {
+            stop_started: Some(Arc::clone(&started)),
+            release_stop: Some(Arc::clone(&release)),
+            ..Default::default()
+        });
+        let (backend, data_dir) = backend(Arc::clone(&runtime));
+        let remote = Arc::clone(&backend.services().remote_input);
+        remote
+            .configure(RemoteInputConfig {
+                enabled: true,
+                port: 8443,
+            })
+            .await
+            .unwrap();
+        let connection_id = SessionId::new();
+        authenticate(remote.as_ref(), connection_id).await;
+        let old_session = remote.start_stream(connection_id).await.unwrap();
+        let stopping = {
+            let remote = Arc::clone(&remote);
+            tokio::spawn(async move { remote.stop_stream(connection_id, old_session).await })
+        };
+        started.notified().await;
+
+        // A slow ASR/LLM finalization still belongs to this connection. The
+        // phone must be able to revoke it without waiting for the provider.
+        tokio::time::timeout(std::time::Duration::from_millis(250), async {
+            if disconnect {
+                remote.disconnect(connection_id).await
+            } else {
+                remote.cancel_stream(connection_id, old_session).await
+            }
+        })
+        .await
+        .expect("cancel/disconnect must not wait for finalization")
+        .unwrap();
+        assert_eq!(runtime.audio_cancel_count.load(Ordering::Acquire), 1);
+        if disconnect {
+            authenticate(remote.as_ref(), connection_id).await;
+        }
+        let new_session = remote.start_stream(connection_id).await.unwrap();
+        release.notify_one();
+        assert_eq!(
+            stopping.await.unwrap().unwrap_err().code,
+            BackendErrorCode::Cancelled
+        );
+        assert_eq!(
+            remote.status().unwrap().active_session_id,
+            Some(new_session)
+        );
+        remote
+            .cancel_stream(connection_id, new_session)
+            .await
+            .unwrap();
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
 }
 
 #[tokio::test]

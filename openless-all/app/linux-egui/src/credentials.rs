@@ -275,7 +275,10 @@ impl CredentialStore for LinuxCredentialStore {
             Ok(CredentialsStatus {
                 active_asr_provider,
                 active_llm_provider,
-                pipeline_mode: preferences.pipeline_mode,
+                pipeline_mode: openless_core::shared_types::effective_pipeline_mode(
+                    preferences.multimodal_pipeline_enabled,
+                    preferences.pipeline_mode,
+                ),
                 asr_configured,
                 llm_configured,
                 omni_configured: openless_core::provider_rules::omni_configured(
@@ -603,6 +606,15 @@ mod tests {
         let persisted = std::fs::read_to_string(root.join("credential-metadata.json")).unwrap();
         assert!(!persisted.contains("secret"));
         assert!(!persisted.contains("password"));
+        let preferences = UserPreferences {
+            multimodal_pipeline_enabled: false,
+            pipeline_mode: openless_core::shared_types::PipelineMode::Multimodal,
+            ..Default::default()
+        };
+        assert_eq!(
+            reopened.status(preferences).await.unwrap().pipeline_mode,
+            openless_core::shared_types::PipelineMode::Traditional
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }

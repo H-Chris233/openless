@@ -953,15 +953,17 @@ impl ActiveTextInsertion {
         let windows_non_streaming = cfg!(target_os = "windows")
             && context.insertion.windows_insertion_mode
                 != crate::shared_types::WindowsInsertionMode::SendInput;
+        let platform_streaming = platform.supports_streaming();
         Arc::new(Self {
             platform,
-            streaming: crate::streaming_insert::streaming_insert_eligible(
-                context.insertion.streaming,
-                context.polish.translation_active,
-                context.polish.chinese_script_preference
-                    == crate::shared_types::ChineseScriptPreference::Traditional,
-                windows_non_streaming,
-            ),
+            streaming: platform_streaming
+                && crate::streaming_insert::streaming_insert_eligible(
+                    context.insertion.streaming,
+                    context.polish.translation_active,
+                    context.polish.chinese_script_preference
+                        == crate::shared_types::ChineseScriptPreference::Traditional,
+                    windows_non_streaming,
+                ),
             script: context.polish.chinese_script_preference,
             save_streamed_text_to_clipboard: context.insertion.save_streamed_text_to_clipboard,
             state: Mutex::new(ActiveTextInsertionState::default()),
@@ -3797,10 +3799,31 @@ impl OpenLessBackend {
             crate::voice_session::VoiceSessionKind::Dictation,
         )?;
         self.disarm_edit_observation();
+        // Context capture can await AX, a keyring, or another host service.
+        // Publish ownership before that first await so Esc/stop see Starting
+        // instead of an invisible lease which would begin recording later.
+        {
+            let mut state = self.state.write().expect("backend state lock poisoned");
+            if let Err(error) = ensure_running(&state) {
+                self.voice_sessions.release(session_id);
+                return Err(error);
+            }
+            state.dictation = DictationStateSnapshot {
+                phase: DictationPhase::Starting,
+                session_id: Some(session_id),
+                ..DictationStateSnapshot::default()
+            };
+            self.events.publish(
+                Some(session_id),
+                BackendEventKind::DictationStateChanged(state.dictation.clone()),
+            );
+            self.phase_changed.notify_waiters();
+        }
         let context = match self.capture_dictation_context(&options).await {
             Ok(context) => Arc::new(context),
             Err(error) => {
-                self.voice_sessions.release(session_id);
+                self.mark_dictation_failed(session_id, &error);
+                self.reset_dictation_session(session_id);
                 return Err(error);
             }
         };
@@ -3810,11 +3833,13 @@ impl OpenLessBackend {
                 self.voice_sessions.release(session_id);
                 return Err(error);
             }
-            if state.dictation.session_id.is_some() {
+            if state.dictation.session_id != Some(session_id)
+                || state.dictation.phase != DictationPhase::Starting
+            {
                 self.voice_sessions.release(session_id);
                 return Err(BackendError::new(
-                    BackendErrorCode::Busy,
-                    "a dictation session is already active",
+                    BackendErrorCode::Cancelled,
+                    "dictation was cancelled while capturing its context",
                 ));
             }
             state.silence_monitor = context.recording.silence_after_ms.map(|silence_ms| {
@@ -3828,20 +3853,8 @@ impl OpenLessBackend {
                     ),
                 }
             });
-            state.dictation = DictationStateSnapshot {
-                phase: DictationPhase::Starting,
-                session_id: Some(session_id),
-                elapsed_ms: 0,
-                level: 0.0,
-                message: None,
-                translation_active: context.polish.translation_active,
-            };
+            state.dictation.translation_active = context.polish.translation_active;
             state.dictation_context = Some(Arc::clone(&context));
-            self.events.publish(
-                Some(session_id),
-                BackendEventKind::DictationStateChanged(state.dictation.clone()),
-            );
-            self.phase_changed.notify_waiters();
             session_id
         };
 
@@ -8426,6 +8439,124 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn native_streaming_unavailable_keeps_one_final_delivery() {
+        struct FinalOnlySession(Arc<Mutex<Vec<String>>>);
+        impl TextInsertionSession for FinalOnlySession {
+            fn supports_streaming(&self) -> bool {
+                false
+            }
+            fn write(
+                &self,
+                _: String,
+            ) -> BoxFuture<'static, Result<InsertWriteResult, BackendError>> {
+                panic!("an unavailable native stream must never receive a chunk");
+            }
+            fn copy(&self, _: String) -> BoxFuture<'static, Result<(), BackendError>> {
+                panic!("native preparation failure still allows final insertion");
+            }
+            fn finish(
+                &self,
+                text: String,
+            ) -> BoxFuture<'static, Result<InsertOutcome, BackendError>> {
+                self.0.lock().unwrap().push(text);
+                boxed(async { Ok(InsertOutcome::Inserted) })
+            }
+            fn cancel(&self) -> BoxFuture<'static, Result<(), BackendError>> {
+                boxed(async { Ok(()) })
+            }
+        }
+        let delivered = Arc::new(Mutex::new(Vec::new()));
+        let mut context = DictationContext::default();
+        context.insertion.streaming = true;
+        context.insertion.windows_insertion_mode =
+            crate::shared_types::WindowsInsertionMode::SendInput;
+        let insertion = ActiveTextInsertion::new(
+            Arc::new(FinalOnlySession(delivered.clone())),
+            &context,
+            Arc::new(TokioTaskSpawner),
+        );
+        insertion.push(&crate::types::PolishDelta {
+            offset: 0,
+            text: "partial".into(),
+            is_final: false,
+        });
+        assert_eq!(
+            insertion.finish("final text".into()).await.unwrap(),
+            InsertOutcome::Inserted
+        );
+        assert_eq!(*delivered.lock().unwrap(), ["final text"]);
+    }
+
+    #[tokio::test]
+    async fn context_capture_is_already_a_cancellable_dictation_session() {
+        struct SlowContext {
+            entered: Arc<tokio::sync::Notify>,
+            release: Arc<tokio::sync::Notify>,
+        }
+        impl HostContextAdapter for SlowContext {
+            fn capture(
+                &self,
+                _: bool,
+            ) -> BoxFuture<'static, Result<HostContextCapture, BackendError>> {
+                let entered = self.entered.clone();
+                let release = self.release.clone();
+                boxed(async move {
+                    entered.notify_one();
+                    release.notified().await;
+                    Ok(HostContextCapture::default())
+                })
+            }
+        }
+        let data_dir = TestDataDir::new("cancel-context-capture");
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let mut services = crate::domains::BackendServices::unsupported();
+        services.host_context = Arc::new(SlowContext {
+            entered: entered.clone(),
+            release: release.clone(),
+        });
+        let backend = Arc::new(
+            OpenLessBackend::new(
+                BackendConfig {
+                    data_dir: data_dir.path().to_path_buf(),
+                    ..BackendConfig::default()
+                },
+                BackendDependencies {
+                    host_actions: Arc::new(FakeHost::default()),
+                    text_inserter: Arc::new(FakeInserter),
+                    dictation_engine: Arc::new(FakeEngine),
+                    services,
+                    ..BackendDependencies::unsupported()
+                },
+            )
+            .unwrap(),
+        );
+        let mut preferences = backend.get_preferences();
+        preferences.cursor_context_enabled = true;
+        backend.set_preferences(preferences).unwrap();
+        backend.start().await.unwrap();
+        let start = tokio::spawn({
+            let backend = backend.clone();
+            async move { backend.start_dictation().await }
+        });
+        entered.notified().await;
+        let cancelled = backend.cancel_active_voice_session(None).await;
+        release.notify_one();
+        let result = start.await.unwrap();
+        assert!(
+            cancelled.is_ok(),
+            "Esc must own the session even while AX/credentials are being captured"
+        );
+        assert_eq!(result.unwrap_err().code, BackendErrorCode::Cancelled);
+        assert_eq!(backend.snapshot().dictation.phase, DictationPhase::Idle);
+        let mut preferences = backend.get_preferences();
+        preferences.cursor_context_enabled = false;
+        backend.set_preferences(preferences).unwrap();
+        backend.start_dictation().await.unwrap();
+        backend.cancel_dictation(None).await.unwrap();
     }
 
     #[tokio::test]

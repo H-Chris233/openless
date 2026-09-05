@@ -104,6 +104,7 @@ mod linux_app {
         last_event_sequence: u64,
         less_computer_input: String,
         less_computer_output: String,
+        less_computer_turn_start: usize,
         less_computer_session: Option<openless_core::SessionId>,
         pending_approval: Option<(String, String)>,
         qa_visible: bool,
@@ -152,6 +153,7 @@ mod linux_app {
                         last_event_sequence: 0,
                         less_computer_input: String::new(),
                         less_computer_output: String::new(),
+                        less_computer_turn_start: 0,
                         less_computer_session: None,
                         pending_approval: None,
                         qa_visible: false,
@@ -192,6 +194,7 @@ mod linux_app {
                     last_event_sequence: 0,
                     less_computer_input: String::new(),
                     less_computer_output: String::new(),
+                    less_computer_turn_start: 0,
                     less_computer_session: None,
                     pending_approval: None,
                     qa_visible: false,
@@ -409,16 +412,17 @@ mod linux_app {
                     // already started. Session ownership, not arrival time,
                     // decides whether a delta/terminal may mutate this view.
                     if let LessComputerEventKind::User { text, fresh } = &event.kind {
-                        if *fresh || self.less_computer_session.is_none() {
-                            self.less_computer_session = session_id;
-                        }
-                        if session_id != self.less_computer_session {
-                            return;
-                        }
+                        // Every User starts a new turn UUID, including a
+                        // continuation. `fresh` describes conversation history,
+                        // never whether this turn is allowed to receive output.
+                        self.less_computer_session = session_id;
+                        self.pending_approval = None;
                         if *fresh {
                             self.less_computer_output.clear();
-                            self.pending_approval = None;
+                        } else if !self.less_computer_output.is_empty() {
+                            self.less_computer_output.push_str("\n\n");
                         }
+                        self.less_computer_turn_start = self.less_computer_output.len();
                         self.less_computer_input = text.clone();
                     } else if session_id != self.less_computer_session {
                         return;
@@ -438,9 +442,11 @@ mod linux_app {
                             self.status = "Less Computer 已压缩上下文".to_string();
                         }
                         LessComputerEventKind::Completed { text, .. } => {
-                            if self.less_computer_output.is_empty() {
-                                self.less_computer_output = text;
-                            }
+                            // A terminal is authoritative even for final-only
+                            // providers or after a missed partial event.
+                            self.less_computer_output
+                                .truncate(self.less_computer_turn_start);
+                            self.less_computer_output.push_str(&text);
                             self.pending_approval = None;
                             self.status = "Less Computer 已完成".to_string();
                         }
@@ -483,7 +489,34 @@ mod linux_app {
                     self.load_remote_status();
                 }
                 BackendEventKind::QaState(state) => {
-                    self.qa_state = Some(state);
+                    if state.kind == QaStateKind::AnswerDelta {
+                        if let Some(current) = self
+                            .qa_state
+                            .as_mut()
+                            .filter(|current| current.session_id == state.session_id)
+                        {
+                            // Core deltas deliberately omit messages. Preserve
+                            // the conversation and append only this turn's text;
+                            // the following Answer replaces it with Core history.
+                            current.kind = state.kind;
+                            current
+                                .chunk
+                                .get_or_insert_with(String::new)
+                                .push_str(state.chunk.as_deref().unwrap_or_default());
+                        }
+                    } else if matches!(
+                        state.kind,
+                        QaStateKind::Idle
+                            | QaStateKind::Loading
+                            | QaStateKind::Thinking
+                            | QaStateKind::Recording
+                    ) || self
+                        .qa_state
+                        .as_ref()
+                        .is_none_or(|current| current.session_id == state.session_id)
+                    {
+                        self.qa_state = Some(state);
+                    }
                 }
                 BackendEventKind::SelectionStateChanged(snapshot) => {
                     if snapshot.phase == SelectionPhase::Preview {
@@ -582,6 +615,7 @@ mod linux_app {
                         self.transcript_session = snapshot.dictation.session_id;
                         self.less_computer_input.clear();
                         self.less_computer_output.clear();
+                        self.less_computer_turn_start = 0;
                         self.less_computer_session = None;
                         self.pending_approval = None;
                         self.qa_state = None;
@@ -2076,6 +2110,119 @@ mod linux_app {
             Box::new(move |_| Ok(Box::new(OpenLessEguiApp::new(tokio, native)))),
         )
         .map_err(|error| error.to_string())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn continuation_turn_keeps_receiving_output_and_approval() {
+            let mut app = OpenLessEguiApp::new(
+                Arc::new(tokio::runtime::Runtime::new().unwrap()),
+                Err("fixture".into()),
+            );
+            let first = openless_core::SessionId::new();
+            let second = openless_core::SessionId::new();
+            for (sequence, session, kind) in [
+                (
+                    1,
+                    first,
+                    LessComputerEventKind::User {
+                        text: "first".into(),
+                        fresh: true,
+                    },
+                ),
+                (
+                    2,
+                    first,
+                    LessComputerEventKind::Completed {
+                        text: "first answer".into(),
+                        cost_usd: None,
+                    },
+                ),
+                (
+                    3,
+                    second,
+                    LessComputerEventKind::User {
+                        text: "follow up".into(),
+                        fresh: false,
+                    },
+                ),
+                (
+                    4,
+                    second,
+                    LessComputerEventKind::Delta {
+                        text: "second answer".into(),
+                    },
+                ),
+                (
+                    5,
+                    second,
+                    LessComputerEventKind::Approval {
+                        token: "approval".into(),
+                        command: "echo test".into(),
+                        reason: "test".into(),
+                    },
+                ),
+                (
+                    6,
+                    first,
+                    LessComputerEventKind::Delta {
+                        text: "stale".into(),
+                    },
+                ),
+            ] {
+                app.apply_event(BackendEvent {
+                    sequence,
+                    session_id: Some(session),
+                    kind: BackendEventKind::LessComputerEvent(openless_core::LessComputerEvent {
+                        seq: None,
+                        kind,
+                    }),
+                });
+            }
+            assert_eq!(app.less_computer_session, Some(second));
+            assert!(app.less_computer_output.ends_with("second answer"));
+            assert_eq!(
+                app.pending_approval,
+                Some(("approval".into(), "echo test".into()))
+            );
+        }
+
+        #[test]
+        fn qa_deltas_accumulate_without_hiding_conversation_history() {
+            let mut app = OpenLessEguiApp::new(
+                Arc::new(tokio::runtime::Runtime::new().unwrap()),
+                Err("fixture".into()),
+            );
+            let session = openless_core::SessionId::new();
+            let mut thinking = QaStateEvent::simple(QaStateKind::Thinking);
+            thinking.session_id = Some(session.to_string());
+            thinking.messages = Some(vec![openless_core::shared_types::QaChatMessage {
+                role: "user".into(),
+                content: "question".into(),
+                selection_text: None,
+            }]);
+            app.apply_event(BackendEvent {
+                sequence: 1,
+                session_id: Some(session),
+                kind: BackendEventKind::QaState(thinking),
+            });
+            for (sequence, chunk) in [(2, "Hello"), (3, " world")] {
+                let mut delta = QaStateEvent::simple(QaStateKind::AnswerDelta);
+                delta.session_id = Some(session.to_string());
+                delta.chunk = Some(chunk.into());
+                app.apply_event(BackendEvent {
+                    sequence,
+                    session_id: Some(session),
+                    kind: BackendEventKind::QaState(delta),
+                });
+            }
+            let state = app.qa_state.as_ref().unwrap();
+            assert_eq!(state.chunk.as_deref(), Some("Hello world"));
+            assert_eq!(state.messages.as_ref().unwrap()[0].content, "question");
+        }
     }
 }
 

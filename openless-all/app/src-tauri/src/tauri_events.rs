@@ -109,9 +109,6 @@ fn forward_legacy_event(app: &AppHandle, backend: &OpenLessBackend, kind: Backen
                     selection_polish: false,
                 });
             }
-            if !result.polished_text.trim().is_empty() {
-                let _ = app.emit("remote:result", result.polished_text);
-            }
         }
         BackendEventKind::RecordingControlRequested(request) => {
             let Some(backend) = app

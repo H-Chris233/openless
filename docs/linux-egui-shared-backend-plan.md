@@ -4,15 +4,15 @@
 > 测试计数和 UI stub 状态不代表 PR #1019 最新实现。当前 2.0.0 接口以
 > `linux-egui-backend-contract.md`、代码中的 canonical fixtures 和 PR #1019 body 为准。
 
-> 文档状态：实施与复审记录；实施状态：2026-09-04 已按 PR #1019 全量修复 handoff 完成 F01–F24 的生产接线和自动 contract，正在执行最终 CI/artifact 复审。Linux QA/Remote/Selection、Provider/Model、Qwen runtime 与 egui 操作面均不再是 stub；真实设备、签名、安装、升级和回滚证据仍须单独记录，自动测试不能替代。
-> 更新日期：2026-09-04；本地/WSL 自动证据随本次提交更新，最终远端 run/head 以 PR #1019 body 和复审记录为准
+> 文档状态：实施与复审记录。2026-09-05 完整复核发现此前 F01–F24 的接口/fixture 通过仍遗漏生产 Adapter、取消、输入目标与 UI 状态序列错误；问题、修复及最新验证以 [`pr1019-2.0-final-review.md`](./pr1019-2.0-final-review.md) 为准。不能继续用下面的历史收口矩阵单独证明迁移完成。
+> 更新日期：2026-09-05；真实设备、签名、安装、升级和回滚仍需单独证据，最终远端 run/head 以 PR #1019 body 和本轮复审记录为准。
 > 范围：抽取无 Tauri 依赖的共享 Rust 应用核心；保留 macOS / Windows 的 Tauri 前端；为 Linux egui 前端准备公共接口、事件契约、测试适配器和构建契约
 > egui 责任：由另一组负责 egui/eframe 界面、交互、视觉和 UI 验收；本文只负责让他们能够稳定调用后端
 > 最终审查基线：推送后重新读取 PR #1019 的真实 `baseRefOid/headRefOid`；不得继续使用历史 SHA 或把 `MERGEABLE` 等同发布就绪
 
 ## 0. F01–F24 收口矩阵（2026-09-04）
 
-下表记录生产调用者与最小自动证据；“设备待补”表示代码/contract 已通过，但不能据此宣称真实平台或发布就绪。
+下表保留上一轮生产调用者与自动证据索引；本轮新发现与修复见上方链接。“设备待补”始终不等于真实平台或发布就绪。
 
 | 项 | Core 生产调用链 / 已删除的 Host policy | 自动证据 | 真实平台证据 |
 | --- | --- | --- | --- |
@@ -1706,11 +1706,11 @@ drain，收到 `Lagged` 必须用 `snapshot()` 或领域查询重同步。Linux 
   已接线且未回退为 `Unsupported`，egui 不得复制 Tauri provider 逻辑。
 - headless 示例实际执行并覆盖听写、Selection、Selection Voice、stale session 与 outcome-unknown；
   Linux host contract 从公开 API 验证同一能力边界。
-- egui UI、布局、交互和视觉测试没有进入本计划的代码或验收范围。
+- 本阶段最初只移交接口；后续 F01/F02 已把可操作的 egui UI 纳入本 PR。生产 UI 的连续会话、审批和增量显示现纳入复核，视觉设计仍由 egui 团队负责。
 
 ### M8：Linux host 接口接线准备
 
-仍不实现 UI，但完成 Linux 可运行宿主所需的非 UI 适配器：
+此处保留早期非 UI 适配器阶段的设计；最终生产 UI 与其启动、事件和目标验证见本轮复核记录：
 
 1. 实现 Linux `TaskSpawner`、`HostActions`、`ResourceResolver`、`CredentialStore`。
 2. 将 fcitx5 DBus commit、热键同步、选区读取接入 Linux platform adapter。
@@ -1724,8 +1724,7 @@ drain，收到 `Lagged` 必须用 `snapshot()` 或领域查询重同步。Linux 
 9. 在 Ubuntu/fcitx5 记录 translation modifier 与 dictation press 的真实信号顺序，并用时间线
    contract test 固定关联规则；晚到 modifier 不得修改已经启动的 `DictationContext`。
 10. 实现 `LinuxSettingsRuntime`，消费 Core 显式 hotkey/active-provider target，通过 fcitx5 DBus 与
-    credential metadata 执行平台 effect，并以 typed receipt 逆序恢复；switch-style、open-app、
-    Coding Agent、style-pack hotkey 和 Windows keyboard effect 在 Linux 保持稳定 `Unsupported`。
+    credential metadata 执行平台 effect，并以 typed receipt 逆序恢复。Coding Agent 启用与语音热键必须有真实 fcitx5 effect；其余未实现的 switch-style、open-app、style-pack hotkey 和 Windows keyboard effect 才保持明确 `Unsupported`。
 11. 以 `LinuxBackendBuilder::from_shared_providers(config)` 作为唯一生产 factory：UI 只传配置，
     factory 内部创建 Linux credentials、Core `ProviderService`、共享云 ASR/LLM/Omni/Auxiliary
     router、cpal recorder、fcitx5 inserter 和 settings runtime；测试/特殊宿主才使用显式 provider
@@ -2225,8 +2224,8 @@ runner 证明，不能从本机结果推断。
 
 ### 2.0.0-Beta.1 版本与许可证边界
 
-本批 Tauri 应用版本统一为 `2.0.0-Beta.1`；`BACKEND_CONTRACT_VERSION` 继续为
-`1.0.0`，两者独立。根项目从该版本起采用 `AGPL-3.0-only`，已发布 1.x 版本仍保持 MIT，
+本批 Tauri 应用版本统一为 `2.0.0-Beta.1`；`BACKEND_CONTRACT_VERSION` 已升级为
+`2.0.0`，应用版本和接口版本仍各自独立。根项目从该版本起采用 `AGPL-3.0-only`，已发布 1.x 版本仍保持 MIT，
 第三方 vendor 文件保留其原始 MIT/Apache/LGPL 条款。Less Computer 语音 session、实时
 `TranscriptDelta` 和 Linux 三档热键事件已进入 Core/Host contract；真实设备、签名和 UI
 验收继续按 M8–M10 单独取证。

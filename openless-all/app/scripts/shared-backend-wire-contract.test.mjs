@@ -216,13 +216,21 @@ const coordinatorBusinessSources = [
   coordinatorCapsule,
   coordinatorHotkeys,
 ].join('\n');
-for (const eventName of ['local-asr-token', 'remote:result']) {
-  assert.doesNotMatch(
-    coordinatorBusinessSources,
-    new RegExp(`\\.emit\\(\\s*["']${eventName}["']`),
-    `${eventName} must be derived from typed Core events by the centralized Tauri bridge`,
-  );
-}
+assert.doesNotMatch(
+  coordinatorBusinessSources,
+  /\.emit\(\s*["']local-asr-token["']/,
+  'local-asr-token must be derived from typed Core events by the centralized Tauri bridge',
+);
+assert.doesNotMatch(
+  `${remoteServer}\n${tauriEvents}`,
+  /listen_any\("remote:result"|\.emit\("remote:result"/,
+  'Remote Input results must never use an ownerless global broadcast',
+);
+assert.match(
+  remoteServer,
+  /event\.session_id != \*remote_session_id/,
+  'Remote Input may only forward events belonging to the authenticated connection session',
+);
 assert.match(
   coordinatorDictation,
   /dispatch_dictation_hotkey_edge_with_session_options/,

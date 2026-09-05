@@ -219,13 +219,27 @@ impl Fcitx5TextInserter {
 impl TextInserter for Fcitx5TextInserter {
     fn begin(
         &self,
-        _session_id: openless_core::SessionId,
+        session_id: openless_core::SessionId,
         _context: std::sync::Arc<openless_core::DictationContext>,
     ) -> BoxFuture<'static, Result<std::sync::Arc<dyn TextInsertionSession>, BackendError>> {
         let clipboard_fallback = self.clipboard_fallback;
         Box::pin(async move {
+            let ticket = session_id.to_string();
+            #[cfg(target_os = "linux")]
+            {
+                let capture_ticket = ticket.clone();
+                // A missing native target is a supported clipboard fallback,
+                // not permission to choose a new window after transcription.
+                let _ = tokio::task::spawn_blocking(move || {
+                    send_bool_message("CaptureDictationTarget", |message| {
+                        message.append1(capture_ticket)
+                    })
+                })
+                .await;
+            }
             Ok(std::sync::Arc::new(Fcitx5InsertionSession {
                 clipboard_fallback,
+                ticket,
                 closed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             }) as std::sync::Arc<dyn TextInsertionSession>)
         })
@@ -235,6 +249,7 @@ impl TextInserter for Fcitx5TextInserter {
 #[derive(Clone)]
 struct Fcitx5InsertionSession {
     clipboard_fallback: bool,
+    ticket: String,
     closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -245,6 +260,7 @@ impl Fcitx5InsertionSession {
             let expected = text.chars().count();
             let insertion_text = text.clone();
             let closed = std::sync::Arc::clone(&self.closed);
+            let ticket = self.ticket.clone();
             let result = tokio::task::spawn_blocking(move || {
                 if closed.load(std::sync::atomic::Ordering::Acquire) {
                     return Err(BackendError::new(
@@ -252,7 +268,7 @@ impl Fcitx5InsertionSession {
                         "fcitx5 insertion session is closed",
                     ));
                 }
-                commit_text(&insertion_text)
+                commit_dictation_target(&ticket, &insertion_text)
             })
             .await
             .map_err(|error| {
@@ -282,14 +298,17 @@ impl Fcitx5InsertionSession {
             #[cfg(target_os = "linux")]
             {
                 let insertion_text = text.clone();
-                let result = tokio::task::spawn_blocking(move || commit_text(&insertion_text))
-                    .await
-                    .map_err(|error| {
-                        BackendError::new(
-                            BackendErrorCode::Platform,
-                            format!("fcitx5 insertion task failed: {error}"),
-                        )
-                    })?;
+                let ticket = self.ticket.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    commit_dictation_target(&ticket, &insertion_text)
+                })
+                .await
+                .map_err(|error| {
+                    BackendError::new(
+                        BackendErrorCode::Platform,
+                        format!("fcitx5 insertion task failed: {error}"),
+                    )
+                })?;
                 if result.is_ok() {
                     return Ok(InsertOutcome::Inserted);
                 }
@@ -377,18 +396,53 @@ impl TextInsertionSession for Fcitx5InsertionSession {
                     "fcitx5 insertion session is already closed",
                 ));
             }
-            if final_text.is_empty() {
+            let result = if final_text.is_empty() {
                 Ok(InsertOutcome::Inserted)
             } else {
                 session.insert_or_copy(final_text).await
-            }
+            };
+            session.release_target().await;
+            result
         })
     }
 
     fn cancel(&self) -> BoxFuture<'static, Result<(), BackendError>> {
         self.closed
             .store(true, std::sync::atomic::Ordering::Release);
-        Box::pin(async { Ok(()) })
+        let session = self.clone();
+        Box::pin(async move {
+            session.release_target().await;
+            Ok(())
+        })
+    }
+}
+
+impl Fcitx5InsertionSession {
+    async fn release_target(&self) {
+        #[cfg(target_os = "linux")]
+        {
+            let ticket = self.ticket.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                send_bool_message("CancelDictationTarget", |message| message.append1(ticket))
+            })
+            .await;
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = &self.ticket;
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn commit_dictation_target(ticket: &str, text: &str) -> Result<(), BackendError> {
+    if send_bool_message("CommitDictationTarget", |message| {
+        message.append2(ticket, text)
+    })? {
+        Ok(())
+    } else {
+        Err(BackendError::new(
+            BackendErrorCode::Cancelled,
+            "the captured dictation target is unavailable",
+        ))
     }
 }
 

@@ -31,6 +31,24 @@ impl LinuxNativeRuntime {
         broker: Option<SingleInstanceBroker>,
         hotkeys: Option<Fcitx5HotkeyListener>,
     ) -> Result<Self, BackendError> {
+        // fcitx5 starts with no OpenLess shortcuts on a clean installation.
+        // Hydrate its native registrations from the same Core target used by
+        // settings transactions before accepting any input. Equal previous/next
+        // values intentionally force the effect without rewriting preferences.
+        let target = openless_core::HotkeyRuntimeTarget::from(&backend.backend.get_preferences());
+        backend
+            .settings_runtime
+            .commit(
+                &openless_core::SettingsEffectPlan {
+                    hotkeys: Some(openless_core::SettingsValueChange {
+                        previous: target.clone(),
+                        next: target,
+                    }),
+                    ..Default::default()
+                },
+                &mut openless_core::SettingsEffectReceipt::default(),
+            )
+            .map_err(|failure| failure.error)?;
         let startup = backend.backend.start().await?;
         openless_core::require_backend_contract_version(&startup.contract_version)?;
         let preferences = backend.backend.get_preferences();
@@ -155,6 +173,23 @@ mod tests {
 
     use super::*;
 
+    #[derive(Default)]
+    struct StartupHotkeys(std::sync::Mutex<Vec<openless_core::HotkeyRuntimeTarget>>);
+
+    impl crate::LinuxSettingsEffects for StartupHotkeys {
+        fn apply_hotkeys(
+            &self,
+            target: &openless_core::HotkeyRuntimeTarget,
+        ) -> Result<(), BackendError> {
+            self.0.lock().unwrap().push(target.clone());
+            Ok(())
+        }
+
+        fn set_active_asr_provider(&self, _: &str) -> Result<(), BackendError> {
+            Ok(())
+        }
+    }
+
     #[tokio::test]
     async fn native_runtime_starts_pumps_and_shuts_down_without_ui() {
         let data_dir = std::env::temp_dir().join(format!(
@@ -198,11 +233,14 @@ mod tests {
             )
             .unwrap(),
         );
+        let hotkeys = Arc::new(StartupHotkeys::default());
         let runtime = LinuxNativeRuntime::start(
             LinuxBackendRuntime {
                 backend: Arc::clone(&backend),
                 host_actions,
-                settings_runtime: Arc::new(openless_core::NoopSettingsRuntime),
+                settings_runtime: Arc::new(crate::LinuxSettingsRuntime::with_effects(
+                    hotkeys.clone(),
+                )),
             },
             None,
             None,
@@ -211,6 +249,12 @@ mod tests {
         .unwrap();
 
         assert!(backend.snapshot().running);
+        assert_eq!(
+            hotkeys.0.lock().unwrap().as_slice(),
+            &[openless_core::HotkeyRuntimeTarget::from(
+                &backend.get_preferences()
+            )]
+        );
         assert_eq!(
             runtime.startup_snapshot().contract_version,
             openless_core::BACKEND_CONTRACT_VERSION

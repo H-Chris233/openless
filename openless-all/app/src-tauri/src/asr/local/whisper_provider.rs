@@ -104,6 +104,36 @@ impl LocalWhisperCache {
         }
     }
 
+    /// Whisper 的同步解码不可强制中止；取消/超时只驱逐本会话借出的实例，
+    /// 旧 worker 用自己的 Arc 安全收尾，新会话不再排队等待那把解码锁。
+    pub fn finish_use(&self, engine: &Arc<WhisperEngine>, discard: bool) {
+        let mut slot = self.inner.lock();
+        if slot
+            .as_ref()
+            .is_some_and(|cached| Arc::ptr_eq(&cached.engine, engine))
+        {
+            if discard {
+                slot.take();
+            } else if let Some(cached) = slot.as_mut() {
+                cached.last_used = Instant::now();
+            }
+        }
+    }
+
+    pub fn release_current_if_idle(
+        &self,
+        engine: &std::sync::Weak<WhisperEngine>,
+        threshold: Duration,
+    ) {
+        let mut slot = self.inner.lock();
+        if slot.as_ref().is_some_and(|cached| {
+            std::sync::Weak::ptr_eq(&Arc::downgrade(&cached.engine), engine)
+                && cached.last_used.elapsed() >= threshold
+        }) {
+            slot.take();
+        }
+    }
+
     pub fn release_if_idle(&self, threshold: Duration) -> bool {
         let mut slot = self.inner.lock();
         match slot.as_ref() {

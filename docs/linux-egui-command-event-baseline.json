@@ -292,7 +292,7 @@
       "qa:state": "map typed QaState payloads",
       "remote-input:error": "map RemoteInputFailed without a PIN or credential value",
       "remote-input:running": "map RemoteInputStatusChanged without a PIN or credential value",
-      "remote:result": "derive from DictationCompleted for the Tauri remote-server bridge",
+      "remote:result": "retired global broadcast: remote-server subscribes directly to owner-scoped Core events; the H5 result message remains compatible",
       "sherpa-onnx-asr-download-progress": "map LocalAsrDownloadProgress for the sherpa-onnx runtime",
       "sherpa-onnx-asr-prepare-progress": "map LocalAsrPrepareProgress for the sherpa-onnx runtime",
       "vocab:suggested": "map VocabularySuggestionsChanged",

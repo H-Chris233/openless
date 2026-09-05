@@ -36,7 +36,10 @@ impl WindowsImeSessionError {
 pub fn map_ime_status_to_insert_status(status: ImeSubmitStatus) -> InsertStatus {
     match status {
         ImeSubmitStatus::Committed => InsertStatus::Inserted,
-        ImeSubmitStatus::Rejected | ImeSubmitStatus::Failed => InsertStatus::CopiedFallback,
+        // DLL 的拒绝/失败只能证明“没有提交”，它从未写入剪贴板。
+        // 返回 Failed 让调用方按用户设置执行真实回退；只有剪贴板写入成功的
+        // 路径才有资格报告 CopiedFallback。OutcomeUnknown 仍通过 Err 单独传递。
+        ImeSubmitStatus::Rejected | ImeSubmitStatus::Failed => InsertStatus::Failed,
     }
 }
 
@@ -232,6 +235,16 @@ mod tests {
             map_ime_status_to_insert_status(ImeSubmitStatus::Committed),
             InsertStatus::Inserted
         );
+    }
+
+    #[test]
+    fn rejected_ime_result_never_claims_that_the_clipboard_was_written() {
+        for status in [ImeSubmitStatus::Rejected, ImeSubmitStatus::Failed] {
+            assert_eq!(
+                map_ime_status_to_insert_status(status),
+                InsertStatus::Failed
+            );
+        }
     }
 
     #[test]
