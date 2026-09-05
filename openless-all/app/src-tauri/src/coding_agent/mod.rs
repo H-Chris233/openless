@@ -2,6 +2,9 @@
 
 pub mod commands;
 
+#[cfg(windows)]
+mod windows_job;
+
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -83,7 +86,10 @@ async fn login_shell_path() -> Option<&'static str> {
         .as_deref()
 }
 
-async fn augment_path(_command: &mut tokio::process::Command) {
+async fn augment_path(_command: &mut tokio::process::Command, cancel: &CancellationToken) -> bool {
+    if cancel.is_cancelled() {
+        return false;
+    }
     #[cfg(unix)]
     {
         let command = _command;
@@ -92,11 +98,18 @@ async fn augment_path(_command: &mut tokio::process::Command) {
         if let Some(home) = &home {
             command.env("HOME", home);
         }
+        // A GUI launch may need a slow login shell to discover PATH. Esc must
+        // interrupt that lookup too, before any agent process has been spawned.
+        let login_path = tokio::select! {
+            path = login_shell_path() => path,
+            _ = cancel.cancelled() => return false,
+        };
         command.env(
             "PATH",
-            openless_core::merge_agent_path(&current, home.as_deref(), login_shell_path().await),
+            openless_core::merge_agent_path(&current, home.as_deref(), login_path),
         );
     }
+    true
 }
 
 impl CodingAgentProcessAdapter for TauriCodingAgentProcessAdapter {
@@ -107,9 +120,20 @@ impl CodingAgentProcessAdapter for TauriCodingAgentProcessAdapter {
         cancel: CancellationToken,
     ) -> BoxFuture<'static, Result<ProcessExit, openless_core::BackendError>> {
         Box::pin(async move {
+            if cancel.is_cancelled() {
+                return Ok(ProcessExit {
+                    code: None,
+                    success: false,
+                });
+            }
             let _workspace = materialize_temporary_files(&mut request)?;
             let mut command = tokio::process::Command::new(&request.executable);
-            augment_path(&mut command).await;
+            if !augment_path(&mut command, &cancel).await {
+                return Ok(ProcessExit {
+                    code: None,
+                    success: false,
+                });
+            }
             command
                 .args(&request.argv)
                 .envs(&request.env)
@@ -119,11 +143,26 @@ impl CodingAgentProcessAdapter for TauriCodingAgentProcessAdapter {
                 .kill_on_drop(true);
             #[cfg(unix)]
             command.process_group(0);
+            // Start suspended so no CLI code or descendants run before joining
+            // this operation's Job. Resume only after assigning ownership; CLI
+            // helpers also stay hidden behind the desktop UI.
+            #[cfg(windows)]
+            command.creation_flags(0x08000000 | 0x00000004);
+            #[cfg(windows)]
+            let job = windows_job::AgentProcessJob::new()?;
             if let Some(cwd) = &request.cwd {
                 command.current_dir(cwd);
             }
             if let PromptPayload::Argv(prompt) = &request.prompt {
                 command.arg(prompt);
+            }
+            // Esc can race PATH discovery or temporary-file materialization.
+            // Never turn their late completion into a newly launched agent.
+            if cancel.is_cancelled() {
+                return Ok(ProcessExit {
+                    code: None,
+                    success: false,
+                });
             }
             let mut child = command.spawn().map_err(|error| {
                 let code = if error.kind() == std::io::ErrorKind::NotFound {
@@ -133,17 +172,13 @@ impl CodingAgentProcessAdapter for TauriCodingAgentProcessAdapter {
                 };
                 openless_core::BackendError::new(code, error.to_string())
             })?;
-            if let PromptPayload::Stdin(prompt) = &request.prompt {
-                if let Some(mut stdin) = child.stdin.take() {
-                    stdin
-                        .write_all(prompt.as_bytes())
-                        .await
-                        .map_err(platform_error)?;
-                    stdin.shutdown().await.map_err(platform_error)?;
-                }
-            } else {
-                drop(child.stdin.take());
-            }
+            #[cfg(windows)]
+            job.assign_and_resume(&child, &cancel)?;
+            // Keep the Unix process-group ID even if wait() reaps its leader
+            // while a descendant still owns an inherited output pipe.
+            #[cfg(unix)]
+            let process_id = child.id();
+            let stdin = child.stdin.take();
             let stdout = child
                 .stdout
                 .take()
@@ -153,7 +188,7 @@ impl CodingAgentProcessAdapter for TauriCodingAgentProcessAdapter {
                 .take()
                 .ok_or_else(|| invalid("missing process stderr"))?;
             let stdout_sink = Arc::clone(&output);
-            let stdout_task = tokio::spawn(async move {
+            let read_stdout = async move {
                 let mut lines = BufReader::new(stdout).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
                     stdout_sink.write(ProcessOutputLine {
@@ -161,8 +196,8 @@ impl CodingAgentProcessAdapter for TauriCodingAgentProcessAdapter {
                         line,
                     });
                 }
-            });
-            let stderr_task = tokio::spawn(async move {
+            };
+            let read_stderr = async move {
                 let mut lines = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
                     output.write(ProcessOutputLine {
@@ -170,43 +205,74 @@ impl CodingAgentProcessAdapter for TauriCodingAgentProcessAdapter {
                         line,
                     });
                 }
-            });
-            let status = loop {
-                tokio::select! {
-                    status = child.wait() => break status.map_err(platform_error)?,
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {
-                        if cancel.is_cancelled() {
-                            #[cfg(unix)]
-                            let killed_group = child.id().is_some_and(|pid| {
-                                // SAFETY: the child was started as process-group leader above.
-                                unsafe { libc::kill(-(pid as i32), libc::SIGKILL) == 0 }
-                            });
-                            #[cfg(windows)]
-                            let killed_group = if let Some(pid) = child.id() {
-                                let mut taskkill = tokio::process::Command::new("taskkill");
-                                taskkill
-                                    .args(["/PID", &pid.to_string(), "/T", "/F"])
-                                    .stdout(Stdio::null())
-                                    .stderr(Stdio::null());
-                                taskkill.creation_flags(0x08000000);
-                                taskkill.status().await.is_ok_and(|status| status.success())
-                            } else {
-                                false
-                            };
-                            #[cfg(not(any(unix, windows)))]
-                            let killed_group = false;
-                            if !killed_group {
-                                child.start_kill().map_err(platform_error)?;
-                            }
-                            break child.wait().await.map_err(platform_error)?;
-                        }
+            };
+            // A large stdin prompt can fill its pipe before the CLI starts
+            // reading; the CLI can simultaneously be blocked on stdout. Poll
+            // all I/O and child.wait together, so neither backpressure nor an
+            // inherited pipe can prevent Esc/timeout from reaching tree cleanup.
+            let result = {
+                let write_stdin = async move {
+                    if let (Some(mut stdin), PromptPayload::Stdin(prompt)) = (stdin, request.prompt)
+                    {
+                        stdin.write_all(prompt.as_bytes()).await?;
+                        // Windows may acknowledge a write into Tokio's blocking
+                        // buffer; flush waits for actual delivery and reports
+                        // its errors. This wait remains cancellable with the I/O.
+                        stdin.flush().await?;
+                        stdin.shutdown().await?;
                     }
+                    Ok::<_, std::io::Error>(())
+                };
+                let drain = async move {
+                    tokio::join!(read_stdout, read_stderr);
+                    Ok::<_, std::io::Error>(())
+                };
+                let operation = async {
+                    tokio::try_join!(write_stdin, drain, child.wait()).map(|(_, _, status)| status)
+                };
+                tokio::pin!(operation);
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => None,
+                    result = &mut operation => Some(result),
                 }
             };
-            let _ = tokio::join!(stdout_task, stderr_task);
+            // Scoped I/O futures now release their pipe/sink ownership. On
+            // Windows, killing the Job also releases pending blocking pipe I/O.
+            // Terminate descendants before reaping the immediate child.
+            let status = match result {
+                Some(Ok(status)) => status,
+                result => {
+                    #[cfg(unix)]
+                    let killed_group = process_id.is_some_and(|pid| {
+                        // SAFETY: the child was started as process-group leader above.
+                        unsafe { libc::kill(-(pid as i32), libc::SIGKILL) == 0 }
+                    });
+                    #[cfg(windows)]
+                    let killed_group = {
+                        job.terminate()?;
+                        true
+                    };
+                    #[cfg(not(any(unix, windows)))]
+                    let killed_group = false;
+                    if !killed_group {
+                        child.start_kill().map_err(platform_error)?;
+                    }
+                    let status = child.wait().await.map_err(platform_error)?;
+                    if let Some(Err(error)) = result {
+                        return Err(platform_error(error));
+                    }
+                    status
+                }
+            };
+            let success = status.success() && !cancel.is_cancelled();
+            #[cfg(windows)]
+            if success {
+                job.release_completed()?;
+            }
             Ok(ProcessExit {
                 code: status.code(),
-                success: status.success() && !cancel.is_cancelled(),
+                success,
             })
         })
     }
@@ -234,31 +300,224 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancellation_kills_a_windows_process_tree() {
+    async fn cancellation_kills_a_windows_process_tree_with_blocked_stdin() {
+        // Windows' async pipe adapter can buffer a 1 MiB write internally. Keep
+        // the requested prompt-size regression and exceed that buffering too,
+        // so the second run proves cancellation while write_all is pending.
+        for prompt_bytes in [1024 * 1024, 4 * 1024 * 1024] {
+            assert_cancelled_process_tree(prompt_bytes, false).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_kills_descendants_after_the_parent_exits() {
+        // The initial process can exit before Esc while a descendant still
+        // holds both output pipes. A dead parent PID is insufficient for /T.
+        assert_cancelled_process_tree(0, true).await;
+    }
+
+    #[tokio::test]
+    async fn natural_success_preserves_a_redirected_background_child() {
+        let ready =
+            std::env::temp_dir().join(format!("openless-agent-ready-{}", uuid::Uuid::new_v4()));
+        let mut request = fixture_request(&ready, 0, true);
+        request
+            .env
+            .insert("OPENLESS_AGENT_TEST_BACKGROUND".into(), "true".into());
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            TauriCodingAgentProcessAdapter.execute(
+                request,
+                Arc::new(IgnoreOutput),
+                CancellationToken::new(),
+            ),
+        )
+        .await;
+        let pids = std::fs::read_to_string(&ready).expect("child must actually start");
+        let _ = std::fs::remove_file(&ready);
+        let grandchild = pids.split_whitespace().nth(1).unwrap();
+        let survived = process_is_running(grandchild).await;
+        cleanup_fixture_process(grandchild).await;
+        assert!(
+            result
+                .expect("completed CLI must return promptly")
+                .unwrap()
+                .success
+        );
+        assert!(
+            survived,
+            "natural success must preserve an intentionally detached worker"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_execution_kills_its_owned_process_tree() {
+        let ready =
+            std::env::temp_dir().join(format!("openless-agent-ready-{}", uuid::Uuid::new_v4()));
+        let operation = tokio::spawn(TauriCodingAgentProcessAdapter.execute(
+            fixture_request(&ready, 4 * 1024 * 1024, false),
+            Arc::new(IgnoreOutput),
+            CancellationToken::new(),
+        ));
+        for _ in 0..400 {
+            if std::fs::read_to_string(&ready)
+                .is_ok_and(|pids| pids.split_whitespace().count() == 2)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        // An outer timeout may drop the future before cooperative cancellation
+        // runs. Job ownership must survive even this direct abort path.
+        operation.abort();
+        let _ = operation.await;
+        let pids = std::fs::read_to_string(&ready).expect("child must actually start");
+        let _ = std::fs::remove_file(&ready);
+        for pid in pids.split_whitespace() {
+            let running = process_is_running(pid).await;
+            if running {
+                cleanup_fixture_process(pid).await;
+            }
+            assert!(!running, "dropped execution left fixture PID {pid} running");
+        }
+    }
+
+    fn fixture_request(
+        ready: &std::path::Path,
+        prompt_bytes: usize,
+        parent_exits: bool,
+    ) -> AgentCommand {
+        AgentCommand {
+            executable: std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            argv: vec![
+                "--exact".into(),
+                "coding_agent::tests::blocked_stdin_child".into(),
+                "--nocapture".into(),
+            ],
+            env: BTreeMap::from([
+                (
+                    "OPENLESS_AGENT_TEST_READY".into(),
+                    ready.to_string_lossy().into_owned(),
+                ),
+                (
+                    "OPENLESS_AGENT_TEST_PARENT_EXIT".into(),
+                    parent_exits.to_string(),
+                ),
+            ]),
+            cwd: None,
+            prompt: PromptPayload::Stdin("x".repeat(prompt_bytes)),
+            temporary_files: Vec::new(),
+        }
+    }
+
+    async fn process_is_running(pid: &str) -> bool {
+        let mut query = tokio::process::Command::new("tasklist");
+        query.args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"]);
+        query.creation_flags(0x08000000);
+        String::from_utf8_lossy(&query.output().await.unwrap().stdout)
+            .contains(&format!("\"{pid}\""))
+    }
+
+    async fn cleanup_fixture_process(pid: &str) {
+        // These PIDs belong exclusively to the fixture's private ready file.
+        let mut cleanup = tokio::process::Command::new("taskkill");
+        cleanup
+            .args(["/PID", pid, "/T", "/F"])
+            .creation_flags(0x08000000);
+        let _ = cleanup.output().await;
+    }
+
+    async fn assert_cancelled_process_tree(prompt_bytes: usize, parent_exits: bool) {
+        let ready =
+            std::env::temp_dir().join(format!("openless-agent-ready-{}", uuid::Uuid::new_v4()));
         let cancelled = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&cancelled);
-        tokio::spawn(async move {
+        let ready_for_cancel = ready.clone();
+        let cancel_task = tokio::spawn(async move {
+            // Do not let cancellation win before spawn: this test must reach
+            // an actually full stdin pipe, not merely exercise the early guard.
+            for _ in 0..400 {
+                if ready_for_cancel.exists() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             flag.store(true, Ordering::Release);
         });
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(3),
             TauriCodingAgentProcessAdapter.execute(
-                AgentCommand {
-                    executable: "cmd.exe".into(),
-                    argv: vec!["/C".into(), "ping -n 11 127.0.0.1 >nul".into()],
-                    env: BTreeMap::new(),
-                    cwd: None,
-                    prompt: PromptPayload::Stdin(String::new()),
-                    temporary_files: Vec::new(),
-                },
+                fixture_request(&ready, prompt_bytes, parent_exits),
                 Arc::new(IgnoreOutput),
                 CancellationToken::from_flag(cancelled),
             ),
         )
-        .await
-        .expect("cancelled Windows process tree must exit promptly")
-        .unwrap();
+        .await;
+        cancel_task.await.unwrap();
+        let pids = std::fs::read_to_string(&ready).expect("child must actually start");
+        let _ = std::fs::remove_file(&ready);
+        let mut running = Vec::new();
+        for pid in pids.split_whitespace() {
+            if process_is_running(pid).await {
+                running.push(pid.to_owned());
+                // Cleanup also runs on a red test, so no fixture process leaks
+                // into subsequent tests when the assertion below fails.
+                cleanup_fixture_process(pid).await;
+            }
+        }
+        let result = result
+            .expect("cancelled Windows process tree must exit promptly")
+            .unwrap();
         assert!(!result.success);
+        assert!(
+            running.is_empty(),
+            "cancelled process tree is still running: {running:?}"
+        );
+    }
+
+    #[test]
+    fn blocked_stdin_child() {
+        use std::os::windows::process::CommandExt;
+        let Ok(ready) = std::env::var("OPENLESS_AGENT_TEST_READY") else {
+            return;
+        };
+        let mut command = std::process::Command::new("ping.exe");
+        command
+            .args(["-n", "31", "127.0.0.1"])
+            .stdin(Stdio::null())
+            .creation_flags(0x08000000);
+        if std::env::var("OPENLESS_AGENT_TEST_BACKGROUND").as_deref() == Ok("true") {
+            use std::os::windows::io::AsRawHandle;
+            use windows::Win32::Foundation::{
+                SetHandleInformation, HANDLE, HANDLE_FLAGS, HANDLE_FLAG_INHERIT,
+            };
+            // Windows can inherit ambient handles even with redirected stdio.
+            // Explicitly detach these pipe handles too, so this fixture models
+            // a worker that genuinely no longer owns the execution's output.
+            for handle in [
+                std::io::stdout().as_raw_handle(),
+                std::io::stderr().as_raw_handle(),
+            ] {
+                unsafe {
+                    SetHandleInformation(HANDLE(handle), HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0))
+                }
+                .unwrap();
+            }
+            command.stdout(Stdio::null()).stderr(Stdio::null());
+        }
+        let mut grandchild = command.spawn().unwrap();
+        std::fs::write(ready, format!("{} {}", std::process::id(), grandchild.id())).unwrap();
+        if std::env::var("OPENLESS_AGENT_TEST_PARENT_EXIT").as_deref() == Ok("true") {
+            return;
+        }
+        // Neither this process nor the grandchild reads the supplied 1 MiB.
+        // Inherited stdout/stderr keep the pipes open until the whole tree dies.
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        let _ = grandchild.kill();
+        let _ = grandchild.wait();
     }
 }

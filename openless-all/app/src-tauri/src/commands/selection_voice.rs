@@ -104,16 +104,21 @@ pub async fn cancel_selection_voice_intent_prompt(
     core: CoreState<'_>,
     coord: CoordinatorState<'_>,
 ) -> Result<(), String> {
-    let session_id = core
+    let Some(session_id) = core
         .services()
         .selection_voice
         .snapshot()
         .await
         .map_err(selection_voice_error)?
-        .session_id;
+        .session_id
+    else {
+        // 没有当时的 generation 就没有资源可取消；不能让一次迟到
+        // 的无目标请求在 await 之后清掉用户刚开启的新会话。
+        return Ok(());
+    };
     core.services()
         .selection_voice
-        .cancel(session_id)
+        .cancel(Some(session_id))
         .await
         .map_err(selection_voice_error)?;
     coord.finish_cancelled_selection_voice_host(session_id);

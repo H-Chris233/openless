@@ -122,7 +122,8 @@ pub(crate) struct TauriQaRuntimeAdapter {
 
 struct TauriQaRuntimeSession {
     context: Mutex<Option<Arc<DictationContext>>>,
-    voice_capture: Mutex<Option<openless_core::QaVoiceCaptureSession>>,
+    // Keep the cancellation handle reachable while finish awaits the provider.
+    voice_capture: Mutex<Option<Arc<openless_core::QaVoiceCaptureSession>>>,
     audio_wav: Mutex<Option<Vec<u8>>>,
     selection_text: Option<String>,
     selection_target: Mutex<Option<crate::selection::SelectionInsertionTarget>>,
@@ -225,15 +226,8 @@ impl TauriQaRuntimeAdapter {
         session_id: SessionId,
     ) -> Result<Arc<TauriQaRuntimeSession>, BackendError> {
         let capture = self.host_context.capture_turn(&self.app);
-        let context = self
-            .backend()?
-            .capture_host_dictation_context(DictationStartOptions {
-                front_app: capture.front_app.clone(),
-                ..DictationStartOptions::default()
-            })
-            .await?;
         let session = Arc::new(TauriQaRuntimeSession {
-            context: Mutex::new(Some(context)),
+            context: Mutex::new(None),
             voice_capture: Mutex::new(None),
             audio_wav: Mutex::new(None),
             selection_text: capture.selection_text,
@@ -244,8 +238,44 @@ impl TauriQaRuntimeAdapter {
             voice_turn: false,
             cancelled: Arc::new(AtomicBool::new(false)),
         });
+        // Publish the owner before context capture can yield. Cancellation
+        // must be able to revoke this turn even before any resource is ready.
         Self::insert_session(&self.sessions, session_id, Arc::clone(&session))?;
+        self.prepare_context(session_id, &session).await?;
         Ok(session)
+    }
+
+    async fn prepare_context(
+        &self,
+        session_id: SessionId,
+        session: &Arc<TauriQaRuntimeSession>,
+    ) -> Result<(), BackendError> {
+        let result = async {
+            let context = self
+                .backend()?
+                .capture_host_dictation_context(DictationStartOptions {
+                    front_app: session.front_app.clone(),
+                    ..DictationStartOptions::default()
+                })
+                .await?;
+            // Checking identity and installing under the same registry lock
+            // prevents a late await from resurrecting a removed/replaced turn.
+            let sessions = self.sessions.lock();
+            if session.cancelled.load(Ordering::Acquire)
+                || !sessions
+                    .get(&session_id)
+                    .is_some_and(|current| Arc::ptr_eq(current, session))
+            {
+                return Err(Self::cancelled_error());
+            }
+            *session.context.lock() = Some(context);
+            Ok(())
+        }
+        .await;
+        if result.is_err() {
+            let _ = self.cancel(session_id).await;
+        }
+        result
     }
 
     fn cancelled_error() -> BackendError {
@@ -285,15 +315,8 @@ impl QaRuntimeAdapter for TauriQaRuntimeAdapter {
             // Do not call `capture_turn`: opening QA has already changed focus,
             // while Selection Voice still owns the original opaque insertion
             // target in the coordinator's host state.
-            let context = adapter
-                .backend()?
-                .capture_host_dictation_context(DictationStartOptions {
-                    front_app: capture.source_app.clone(),
-                    ..DictationStartOptions::default()
-                })
-                .await?;
             let session = Arc::new(TauriQaRuntimeSession {
-                context: Mutex::new(Some(context)),
+                context: Mutex::new(None),
                 voice_capture: Mutex::new(None),
                 audio_wav: Mutex::new(None),
                 selection_text: Some(capture.text.clone()),
@@ -304,7 +327,8 @@ impl QaRuntimeAdapter for TauriQaRuntimeAdapter {
                 voice_turn: false,
                 cancelled: Arc::new(AtomicBool::new(false)),
             });
-            Self::insert_session(&adapter.sessions, session_id, session)?;
+            Self::insert_session(&adapter.sessions, session_id, Arc::clone(&session))?;
+            adapter.prepare_context(session_id, &session).await?;
             Ok(QaInput {
                 text: instruction,
                 selection_text: Some(capture.text),
@@ -368,20 +392,33 @@ impl QaRuntimeAdapter for TauriQaRuntimeAdapter {
                     return Err(error);
                 }
             };
-            *session.context.lock() = Some(voice_capture.context());
-            *session.voice_capture.lock() = Some(voice_capture);
+            let voice_capture = Arc::new(voice_capture);
+            let installed = {
+                let sessions = adapter.sessions.lock();
+                if session.cancelled.load(Ordering::Acquire)
+                    || !sessions
+                        .get(&session_id)
+                        .is_some_and(|current| Arc::ptr_eq(current, &session))
+                {
+                    false
+                } else {
+                    *session.context.lock() = Some(voice_capture.context());
+                    *session.voice_capture.lock() = Some(Arc::clone(&voice_capture));
+                    true
+                }
+            };
+            if !installed {
+                // Cancel can win while cpal/provider startup is awaiting. The
+                // returned capture was never installed, so this path owns it.
+                let _ = voice_capture.cancel().await;
+                return Err(Self::cancelled_error());
+            }
             // Core may have queued an immediate device fault while cpal was
             // starting. Arm only after the capture is reachable by cancel or
             // finish, otherwise the terminal action could race this install.
-            if let Some(capture) = session.voice_capture.lock().as_ref() {
-                capture.arm_recording_progress();
-            }
+            voice_capture.arm_recording_progress();
             if session.cancelled.load(Ordering::Acquire) {
-                let voice_capture = session.voice_capture.lock().take();
-                if let Some(voice_capture) = voice_capture {
-                    let _ = voice_capture.cancel().await;
-                }
-                Self::remove_if_current(&adapter.sessions, session_id, &session);
+                let _ = voice_capture.cancel().await;
                 return Err(Self::cancelled_error());
             }
             Ok(())
@@ -393,6 +430,7 @@ impl QaRuntimeAdapter for TauriQaRuntimeAdapter {
         session_id: SessionId,
     ) -> BoxFuture<'static, Result<QaInput, BackendError>> {
         let session = self.sessions.lock().get(&session_id).cloned();
+        let sessions = Arc::clone(&self.sessions);
         Box::pin(async move {
             let session = session.ok_or_else(|| {
                 BackendError::new(
@@ -400,11 +438,18 @@ impl QaRuntimeAdapter for TauriQaRuntimeAdapter {
                     "QA runtime session is no longer active",
                 )
             })?;
-            let voice_capture = session.voice_capture.lock().take().ok_or_else(|| {
+            // Retain an Arc in the registry until complete/cancel; finishing
+            // the microphone is not the end of the provider request's lease.
+            let voice_capture = session.voice_capture.lock().clone().ok_or_else(|| {
                 BackendError::new(BackendErrorCode::InvalidState, "QA recording is not ready")
             })?;
             let result = voice_capture.finish().await?;
-            if session.cancelled.load(Ordering::Acquire) {
+            let sessions = sessions.lock();
+            if session.cancelled.load(Ordering::Acquire)
+                || !sessions
+                    .get(&session_id)
+                    .is_some_and(|current| Arc::ptr_eq(current, &session))
+            {
                 return Err(Self::cancelled_error());
             }
             session
@@ -428,6 +473,7 @@ impl QaRuntimeAdapter for TauriQaRuntimeAdapter {
     ) -> BoxFuture<'static, Result<QaTurnResult, BackendError>> {
         let session = self.sessions.lock().get(&request.session_id).cloned();
         let credentials = Arc::clone(&self.credentials);
+        let sessions = Arc::clone(&self.sessions);
         Box::pin(async move {
             let session = session.ok_or_else(|| {
                 BackendError::new(
@@ -450,6 +496,14 @@ impl QaRuntimeAdapter for TauriQaRuntimeAdapter {
                 Arc::clone(&session.cancelled),
             )
             .await?;
+            let sessions = sessions.lock();
+            if session.cancelled.load(Ordering::Acquire)
+                || !sessions
+                    .get(&request.session_id)
+                    .is_some_and(|current| Arc::ptr_eq(current, &session))
+            {
+                return Err(Self::cancelled_error());
+            }
             Ok(QaTurnResult { answer })
         })
     }
@@ -512,12 +566,23 @@ impl QaRuntimeAdapter for TauriQaRuntimeAdapter {
     }
 
     fn cancel(&self, session_id: SessionId) -> BoxFuture<'static, Result<(), BackendError>> {
-        let session = self.sessions.lock().remove(&session_id);
+        let session = {
+            let mut sessions = self.sessions.lock();
+            let session = sessions.remove(&session_id);
+            if let Some(session) = &session {
+                session.cancelled.store(true, Ordering::Release);
+            }
+            session
+        };
         Box::pin(async move {
             let Some(session) = session else {
                 return Ok(());
             };
-            session.cancelled.store(true, Ordering::Release);
+            // Clear host-only data as soon as cancellation wins, even when a
+            // prepare/finish future still retains this session Arc.
+            session.context.lock().take();
+            session.audio_wav.lock().take();
+            session.selection_target.lock().take();
             let voice_capture = session.voice_capture.lock().take();
             match voice_capture {
                 Some(voice_capture) => voice_capture.cancel().await,
@@ -542,6 +607,87 @@ impl Clone for TauriQaRuntimeAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cancellation_during_selection_context_capture_cannot_reinstall_the_turn() {
+        struct PendingContext {
+            entered: Arc<tokio::sync::Semaphore>,
+            gate: Arc<tokio::sync::Semaphore>,
+        }
+        impl openless_core::HostContextAdapter for PendingContext {
+            fn capture(
+                &self,
+                _include_cursor: bool,
+            ) -> BoxFuture<'static, Result<openless_core::HostContextCapture, BackendError>>
+            {
+                let entered = self.entered.clone();
+                let gate = self.gate.clone();
+                Box::pin(async move {
+                    entered.add_permits(1);
+                    gate.acquire().await.unwrap().forget();
+                    Ok(openless_core::HostContextCapture::default())
+                })
+            }
+        }
+        let pending = Arc::new(PendingContext {
+            entered: Arc::new(tokio::sync::Semaphore::new(0)),
+            gate: Arc::new(tokio::sync::Semaphore::new(0)),
+        });
+        let data_dir =
+            std::env::temp_dir().join(format!("openless-tauri-qa-prepare-{}", SessionId::new()));
+        let mut dependencies = openless_core::BackendDependencies::unsupported();
+        dependencies.services.host_context = pending.clone();
+        let backend = Arc::new(
+            openless_core::OpenLessBackend::new(
+                openless_core::BackendConfig {
+                    data_dir: data_dir.clone(),
+                    ..Default::default()
+                },
+                dependencies,
+            )
+            .unwrap(),
+        );
+        let mut preferences = backend.get_preferences();
+        preferences.cursor_context_enabled = true;
+        backend
+            .update_settings(
+                preferences,
+                openless_core::SettingsUpdateOptions::STRICT,
+                &openless_core::NoopSettingsRuntime,
+            )
+            .unwrap();
+        let adapter = TauriQaRuntimeAdapter::new(
+            Arc::new(Mutex::new(None)),
+            Arc::new(Mutex::new(Some(Arc::downgrade(&backend)))),
+            Arc::new(openless_core::UnsupportedCredentialStore),
+            Arc::new(TauriQaHostContext::default()),
+        );
+        let session_id = SessionId::new();
+        let preparing = tokio::spawn(adapter.prepare_selection_edit(
+            session_id,
+            SessionId::new(),
+            SelectionCapture {
+                text: "original selection".into(),
+                source_app: Some("Editor".into()),
+            },
+            "shorten".into(),
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(5), pending.entered.acquire())
+            .await
+            .expect("host context capture must begin")
+            .unwrap()
+            .forget();
+        assert!(adapter.sessions.lock().contains_key(&session_id));
+        adapter.cancel(session_id).await.unwrap();
+        pending.gate.add_permits(1);
+        assert_eq!(
+            preparing.await.unwrap().unwrap_err().code,
+            BackendErrorCode::Cancelled
+        );
+        assert!(adapter.sessions.lock().is_empty());
+        drop(backend);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
 
     fn runtime_session() -> Arc<TauriQaRuntimeSession> {
         Arc::new(TauriQaRuntimeSession {

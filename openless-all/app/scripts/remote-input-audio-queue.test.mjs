@@ -6,6 +6,10 @@ const source = await readFile(
   new URL('../src-tauri/src/remote_server/assets/app.js', import.meta.url),
   'utf8',
 );
+const html = await readFile(
+  new URL('../src-tauri/src/remote_server/assets/index.html', import.meta.url),
+  'utf8',
+);
 
 function fakeElement() {
   const classes = new Set();
@@ -29,7 +33,7 @@ function fakeElement() {
   };
 }
 
-async function openRemotePage() {
+async function openRemotePage({ defaultMode, savedMode } = {}) {
   const elements = new Map();
   const documentListeners = {};
   const sent = [];
@@ -105,7 +109,10 @@ async function openRemotePage() {
     console,
     document,
     isNaN,
-    localStorage: storage([['ol_remote_pin', '123456']]),
+    localStorage: storage([
+      ['ol_remote_pin', '123456'],
+      ...(savedMode === undefined ? [] : [['ol_remote_mode', savedMode]]),
+    ]),
     location: { host: 'localhost:8443', origin: 'https://localhost:8443', reload() {} },
     navigator: {
       language: 'zh-CN',
@@ -118,7 +125,12 @@ async function openRemotePage() {
     setTimeout,
   };
   context.window = context;
-  context.window.__OL_LANG__ = 'zh-CN';
+  // Exercise the embedded HTML script too, so a missing template variable cannot
+  // be hidden by setting window properties directly in the test harness.
+  const injectedScript = html.match(/<script>([\s\S]*?)<\/script>/)[1]
+    .replaceAll('%%OL_LANG%%', 'zh-CN')
+    .replaceAll('%%OL_DEFAULT_MODE%%', defaultMode ?? '');
+  runInNewContext(injectedScript, context, { filename: 'remote-server/assets/index.html' });
   runInNewContext(source, context, { filename: 'remote-server/assets/app.js' });
 
   socket.onopen();
@@ -130,6 +142,7 @@ async function openRemotePage() {
     element,
     sent,
     socket,
+    storage: context.localStorage,
     async start() {
       element('btn-record').listeners.click();
       for (let i = 0; i < 8; i += 1) await Promise.resolve();
@@ -137,6 +150,36 @@ async function openRemotePage() {
     },
     pcm(bytes) { worklet.port.onmessage({ data: Uint8Array.from(bytes).buffer }); },
   };
+}
+
+// Exercise the displayed page, not a copied mode resolver: a new phone follows
+// the PC setting, while a mode explicitly saved on that phone takes priority.
+for (const [defaultMode, savedMode, expected] of [
+  ['hold', undefined, 'hold'],
+  ['toggle', undefined, 'toggle'],
+  ['hold', 'toggle', 'toggle'],
+  ['toggle', 'hold', 'hold'],
+  ['hold', 'invalid', 'hold'],
+  ['invalid', undefined, 'toggle'],
+  [undefined, undefined, 'toggle'],
+]) {
+  const page = await openRemotePage({ defaultMode, savedMode });
+  assert.equal(
+    page.element('btn-record').style.touchAction,
+    expected === 'hold' ? 'none' : 'manipulation',
+    `PC default ${defaultMode}, phone choice ${savedMode} must use ${expected}`,
+  );
+  assert.equal(page.storage.getItem('ol_remote_mode'), savedMode ?? null,
+    'inheriting a PC default must not create a phone override');
+}
+
+{
+  const page = await openRemotePage({ defaultMode: 'hold' });
+  page.element('mode-switch').listeners.click({
+    target: { closest: () => ({ getAttribute: () => 'toggle' }) },
+  });
+  assert.equal(page.storage.getItem('ol_remote_mode'), 'toggle');
+  assert.equal(page.element('btn-record').style.touchAction, 'manipulation');
 }
 
 const binaryFrames = (sent) => sent.filter((value) => value instanceof ArrayBuffer);

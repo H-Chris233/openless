@@ -432,7 +432,10 @@
   function readMode() {
     var m = null;
     try { m = localStorage.getItem(MODE_KEY); } catch (e) {}
-    return m === 'hold' ? 'hold' : 'toggle';
+    // 手机明确保存的两种模式优先；首次访问、旧值损坏或存储被禁用时，
+    // 跟随 PC 当前默认值。不要把继承值写回存储，否则之后 PC 改设置就失效了。
+    if (m === 'hold' || m === 'toggle') return m;
+    return window.__OL_DEFAULT_MODE__ === 'hold' ? 'hold' : 'toggle';
   }
   function writeMode(m) {
     mode = m;
@@ -455,7 +458,7 @@
     }
   }
 
-  // 切换模式时若约定的 prefer 变化,告知 PC(若已连接)
+  // 手机手动切换后保存为本机偏好，后续访问继续优先于 PC 默认值。
   modeSwitch.addEventListener('click', function (e) {
     var t = e.target.closest('.mode-btn');
     if (!t) return;

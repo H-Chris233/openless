@@ -24,6 +24,10 @@ struct FixtureQaRuntime {
     fail_prepare: AtomicBool,
     fail_finish: AtomicBool,
     fail_answer: AtomicBool,
+    block_prepare: AtomicBool,
+    prepare_started: Arc<tokio::sync::Semaphore>,
+    prepare_gate: Arc<tokio::sync::Semaphore>,
+    live_contexts: Arc<Mutex<std::collections::HashSet<SessionId>>>,
     block_answer: AtomicBool,
     answer_entered: Arc<AtomicBool>,
     answer_started: Arc<tokio::sync::Notify>,
@@ -47,6 +51,10 @@ impl Default for FixtureQaRuntime {
             fail_prepare: AtomicBool::new(false),
             fail_finish: AtomicBool::new(false),
             fail_answer: AtomicBool::new(false),
+            block_prepare: AtomicBool::new(false),
+            prepare_started: Arc::new(tokio::sync::Semaphore::new(0)),
+            prepare_gate: Arc::new(tokio::sync::Semaphore::new(0)),
+            live_contexts: Arc::new(Mutex::new(std::collections::HashSet::new())),
             block_answer: AtomicBool::new(false),
             answer_entered: Arc::new(AtomicBool::new(false)),
             answer_started: Arc::new(tokio::sync::Notify::new()),
@@ -81,7 +89,16 @@ impl QaRuntimeAdapter for FixtureQaRuntime {
         self.prepared_sessions.lock().unwrap().push(session_id);
         let fail = self.fail_prepare.load(Ordering::Acquire);
         let selection_text = self.selection.lock().unwrap().clone();
+        let block = self.block_prepare.load(Ordering::Acquire);
+        let started = self.prepare_started.clone();
+        let gate = self.prepare_gate.clone();
+        let contexts = self.live_contexts.clone();
         Box::pin(async move {
+            if block {
+                started.add_permits(1);
+                gate.acquire().await.unwrap().forget();
+                contexts.lock().unwrap().insert(session_id);
+            }
             if fail {
                 return Err(BackendError::new(
                     BackendErrorCode::Platform,
@@ -215,8 +232,9 @@ impl QaRuntimeAdapter for FixtureQaRuntime {
         Ok(())
     }
 
-    fn cancel(&self, _session_id: SessionId) -> BoxFuture<'static, Result<(), BackendError>> {
+    fn cancel(&self, session_id: SessionId) -> BoxFuture<'static, Result<(), BackendError>> {
         self.cancel_count.fetch_add(1, Ordering::AcqRel);
+        self.live_contexts.lock().unwrap().remove(&session_id);
         Box::pin(async { Ok(()) })
     }
 }
@@ -296,6 +314,63 @@ fn backend_with_selection_voice(
     )
     .unwrap();
     (Arc::new(backend), data_dir)
+}
+
+#[tokio::test]
+async fn qa_cancel_during_prepare_releases_late_context_without_answering() {
+    let runtime = Arc::new(FixtureQaRuntime::responding("must not answer"));
+    runtime.block_prepare.store(true, Ordering::Release);
+    let (backend, data_dir) = backend(runtime.clone());
+    let qa = backend.services().qa.clone();
+    let submit = tokio::spawn(qa.submit_text("cancel this question".into()));
+    runtime.prepare_started.acquire().await.unwrap().forget();
+    let session_id = qa.snapshot().await.unwrap().session_id.unwrap();
+    qa.cancel(Some(session_id)).await.unwrap();
+    runtime.prepare_gate.add_permits(1);
+    assert_eq!(
+        submit.await.unwrap().unwrap_err().code,
+        BackendErrorCode::Cancelled
+    );
+    assert!(
+        runtime.live_contexts.lock().unwrap().is_empty(),
+        "late context must be released"
+    );
+    assert!(runtime.requests.lock().unwrap().is_empty());
+    assert_eq!(qa.snapshot().await.unwrap().phase, QaPhase::Cancelled);
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
+async fn qa_deferred_stop_cannot_start_or_stop_another_recording_generation() {
+    let runtime = Arc::new(FixtureQaRuntime::responding("answer"));
+    *runtime.recorded_text.lock().unwrap() = "question".to_string();
+    let (backend, data_dir) = backend(runtime.clone());
+    let qa = &backend.services().qa;
+    qa.toggle_recording().await.unwrap();
+    let first = qa.snapshot().await.unwrap().session_id.unwrap();
+    qa.stop_recording(first).await.unwrap();
+    assert_eq!(qa.snapshot().await.unwrap().phase, QaPhase::Completed);
+    assert_eq!(
+        qa.stop_recording(first).await.unwrap_err().code,
+        BackendErrorCode::Cancelled
+    );
+    qa.toggle_recording().await.unwrap();
+    let second = qa.snapshot().await.unwrap().session_id.unwrap();
+    assert_ne!(first, second);
+    assert_eq!(
+        qa.stop_recording(first).await.unwrap_err().code,
+        BackendErrorCode::Cancelled
+    );
+    assert_eq!(qa.snapshot().await.unwrap().phase, QaPhase::Recording);
+    assert_eq!(qa.snapshot().await.unwrap().session_id, Some(second));
+    assert_eq!(runtime.requests.lock().unwrap().len(), 1);
+    // Follow-ups keep the conversation owner but must stop using their own
+    // per-turn token; testing only the first turn would hide this distinction.
+    assert_eq!(qa.snapshot().await.unwrap().conversation_id, Some(first));
+    qa.stop_recording(second).await.unwrap();
+    assert_eq!(qa.snapshot().await.unwrap().phase, QaPhase::Completed);
+    assert_eq!(runtime.requests.lock().unwrap().len(), 2);
+    let _ = std::fs::remove_dir_all(data_dir);
 }
 
 #[tokio::test]

@@ -370,7 +370,7 @@ impl DictationEngine for PipelineDictationEngine {
                     } else {
                         None
                     };
-                    let _ = transcription.cancel().await;
+                    let _ = cancel_transcription_once(&session, Arc::clone(&transcription)).await;
                     match retry_pcm {
                         Some(pcm) => match retry_transcription(
                             transcription_engine,
@@ -685,21 +685,54 @@ async fn retry_transcription(
             .await
         {
             Ok(transcription) => transcription,
+            Err(_) if session.cancelled.load(Ordering::Acquire) => {
+                return Err((
+                    cancelled_error("dictation was cancelled while retry ASR was starting"),
+                    last_label,
+                ));
+            }
             Err(error) if error.retryable && attempt < 2 => continue,
             Err(error) => return Err((error, last_label)),
         };
         last_label = transcription.asr_call_label();
-        session
-            .transcription_cancelled
-            .store(false, Ordering::Release);
-        session
-            .transcription_finished
-            .store(false, Ordering::Release);
-        session
-            .resources
-            .lock()
-            .expect("pipeline resource lock poisoned")
-            .transcription = Some(Arc::clone(&transcription));
+        let registered = {
+            let mut resources = session
+                .resources
+                .lock()
+                .expect("pipeline resource lock poisoned");
+            // Cancellation may have removed the pipeline while the provider
+            // was creating this retry. Publish the new resource and reset its
+            // once-only flags under the same lock used by cancel(), so that
+            // cancel either owns this retry or the late-start path cleans it.
+            if session.cancelled.load(Ordering::Acquire) {
+                false
+            } else {
+                session
+                    .transcription_cancelled
+                    .store(false, Ordering::Release);
+                session
+                    .transcription_finished
+                    .store(false, Ordering::Release);
+                resources.transcription = Some(Arc::clone(&transcription));
+                true
+            }
+        };
+        if !registered {
+            // The global once flag belongs to the previous attempt. This
+            // unregistered resource must be cancelled directly, never fed.
+            let _ = transcription.cancel().await;
+            return Err((
+                cancelled_error("dictation was cancelled while retry ASR was starting"),
+                last_label,
+            ));
+        }
+        if session.cancelled.load(Ordering::Acquire) {
+            let _ = cancel_transcription_once(&session, transcription).await;
+            return Err((
+                cancelled_error("dictation was cancelled before retry audio replay"),
+                last_label,
+            ));
+        }
         transcription.consume_pcm_chunk(&pcm);
         let transcription_result = transcription.finish().await;
         for notification in transcription.take_progress_notifications() {
@@ -720,7 +753,7 @@ async fn retry_transcription(
                 return Ok((output, last_label));
             }
             Err(error) => {
-                let _ = transcription.cancel().await;
+                let _ = cancel_transcription_once(&session, transcription).await;
                 if !error.retryable || attempt == 2 {
                     return Err((error, last_label));
                 }
@@ -1715,5 +1748,79 @@ mod tests {
         let failure = finishing.await.unwrap().unwrap_err();
         assert_eq!(failure.error.code, BackendErrorCode::Cancelled);
         assert_eq!(starts.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn cancellation_while_retry_asr_starts_cancels_the_late_resource_without_feeding_it() {
+        struct DelayedRetryStart {
+            entered: Arc<tokio::sync::Notify>,
+            release: Arc<tokio::sync::Notify>,
+            session: Arc<FixtureTranscriptionSession>,
+        }
+        impl TranscriptionEngine for DelayedRetryStart {
+            fn start(
+                &self,
+                _: SessionId,
+                _: Arc<DictationContext>,
+                _: Arc<dyn TextStreamSink>,
+            ) -> BoxFuture<'static, Result<Arc<dyn TranscriptionSession>, BackendError>>
+            {
+                let entered = self.entered.clone();
+                let release = self.release.clone();
+                let session = self.session.clone();
+                Box::pin(async move {
+                    entered.notify_one();
+                    release.notified().await;
+                    Ok(session as Arc<dyn TranscriptionSession>)
+                })
+            }
+        }
+        let (mut engine, progress, _) = retry_test_engine(
+            vec![Err(BackendError::new(
+                BackendErrorCode::Provider,
+                "temporary",
+            )
+            .retryable(true))],
+            true,
+        );
+        let session_id = SessionId::new();
+        engine
+            .start(session_id, raw_dictation_context(), progress.clone())
+            .await
+            .unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let late = Arc::new(FixtureTranscriptionSession {
+            pcm: Arc::new(Mutex::new(Vec::new())),
+            cancels: Arc::new(AtomicUsize::new(0)),
+            finish_entered: None,
+            finish_release: None,
+        });
+        // The first session is already registered; only the retry start blocks.
+        engine.transcription = Arc::new(DelayedRetryStart {
+            entered: entered.clone(),
+            release: release.clone(),
+            session: late.clone(),
+        });
+        let engine = Arc::new(engine);
+        let finishing = tokio::spawn({
+            let engine = engine.clone();
+            async move { engine.finish(session_id, progress).await }
+        });
+        entered.notified().await;
+        engine.cancel(session_id).await.unwrap();
+        release.notify_one();
+        let failure = finishing.await.unwrap().unwrap_err();
+        assert_eq!(failure.error.code, BackendErrorCode::Cancelled);
+        assert_eq!(
+            late.cancels.load(Ordering::Acquire),
+            1,
+            "late ASR resource needs its own cleanup"
+        );
+        assert!(
+            late.pcm.lock().unwrap().is_empty(),
+            "cancelled speech must not be replayed to a new ASR"
+        );
+        assert!(engine.sessions.lock().unwrap().is_empty());
     }
 }

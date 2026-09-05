@@ -202,6 +202,9 @@ impl QaService {
     async fn finish_recording(&self, session_id: SessionId) -> Result<(), BackendError> {
         {
             let mut state = self.state.lock().expect("QA state lock poisoned");
+            // Validate the callback's generation and claim the finish under
+            // one lock. A delayed silence event cannot toggle a completed turn
+            // back on, stop its successor, or compete with a manual stop.
             ensure_current_phase(&state.snapshot, session_id, QaPhase::Recording)?;
             state.snapshot.phase = QaPhase::Thinking;
         }
@@ -304,6 +307,17 @@ impl QaService {
         session_id: SessionId,
         mut input: QaInput,
     ) -> Result<(), BackendError> {
+        // A platform context/capture may finish preparing after cancellation.
+        // Reject the stale generation and explicitly sweep the runtime again;
+        // adapters make release idempotent, including a late resource install.
+        let current = {
+            let state = self.state.lock().expect("QA state lock poisoned");
+            ensure_current_phase(&state.snapshot, session_id, QaPhase::Thinking)
+        };
+        if let Err(error) = current {
+            self.cancel_runtime_best_effort(session_id).await;
+            return Err(error);
+        }
         input.text = input.text.trim().to_string();
         if input.text.is_empty() {
             if let Err(error) = self.runtime.complete(session_id).await {
@@ -668,6 +682,14 @@ impl QaApi for QaService {
             service.voice_sessions.release(session_id);
             service.runtime.cancel(session_id).await
         })
+    }
+
+    fn stop_recording(
+        &self,
+        session_id: SessionId,
+    ) -> BoxFuture<'static, Result<(), BackendError>> {
+        let service = self.clone();
+        Box::pin(async move { service.finish_recording(session_id).await })
     }
 
     fn submit_text(&self, text: String) -> BoxFuture<'static, Result<(), BackendError>> {

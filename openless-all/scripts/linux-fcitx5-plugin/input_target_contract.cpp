@@ -50,9 +50,25 @@ int main() {
         assert(first.committed.empty());
         first.surroundingText().setCursor(3, 3);
         assert(!plugin.applySelectionTarget("selection", "foo", "replacement"));
-        first.surroundingText().setCursor(3, 0);
-        assert(plugin.applySelectionTarget("selection", "foo", "replacement"));
+        // Changing unselected context or invalidating the native snapshot must
+        // also invalidate Apply, even while PRIMARY still contains "foo".
+        first.surroundingText().setText("foo bar", 3, 0);
+        assert(!plugin.applySelectionTarget("selection", "foo", "replacement"));
+        first.surroundingText().invalidate();
+        assert(!plugin.applySelectionTarget("selection", "foo", "replacement"));
+        first.surroundingText().setText("foo foo", 3, 0);
+        // The QA -> preview handoff moves the captured values, never the live
+        // SurroundingText object. The old ticket must become unusable.
+        assert(plugin.rekeySelectionTarget("selection", "preview"));
+        assert(!plugin.applySelectionTarget("selection", "foo", "replacement"));
+        assert(plugin.applySelectionTarget("preview", "foo", "replacement"));
         assert(first.committed == std::vector<std::string>{"replacement"});
+        // A client reports its new surrounding text after commit. Undo still
+        // uses the captured offsets after the ticket has been transferred.
+        first.surroundingText().setText("replacement foo", 11, 11);
+        assert(plugin.revertSelectionTarget("preview"));
+        assert(first.committed.back() == "foo");
+        assert(!plugin.revertSelectionTarget("preview"));
 
         RecordingInputContext second(instance.inputContextManager());
         fcitx::OpenLessInputTargetContract::type(plugin, first);

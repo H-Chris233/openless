@@ -125,7 +125,7 @@ pub struct VoiceTranscriptionSession {
     transcription: Arc<dyn TranscriptionSession>,
     recording: Mutex<Option<Box<dyn crate::ports::ActiveRecording>>>,
     partials: Arc<VoiceTranscriptSink>,
-    closed: std::sync::atomic::AtomicBool,
+    lifecycle: Arc<VoiceCaptureLifecycle>,
 }
 
 pub struct QaVoiceCaptureSession {
@@ -134,7 +134,89 @@ pub struct QaVoiceCaptureSession {
     transcription: Option<Arc<dyn TranscriptionSession>>,
     pcm: Option<Arc<CapturedPcm>>,
     recording_progress: Arc<QaRecordingProgress>,
-    closed: std::sync::atomic::AtomicBool,
+    lifecycle: Arc<VoiceCaptureLifecycle>,
+}
+
+#[derive(Default, PartialEq, Eq)]
+enum VoiceCapturePhase {
+    #[default]
+    Recording,
+    Finishing,
+    Completed,
+    Cancelled,
+}
+
+/// Stopping the microphone begins provider finalization; it does not close
+/// the cancellation window. Both voice entry points retain this shared state
+/// until the provider result is committed or cancellation wins.
+#[derive(Default)]
+struct VoiceCaptureLifecycle(Mutex<VoiceCapturePhase>);
+
+impl VoiceCaptureLifecycle {
+    fn begin_finish(&self) -> Result<(), BackendError> {
+        let mut phase = self
+            .0
+            .lock()
+            .expect("voice capture lifecycle lock poisoned");
+        match *phase {
+            VoiceCapturePhase::Recording => {
+                *phase = VoiceCapturePhase::Finishing;
+                Ok(())
+            }
+            VoiceCapturePhase::Cancelled => Err(Self::cancelled_error()),
+            _ => Err(BackendError::new(
+                BackendErrorCode::InvalidState,
+                "voice capture is already finishing or completed",
+            )),
+        }
+    }
+
+    fn is_cancelled(&self) -> bool {
+        *self
+            .0
+            .lock()
+            .expect("voice capture lifecycle lock poisoned")
+            == VoiceCapturePhase::Cancelled
+    }
+
+    /// The winner alone owns provider cancellation. Recorder ownership is
+    /// independently transferred with take(), so concurrent finish/cancel can
+    /// never stop the native recorder or discard its archive twice.
+    fn claim_cancel(&self) -> bool {
+        let mut phase = self
+            .0
+            .lock()
+            .expect("voice capture lifecycle lock poisoned");
+        if matches!(
+            *phase,
+            VoiceCapturePhase::Completed | VoiceCapturePhase::Cancelled
+        ) {
+            return false;
+        }
+        *phase = VoiceCapturePhase::Cancelled;
+        true
+    }
+
+    fn settle<T>(&self, result: Result<T, BackendError>) -> (Result<T, BackendError>, bool) {
+        let mut phase = self
+            .0
+            .lock()
+            .expect("voice capture lifecycle lock poisoned");
+        if *phase == VoiceCapturePhase::Cancelled {
+            return (Err(Self::cancelled_error()), false);
+        }
+        let cancel_provider = result.is_err();
+        *phase = if cancel_provider {
+            VoiceCapturePhase::Cancelled
+        } else {
+            VoiceCapturePhase::Completed
+        };
+        (result, cancel_provider)
+    }
+
+    fn cancelled_error() -> BackendError {
+        BackendError::new(BackendErrorCode::Cancelled, "voice capture was cancelled")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -319,7 +401,7 @@ impl QaRecordingProgress {
         let qa = Arc::clone(&self.qa);
         self.task_spawner.spawn(Box::pin(async move {
             let result = match terminal {
-                QaRecordingTerminal::Stop => qa.toggle_recording().await,
+                QaRecordingTerminal::Stop => qa.stop_recording(session_id).await,
                 QaRecordingTerminal::Cancel => qa.cancel(Some(session_id)).await,
                 QaRecordingTerminal::Fault(error) => qa.recording_fault(session_id, error).await,
             };
@@ -700,14 +782,9 @@ impl VoiceTranscriptionSession {
         self.session_id
     }
 
-    pub fn finish(self) -> futures_util::future::BoxFuture<'static, Result<String, BackendError>> {
-        if self.closed.swap(true, std::sync::atomic::Ordering::AcqRel) {
-            return Box::pin(async {
-                Err(BackendError::new(
-                    BackendErrorCode::InvalidState,
-                    "voice transcription session is already closed",
-                ))
-            });
+    pub fn finish(&self) -> futures_util::future::BoxFuture<'static, Result<String, BackendError>> {
+        if let Err(error) = self.lifecycle.begin_finish() {
+            return Box::pin(async move { Err(error) });
         }
         let recording = self
             .recording
@@ -716,27 +793,37 @@ impl VoiceTranscriptionSession {
             .take();
         let transcription = Arc::clone(&self.transcription);
         let partials = Arc::clone(&self.partials);
+        let lifecycle = Arc::clone(&self.lifecycle);
         Box::pin(async move {
-            if let Some(recording) = recording {
-                if let Err(error) = recording.stop().await {
-                    let _ = transcription.cancel().await;
-                    return Err(error);
+            let result = async {
+                if let Some(recording) = recording {
+                    stop_and_discard_recording(recording).await?;
                 }
+                if lifecycle.is_cancelled() {
+                    return Err(VoiceCaptureLifecycle::cancelled_error());
+                }
+                let transcript = transcription.finish().await?.text.trim().to_string();
+                if transcript.is_empty() {
+                    return Err(BackendError::new(
+                        BackendErrorCode::Provider,
+                        "transcription provider returned an empty transcript",
+                    ));
+                }
+                Ok(transcript)
             }
-            let transcript = transcription.finish().await?.text.trim().to_string();
-            if transcript.is_empty() {
-                return Err(BackendError::new(
-                    BackendErrorCode::Provider,
-                    "transcription provider returned an empty transcript",
-                ));
+            .await;
+            let (result, cancel_provider) = lifecycle.settle(result);
+            if cancel_provider {
+                let _ = transcription.cancel().await;
             }
+            let transcript = result?;
             partials.publish_final(transcript.clone())?;
             Ok(transcript)
         })
     }
 
     pub fn cancel(&self) -> futures_util::future::BoxFuture<'static, Result<(), BackendError>> {
-        if self.closed.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        if !self.lifecycle.claim_cancel() {
             return Box::pin(async { Ok(()) });
         }
         let recording = self
@@ -746,11 +833,17 @@ impl VoiceTranscriptionSession {
             .take();
         let transcription = Arc::clone(&self.transcription);
         Box::pin(async move {
-            let recording_result = match recording {
-                Some(recording) => recording.stop().await,
-                None => Ok(()),
-            };
-            recording_result.and(transcription.cancel().await)
+            let (recording_result, transcription_result) = futures_util::future::join(
+                async move {
+                    match recording {
+                        Some(recording) => stop_and_discard_recording(recording).await,
+                        None => Ok(()),
+                    }
+                },
+                transcription.cancel(),
+            )
+            .await;
+            recording_result.and(transcription_result)
         })
     }
 }
@@ -768,63 +861,67 @@ impl QaVoiceCaptureSession {
     }
 
     pub fn finish(
-        self,
+        &self,
     ) -> futures_util::future::BoxFuture<'static, Result<QaVoiceCaptureResult, BackendError>> {
-        if self.closed.swap(true, std::sync::atomic::Ordering::AcqRel) {
-            return Box::pin(async {
-                Err(BackendError::new(
-                    BackendErrorCode::InvalidState,
-                    "QA voice capture session is already closed",
-                ))
-            });
+        if let Err(error) = self.lifecycle.begin_finish() {
+            return Box::pin(async move { Err(error) });
         }
         let recording = self
             .recording
             .lock()
             .expect("QA voice recording lock poisoned")
             .take();
-        let transcription = self.transcription;
-        let pcm = self.pcm;
+        let transcription = self.transcription.clone();
+        let pcm = self.pcm.clone();
+        let lifecycle = Arc::clone(&self.lifecycle);
         Box::pin(async move {
-            if let Some(recording) = recording {
-                if let Err(error) = stop_and_discard_recording(recording).await {
-                    if let Some(transcription) = transcription {
-                        let _ = transcription.cancel().await;
+            let result = async {
+                if let Some(recording) = recording {
+                    stop_and_discard_recording(recording).await?;
+                }
+                if lifecycle.is_cancelled() {
+                    return Err(VoiceCaptureLifecycle::cancelled_error());
+                }
+                match (&transcription, pcm) {
+                    (Some(transcription), None) => {
+                        let output = transcription.finish().await?;
+                        let transcript = output.text.trim().to_string();
+                        if transcript.is_empty() {
+                            return Err(BackendError::new(
+                                BackendErrorCode::Provider,
+                                "transcription provider returned an empty transcript",
+                            ));
+                        }
+                        Ok(QaVoiceCaptureResult {
+                            transcript: Some(transcript),
+                            audio_wav: None,
+                            duration_ms: output.duration_ms,
+                        })
                     }
-                    return Err(error);
+                    (None, Some(pcm)) => Ok(QaVoiceCaptureResult {
+                        transcript: None,
+                        audio_wav: Some(crate::audio::encode_dictation_wav(&pcm.snapshot())?),
+                        duration_ms: pcm.duration_ms(),
+                    }),
+                    _ => Err(BackendError::new(
+                        BackendErrorCode::Internal,
+                        "QA voice capture has an invalid pipeline shape",
+                    )),
                 }
             }
-            match (transcription, pcm) {
-                (Some(transcription), None) => {
-                    let output = transcription.finish().await?;
-                    let transcript = output.text.trim().to_string();
-                    if transcript.is_empty() {
-                        return Err(BackendError::new(
-                            BackendErrorCode::Provider,
-                            "transcription provider returned an empty transcript",
-                        ));
-                    }
-                    Ok(QaVoiceCaptureResult {
-                        transcript: Some(transcript),
-                        audio_wav: None,
-                        duration_ms: output.duration_ms,
-                    })
+            .await;
+            let (result, cancel_provider) = lifecycle.settle(result);
+            if cancel_provider {
+                if let Some(transcription) = transcription {
+                    let _ = transcription.cancel().await;
                 }
-                (None, Some(pcm)) => Ok(QaVoiceCaptureResult {
-                    transcript: None,
-                    audio_wav: Some(crate::audio::encode_dictation_wav(&pcm.snapshot())?),
-                    duration_ms: pcm.duration_ms(),
-                }),
-                _ => Err(BackendError::new(
-                    BackendErrorCode::Internal,
-                    "QA voice capture has an invalid pipeline shape",
-                )),
             }
+            result
         })
     }
 
     pub fn cancel(&self) -> futures_util::future::BoxFuture<'static, Result<(), BackendError>> {
-        if self.closed.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        if !self.lifecycle.claim_cancel() {
             return Box::pin(async { Ok(()) });
         }
         let recording = self
@@ -834,14 +931,21 @@ impl QaVoiceCaptureSession {
             .take();
         let transcription = self.transcription.clone();
         Box::pin(async move {
-            let recording_result = match recording {
-                Some(recording) => stop_and_discard_recording(recording).await,
-                None => Ok(()),
-            };
-            let transcription_result = match transcription {
-                Some(transcription) => transcription.cancel().await,
-                None => Ok(()),
-            };
+            let (recording_result, transcription_result) = futures_util::future::join(
+                async move {
+                    match recording {
+                        Some(recording) => stop_and_discard_recording(recording).await,
+                        None => Ok(()),
+                    }
+                },
+                async move {
+                    match transcription {
+                        Some(transcription) => transcription.cancel().await,
+                        None => Ok(()),
+                    }
+                },
+            )
+            .await;
             recording_result.and(transcription_result)
         })
     }
@@ -2027,7 +2131,7 @@ impl OpenLessBackend {
             transcription: capture.transcription,
             recording: Mutex::new(Some(capture.recording)),
             partials,
-            closed: std::sync::atomic::AtomicBool::new(false),
+            lifecycle: Arc::new(VoiceCaptureLifecycle::default()),
         })
     }
 
@@ -2068,7 +2172,7 @@ impl OpenLessBackend {
                 transcription: None,
                 pcm: Some(capture.pcm),
                 recording_progress,
-                closed: std::sync::atomic::AtomicBool::new(false),
+                lifecycle: Arc::new(VoiceCaptureLifecycle::default()),
             })
         } else {
             let capture = self
@@ -2087,7 +2191,7 @@ impl OpenLessBackend {
                 transcription: Some(capture.transcription),
                 pcm: None,
                 recording_progress,
-                closed: std::sync::atomic::AtomicBool::new(false),
+                lifecycle: Arc::new(VoiceCaptureLifecycle::default()),
             })
         }
     }
@@ -4671,14 +4775,28 @@ impl OpenLessBackend {
     ) -> Result<DictationContext, BackendError> {
         let preferences = self.get_preferences();
         let mut captured_options = options.clone();
-        if preferences.cursor_context_enabled
-            && (captured_options.front_app.is_none() || captured_options.cursor_context.is_none())
+        if !preferences.cursor_context_enabled {
+            // This switch controls document text, including text supplied by
+            // callers. Front-application metadata is still needed for history,
+            // application-aware polish, and macOS Auto newline selection.
+            captured_options.cursor_context = None;
+        }
+        if captured_options.front_app.is_none()
+            || (preferences.cursor_context_enabled && captured_options.cursor_context.is_none())
         {
-            match self.deps.services.host_context.capture(true).await {
+            match self
+                .deps
+                .services
+                .host_context
+                .capture(preferences.cursor_context_enabled)
+                .await
+            {
                 Ok(capture) => {
                     captured_options.front_app = captured_options.front_app.or(capture.front_app);
-                    captured_options.cursor_context =
-                        captured_options.cursor_context.or(capture.cursor_context);
+                    if preferences.cursor_context_enabled {
+                        captured_options.cursor_context =
+                            captured_options.cursor_context.or(capture.cursor_context);
+                    }
                 }
                 Err(error) => log::warn!("host context capture failed: {error}"),
             }
@@ -4875,7 +4993,10 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct FakeHostContext(std::sync::atomic::AtomicUsize);
+    struct FakeHostContext(
+        std::sync::atomic::AtomicUsize,
+        std::sync::atomic::AtomicUsize,
+    );
 
     impl HostContextAdapter for FakeHostContext {
         fn capture(
@@ -4883,9 +5004,12 @@ mod tests {
             include_cursor: bool,
         ) -> BoxFuture<'static, Result<HostContextCapture, BackendError>> {
             self.0.fetch_add(1, Ordering::AcqRel);
+            if include_cursor {
+                self.1.fetch_add(1, Ordering::AcqRel);
+            }
             boxed(async move {
                 Ok(HostContextCapture {
-                    front_app: Some("Editor (com.example.Editor)".into()),
+                    front_app: Some("Terminal (com.apple.Terminal)".into()),
                     cursor_context: include_cursor.then(|| "before <OPENLESS_CURSOR> after".into()),
                 })
             })
@@ -5635,6 +5759,113 @@ mod tests {
         assert_eq!(recorder.stop_count(), 2);
     }
 
+    #[tokio::test]
+    async fn qa_and_selection_voice_capture_can_cancel_during_transcription_finish() {
+        struct PendingTranscription {
+            entered: Arc<tokio::sync::Semaphore>,
+            gate: Arc<tokio::sync::Semaphore>,
+            cancellations: std::sync::atomic::AtomicUsize,
+        }
+        impl crate::ports::AudioConsumer for PendingTranscription {
+            fn consume_pcm_chunk(&self, _pcm: &[u8]) {}
+        }
+        impl TranscriptionSession for PendingTranscription {
+            fn finish(&self) -> BoxFuture<'static, Result<crate::TranscriptOutput, BackendError>> {
+                let entered = self.entered.clone();
+                let gate = self.gate.clone();
+                Box::pin(async move {
+                    entered.add_permits(1);
+                    gate.acquire().await.unwrap().forget();
+                    // Model a provider which still returns a buffered result
+                    // after abort. Core must suppress this late success.
+                    Ok(crate::TranscriptOutput {
+                        text: "late question".into(),
+                        duration_ms: 10,
+                    })
+                })
+            }
+            fn cancel(&self) -> BoxFuture<'static, Result<(), BackendError>> {
+                self.cancellations.fetch_add(1, Ordering::AcqRel);
+                self.gate.add_permits(1);
+                Box::pin(async { Ok(()) })
+            }
+        }
+        let transcription = Arc::new(PendingTranscription {
+            entered: Arc::new(tokio::sync::Semaphore::new(0)),
+            gate: Arc::new(tokio::sync::Semaphore::new(0)),
+            cancellations: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let capture = QaVoiceCaptureSession {
+            context: Arc::new(DictationContext::default()),
+            recording: Mutex::new(None),
+            transcription: Some(transcription.clone()),
+            pcm: None,
+            recording_progress: Arc::new(QaRecordingProgress {
+                session_id: SessionId::new(),
+                qa: Arc::new(FakeQaControl::default()),
+                progress: Arc::new(VoiceRecordingProgress),
+                task_spawner: Arc::new(TokioTaskSpawner),
+                started_at: std::time::Instant::now(),
+                silence: Mutex::new(None),
+                terminal: Mutex::new(QaRecordingTerminalState::default()),
+            }),
+            lifecycle: Arc::new(VoiceCaptureLifecycle::default()),
+        };
+        let finishing = tokio::spawn(capture.finish());
+        transcription.entered.acquire().await.unwrap().forget();
+        assert_eq!(
+            capture.finish().await.unwrap_err().code,
+            BackendErrorCode::InvalidState
+        );
+        capture.cancel().await.unwrap();
+        capture.cancel().await.unwrap();
+        assert_eq!(transcription.cancellations.load(Ordering::Acquire), 1);
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), finishing)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.unwrap_err().code, BackendErrorCode::Cancelled);
+
+        let data_dir = TestDataDir::new("selection-voice-finish-cancel");
+        let backend = OpenLessBackend::new(
+            BackendConfig {
+                data_dir: data_dir.path().to_path_buf(),
+                ..BackendConfig::default()
+            },
+            BackendDependencies::unsupported(),
+        )
+        .unwrap();
+        let mut events = backend.subscribe();
+        let transcription = Arc::new(PendingTranscription {
+            entered: Arc::new(tokio::sync::Semaphore::new(0)),
+            gate: Arc::new(tokio::sync::Semaphore::new(0)),
+            cancellations: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let capture = VoiceTranscriptionSession {
+            session_id: SessionId::new(),
+            transcription: transcription.clone(),
+            recording: Mutex::new(None),
+            partials: Arc::new(VoiceTranscriptSink {
+                publisher: backend.event_publisher(),
+                session_id: SessionId::new(),
+                transcript: Mutex::new(crate::types::TranscriptAccumulator::default()),
+            }),
+            lifecycle: Arc::new(VoiceCaptureLifecycle::default()),
+        };
+        let finishing = tokio::spawn(capture.finish());
+        transcription.entered.acquire().await.unwrap().forget();
+        capture.cancel().await.unwrap();
+        capture.cancel().await.unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), finishing)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.unwrap_err().code, BackendErrorCode::Cancelled);
+        assert_eq!(transcription.cancellations.load(Ordering::Acquire), 1);
+        assert!(!std::iter::from_fn(|| events.try_recv().ok())
+            .any(|event| matches!(event.kind, BackendEventKind::TranscriptDelta(_))));
+    }
+
     #[derive(Default)]
     struct FakeRecordingControl {
         requests: Mutex<Vec<(SessionId, crate::events::RecordingControlAction)>>,
@@ -5668,6 +5899,13 @@ mod tests {
         }
 
         fn toggle_recording(&self) -> BoxFuture<'static, Result<(), BackendError>> {
+            Box::pin(async { panic!("deferred recording callbacks must not toggle QA") })
+        }
+
+        fn stop_recording(
+            &self,
+            _session_id: SessionId,
+        ) -> BoxFuture<'static, Result<(), BackendError>> {
             self.stops.fetch_add(1, Ordering::AcqRel);
             Box::pin(async { Ok(()) })
         }
@@ -7019,7 +7257,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn host_context_is_queried_only_when_the_privacy_switch_is_enabled() {
+    async fn front_app_is_captured_without_reading_documents_when_cursor_context_is_disabled() {
         let data_dir = TestDataDir::new("host-context-privacy");
         let host_context = Arc::new(FakeHostContext::default());
         let mut services = crate::domains::BackendServices::unsupported();
@@ -7031,6 +7269,10 @@ mod tests {
             },
             BackendDependencies {
                 services,
+                host_actions: Arc::new(FakeHost::default()),
+                text_inserter: Arc::new(FakeInserter),
+                dictation_engine: Arc::new(FakeEngine),
+                credential_store: Arc::new(crate::InMemoryCredentialStore::default()),
                 ..BackendDependencies::unsupported()
             },
         )
@@ -7040,8 +7282,17 @@ mod tests {
             .capture_host_dictation_context(DictationStartOptions::default())
             .await
             .unwrap();
-        assert_eq!(host_context.0.load(Ordering::Acquire), 0);
+        assert_eq!(host_context.0.load(Ordering::Acquire), 1);
+        assert_eq!(host_context.1.load(Ordering::Acquire), 0);
         assert!(context.polish.cursor_context.is_none());
+        assert_eq!(
+            context.polish.front_app.as_deref(),
+            Some("Terminal (com.apple.Terminal)")
+        );
+        assert_eq!(
+            context.insertion.macos_newline_mode,
+            crate::shared_types::MacosNewlineMode::LineFeed
+        );
 
         let mut preferences = backend.get_preferences();
         preferences.cursor_context_enabled = true;
@@ -7050,12 +7301,46 @@ mod tests {
             .capture_host_dictation_context(DictationStartOptions::default())
             .await
             .unwrap();
-        assert_eq!(host_context.0.load(Ordering::Acquire), 1);
+        assert_eq!(host_context.0.load(Ordering::Acquire), 2);
+        assert_eq!(host_context.1.load(Ordering::Acquire), 1);
         assert_eq!(
             context.polish.front_app.as_deref(),
-            Some("Editor (com.example.Editor)")
+            Some("Terminal (com.apple.Terminal)")
         );
         assert!(context.polish.cursor_context.is_some());
+
+        let mut preferences = backend.get_preferences();
+        preferences.cursor_context_enabled = false;
+        backend.set_preferences(preferences).unwrap();
+        let context = backend
+            .capture_host_dictation_context(DictationStartOptions {
+                cursor_context: Some("must not survive a disabled privacy switch".into()),
+                ..DictationStartOptions::default()
+            })
+            .await
+            .unwrap();
+        assert!(context.polish.cursor_context.is_none());
+        backend.start().await.unwrap();
+        backend.start_dictation().await.unwrap();
+        backend.stop_dictation().await.unwrap();
+        let history = backend.history.list().unwrap();
+        assert_eq!(
+            history[0].app_bundle_id.as_deref(),
+            cfg!(target_os = "macos").then_some("com.apple.Terminal")
+        );
+        assert_eq!(
+            history[0].app_name.as_deref(),
+            Some(if cfg!(target_os = "macos") {
+                "Terminal"
+            } else {
+                "Terminal (com.apple.Terminal)"
+            })
+        );
+        assert_eq!(
+            host_context.1.load(Ordering::Acquire),
+            1,
+            "only the explicitly enabled capture may read a document"
+        );
     }
 
     #[tokio::test]
@@ -8499,13 +8784,15 @@ mod tests {
         impl HostContextAdapter for SlowContext {
             fn capture(
                 &self,
-                _: bool,
+                include_cursor: bool,
             ) -> BoxFuture<'static, Result<HostContextCapture, BackendError>> {
                 let entered = self.entered.clone();
                 let release = self.release.clone();
                 boxed(async move {
-                    entered.notify_one();
-                    release.notified().await;
+                    if include_cursor {
+                        entered.notify_one();
+                        release.notified().await;
+                    }
                     Ok(HostContextCapture::default())
                 })
             }

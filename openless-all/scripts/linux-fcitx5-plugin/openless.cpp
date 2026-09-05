@@ -356,7 +356,9 @@ public:
         if (source.empty()) {
             return std::string();
         }
-        selectionTargets_[ticket] = {selectionIc_, source, std::string(), surrounding};
+        selectionTargets_[ticket] = {
+            selectionIc_, source, std::string(), surrounding.text(),
+            surrounding.cursor(), surrounding.anchor(), surrounding.isValid()};
         return source;
     }
 
@@ -392,16 +394,16 @@ public:
         }
         auto *ic = found->second.inputContext;
         const auto &surrounding = ic->surroundingText();
-        const auto &captured = found->second.surrounding;
+        const auto &captured = found->second;
         // PRIMARY can outlive the selection, and the same selected string may
         // occur at several offsets. Only the original IC's complete surrounding
         // snapshot proves that this exact range is still the intended target.
         // Without surrounding-text support, preview/read remains possible but
         // destructive replacement must fail safely.
-        if (!captured.isValid() || !surrounding.isValid() ||
-            captured.text() != surrounding.text() ||
-            captured.cursor() != surrounding.cursor() ||
-            captured.anchor() != surrounding.anchor() ||
+        if (!captured.surroundingValid || !surrounding.isValid() ||
+            captured.surroundingText != surrounding.text() ||
+            captured.cursor != surrounding.cursor() ||
+            captured.anchor != surrounding.anchor() ||
             surrounding.selectedText() != source) {
             return false;
         }
@@ -431,8 +433,8 @@ public:
             surrounding.cursor() < replacementChars) {
             return false;
         }
-        const auto &captured = found->second.surrounding;
-        if (surrounding.cursor() != std::min(captured.cursor(), captured.anchor()) + replacementChars ||
+        const auto &captured = found->second;
+        if (surrounding.cursor() != std::min(captured.cursor, captured.anchor) + replacementChars ||
             surrounding.anchor() != surrounding.cursor()) {
             return false;
         }
@@ -780,7 +782,16 @@ private:
         InputContext *inputContext;
         std::string source;
         std::string replacement;
-        SurroundingText surrounding;
+        // Keep an owned value snapshot, not the live fcitx object: Ubuntu 22.04's
+        // Fcitx 5.0.14 SurroundingText is neither copyable nor movable. Plain
+        // values also keep the captured range unchanged as the client updates
+        // its live context or Core transfers this ticket from QA to a preview.
+        std::string surroundingText;
+        // Fcitx cursor/anchor offsets count Unicode characters, not UTF-8 bytes;
+        // preserve those units for both stale-range checks and undo placement.
+        unsigned int cursor;
+        unsigned int anchor;
+        bool surroundingValid;
     };
 
     static constexpr const char *configFile() {

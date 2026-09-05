@@ -349,8 +349,8 @@ fn build_router(state: Arc<WsState>) -> Router {
         .with_state(state)
 }
 
-/// 首页：按 PC 端当前界面语言把 `__OL_LANG__` 占位替换成实际 locale，
-/// H5 据此（window.__OL_LANG__ / <html lang>）选择显示语言。
+/// 首页按 PC 当前偏好注入语言和录音默认模式，每次刷新即读取最新值。
+/// H5 保留手机本地明确保存的模式，仅首次访问或无效本地值使用 PC 默认值。
 async fn index_handler(State(state): State<Arc<WsState>>) -> impl IntoResponse {
     let lang = state
         .backend
@@ -359,7 +359,17 @@ async fn index_handler(State(state): State<Arc<WsState>>) -> impl IntoResponse {
         .status()
         .map(|status| status.locale)
         .unwrap_or_else(|_| "zh-CN".to_string());
-    Html(assets::INDEX_HTML.replace("%%OL_LANG%%", &lang))
+    // 偏好来自持久化数据，禁止将任意字符串拼进内联 script；只注入固定字面量。
+    let default_mode = if state.backend.get_preferences().remote_input_default_mode == "hold" {
+        "hold"
+    } else {
+        "toggle"
+    };
+    Html(
+        assets::INDEX_HTML
+            .replace("%%OL_LANG%%", &lang)
+            .replace("%%OL_DEFAULT_MODE%%", default_mode),
+    )
 }
 
 /// 极简标准 base64：构造 .mobileconfig 时把证书 DER 编码进 XML，避免引入额外依赖。

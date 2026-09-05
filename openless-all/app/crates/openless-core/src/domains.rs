@@ -905,6 +905,14 @@ pub trait QaApi: Send + Sync {
     fn show(&self) -> BoxFuture<'static, Result<(), BackendError>>;
     fn snapshot(&self) -> BoxFuture<'static, Result<QaSnapshot, BackendError>>;
     fn toggle_recording(&self) -> BoxFuture<'static, Result<(), BackendError>>;
+    /// Stop only this recording generation. Deferred device/silence callbacks
+    /// must never use the UI toggle: it could start or stop a newer turn.
+    fn stop_recording(
+        &self,
+        _session_id: SessionId,
+    ) -> BoxFuture<'static, Result<(), BackendError>> {
+        unsupported("QA recording stop")
+    }
     fn recording_fault(
         &self,
         _session_id: SessionId,

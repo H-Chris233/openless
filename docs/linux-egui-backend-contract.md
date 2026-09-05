@@ -114,7 +114,7 @@ let current: BackendSnapshot = backend.snapshot();
 | `ModelStore` | Core 统一 catalog、HF tree 分页、文件过滤、Range/断点下载、SHA-256、staging/ready sentinel、归档解压与 1.x 模型目录迁移 |
 | `SelectionApi` | snapshot、begin polish、confirm、cancel、revert |
 | `SelectionVoiceApi` | begin/mark processing、Core-owned transcript 处理、intent confirm、edit delivery、QA preview create/revise、preview apply ticket/finish、cancel/revert |
-| `QaApi` | snapshot、toggle recording、submit text、edit-instruction mode、session cancel、dismiss |
+| `QaApi` | snapshot、toggle recording、按每轮token stop_recording、submit text、edit-instruction mode、session cancel、dismiss |
 | `LessComputerApi` | submit、cancel、dismiss、begin turn、approval decision；Core 统一 provider/model/permission/workdir/prompt/guard/continuation |
 | `RemoteInputApi` | 同步 status、configure、显式读取/重新生成 pairing PIN、locale、local IPs、connect/disconnect、start/feed/stop/cancel stream |
 | `MarketplaceApi` | list/detail/install/download/upload/like/delete、my lists、GitHub device flow、logout |
@@ -589,6 +589,8 @@ Host 不得再保存 cooldown、began-session 或重复的 mode policy。
 
 - `LinuxCredentialStore`：secret value 只写 Linux Secret Service/keyring；
   `credential-metadata.json` 仅保存 channel、active provider 与已配置 key 标识，并原子替换；
+  删除按namespace+channel清理全部secret，失败保留可重试元数据；读操作不暴露尚未提交索引的孤立secret。
+  只有Host提供`BackendConfig.home_dir`时才尝试导入旧`com.openless.app` vault/分片与该目录下的旧JSON；Core解析旧格式，Host执行幂等写入，新配置优先，全部成功才写标记，保留旧来源。None配置不隐式访问系统旧凭据或真实HOME。
 - `LinuxResourceLayout` / `LinuxResourceResolver`：分别定义 development、AppImage、deb、rpm
   的资源根与 fcitx5 插件相对路径；
 - fcitx5 Adapter：availability、DBus commit、selection read、hotkey sync、clipboard fallback；

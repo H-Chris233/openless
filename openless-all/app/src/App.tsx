@@ -37,9 +37,9 @@ const Onboarding = lazy(() =>
 const QaPanel = lazy(() => import('./pages/QaPanel').then(m => ({ default: m.QaPanel })));
 const SelectionPolishPreview = lazy(() => import('./pages/SelectionPolishPreview').then(m => ({ default: m.SelectionPolishPreview })));
 const SelectionVoiceIntentPicker = lazy(() => import('./pages/SelectionVoiceIntentPicker').then(m => ({ default: m.SelectionVoiceIntentPicker })));
-// Less Computer 仅 macOS 开放（后端只在 macOS 注册热键/创建窗口）。Tauri 构建时
-// TAURI_ENV_PLATFORM 是编译期字面量：非 macOS 平台下面两个三元的 import() 分支
-// 被常量折叠 + DCE 整个裁掉，面板 chunk 不进打包产物（门控 = 不打包）。
+// Tauri 的 Less Computer 面板同时面向 macOS 和 Windows；Linux 由原生 egui 提供。
+// TAURI_ENV_PLATFORM 是编译期字面量，不支持该 WebView 的平台可裁掉对应 import，
+// 避免把不能显示的面板 chunk 带入移动端构建。
 // 纯浏览器 vite 环境（预览/调样式）没有该变量 → 保持可加载。
 const TAURI_BUILD_PLATFORM: string | undefined = import.meta.env.TAURI_ENV_PLATFORM;
 const LESS_COMPUTER_BUNDLED = !TAURI_BUILD_PLATFORM

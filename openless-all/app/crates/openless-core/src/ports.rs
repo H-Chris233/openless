@@ -36,6 +36,9 @@ pub struct HostContextCapture {
 }
 
 pub trait HostContextAdapter: Send + Sync {
+    /// Capture foreground application metadata for attribution and input policy.
+    /// `include_cursor=false` forbids reading document/AX text, not querying the
+    /// application identity. Hosts must honor this before any document access.
     fn capture(
         &self,
         include_cursor: bool,

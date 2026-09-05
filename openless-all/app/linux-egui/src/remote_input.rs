@@ -413,7 +413,18 @@ async fn index(State(state): State<Arc<WebState>>) -> Html<String> {
         .status()
         .map(|status| status.locale)
         .unwrap_or_else(|_| "zh-CN".to_string());
-    Html(assets::INDEX_HTML.replace("%%OL_LANG%%", &locale))
+    // Read the current PC default on each page load. The page retains an explicit
+    // phone choice; only fixed literals may enter its inline script, never raw prefs.
+    let default_mode = if state.backend.get_preferences().remote_input_default_mode == "hold" {
+        "hold"
+    } else {
+        "toggle"
+    };
+    Html(
+        assets::INDEX_HTML
+            .replace("%%OL_LANG%%", &locale)
+            .replace("%%OL_DEFAULT_MODE%%", default_mode),
+    )
 }
 
 #[cfg(target_os = "linux")]

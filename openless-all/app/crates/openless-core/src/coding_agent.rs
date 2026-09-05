@@ -240,6 +240,15 @@ impl CancellationToken {
     pub fn is_cancelled(&self) -> bool {
         self.0.load(Ordering::Acquire)
     }
+
+    /// Wait on the shared flag without blocking process I/O. Hosts and Core use
+    /// the same wake-up interval because desktop hotkeys also set this flag
+    /// directly; replacing it with a separate notifier would miss those writes.
+    pub async fn cancelled(&self) {
+        while !self.is_cancelled() {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1114,6 +1123,13 @@ async fn run_process(
     let _ = events.send(CodingAgentStreamEvent::Started {
         session_id: request.session_id.clone(),
     });
+    let cancellation = CancellationToken::from_flag(Arc::clone(&cancel));
+    if cancellation.is_cancelled() {
+        let _ = events.send(CodingAgentStreamEvent::Cancelled {
+            session_id: request.session_id,
+        });
+        return Ok(());
+    }
     if let Some(cwd) = &request.cwd {
         if let Ok((exit, stdout, _)) = execute_capture(
             Arc::clone(&process),
@@ -1128,6 +1144,7 @@ async fn run_process(
                 ],
             ),
             std::time::Duration::from_secs(15),
+            cancellation.clone(),
         )
         .await
         {
@@ -1138,6 +1155,15 @@ async fn run_process(
                 );
             }
         }
+    }
+    // A best-effort Git snapshot is part of the same user operation. Esc during
+    // that probe must stop here, even when the probe returns an error or races
+    // cancellation; otherwise a cancelled request could still launch the CLI.
+    if cancellation.is_cancelled() {
+        let _ = events.send(CodingAgentStreamEvent::Cancelled {
+            session_id: request.session_id,
+        });
+        return Ok(());
     }
     let command = build_agent_command(&request)?;
     let (line_sender, mut lines) = tokio::sync::mpsc::unbounded_channel();
@@ -1654,23 +1680,41 @@ async fn execute_capture(
     process: Arc<dyn CodingAgentProcessAdapter>,
     command: AgentCommand,
     timeout: std::time::Duration,
+    request_cancel: CancellationToken,
 ) -> Result<(ProcessExit, String, String), BackendError> {
     let output = Arc::new(CapturedProcessOutput::default());
+    // The probe has its own deadline, but also observes the caller's Esc token.
+    // A timed-out best-effort snapshot must not cancel the later agent run;
+    // only explicit request cancellation propagates back to that session.
     let cancellation = CancellationToken::new();
-    let result = tokio::time::timeout(
-        timeout,
-        process.execute(command, output.clone(), cancellation.clone()),
-    )
-    .await;
+    if request_cancel.is_cancelled() {
+        return Err(BackendError::new(
+            BackendErrorCode::Cancelled,
+            "coding agent command cancelled",
+        ));
+    }
+    let execution = process.execute(command, output.clone(), cancellation.clone());
+    tokio::pin!(execution);
+    let result = tokio::select! {
+        biased;
+        _ = request_cancel.cancelled() => Err(BackendError::new(
+            BackendErrorCode::Cancelled, "coding agent command cancelled",
+        )),
+        result = &mut execution => Ok(result),
+        _ = tokio::time::sleep(timeout) => Err(BackendError::new(
+            BackendErrorCode::Provider, "coding agent command timed out",
+        ).retryable(true)),
+    };
     let exit = match result {
         Ok(result) => result?,
-        Err(_) => {
+        Err(error) => {
             cancellation.cancel();
-            return Err(BackendError::new(
-                BackendErrorCode::Provider,
-                "coding agent command timed out",
-            )
-            .retryable(true));
+            // Keep polling the existing future so the Host can kill/reap the
+            // whole process tree and close pipes. Dropping it first only runs
+            // kill_on_drop on the immediate child. Bound cleanup as the runner
+            // does, so a broken Host cannot hang detection or cancellation.
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), &mut execution).await;
+            return Err(error);
         }
     };
     let lines = output.0.lock().expect("coding agent output lock poisoned");
@@ -1713,6 +1757,7 @@ impl crate::domains::CodingAgentApi for CodingAgentService {
                 Arc::clone(&process),
                 simple_command(executable.clone(), vec!["--version".into()]),
                 std::time::Duration::from_secs(10),
+                CancellationToken::new(),
             )
             .await;
             let (installed, version) = match probe {
@@ -1728,6 +1773,7 @@ impl crate::domains::CodingAgentApi for CodingAgentService {
                     process,
                     simple_command(executable.clone(), vec!["mcp".into(), "list".into()]),
                     std::time::Duration::from_secs(15),
+                    CancellationToken::new(),
                 )
                 .await
                 {
@@ -1773,6 +1819,7 @@ impl crate::domains::CodingAgentApi for CodingAgentService {
                 process,
                 simple_command(executable, argv),
                 std::time::Duration::from_secs(45),
+                CancellationToken::new(),
             )
             .await?;
             if !exit.success {
@@ -1941,6 +1988,85 @@ mod tests {
     }
 
     struct CancelAwareProcess;
+
+    struct SnapshotCancellationProcess {
+        commands: Arc<Mutex<Vec<String>>>,
+        cleaned_up: Arc<AtomicBool>,
+    }
+
+    impl CodingAgentProcessAdapter for SnapshotCancellationProcess {
+        fn execute(
+            &self,
+            command: AgentCommand,
+            _output: Arc<dyn ProcessOutputSink>,
+            cancel: CancellationToken,
+        ) -> BoxFuture<'static, Result<ProcessExit, BackendError>> {
+            self.commands.lock().unwrap().push(command.executable);
+            let cleaned_up = Arc::clone(&self.cleaned_up);
+            Box::pin(async move {
+                while !cancel.is_cancelled() {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+                // A host still needs to kill/reap its process tree after the
+                // cancellation flag is set. Dropping the future skips this.
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                cleaned_up.store(true, Ordering::Release);
+                Ok(ProcessExit {
+                    code: None,
+                    success: false,
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn capture_timeout_waits_for_host_process_cleanup() {
+        let cleaned_up = Arc::new(AtomicBool::new(false));
+        let process = Arc::new(SnapshotCancellationProcess {
+            commands: Arc::new(Mutex::new(Vec::new())),
+            cleaned_up: Arc::clone(&cleaned_up),
+        });
+        let result = execute_capture(
+            process,
+            simple_command("git".into(), Vec::new()),
+            std::time::Duration::from_millis(20),
+            CancellationToken::new(),
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(
+            cleaned_up.load(Ordering::Acquire),
+            "timeout must let the host reap its process tree"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_snapshot_never_launches_the_agent() {
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let cleaned_up = Arc::new(AtomicBool::new(false));
+        let runner = CodingAgentRunner::new(Arc::new(SnapshotCancellationProcess {
+            commands: Arc::clone(&commands),
+            cleaned_up: Arc::clone(&cleaned_up),
+        }));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_after_start = Arc::clone(&cancel);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            cancel_after_start.store(true, Ordering::Release);
+        });
+        let mut request = CodingAgentRequest::new("snapshot-cancel", "do not run");
+        request.cwd = Some(PathBuf::from("workspace"));
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            runner.run(request, cancel),
+        )
+        .await
+        .expect("Esc must cancel the pre-run snapshot promptly")
+        .unwrap();
+        assert_eq!(result.outcome, CodingAgentRunOutcome::Cancelled);
+        assert_eq!(*commands.lock().unwrap(), vec!["git"]);
+        assert!(cleaned_up.load(Ordering::Acquire));
+    }
 
     impl CodingAgentProcessAdapter for CancelAwareProcess {
         fn execute(

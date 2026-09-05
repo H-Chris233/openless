@@ -33,7 +33,9 @@ pub struct LinuxQaRuntime {
 
 struct LinuxQaSession {
     context: Mutex<Option<Arc<DictationContext>>>,
-    voice_capture: Mutex<Option<openless_core::QaVoiceCaptureSession>>,
+    // Finish borrows this shared handle; cancel retains provider access until
+    // the entire turn completes, including an in-flight final ASR response.
+    voice_capture: Mutex<Option<Arc<openless_core::QaVoiceCaptureSession>>>,
     audio_wav: Mutex<Option<Vec<u8>>>,
     selection_text: Option<String>,
     duration_ms: AtomicU64,
@@ -142,12 +144,8 @@ impl LinuxQaRuntime {
         &self,
         session_id: SessionId,
     ) -> Result<Arc<LinuxQaSession>, BackendError> {
-        let context = self
-            .backend()?
-            .capture_host_dictation_context(DictationStartOptions::default())
-            .await?;
         let session = Arc::new(LinuxQaSession {
-            context: Mutex::new(Some(context)),
+            context: Mutex::new(None),
             voice_capture: Mutex::new(None),
             audio_wav: Mutex::new(None),
             selection_text: Self::selection_text(session_id),
@@ -155,7 +153,36 @@ impl LinuxQaRuntime {
             voice_turn: false,
             cancelled: Arc::new(AtomicBool::new(false)),
         });
+        // Register before the first await so cancel owns the selection target
+        // and can revoke preparation while host context capture is pending.
         self.insert_session(session_id, Arc::clone(&session))?;
+        let result = async {
+            let context = self
+                .backend()?
+                .capture_host_dictation_context(DictationStartOptions::default())
+                .await?;
+            let sessions = self
+                .sessions
+                .lock()
+                .expect("Linux QA session lock poisoned");
+            if session.cancelled.load(Ordering::Acquire)
+                || !sessions
+                    .get(&session_id)
+                    .is_some_and(|current| Arc::ptr_eq(current, &session))
+            {
+                return Err(Self::cancelled_error());
+            }
+            *session
+                .context
+                .lock()
+                .expect("Linux QA context lock poisoned") = Some(context);
+            Ok(())
+        }
+        .await;
+        if let Err(error) = result {
+            let _ = self.cancel(session_id).await;
+            return Err(error);
+        }
         Ok(session)
     }
 
@@ -202,33 +229,66 @@ impl QaRuntimeAdapter for LinuxQaRuntime {
                 cancelled: Arc::new(AtomicBool::new(false)),
             });
             runtime.insert_session(session_id, Arc::clone(&session))?;
-            progress.publish(session_id, QaProgress::SelectionCaptured(selection_text))?;
-            let capture = match runtime
-                .backend()?
-                .start_qa_voice_capture(
-                    session_id,
-                    DictationStartOptions::default(),
-                    Arc::new(LinuxQaRecordingProgress {
+            let capture = match async {
+                progress.publish(session_id, QaProgress::SelectionCaptured(selection_text))?;
+                runtime
+                    .backend()?
+                    .start_qa_voice_capture(
                         session_id,
-                        progress,
-                    }),
-                )
-                .await
+                        DictationStartOptions::default(),
+                        Arc::new(LinuxQaRecordingProgress {
+                            session_id,
+                            progress,
+                        }),
+                    )
+                    .await
+            }
+            .await
             {
                 Ok(capture) => capture,
                 Err(error) => {
-                    runtime.remove(session_id);
+                    let _ = runtime.cancel(session_id).await;
                     return Err(error);
                 }
             };
-            *session
-                .context
-                .lock()
-                .expect("Linux QA context lock poisoned") = Some(capture.context());
-            *session
-                .voice_capture
-                .lock()
-                .expect("Linux QA voice capture lock poisoned") = Some(capture);
+            let capture = Arc::new(capture);
+            let installed = {
+                let sessions = runtime
+                    .sessions
+                    .lock()
+                    .expect("Linux QA session lock poisoned");
+                if session.cancelled.load(Ordering::Acquire)
+                    || !sessions
+                        .get(&session_id)
+                        .is_some_and(|current| Arc::ptr_eq(current, &session))
+                {
+                    false
+                } else {
+                    *session
+                        .context
+                        .lock()
+                        .expect("Linux QA context lock poisoned") = Some(capture.context());
+                    *session
+                        .voice_capture
+                        .lock()
+                        .expect("Linux QA voice capture lock poisoned") =
+                        Some(Arc::clone(&capture));
+                    true
+                }
+            };
+            if !installed {
+                // Startup may return after cancel removed the owner. Release
+                // this late capture directly instead of reviving the turn.
+                let _ = capture.cancel().await;
+                return Err(Self::cancelled_error());
+            }
+            // Audio startup may already have queued silence or a Fatal event.
+            // Release it only now, when stop/cancel can reach the capture.
+            capture.arm_recording_progress();
+            if session.cancelled.load(Ordering::Acquire) {
+                let _ = capture.cancel().await;
+                return Err(Self::cancelled_error());
+            }
             Ok(())
         })
     }
@@ -238,16 +298,16 @@ impl QaRuntimeAdapter for LinuxQaRuntime {
         session_id: SessionId,
     ) -> BoxFuture<'static, Result<QaInput, BackendError>> {
         let session = self.session(session_id);
+        let sessions = Arc::clone(&self.sessions);
         Box::pin(async move {
             let session = session?;
-            // `take()` transfers the recorder/transcriber lease to this one
-            // finish operation. A concurrent Core cancel can remove the table
-            // entry and flip `cancelled`, but it cannot finish the lease twice.
+            // Keep the shared handle registered throughout provider finish.
+            // Core claims finish once; cancel can still abort the same ASR.
             let capture = session
                 .voice_capture
                 .lock()
                 .expect("Linux QA voice capture lock poisoned")
-                .take()
+                .clone()
                 .ok_or_else(|| {
                     BackendError::new(
                         BackendErrorCode::InvalidState,
@@ -255,7 +315,12 @@ impl QaRuntimeAdapter for LinuxQaRuntime {
                     )
                 })?;
             let result = capture.finish().await?;
-            if session.cancelled.load(Ordering::Acquire) {
+            let sessions = sessions.lock().expect("Linux QA session lock poisoned");
+            if session.cancelled.load(Ordering::Acquire)
+                || !sessions
+                    .get(&session_id)
+                    .is_some_and(|current| Arc::ptr_eq(current, &session))
+            {
                 return Err(Self::cancelled_error());
             }
             session
@@ -282,6 +347,7 @@ impl QaRuntimeAdapter for LinuxQaRuntime {
     ) -> BoxFuture<'static, Result<QaTurnResult, BackendError>> {
         let session = self.session(request.session_id);
         let credentials = Arc::clone(&self.credentials);
+        let sessions = Arc::clone(&self.sessions);
         Box::pin(async move {
             let session = session?;
             if session.cancelled.load(Ordering::Acquire) {
@@ -302,6 +368,14 @@ impl QaRuntimeAdapter for LinuxQaRuntime {
                 Arc::clone(&session.cancelled),
             )
             .await?;
+            let sessions = sessions.lock().expect("Linux QA session lock poisoned");
+            if session.cancelled.load(Ordering::Acquire)
+                || !sessions
+                    .get(&request.session_id)
+                    .is_some_and(|current| Arc::ptr_eq(current, &session))
+            {
+                return Err(Self::cancelled_error());
+            }
             Ok(QaTurnResult { answer })
         })
     }
@@ -345,15 +419,32 @@ impl QaRuntimeAdapter for LinuxQaRuntime {
     }
 
     fn cancel(&self, session_id: SessionId) -> BoxFuture<'static, Result<(), BackendError>> {
-        let session = self.remove(session_id);
+        let session = {
+            let mut sessions = self
+                .sessions
+                .lock()
+                .expect("Linux QA session lock poisoned");
+            let session = sessions.remove(&session_id);
+            if let Some(session) = &session {
+                session.cancelled.store(true, Ordering::Release);
+            }
+            session
+        };
         Box::pin(async move {
             let Some(session) = session else {
                 return Ok(());
             };
             let _ = crate::fcitx5::cancel_selection_target(&session_id.to_string());
-            // Publish cancellation before taking the capture so a finish that
-            // already owns the lease still rejects its late provider result.
-            session.cancelled.store(true, Ordering::Release);
+            session
+                .context
+                .lock()
+                .expect("Linux QA context lock poisoned")
+                .take();
+            session
+                .audio_wav
+                .lock()
+                .expect("Linux QA audio lock poisoned")
+                .take();
             let capture = session
                 .voice_capture
                 .lock()
@@ -364,5 +455,229 @@ impl QaRuntimeAdapter for LinuxQaRuntime {
                 None => Ok(()),
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openless_core::{AudioRecorder, BackendConfig, BackendDependencies, QaPhase};
+
+    struct PendingRecorder {
+        entered: Arc<tokio::sync::Semaphore>,
+        gate: Arc<tokio::sync::Semaphore>,
+        recorder: openless_core::testing::FixtureAudioRecorder,
+        fatal: bool,
+    }
+
+    impl AudioRecorder for PendingRecorder {
+        fn start(
+            &self,
+            session_id: SessionId,
+            context: Arc<DictationContext>,
+            consumer: Arc<dyn openless_core::AudioConsumer>,
+            progress: Arc<dyn RecordingProgressSink>,
+        ) -> BoxFuture<'static, Result<Box<dyn openless_core::ActiveRecording>, BackendError>>
+        {
+            let entered = self.entered.clone();
+            let gate = self.gate.clone();
+            let recorder = self.recorder.clone();
+            let fatal = self.fatal;
+            Box::pin(async move {
+                entered.add_permits(1);
+                gate.acquire().await.unwrap().forget();
+                if fatal {
+                    progress.publish(openless_core::RecordingEvent::Fatal(BackendError::new(
+                        BackendErrorCode::Platform,
+                        "fixture microphone disconnected",
+                    )))?;
+                }
+                recorder
+                    .start(session_id, context, consumer, progress)
+                    .await
+            })
+        }
+    }
+
+    fn voice_backend(
+        recorder: Arc<PendingRecorder>,
+    ) -> (
+        Arc<OpenLessBackend>,
+        Arc<LinuxQaRuntime>,
+        std::path::PathBuf,
+    ) {
+        let runtime = Arc::new(LinuxQaRuntime::new(
+            backend_slot(),
+            Arc::new(openless_core::UnsupportedCredentialStore),
+        ));
+        let data_dir =
+            std::env::temp_dir().join(format!("openless-linux-qa-lifecycle-{}", SessionId::new()));
+        let mut dependencies = BackendDependencies::unsupported();
+        dependencies.qa_runtime = Some(runtime.clone());
+        dependencies.dictation_engine = Arc::new(openless_core::PipelineDictationEngine::new(
+            recorder,
+            Arc::new(
+                openless_core::testing::FixtureTranscriptionEngine::successful("question", 100),
+            ),
+            Arc::new(openless_core::testing::FixtureTextPolisher::successful(
+                "unused",
+            )),
+        ));
+        let backend = Arc::new(
+            OpenLessBackend::new(
+                BackendConfig {
+                    data_dir: data_dir.clone(),
+                    ..Default::default()
+                },
+                dependencies,
+            )
+            .unwrap(),
+        );
+        bind_backend(&runtime.backend, &backend);
+        (backend, runtime, data_dir)
+    }
+
+    #[tokio::test]
+    async fn cancelled_startup_closes_the_late_native_capture_once() {
+        let recorder = Arc::new(PendingRecorder {
+            entered: Arc::new(tokio::sync::Semaphore::new(0)),
+            gate: Arc::new(tokio::sync::Semaphore::new(0)),
+            recorder: openless_core::testing::FixtureAudioRecorder::default(),
+            fatal: false,
+        });
+        let (backend, runtime, data_dir) = voice_backend(recorder.clone());
+        let qa = backend.services().qa.clone();
+        let starting = tokio::spawn(qa.toggle_recording());
+        recorder.entered.acquire().await.unwrap().forget();
+        let session_id = qa.snapshot().await.unwrap().session_id.unwrap();
+        qa.cancel(Some(session_id)).await.unwrap();
+        recorder.gate.add_permits(1);
+        assert_eq!(
+            starting.await.unwrap().unwrap_err().code,
+            BackendErrorCode::Cancelled
+        );
+        assert_eq!(recorder.recorder.stop_count(), 1);
+        assert!(runtime.sessions.lock().unwrap().is_empty());
+        assert_eq!(qa.snapshot().await.unwrap().phase, QaPhase::Cancelled);
+        drop(backend);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn startup_silence_and_fatal_events_are_armed_after_capture_installation() {
+        for fatal in [false, true] {
+            let recorder = Arc::new(PendingRecorder {
+                entered: Arc::new(tokio::sync::Semaphore::new(0)),
+                gate: Arc::new(tokio::sync::Semaphore::new(1)),
+                recorder: openless_core::testing::FixtureAudioRecorder::new(
+                    vec![],
+                    if fatal { vec![] } else { vec![(10_000, 0.0)] },
+                ),
+                fatal,
+            });
+            let (backend, runtime, data_dir) = voice_backend(recorder.clone());
+            let mut preferences = backend.get_preferences();
+            preferences.silence_auto_stop_enabled = true;
+            preferences.hotkey.mode = openless_core::shared_types::HotkeyMode::Toggle;
+            backend
+                .update_settings(
+                    preferences,
+                    openless_core::SettingsUpdateOptions::STRICT,
+                    &openless_core::NoopSettingsRuntime,
+                )
+                .unwrap();
+            let qa = &backend.services().qa;
+            qa.toggle_recording().await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                loop {
+                    if qa.snapshot().await.unwrap().phase != QaPhase::Recording {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("queued startup terminal must be dispatched");
+            assert_eq!(
+                qa.snapshot().await.unwrap().phase,
+                if fatal {
+                    QaPhase::Failed
+                } else {
+                    QaPhase::Cancelled
+                }
+            );
+            assert_eq!(recorder.recorder.stop_count(), 1);
+            assert!(runtime.sessions.lock().unwrap().is_empty());
+            drop(backend);
+            let _ = std::fs::remove_dir_all(data_dir);
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_text_preparation_does_not_reinstall_host_context() {
+        struct PendingContext(Arc<tokio::sync::Semaphore>, Arc<tokio::sync::Semaphore>);
+        impl openless_core::HostContextAdapter for PendingContext {
+            fn capture(
+                &self,
+                _include_cursor: bool,
+            ) -> BoxFuture<'static, Result<openless_core::HostContextCapture, BackendError>>
+            {
+                let entered = self.0.clone();
+                let gate = self.1.clone();
+                Box::pin(async move {
+                    entered.add_permits(1);
+                    gate.acquire().await.unwrap().forget();
+                    Ok(openless_core::HostContextCapture::default())
+                })
+            }
+        }
+        let entered = Arc::new(tokio::sync::Semaphore::new(0));
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let runtime = Arc::new(LinuxQaRuntime::new(
+            backend_slot(),
+            Arc::new(openless_core::UnsupportedCredentialStore),
+        ));
+        let data_dir =
+            std::env::temp_dir().join(format!("openless-linux-qa-context-{}", SessionId::new()));
+        let mut dependencies = BackendDependencies::unsupported();
+        dependencies.services.host_context =
+            Arc::new(PendingContext(entered.clone(), gate.clone()));
+        let backend = Arc::new(
+            OpenLessBackend::new(
+                BackendConfig {
+                    data_dir: data_dir.clone(),
+                    ..Default::default()
+                },
+                dependencies,
+            )
+            .unwrap(),
+        );
+        bind_backend(&runtime.backend, &backend);
+        let session_id = SessionId::new();
+        let mut preferences = backend.get_preferences();
+        preferences.cursor_context_enabled = true;
+        backend
+            .update_settings(
+                preferences,
+                openless_core::SettingsUpdateOptions::STRICT,
+                &openless_core::NoopSettingsRuntime,
+            )
+            .unwrap();
+        let preparing = tokio::spawn(runtime.prepare_text(session_id, "question".into()));
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered.acquire())
+            .await
+            .expect("host context capture must begin")
+            .unwrap()
+            .forget();
+        assert!(runtime.sessions.lock().unwrap().contains_key(&session_id));
+        runtime.cancel(session_id).await.unwrap();
+        gate.add_permits(1);
+        assert_eq!(
+            preparing.await.unwrap().unwrap_err().code,
+            BackendErrorCode::Cancelled
+        );
+        assert!(runtime.sessions.lock().unwrap().is_empty());
+        drop(backend);
+        let _ = std::fs::remove_dir_all(data_dir);
     }
 }

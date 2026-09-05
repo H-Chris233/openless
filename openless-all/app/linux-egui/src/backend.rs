@@ -669,6 +669,21 @@ impl LinuxBackendBuilder {
     /// protocol implementations or read credential accounts.
     pub fn from_shared_providers(config: BackendConfig) -> Result<Self, BackendError> {
         let store = LinuxCredentialStore::open(&config.data_dir)?;
+        // Only a host that supplies a home directory opts into reading legacy
+        // credentials. Data-only builders and integration tests leave it unset;
+        // their isolation must also hold when linked against a production lib.
+        if let Some(home_dir) = config.home_dir.as_deref() {
+            if let Err(error) = store.migrate_legacy(home_dir) {
+                // A locked/unavailable Secret Service must not disable local ASR.
+                // The migration marker remains unset, so unlocking and restarting
+                // retries the original sources. Log only the classification, never
+                // a provider/keyring message that might contain secret values.
+                log::warn!(
+                    "Legacy credential migration is incomplete ({:?}); unlock the credential vault and restart to retry. Original credentials were retained.",
+                    error.code
+                );
+            }
+        }
         let credential_store: Arc<dyn CredentialStore> = Arc::new(store.clone());
         let task_spawner: Arc<dyn openless_core::TaskSpawner> = Arc::new(TokioTaskSpawner);
 
@@ -947,6 +962,7 @@ mod tests {
         .unwrap();
 
         assert!(!runtime.backend.snapshot().running);
+        assert!(!data_dir.join("credential-metadata.json").exists());
         let _ = std::fs::remove_dir_all(data_dir);
     }
 

@@ -23,7 +23,7 @@
 | F05 | ProviderDescriptor auth requirement → validate 与真实 builder；空 key 不发 Authorization | local fake HTTP no-auth ASR/LLM tests | 自建无鉴权服务待补 |
 | F06 | ProviderDescriptor validation probe/static model policy → ProviderService | StepFun/DashScope/static-list/timeout/cancel/redirect tests | 各云厂商错误 key 待补 |
 | F07 | 共享 `SilenceAutoStop` + typed RecordingPlan/Event/Control；Host 仅 recorder effect | 六个 silence tests、QA/Selection/Less wiring、recording fault test | 三平台 mute/fault/设备切换待补 |
-| F08 | `TextInserter::begin` 固定 opaque target；Core HostContext/EditObservation generation | host-context zero-call、edit stale、target restore/source gate | Windows 切焦点、macOS AX/privacy 待补 |
+| F08 | `TextInserter::begin` 固定 opaque target；Core HostContext/EditObservation generation | cursor-off零文档读取（前台应用仍冻结）、edit stale、target restore/source gate | Windows 切焦点、macOS AX/privacy 待补 |
 | F09 | Pipeline correction → actual ASR/LLM labels/timing/history；Host 归因逻辑已删除 | corrected-polisher/history/provider attribution tests | Foundry GPU→CPU notice 待补 |
 | F10 | `HotkeyInterpreter` 持有 press generation、grace/debounce/cooldown；Host 只发 edge | Core 29、Tauri 39、Linux hotkey contract | 三平台物理三连按待补 |
 | F11 | Pipeline 从同一 archive/冻结 context 最多重试两次 | retry success/exhaust/cancel/terminal contract | 冷云 ASR 失败恢复待补 |

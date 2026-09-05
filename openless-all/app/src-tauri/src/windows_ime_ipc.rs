@@ -10,9 +10,11 @@ const IME_SUBMIT_TIMEOUT_MARGIN_MS: u64 = 1000;
 const IME_NATIVE_ASYNC_COMMIT_TIMEOUT_MS: u64 =
     IME_OWNER_THREAD_MESSAGE_TIMEOUT_MS + IME_ASYNC_EDIT_SESSION_TIMEOUT_MS;
 
-// Must exceed the IME DLL owner-thread SendMessageTimeoutW wait plus the
-// async edit session wait, otherwise Rust can fall back while the DLL later
-// commits and duplicates insertion.
+// The DLL posts to its owner thread with PostMessageW and then waits on an
+// event; async TSF edits have a second wait. A timed-out wait only requests
+// cancellation: an edit already inside COM can still commit afterwards.
+// Every post-dispatch timeout therefore remains OutcomeUnknown, never a
+// definite failure that authorizes another insertion attempt.
 pub const IME_SUBMIT_TIMEOUT: Duration =
     Duration::from_millis(IME_NATIVE_ASYNC_COMMIT_TIMEOUT_MS + IME_SUBMIT_TIMEOUT_MARGIN_MS);
 const IME_PIPE_RETRY_INTERVAL: Duration = Duration::from_millis(25);
@@ -57,6 +59,61 @@ impl WindowsImeIpcError {
 }
 
 pub type WindowsImeIpcResult<T> = Result<T, WindowsImeIpcError>;
+
+fn classify_dispatched_submit_response(
+    response: &str,
+    pending: &mut PendingImeSubmit,
+) -> WindowsImeIpcResult<ImeSubmitStatus> {
+    use crate::windows_ime_protocol::{
+        decode_message, ImePipeMessage, OPENLESS_IME_PROTOCOL_VERSION,
+    };
+    match decode_message(response.trim_end()).map_err(|error| {
+        WindowsImeIpcError::OutcomeUnknown(format!("invalid post-dispatch response: {error}"))
+    })? {
+        ImePipeMessage::SubmitResult {
+            protocol_version,
+            session_id,
+            status,
+            error_code,
+        } if protocol_version == OPENLESS_IME_PROTOCOL_VERSION => {
+            if status != ImeSubmitStatus::Committed {
+                log::warn!(
+                    "[windows-ime] submit result status={status:?} error_code={error_code:?}"
+                );
+            }
+            let status = pending
+                .accept_result(&session_id, status)
+                .map_err(|error| {
+                    WindowsImeIpcError::OutcomeUnknown(format!(
+                        "ambiguous post-dispatch result: {error}"
+                    ))
+                })?;
+            if status != ImeSubmitStatus::Committed
+                && matches!(
+                    error_code.as_deref(),
+                    Some("hresult:0x800705B4" | "hresult:0x800704C7")
+                )
+            {
+                // Keep the 1.x classification: a native timeout/cancel reply
+                // does not prove InsertTextAtSelection never committed. R01's
+                // definitive rejection fallback must not replay this text.
+                return Err(WindowsImeIpcError::OutcomeUnknown(format!(
+                    "native IME submission may still complete after {}",
+                    error_code.as_deref().unwrap_or("cancellation")
+                )));
+            }
+            Ok(status)
+        }
+        ImePipeMessage::SubmitResult {
+            protocol_version, ..
+        } => Err(WindowsImeIpcError::OutcomeUnknown(format!(
+            "unsupported IME protocol version {protocol_version}"
+        ))),
+        _ => Err(WindowsImeIpcError::OutcomeUnknown(
+            "message is not a submit result".into(),
+        )),
+    }
+}
 
 fn map_wait_named_pipe_error(error_code: Option<u32>) -> WindowsImeIpcError {
     match error_code {
@@ -255,35 +312,7 @@ mod windows_pipe {
             )
         })??;
 
-        match decode_message(response.trim_end()).map_err(|error| {
-            WindowsImeIpcError::OutcomeUnknown(format!("invalid post-dispatch response: {error}"))
-        })? {
-            ImePipeMessage::SubmitResult {
-                protocol_version,
-                session_id,
-                status,
-                error_code,
-            } if protocol_version == OPENLESS_IME_PROTOCOL_VERSION => {
-                if status != crate::windows_ime_protocol::ImeSubmitStatus::Committed {
-                    log::warn!(
-                        "[windows-ime] submit result status={status:?} error_code={error_code:?}"
-                    );
-                }
-                pending.accept_result(&session_id, status).map_err(|error| {
-                    WindowsImeIpcError::OutcomeUnknown(format!(
-                        "ambiguous post-dispatch result: {error}"
-                    ))
-                })
-            }
-            ImePipeMessage::SubmitResult {
-                protocol_version, ..
-            } => Err(WindowsImeIpcError::OutcomeUnknown(format!(
-                "unsupported IME protocol version {protocol_version}"
-            ))),
-            _ => Err(WindowsImeIpcError::OutcomeUnknown(
-                "message is not a submit result".to_string(),
-            )),
-        }
+        super::classify_dispatched_submit_response(&response, &mut pending)
     }
 
     async fn open_pipe_with_retry(
@@ -444,6 +473,48 @@ mod tests {
         assert!(WindowsImeIpcError::OutcomeUnknown("fixture".to_string()).is_outcome_unknown());
         assert!(!WindowsImeIpcError::Timeout.is_outcome_unknown());
         assert!(!WindowsImeIpcError::NoReadyClient.is_outcome_unknown());
+    }
+
+    #[test]
+    fn native_timeout_and_cancel_responses_are_not_safe_to_retry() {
+        for status in ["rejected", "failed"] {
+            for code in ["hresult:0x800705B4", "hresult:0x800704C7"] {
+                let response = serde_json::json!({
+                    "type": "submitResult", "protocolVersion": 1,
+                    "sessionId": "session-1", "status": status, "errorCode": code,
+                })
+                .to_string();
+                let mut pending = PendingImeSubmit::new("session-1".into());
+                assert!(matches!(
+                    classify_dispatched_submit_response(&response, &mut pending),
+                    Err(WindowsImeIpcError::OutcomeUnknown(_))
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn dispatched_responses_validate_ownership_before_allowing_definite_fallback() {
+        for response in [
+            "{",
+            r#"{"type":"ping","protocolVersion":1}"#,
+            r#"{"type":"submitResult","protocolVersion":2,"sessionId":"session-1","status":"committed"}"#,
+            r#"{"type":"submitResult","protocolVersion":1,"sessionId":"other","status":"committed"}"#,
+        ] {
+            let mut pending = PendingImeSubmit::new("session-1".into());
+            assert!(matches!(
+                classify_dispatched_submit_response(response, &mut pending),
+                Err(WindowsImeIpcError::OutcomeUnknown(_))
+            ));
+        }
+        let mut pending = PendingImeSubmit::new("session-1".into());
+        assert_eq!(
+            classify_dispatched_submit_response(
+                r#"{"type":"submitResult","protocolVersion":1,"sessionId":"session-1","status":"rejected","errorCode":"hresult:0x80004005"}"#,
+                &mut pending
+            ),
+            Ok(ImeSubmitStatus::Rejected)
+        );
     }
 
     #[test]

@@ -37,7 +37,9 @@ impl SelectionVoiceRecordingControl {
             openless_core::RecordingControlAction::Stop => {
                 let task_inner = Arc::clone(inner);
                 inner.host.spawn(async move {
-                    if let Err(error) = end_selection_voice_session(&task_inner).await {
+                    if let Err(error) =
+                        end_selection_voice_session(&task_inner, Some(session_id)).await
+                    {
                         log::warn!("[selection-voice] automatic stop failed: {error}");
                     }
                 });
@@ -46,7 +48,7 @@ impl SelectionVoiceRecordingControl {
                 Coordinator {
                     inner: Arc::clone(inner),
                 }
-                .finish_cancelled_selection_voice_host(Some(session_id));
+                .finish_cancelled_selection_voice_host(session_id);
             }
         }
     }
@@ -86,18 +88,21 @@ impl openless_core::RecordingControlSink for SelectionVoiceRecordingControl {
                 "selection voice host session is no longer available",
             )
         })?;
+        // 与 flush 串行化：不能在 flush 读空队列以后才把启动事件排入。
+        let mut pending = self.pending.lock();
         let ready = inner
             .selection_voice_capture
             .lock()
             .as_ref()
             .is_some_and(|capture| capture.session_id() == session_id);
         if ready {
+            drop(pending);
             Self::apply(&inner, session_id, action);
         } else {
             // cpal may report a device fault immediately after starting its
             // stream, before the returned capture reaches the Host slot.
             // Preserve that Core decision and replay it after installation.
-            self.pending.lock().push((session_id, action));
+            pending.push((session_id, action));
         }
         Ok(())
     }
@@ -198,11 +203,13 @@ fn target_for_session(
     Ok(host.insertion_target.clone())
 }
 
-fn clear_host_session(inner: &Arc<Inner>, session_id: CoreSessionId) {
+fn clear_host_session(inner: &Arc<Inner>, session_id: CoreSessionId) -> bool {
     let mut host = inner.selection_voice_host.lock();
     if host.target_session_id == Some(session_id) {
         *host = SelectionVoiceHostState::default();
+        return true;
     }
+    false
 }
 
 pub(super) fn bind_selection_voice_target_state(
@@ -235,7 +242,7 @@ pub(super) async fn handle_selection_voice_pressed(inner: &Arc<Inner>) {
     };
     let result = match action {
         SelectionVoiceHotkeyAction::Start => begin_selection_voice_session(inner).await,
-        SelectionVoiceHotkeyAction::Finish => end_selection_voice_session(inner).await,
+        SelectionVoiceHotkeyAction::Finish => end_selection_voice_session(inner, None).await,
         SelectionVoiceHotkeyAction::Noop => return,
     };
     if let Err(error) = result {
@@ -259,7 +266,7 @@ pub(super) async fn handle_selection_voice_released(inner: &Arc<Inner>) {
         }
     };
     if action == SelectionVoiceHotkeyAction::Finish {
-        if let Err(error) = end_selection_voice_session(inner).await {
+        if let Err(error) = end_selection_voice_session(inner, None).await {
             log::warn!("[selection-voice] end on hotkey release failed: {error}");
         }
     }
@@ -299,10 +306,39 @@ async fn begin_selection_voice_session(inner: &Arc<Inner>) -> Result<(), String>
         .await
     {
         Ok(capture) => {
-            *inner.selection_voice_capture.lock() = Some(capture);
+            let capture = Arc::new(capture);
+            let installed = {
+                // 启动中的取消会先撤销 target owner。检查 owner 与安装
+                // capture 共用这段锁，迟到的设备启动不能覆盖下一轮句柄。
+                let host = inner.selection_voice_host.lock();
+                if host.target_session_id == Some(session_id) {
+                    *inner.selection_voice_capture.lock() = Some(Arc::clone(&capture));
+                    true
+                } else {
+                    false
+                }
+            };
+            if !installed {
+                let _ = capture.cancel().await;
+                // 用户已取消或开始新一轮，不再把迟到的旧启动显示为错误。
+                return Ok(());
+            }
             recording_control.flush(session_id);
         }
         Err(error) => {
+            let snapshot = inner
+                .backend
+                .services()
+                .selection_voice
+                .snapshot()
+                .await
+                .map_err(core_error)?;
+            if snapshot.session_id != Some(session_id)
+                || snapshot.phase == SelectionVoicePhase::Cancelled
+            {
+                clear_host_session(inner, session_id);
+                return Ok(());
+            }
             let _ = inner
                 .backend
                 .services()
@@ -316,7 +352,10 @@ async fn begin_selection_voice_session(inner: &Arc<Inner>) -> Result<(), String>
     Ok(())
 }
 
-async fn end_selection_voice_session(inner: &Arc<Inner>) -> Result<(), String> {
+async fn end_selection_voice_session(
+    inner: &Arc<Inner>,
+    expected_session: Option<CoreSessionId>,
+) -> Result<(), String> {
     let snapshot = inner
         .backend
         .services()
@@ -330,6 +369,11 @@ async fn end_selection_voice_session(inner: &Arc<Inner>) -> Result<(), String> {
     let session_id = snapshot
         .session_id
         .ok_or_else(|| "selectionVoiceSessionUnavailable".to_string())?;
+    // 延迟静音事件携带旧 generation；Core 的 mark_processing 会在同一
+    // 状态锁内再次验证，保证检查后发生的取消/换轮也不会被越过。
+    if expected_session.is_some_and(|expected| expected != session_id) {
+        return Ok(());
+    }
     inner
         .backend
         .services()
@@ -344,9 +388,23 @@ async fn end_selection_voice_session(inner: &Arc<Inner>) -> Result<(), String> {
         let capture = inner
             .selection_voice_capture
             .lock()
-            .take()
+            .as_ref()
+            .filter(|capture| capture.session_id() == session_id)
+            .cloned()
             .ok_or_else(|| "selectionVoiceAsrUnavailable".to_string())?;
-        let transcript = capture.finish().await.map_err(core_error)?;
+        // ASR finish 期间仍保留注册表中的 Arc，让取消能中止相同 provider。
+        // finish 返回后仅移除自己的句柄，旧任务不能清掉下一轮 capture。
+        let result = capture.finish().await;
+        {
+            let mut current = inner.selection_voice_capture.lock();
+            if current
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &capture))
+            {
+                current.take();
+            }
+        }
+        let transcript = result.map_err(core_error)?;
         if transcript.trim().is_empty() {
             inner
                 .backend
@@ -383,6 +441,21 @@ async fn end_selection_voice_session(inner: &Arc<Inner>) -> Result<(), String> {
         Ok(EndWorkflowOutcome::AwaitingIntent) => Ok(()),
         Ok(EndWorkflowOutcome::Finished) => Ok(()),
         Err(error) => {
+            let snapshot = inner
+                .backend
+                .services()
+                .selection_voice
+                .snapshot()
+                .await
+                .map_err(core_error)?;
+            if snapshot.session_id != Some(session_id)
+                || snapshot.phase == SelectionVoicePhase::Cancelled
+            {
+                // 取消后的旧 provider 结果只清理自己的 owner；不再触发
+                // 错误胶囊，否则可能把下一轮正在录音的 UI 覆盖掉。
+                clear_host_session(inner, session_id);
+                return Ok(());
+            }
             let _ = inner
                 .backend
                 .services()
@@ -459,18 +532,30 @@ impl Coordinator {
         result
     }
 
-    pub(crate) fn finish_cancelled_selection_voice_host(&self, session_id: Option<CoreSessionId>) {
-        let capture = self.inner.selection_voice_capture.lock().take();
+    pub(crate) fn finish_cancelled_selection_voice_host(&self, session_id: CoreSessionId) {
+        // 先撤销 owner，阻止仍在 await 的启动任务安装资源；之后只取走
+        // 对应 generation 的录音，旧取消回调不能中止新一轮。
+        let was_current = clear_host_session(&self.inner, session_id);
+        let capture = {
+            let mut current = self.inner.selection_voice_capture.lock();
+            if current
+                .as_ref()
+                .is_some_and(|capture| capture.session_id() == session_id)
+            {
+                current.take()
+            } else {
+                None
+            }
+        };
         let spawner = self.inner.host.clone();
         spawner.spawn(async move {
             if let Some(capture) = capture {
                 let _ = capture.cancel().await;
             }
         });
-        if let Some(session_id) = session_id {
-            clear_host_session(&self.inner, session_id);
+        if was_current {
+            self.inner.host.hide_selection_voice_intent_prompt();
         }
-        self.inner.host.hide_selection_voice_intent_prompt();
     }
 
     pub(crate) fn bind_selection_voice_target(

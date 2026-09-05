@@ -1,8 +1,9 @@
 //! JNI bridge between Kotlin overlay code and the shared Rust backend.
 //!
 //! Dictation lifecycle calls use [`openless_core::OpenLessBackend`] directly.
-//! Android-only overlay, QA and style-pack actions remain compatibility calls
-//! into [`Coordinator`] until those domains move to the shared core.
+//! [`Coordinator`] adapts Android overlay/window effects and forwards QA and
+//! style-pack actions to their Core-owned services; it is not another owner of
+//! their business state. Kotlin only receives the existing JNI wire envelope.
 
 use std::sync::{Arc, OnceLock};
 

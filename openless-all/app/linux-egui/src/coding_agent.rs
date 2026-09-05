@@ -94,11 +94,7 @@ async fn augment_path(command: &mut tokio::process::Command, cancel: &Cancellati
     // the normal process-group kill path to terminate.
     let login_path = tokio::select! {
         path = login_shell_path() => path,
-        _ = async {
-            while !cancel.is_cancelled() {
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            }
-        } => return false,
+        _ = cancel.cancelled() => return false,
     };
     command.env(
         "PATH",
@@ -117,8 +113,15 @@ pub(crate) fn isolate_process_group(command: &mut tokio::process::Command) {
 pub(crate) fn kill_process_group(
     child: &mut tokio::process::Child,
 ) -> Result<(), openless_core::BackendError> {
+    kill_process_group_with_id(child, child.id())
+}
+
+fn kill_process_group_with_id(
+    child: &mut tokio::process::Child,
+    _process_id: Option<u32>,
+) -> Result<(), openless_core::BackendError> {
     #[cfg(target_os = "linux")]
-    if child.id().is_some_and(|pid| {
+    if _process_id.is_some_and(|pid| {
         // SAFETY: `isolate_process_group` starts the child as process-group leader.
         unsafe { libc::kill(-(pid as i32), libc::SIGKILL) == 0 }
     }) {
@@ -135,6 +138,12 @@ impl CodingAgentProcessAdapter for LinuxCodingAgentProcessAdapter {
         cancel: CancellationToken,
     ) -> BoxFuture<'static, Result<ProcessExit, openless_core::BackendError>> {
         Box::pin(async move {
+            if cancel.is_cancelled() {
+                return Ok(ProcessExit {
+                    code: None,
+                    success: false,
+                });
+            }
             let _workspace = materialize(&mut request)?;
             let mut command = tokio::process::Command::new(&request.executable);
             if !augment_path(&mut command, &cancel).await {
@@ -157,6 +166,14 @@ impl CodingAgentProcessAdapter for LinuxCodingAgentProcessAdapter {
             if let PromptPayload::Argv(prompt) = &request.prompt {
                 command.arg(prompt);
             }
+            // PATH discovery/materialization may have completed at the same
+            // time as Esc. Check again at the last boundary before spawn.
+            if cancel.is_cancelled() {
+                return Ok(ProcessExit {
+                    code: None,
+                    success: false,
+                });
+            }
             let mut child = command.spawn().map_err(|error| {
                 openless_core::BackendError::new(
                     if error.kind() == std::io::ErrorKind::NotFound {
@@ -167,17 +184,10 @@ impl CodingAgentProcessAdapter for LinuxCodingAgentProcessAdapter {
                     error.to_string(),
                 )
             })?;
-            if let PromptPayload::Stdin(prompt) = &request.prompt {
-                if let Some(mut stdin) = child.stdin.take() {
-                    stdin
-                        .write_all(prompt.as_bytes())
-                        .await
-                        .map_err(platform_error)?;
-                    stdin.shutdown().await.map_err(platform_error)?;
-                }
-            } else {
-                drop(child.stdin.take());
-            }
+            // Remember the group before wait() reaps the leader: a descendant
+            // can keep stdout/stderr open even after the leader has exited.
+            let process_id = child.id();
+            let stdin = child.stdin.take();
             let stdout = child
                 .stdout
                 .take()
@@ -187,7 +197,7 @@ impl CodingAgentProcessAdapter for LinuxCodingAgentProcessAdapter {
                 .take()
                 .ok_or_else(|| invalid("missing process stderr"))?;
             let stdout_sink = Arc::clone(&output);
-            let stdout_task = tokio::spawn(async move {
+            let read_stdout = async move {
                 let mut lines = BufReader::new(stdout).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
                     stdout_sink.write(ProcessOutputLine {
@@ -195,8 +205,8 @@ impl CodingAgentProcessAdapter for LinuxCodingAgentProcessAdapter {
                         line,
                     });
                 }
-            });
-            let stderr_task = tokio::spawn(async move {
+            };
+            let read_stderr = async move {
                 let mut lines = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
                     output.write(ProcessOutputLine {
@@ -204,19 +214,46 @@ impl CodingAgentProcessAdapter for LinuxCodingAgentProcessAdapter {
                         line,
                     });
                 }
-            });
-            let status = loop {
-                tokio::select! {
-                    status = child.wait() => break status.map_err(platform_error)?,
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {
-                        if cancel.is_cancelled() {
-                            kill_process_group(&mut child)?;
-                            break child.wait().await.map_err(platform_error)?;
-                        }
+            };
+            // Pipe backpressure is bidirectional: a CLI can fill stdout before
+            // consuming a large prompt. Write, drain, and wait concurrently,
+            // under the same cancellation lifetime. Scoped futures (not spawned
+            // tasks) close every pipe before process-group cleanup begins.
+            let result = {
+                let write_stdin = async move {
+                    if let (Some(mut stdin), PromptPayload::Stdin(prompt)) = (stdin, request.prompt)
+                    {
+                        stdin.write_all(prompt.as_bytes()).await?;
+                        stdin.flush().await?;
+                        stdin.shutdown().await?;
                     }
+                    Ok::<_, std::io::Error>(())
+                };
+                let drain = async move {
+                    tokio::join!(read_stdout, read_stderr);
+                    Ok::<_, std::io::Error>(())
+                };
+                let operation = async {
+                    tokio::try_join!(write_stdin, drain, child.wait()).map(|(_, _, status)| status)
+                };
+                tokio::pin!(operation);
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => None,
+                    result = &mut operation => Some(result),
                 }
             };
-            let _ = tokio::join!(stdout_task, stderr_task);
+            let status = match result {
+                Some(Ok(status)) => status,
+                result => {
+                    kill_process_group_with_id(&mut child, process_id)?;
+                    let status = child.wait().await.map_err(platform_error)?;
+                    if let Some(Err(error)) = result {
+                        return Err(platform_error(error));
+                    }
+                    status
+                }
+            };
             Ok(ProcessExit {
                 code: status.code(),
                 success: status.success() && !cancel.is_cancelled(),
@@ -253,31 +290,72 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancellation_kills_a_running_child() {
+    async fn cancellation_kills_a_running_child_with_blocked_stdin() {
+        super::login_shell_path().await;
+        let ready =
+            std::env::temp_dir().join(format!("openless-agent-ready-{}", uuid::Uuid::new_v4()));
         let cancelled = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&cancelled);
-        tokio::spawn(async move {
+        let ready_for_cancel = ready.clone();
+        let cancel_task = tokio::spawn(async move {
+            for _ in 0..400 {
+                if ready_for_cancel.exists() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             flag.store(true, Ordering::Release);
         });
         let result = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
+            std::time::Duration::from_secs(3),
             LinuxCodingAgentProcessAdapter.execute(
                 AgentCommand {
                     executable: "sh".into(),
-                    argv: vec!["-c".into(), "sleep 10".into()],
-                    env: BTreeMap::new(),
+                    argv: vec![
+                        "-c".into(),
+                        "sleep 30 & printf '%s %s' $$ $! > \"$OPENLESS_AGENT_TEST_READY\"; wait"
+                            .into(),
+                    ],
+                    env: BTreeMap::from([(
+                        "OPENLESS_AGENT_TEST_READY".into(),
+                        ready.to_string_lossy().into_owned(),
+                    )]),
                     cwd: None,
-                    prompt: PromptPayload::Stdin(String::new()),
+                    // Exceeds the pipe capacity; `sleep` never reads stdin.
+                    prompt: PromptPayload::Stdin("x".repeat(1024 * 1024)),
                     temporary_files: Vec::new(),
                 },
                 Arc::new(IgnoreOutput),
                 CancellationToken::from_flag(cancelled),
             ),
         )
-        .await
-        .expect("cancelled child must exit promptly")
-        .unwrap();
+        .await;
+        cancel_task.await.unwrap();
+        let pids = std::fs::read_to_string(&ready).expect("child must actually start");
+        let _ = std::fs::remove_file(&ready);
+        let mut running = Vec::new();
+        for pid in pids.split_whitespace() {
+            if std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .ok()
+                .and_then(|stat| {
+                    stat.rsplit_once(") ")
+                        .map(|(_, rest)| !rest.starts_with('Z'))
+                })
+                .unwrap_or(false)
+            {
+                running.push(pid.to_owned());
+                // Only fixture PIDs read from our private ready file are killed.
+                unsafe {
+                    libc::kill(pid.parse().unwrap(), libc::SIGKILL);
+                }
+            }
+        }
+        let result = result.expect("cancelled child must exit promptly").unwrap();
         assert!(!result.success);
+        assert!(
+            running.is_empty(),
+            "cancelled process group is still running: {running:?}"
+        );
     }
 }

@@ -480,7 +480,7 @@ struct Inner {
     #[cfg(all(not(mobile), target_os = "windows"))]
     selection_voice_host: Arc<Mutex<selection_voice_session::SelectionVoiceHostState>>,
     #[cfg(all(not(mobile), target_os = "windows"))]
-    selection_voice_capture: Mutex<Option<openless_core::VoiceTranscriptionSession>>,
+    selection_voice_capture: Mutex<Option<Arc<openless_core::VoiceTranscriptionSession>>>,
     /// 「本次会话真的要翻译」。每次 begin_session 重置为 false；hotkey 监听器在
     /// Listening / Starting 阶段看到 Shift down 边沿（或安卓浮层请求）时，经
     /// `arm_translation_if_effective` 判定翻译确实会生效（设了目标语言、且不等于唯一工作语言）

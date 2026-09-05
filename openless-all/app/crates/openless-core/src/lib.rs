@@ -17,6 +17,7 @@ pub mod coding_agent_guard;
 pub mod config;
 pub mod correction;
 pub mod credentials;
+pub mod credentials_legacy;
 pub mod dictation_context;
 pub mod dictation_engine;
 pub mod domains;
