@@ -1,5 +1,7 @@
 # Core / Host 平台边界审计
 
+> 2026-09-06范围更新：[当前2.0需求](./2.0-requirements.md)要求Windows/macOS完整保留各自1.x功能；Linux剩余Host/UI和产品验收移交egui团队，见[拆分交接目录](./linux-egui-handoff/README.md)。本审计保留代码边界证据，不表示Linux产品完整；Linux应用待办不单独阻塞本批桌面2.0。
+
 审计基线：OpenLess 2.0.0-Beta.1（2026-09-04 工作树）。范围覆盖 `openless-core`、Tauri、Linux egui、React/TypeScript、C++ 插件及构建脚本；vendor、生成物和纯视觉实现排除。
 
 2026-09-05 更新：下文为边界迁移索引；最新生产行为缺口、修复和证据在

@@ -1,5 +1,7 @@
 # OpenLess Linux egui 与共享后端 lib 拆分实施计划
 
+> **2026-09-06 范围更新**：当前需求以[2.0交付范围](./2.0-requirements.md)、[Windows/macOS验收](./2.0-desktop-acceptance.md)及[Linux拆分交接目录](./linux-egui-handoff/README.md)为准。Windows/macOS须完整保留各自Tauri 1.x功能；Linux本批交付可接入Core，剩余Linux Host/UI和产品验收交egui团队，不再作为本批桌面2.0完成条件。下方旧阶段记录不覆盖这一新范围。
+
 > 历史说明：本文保留 2026-08-31 至 2026-09-01 的分阶段设计与证据，正文中的“当前”、旧 HEAD、
 > 测试计数和 UI stub 状态不代表 PR #1019 最新实现。当前 2.0.0 接口以
 > `linux-egui-backend-contract.md`、代码中的 canonical fixtures 和 PR #1019 body 为准。
@@ -7,7 +9,7 @@
 > 文档状态：实施与复审记录。2026-09-05 完整复核发现此前 F01–F24 的接口/fixture 通过仍遗漏生产 Adapter、取消、输入目标与 UI 状态序列错误；问题、修复及最新验证以 [`pr1019-2.0-final-review.md`](./pr1019-2.0-final-review.md) 为准。不能继续用下面的历史收口矩阵单独证明迁移完成。
 > 更新日期：2026-09-05；真实设备、签名、安装、升级和回滚仍需单独证据，最终远端 run/head 以 PR #1019 body 和本轮复审记录为准。
 > 范围：抽取无 Tauri 依赖的共享 Rust 应用核心；保留 macOS / Windows 的 Tauri 前端；为 Linux egui 前端准备公共接口、事件契约、测试适配器和构建契约
-> egui 责任：由另一组负责 egui/eframe 界面、交互、视觉和 UI 验收；本文只负责让他们能够稳定调用后端
+> egui 责任（2026-09-06调整）：由另一组负责剩余Linux Host原生实现/接线、egui/eframe界面、交互、视觉、设备与Linux发布验收；本轮交付稳定Core与细化缺口文档
 > 最终审查基线：推送后重新读取 PR #1019 的真实 `baseRefOid/headRefOid`；不得继续使用历史 SHA 或把 `MERGEABLE` 等同发布就绪
 
 ## 0. F01–F24 收口矩阵（2026-09-04）
@@ -62,7 +64,7 @@ egui UI  ── Linux 适配器 ──┘
 
 1. `openless-core` 只承载应用业务、会话状态机、provider 调度、持久化、类型化结果和语义事件。
 2. Tauri 只承载 IPC 转换、Tauri 插件、窗口/托盘生命周期和 WebView 事件桥接。
-3. Linux 适配器只承载 Linux 平台能力和非 UI 宿主接线；egui/eframe 主循环、窗口布局与交互由 egui 团队实现。
+3. Linux适配器只承载Linux平台能力和非UI宿主接线；依2026-09-06范围，其剩余工作与egui/eframe主循环、窗口及交互一并交egui团队实现。
 4. 核心接口不能出现 `AppHandle`、`tauri::State`、WebView 窗口 label、`emit_to` 或 egui 类型。
 5. egui 团队只接收稳定的 Rust 接口和事件契约，不需要了解核心内部模块。
 6. Android 暂时继续作为 Tauri mobile 适配器；本计划不把 Android UI 改成 egui，也不改变现有 Android 语义。
@@ -71,12 +73,12 @@ egui UI  ── Linux 适配器 ──┘
 
 | 责任方 | 本计划内的交付 | 明确不负责 |
 | --- | --- | --- |
-| 共享后端/架构组 | `openless-core` facade、领域实现、状态机、平台 Interface、事件/错误/能力契约、fake/headless fixture、Tauri/Linux Adapter 接线、兼容测试、CI/打包门禁和接口文档 | egui 页面、控件布局、视觉样式、交互动画、UI 自动化和最终视觉验收 |
-| Tauri 组 | React IPC 薄 wrapper、Tauri event mapping、窗口/托盘/plugin、macOS/Windows/Android 原生能力和对应 runner 证据 | 在 command 中重新实现 provider、prompt、session、设置事务或其他 core 业务规则 |
-| Linux host 组 | Linux `HostActions`、Secret Service、fcitx5、cpal、单实例、资源布局、非 UI runtime 和 Ubuntu 原生 runner 证据 | `eframe::App`、egui view、布局、视觉、UI 交互和 UI 测试 |
-| egui 组 | 基于 2.0.0 contract 实现 `eframe::App`、view-model、页面交互、视觉和 UI 验收；发现缺口时提交可复现接口需求 | 读取 core 私有模块、include Tauri 源码、复制业务规则、直接处理凭据/HTTP/provider router 或绕过 LinuxHost 事务 |
+| 共享后端/架构组 | `openless-core`真实领域实现、facade、状态机、平台Interface、事件/错误/能力合同、fixture/headless、兼容测试与Linux拆分交接资料；修复接入所需Core缺口 | Linux剩余Host/UI及Linux完整产品验收 |
+| Tauri组 | Windows/macOS完整保留各自1.x功能，React IPC/event接线、原生Adapter、自动与设备/安装验收；保留现有Android合同不回退 | 在command中重新实现Core业务规则；本次不新增Android首批完整支持承诺 |
+| Linux Host工作（移交egui团队） | 复用已有Secret Service、fcitx5、cpal、单实例/runtime；补原生效果、全局热键、上下文/归档、系统集成与设备/发布验收 | 重写Core领域规则或将OS细节塞进Core |
+| egui组 | 承接上一行Host工作，并基于2.0.0合同补齐页面、交互与Linux产品验收；缺口逐项见交接目录 | 读取Core私有模块、include Tauri源码、复制业务规则，或在UI绕过LinuxHost事务/读取秘密 |
 
-**移交门（M7）**：只有当公开 re-export、`linux-egui-backend-contract.md`、headless example、fake/fixture、能力矩阵、事件映射表和 Linux host contract 全部可运行时，才把接口交给 egui 组。移交后 egui 可以并行开发；未完成的真实平台能力必须以 `Unsupported` 或明确 capability 状态表达，不得用 UI stub 或 fake 成功结果代替原生验收。
+**当前移交门**：按[2.0需求第4节](./2.0-requirements.md#4-core-对-linux-的交付门)提供真实Core实现、可运行合同/示例与[拆分交接资料](./linux-egui-handoff/README.md)。保留已有Linux实现；未接入的原生效果明确表达不可用并移交，不等待Linux全部设备/UI验收才交付Windows/macOS。后文M7为历史阶段记录。
 
 完成的定义：
 

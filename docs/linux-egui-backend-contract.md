@@ -1,7 +1,7 @@
 # Linux egui 后端接口契约（2.0.0）
 
-> 本文是 Linux egui 组与共享 Rust 后端之间的交付契约。egui 组负责
-> `eframe::App`、布局、控件、绘制和 UI 测试；本文不规定视觉实现。
+> **2026-09-06更新**：接手请先读[Linux交接目录](./linux-egui-handoff/README.md)中的短文档；本文保留长接口与历史实现参考，不再作为唯一交接材料。
+> 当前范围以[2.0需求](./2.0-requirements.md)为准：Windows/macOS完整保留各自Tauri 1.x功能；Linux交付可接入Core。egui团队承接剩余Linux Host原生接线、UI、设备与发布验收，不仅负责绘制；Linux产品未完成不单独阻塞本批Windows/macOS交付。
 >
 > 2026-09-04 当前状态：2.0.0 facade、repository、Provider/Credential、听写 Pipeline、Local ASR
 > 原子激活、主热键仲裁、录音生命周期、上下文/手改观察、静默重试、插入 reconciliation、
@@ -10,7 +10,7 @@
 > 凭据、窗口、进程、焦点和插入 Adapter。Linux production factory 已注入真实 QA、Remote Input、
 > Selection preview/revert 与打包的 Qwen runtime；AppImage 会在 listener 前安装 fcitx5 插件。
 > 自动 contract 不替代真实平台证据：Ubuntu/Windows/macOS/Android 的设备、安装、升级和签名
-> 结果仍须按 [`linux-egui-shared-backend-plan.md`](./linux-egui-shared-backend-plan.md) 单独记录。
+> 结果仍须单独记录，当前责任与门槛按[桌面验收](./2.0-desktop-acceptance.md)和[Linux验收](./linux-egui-handoff/07-acceptance.md)区分；以下旧日期状态不能证明Linux无剩余缺口。
 >
 > 2026-09-05 复核补充：最新生产行为修复见 [`pr1019-2.0-final-review.md`](./pr1019-2.0-final-review.md)。
 > 原生预加载必须使用请求的 target/provider type；平台无法准备流式时以 `supports_streaming=false`
