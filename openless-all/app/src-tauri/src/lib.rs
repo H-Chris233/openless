@@ -32,6 +32,7 @@ mod correction;
 // Linux 退化为纯轮询兜底。仅桌面端。详见 issue #470。
 #[cfg(not(mobile))]
 mod device_watch;
+mod endpoint_security;
 mod external_url;
 #[cfg(not(mobile))]
 mod global_hotkey_runtime;
@@ -95,6 +96,9 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
+use gtk::prelude::WidgetExt;
+
 const LOG_ROTATE_LIMIT_BYTES: u64 = 10 * 1024 * 1024;
 #[cfg(target_os = "macos")]
 const OPENLESS_BUNDLE_ID: &str = "com.openless.app";
@@ -109,6 +113,8 @@ static LESS_COMPUTER_PANEL_EPOCH: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 #[cfg(not(mobile))]
 static TRAY_MICROPHONE_WATCHER_STOPPING: AtomicBool = AtomicBool::new(false);
+#[cfg(not(mobile))]
+struct TrayMicrophoneDeviceCache(parking_lot::Mutex<Vec<recorder::MicrophoneDevice>>);
 #[cfg(not(mobile))]
 use tauri::menu::{
     CheckMenuItemBuilder, Menu, MenuBuilder, MenuItemBuilder, Submenu, SubmenuBuilder,
@@ -173,6 +179,7 @@ macro_rules! app_invoke_handler_desktop {
             commands::clear_history,
             commands::get_activity_stats,
             commands::read_audio_recording,
+            commands::export_audio_recording,
             commands::retranscribe_recording,
             commands::marketplace_list,
             commands::marketplace_detail,
@@ -184,6 +191,9 @@ macro_rules! app_invoke_handler_desktop {
             commands::marketplace_delete,
             commands::github_device_flow_start,
             commands::github_device_flow_poll,
+            commands::github_device_flow_cancel,
+            commands::marketplace_auth_status,
+            commands::marketplace_logout,
             commands::list_vocab,
             commands::add_vocab,
             commands::remove_vocab,
@@ -199,12 +209,21 @@ macro_rules! app_invoke_handler_desktop {
             commands::cancel_dictation,
             coding_agent::commands::coding_agent_detect,
             coding_agent::commands::coding_agent_detect_opencode,
+            coding_agent::commands::coding_agent_list_opencode_models,
             coding_agent::commands::coding_agent_run_test,
             coding_agent::commands::coding_agent_cancel_test,
             coding_agent::commands::coding_agent_command_risk,
             commands::handle_window_hotkey_event,
             #[cfg(debug_assertions)]
             commands::inject_hotkey_click_for_dev,
+            #[cfg(debug_assertions)]
+            commands::run_selection_polish_for_dev,
+            #[cfg(not(mobile))]
+            commands::get_selection_polish_preview,
+            #[cfg(not(mobile))]
+            commands::confirm_selection_polish_preview,
+            #[cfg(not(mobile))]
+            commands::cancel_selection_polish_preview,
             commands::repolish,
             commands::list_style_packs,
             commands::create_style_pack_from_template,
@@ -229,6 +248,7 @@ macro_rules! app_invoke_handler_desktop {
             commands::set_active_llm_provider,
             commands::get_qa_hotkey_label,
             commands::set_qa_hotkey,
+            commands::set_selection_polish_hotkey,
             commands::validate_shortcut_binding,
             commands::set_dictation_hotkey,
             commands::set_translation_hotkey,
@@ -238,6 +258,7 @@ macro_rules! app_invoke_handler_desktop {
             commands::qa_toggle_recording,
             commands::qa_submit_text,
             commands::less_computer_window_dismiss,
+            commands::less_computer_window_open,
             commands::chat_panel_focus_keyboard,
             commands::less_computer_submit_text,
             commands::less_computer_sync,
@@ -342,6 +363,7 @@ macro_rules! app_invoke_handler_mobile {
             $crate::commands::clear_history,
             $crate::commands::get_activity_stats,
             $crate::commands::read_audio_recording,
+            $crate::commands::export_audio_recording,
             $crate::commands::retranscribe_recording,
             $crate::commands::marketplace_list,
             $crate::commands::marketplace_detail,
@@ -353,6 +375,9 @@ macro_rules! app_invoke_handler_mobile {
             $crate::commands::marketplace_delete,
             $crate::commands::github_device_flow_start,
             $crate::commands::github_device_flow_poll,
+            $crate::commands::github_device_flow_cancel,
+            $crate::commands::marketplace_auth_status,
+            $crate::commands::marketplace_logout,
             $crate::commands::list_vocab,
             $crate::commands::add_vocab,
             $crate::commands::remove_vocab,
@@ -478,6 +503,7 @@ fn run_desktop() {
         .manage(sherpa_onnx_runtime.clone())
         .manage(commands::MicrophoneMonitorState::new(None))
         .manage(commands::TrayMicrophoneMenuState::new(Vec::new()))
+        .manage(TrayMicrophoneDeviceCache(parking_lot::Mutex::new(Vec::new())))
         .setup(move |app| {
             init_file_logger();
             log::info!("=== OpenLess 启动 ===");
@@ -520,8 +546,27 @@ fn run_desktop() {
                 }
                 // 纯光效舞台没有任何可点元素（✕/✓ 按钮已移除），而窗口放大到 460×180
                 // 盖住屏幕底部中央 —— 必须鼠标穿透，否则会挡住底下应用的点击。
-                if let Err(e) = capsule.set_ignore_cursor_events(true) {
-                    log::warn!("[capsule] set_ignore_cursor_events failed: {e}");
+                // Linux 下 tao 的鼠标穿透实现会直接解包底层 GDK 窗口；visible=false 时
+                // 窗口尚未 realize。这里只创建窗口系统资源而不 map，避免 X11 崩溃，
+                // 也不会像 show() 那样在不支持窗口定位的 Wayland 上造成启动闪窗。
+                #[cfg(target_os = "linux")]
+                let cursor_passthrough_ready = match capsule.gtk_window() {
+                    Ok(gtk_window) => {
+                        gtk_window.realize();
+                        true
+                    }
+                    Err(e) => {
+                        log::warn!("[capsule] gtk_window failed; skipping cursor passthrough: {e}");
+                        false
+                    }
+                };
+                #[cfg(not(target_os = "linux"))]
+                let cursor_passthrough_ready = true;
+
+                if cursor_passthrough_ready {
+                    if let Err(e) = capsule.set_ignore_cursor_events(true) {
+                        log::warn!("[capsule] set_ignore_cursor_events failed: {e}");
+                    }
                 }
                 if let Err(e) = position_capsule_bottom_center(&capsule, false) {
                     log::warn!("[capsule] position failed: {e}");
@@ -714,6 +759,7 @@ fn run_desktop() {
                 let coordinator = app.state::<Arc<coordinator::Coordinator>>();
                 // 同步启动 QA hotkey listener。和 dictation hotkey 平行，互不抢状态。
                 coordinator.start_qa_hotkey_listener();
+                coordinator.start_selection_polish_hotkey_listener();
                 // 启动「快速 Agent」双热键监听（功能默认关闭，启用后才注册）。
                 coordinator.start_coding_agent_hotkey_listener();
                 // 启动自定义组合键监听器。当 trigger == Custom 时替代 modifier-only 监听器。
@@ -737,6 +783,7 @@ fn run_desktop() {
                 let coordinator = app.state::<Arc<coordinator::Coordinator>>();
                 coordinator.stop_hotkey_listener();
                 coordinator.stop_qa_hotkey_listener();
+                coordinator.stop_selection_polish_hotkey_listener();
                 coordinator.stop_coding_agent_hotkey_listener();
                 coordinator.stop_combo_hotkey_listener();
                 coordinator.stop_translation_hotkey_listener();
@@ -866,13 +913,14 @@ fn build_microphone_tray_menu<M: Manager<tauri::Wry>>(
     let selected = coordinator.prefs().get().microphone_device_name;
     let mut items = Vec::new();
     let mut submenu = SubmenuBuilder::with_id(app, "microphone", "选择麦克风");
-    let devices = match recorder::list_input_devices() {
-        Ok(devices) => devices,
-        Err(err) => {
-            log::warn!("[tray] list microphone devices failed: {err}");
-            Vec::new()
-        }
-    };
+    // CoreAudio device enumeration can block inside AudioUnitSetProperty while AppKit is
+    // finishing launch. Tray menus must be built on the main thread, so only consume the
+    // cache here; the watcher below owns every potentially blocking enumeration.
+    let devices = app
+        .state::<TrayMicrophoneDeviceCache>()
+        .0
+        .lock()
+        .clone();
     let selected_available =
         selected.trim().is_empty() || devices.iter().any(|device| device.name == selected);
 
@@ -930,18 +978,44 @@ pub(crate) fn refresh_tray_microphone_menu(app: &AppHandle) -> tauri::Result<()>
 }
 
 #[cfg(not(mobile))]
-fn microphone_device_signature() -> Option<Vec<(String, bool)>> {
+fn microphone_devices_with_signature(
+) -> Option<(Vec<recorder::MicrophoneDevice>, Vec<(String, bool)>)> {
     match recorder::list_input_devices() {
-        Ok(devices) => Some(
-            devices
-                .into_iter()
-                .map(|device| (device.name, device.is_default))
-                .collect(),
-        ),
+        Ok(devices) => {
+            let signature = devices
+                .iter()
+                .map(|device| (device.name.clone(), device.is_default))
+                .collect();
+            Some((devices, signature))
+        }
         Err(err) => {
             log::warn!("[tray] watch microphone devices failed: {err}");
             None
         }
+    }
+}
+
+/// Enumerate devices off the main thread, update the shared cache, then rebuild the tray on
+/// AppKit's main thread only when the device signature changed.
+#[cfg(not(mobile))]
+fn refresh_microphone_cache_if_changed(
+    app: &AppHandle,
+    last_signature: &parking_lot::Mutex<Option<Vec<(String, bool)>>>,
+) {
+    let Some((devices, signature)) = microphone_devices_with_signature() else {
+        return;
+    };
+    {
+        let mut guard = last_signature.lock();
+        if guard.as_ref() == Some(&signature) {
+            return;
+        }
+        *guard = Some(signature);
+    }
+    *app.state::<TrayMicrophoneDeviceCache>().0.lock() = devices;
+    let refresh_app = app.clone();
+    if let Err(err) = app.run_on_main_thread(move || refresh_microphone_on_main(&refresh_app)) {
+        log::warn!("[tray] dispatch microphone cache refresh failed: {err}");
     }
 }
 
@@ -956,24 +1030,29 @@ fn refresh_microphone_on_main(app: &AppHandle) {
 }
 
 /// 设备变更去抖闭包：被 OS 原生通知回调（macOS CoreAudio / Windows MMDevice）调用。
-/// 复用 `microphone_device_signature()` 去抖——签名没变就零副作用直接返回；变了才
-/// `run_on_main_thread` 派发刷新+emit。OS 通知可能合并/重复触发，去抖确保只在真正
-/// 变化时刷新。`last_signature` 用 `Mutex` 保护，因为回调可能从不同的 CoreAudio/COM
-/// 线程并发进入。
+/// OS 回调仅调度一个后台枚举任务，绝不在 AppKit 主线程或 CoreAudio/COM 通知线程中
+/// 直接枚举设备。并发通知通过 `refresh_in_flight` 合并，签名去抖避免重复刷新菜单。
 #[cfg(not(mobile))]
 fn make_microphone_change_handler(app: AppHandle) -> impl Fn() + Send + Sync + 'static {
-    let last_signature = parking_lot::Mutex::new(microphone_device_signature());
+    let last_signature = Arc::new(parking_lot::Mutex::new(None));
+    let refresh_in_flight = Arc::new(AtomicBool::new(false));
     move || {
-        let signature = microphone_device_signature();
-        {
-            let mut guard = last_signature.lock();
-            if signature == *guard {
-                return;
-            }
-            *guard = signature;
+        if refresh_in_flight.swap(true, Ordering::AcqRel) {
+            return;
         }
         let refresh_app = app.clone();
-        let _ = app.run_on_main_thread(move || refresh_microphone_on_main(&refresh_app));
+        let refresh_signature = Arc::clone(&last_signature);
+        let refresh_flag = Arc::clone(&refresh_in_flight);
+        if let Err(err) = std::thread::Builder::new()
+            .name("openless-tray-mic-event".into())
+            .spawn(move || {
+                refresh_microphone_cache_if_changed(&refresh_app, &refresh_signature);
+                refresh_flag.store(false, Ordering::Release);
+            })
+        {
+            refresh_in_flight.store(false, Ordering::Release);
+            log::warn!("[tray] start microphone event refresh failed: {err}");
+        }
     }
 }
 
@@ -1002,7 +1081,9 @@ fn start_tray_microphone_watcher(app: AppHandle) {
     if let Err(err) = std::thread::Builder::new()
         .name("openless-tray-mic-poll".into())
         .spawn(move || {
-            let mut last_signature = microphone_device_signature();
+            let last_signature = parking_lot::Mutex::new(None);
+            // Populate the initially empty tray cache without blocking AppKit startup.
+            refresh_microphone_cache_if_changed(&app, &last_signature);
             while !TRAY_MICROPHONE_WATCHER_STOPPING.load(Ordering::Relaxed) {
                 // 60s（而非 10s）：原生通知承担实时检测，这条线程只是兜底，把它拉到 60s
                 // 进一步压低空闲唤醒。1s 一片的睡眠让退出 flag 最多 1s 内生效，避免退出时
@@ -1016,13 +1097,7 @@ fn start_tray_microphone_watcher(app: AppHandle) {
                 if TRAY_MICROPHONE_WATCHER_STOPPING.load(Ordering::Relaxed) {
                     break;
                 }
-                let signature = microphone_device_signature();
-                if signature == last_signature {
-                    continue;
-                }
-                last_signature = signature;
-                let refresh_app = app.clone();
-                let _ = app.run_on_main_thread(move || refresh_microphone_on_main(&refresh_app));
+                refresh_microphone_cache_if_changed(&app, &last_signature);
             }
         })
     {
@@ -1248,13 +1323,18 @@ fn reset_tcc_service_for_restart(service: &str, reason: &str) {
 }
 
 /// 把日志同时写到 stderr + ~/Library/Logs/OpenLess/openless.log（match Swift `Log.swift`）。
-fn init_file_logger() {
+pub(crate) fn init_file_logger() {
     use simplelog::{
         ColorChoice, CombinedLogger, ConfigBuilder, LevelFilter, TermLogger, TerminalMode,
         WriteLogger,
     };
     let log_dir = log_dir_path();
-    let _ = std::fs::create_dir_all(&log_dir);
+    if let Err(e) = std::fs::create_dir_all(&log_dir) {
+        eprintln!(
+            "[logger] WARN create log dir failed path={}: {e}",
+            log_dir.display()
+        );
+    }
     let log_file = log_dir.join("openless.log");
     if let Err(e) = rotate_log_if_too_large(&log_file) {
         eprintln!("[logger] WARN 日志轮转失败: {e}");
@@ -1266,12 +1346,21 @@ fn init_file_logger() {
         TerminalMode::Mixed,
         ColorChoice::Auto,
     )];
-    if let Ok(file) = std::fs::OpenOptions::new()
+    match std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&log_file)
     {
-        loggers.push(WriteLogger::new(LevelFilter::Info, config, file));
+        Ok(file) => {
+            loggers.push(WriteLogger::new(LevelFilter::Info, config, file));
+            eprintln!("[logger] file logger ready path={}", log_file.display());
+        }
+        Err(e) => {
+            eprintln!(
+                "[logger] ERROR open log file failed path={}: {e}",
+                log_file.display()
+            );
+        }
     }
     let _ = CombinedLogger::init(loggers);
 }
@@ -1323,11 +1412,17 @@ pub fn log_dir_path() -> std::path::PathBuf {
     }
     #[cfg(target_os = "android")]
     {
-        if let Ok(dir) = std::env::var("TAURI_ANDROID_APP_DATA_DIR") {
-            return std::path::PathBuf::from(dir).join("logs");
+        // Prefer cached JNI filesDir/logs; never use /data/local/tmp.
+        if let Ok(dir) = crate::persistence::android_log_dir() {
+            return dir;
         }
+        eprintln!("[logger] ERROR android_log_dir unavailable; file logging disabled");
+        return std::path::PathBuf::from("/__openless_android_log_uninitialized__");
     }
-    std::env::temp_dir().join("OpenLess")
+    #[cfg(not(target_os = "android"))]
+    {
+        std::env::temp_dir().join("OpenLess")
+    }
 }
 
 pub(crate) fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
@@ -2156,17 +2251,17 @@ fn ensure_qa_window<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<tauri::Webv
     }
     let built = WebviewWindowBuilder::new(app, "qa", WebviewUrl::App("index.html?window=qa".into()))
         .title("OpenLess QA")
-        .inner_size(QA_WINDOW_WIDTH, QA_WINDOW_HEIGHT)
-        .decorations(false)
-        .transparent(true)
-        .shadow(true)
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .resizable(false)
-        .focused(false)
-        .visible(false)
-        .accept_first_mouse(true)
-        .build();
+            .inner_size(QA_WINDOW_WIDTH, QA_WINDOW_HEIGHT)
+            .decorations(false)
+            .transparent(true)
+            .shadow(true)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .resizable(false)
+            .focused(false)
+            .visible(false)
+            .accept_first_mouse(true)
+            .build();
     match built {
         Ok(w) => {
             // ⚠️ NSWindow 操作必须在主线程（macOS 26 硬约束）。ensure_qa_window 常从
@@ -2311,6 +2406,57 @@ pub(crate) fn hide_qa_window<R: tauri::Runtime>(app: &AppHandle<R>) {
     hide_chat_window_animated(app, "qa", &QA_PANEL_EPOCH);
 }
 
+/// 选区润色预览是独立、可编辑的小窗：模型结果不会直接覆盖，用户确认后才回到原选区粘贴。
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn ensure_selection_polish_preview_window<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Option<tauri::WebviewWindow<R>> {
+    if let Some(window) = app.get_webview_window("selection-polish-preview") {
+        return Some(window);
+    }
+    WebviewWindowBuilder::new(
+        app,
+        "selection-polish-preview",
+        WebviewUrl::App("index.html?window=selection-polish-preview".into()),
+    )
+    .title("OpenLess 选区润色预览")
+    .inner_size(640.0, 440.0)
+    .min_inner_size(480.0, 320.0)
+    .resizable(true)
+    .always_on_top(true)
+    .visible(false)
+    .build()
+    .map(Some)
+    .unwrap_or_else(|error| {
+        log::warn!("[selection-polish] create preview window failed: {error}");
+        None
+    })
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn show_selection_polish_preview<R: tauri::Runtime>(app: &AppHandle<R>) {
+    let Some(window) = ensure_selection_polish_preview_window(app) else {
+        return;
+    };
+    if let Err(error) = window.show() {
+        log::warn!("[selection-polish] show preview failed: {error}");
+        return;
+    }
+    if let Err(error) = window.set_focus() {
+        log::warn!("[selection-polish] focus preview failed: {error}");
+    }
+    let _ = app.emit_to("selection-polish-preview", "selection-polish-preview:shown", ());
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub(crate) fn show_selection_polish_preview<R: tauri::Runtime>(_app: &AppHandle<R>) {}
+
+pub(crate) fn hide_selection_polish_preview<R: tauri::Runtime>(app: &AppHandle<R>) {
+    if let Some(window) = app.get_webview_window("selection-polish-preview") {
+        let _ = window.hide();
+    }
+}
+
 // ───────────────────────── Less Computer 浮窗 ─────────────────────────
 //
 // Less Computer 语音 Agent 的聊天浮窗（窗口 label = "less-computer"）。
@@ -2360,13 +2506,23 @@ pub(crate) fn show_less_computer_window<R: tauri::Runtime>(app: &AppHandle<R>) {
         log::info!("[less-computer] show 跳过：窗口不存在");
         return;
     };
-    if let Err(e) = position_less_computer_window(&window) {
-        log::warn!("[less-computer] position before show failed: {e}");
-    }
     let window_clone = window.clone();
     let _ = app.run_on_main_thread(move || {
         use objc2::msg_send;
         use objc2::runtime::AnyObject;
+        // This helper is also called from the Tokio worker that executes a text or
+        // voice Agent turn. Keep every AppKit-backed window mutation on the main
+        // thread; macOS aborts the process if a converted NSPanel is resized or moved
+        // from that worker while WebKit is servicing its custom URL scheme.
+        if let Err(e) = position_less_computer_window(&window_clone) {
+            log::warn!("[less-computer] position before show failed: {e}");
+        }
+        // A lazily-created window starts with Tauri's visible=false state. Cocoa's
+        // orderFrontRegardless alone does not always clear that state, leaving the first
+        // text-only launch invisible even though the NSPanel was created successfully.
+        if let Err(e) = window_clone.show() {
+            log::warn!("[less-computer] window.show before orderFront failed: {e}");
+        }
         match window_clone.ns_window() {
             Ok(handle) => {
                 let ns = handle as *mut AnyObject;
@@ -2433,6 +2589,7 @@ pub(crate) fn show_less_computer_glow<R: tauri::Runtime>(app: &AppHandle<R>) {
     // issue #470：通知 glow 前端「可见」，恢复发光动画（隐藏时会 emit(false) 卸载发光层以释放 GPU）。
     let _ = window.emit("less-computer-glow:active", true);
     let window_clone = window.clone();
+    let app_for_reassert = app.clone();
     let _ = app.run_on_main_thread(move || {
         use objc2::msg_send;
         use objc2::runtime::AnyObject;
@@ -2445,11 +2602,32 @@ pub(crate) fn show_less_computer_glow<R: tauri::Runtime>(app: &AppHandle<R>) {
                     unsafe {
                         // 抬到菜单栏(24)/Dock 之上，让描边能真正贴到屏幕最外缘（含顶部菜单栏区域）。
                         let _: () = msg_send![ns, setLevel: 25i64];
-                        // 所有 Space 都显示、不参与窗口循环、全屏 app 上也叠加。
-                        let _: () = msg_send![ns, setCollectionBehavior: 273u64];
+                        // 所有 Space 都显示、不参与窗口循环、全屏 app 上也叠加（273 =
+                        // CanJoinAllSpaces|Stationary|FullScreenAuxiliary）。macOS 26 会在
+                        // 运行中把窗口从「全 Space 贴附」剥离且同值写入救不回（详见
+                        // show_capsule_window_no_activate 的重注册注释）；glow show 频率低，
+                        // 每次都走重注册序列：先以去掉 CanJoinAllSpaces 位的 272 上屏，
+                        // 下一个 tick 再写 273 —— 可见状态下的位翻转才触发重新注册。
+                        let _: () = msg_send![ns, setCollectionBehavior: 272u64];
                         let _: () = msg_send![ns, setIgnoresMouseEvents: true];
                         let _: () = msg_send![ns, orderFrontRegardless];
                     }
+                    let window_for_reassert = window_clone.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(30));
+                        let _ = app_for_reassert.run_on_main_thread(move || {
+                            let Ok(handle) = window_for_reassert.ns_window() else {
+                                return;
+                            };
+                            let ns = handle as *mut AnyObject;
+                            if ns.is_null() {
+                                return;
+                            }
+                            unsafe {
+                                let _: () = msg_send![ns, setCollectionBehavior: 273u64];
+                            }
+                        });
+                    });
                 }
             }
             Err(_) => {

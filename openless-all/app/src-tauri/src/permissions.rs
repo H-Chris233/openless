@@ -8,6 +8,8 @@
 //!   `AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: true})` 弹系统授权框。
 //! - macOS Microphone：`AVAudioApplication.shared.recordPermission` + requestRecordPermission。
 //! - Windows：cpal 不需要 Accessibility 等价权限；麦克风首次使用时 Win10+ 弹一次系统提示。
+//!   没有可用输入设备时返回 `NoDevice`（区别于权限被拒的 `Denied`），避免把
+//!   “没插麦克风”误报成“未授权麦克风”。详见 issue #779。
 
 use serde::Serialize;
 
@@ -20,6 +22,26 @@ pub enum PermissionStatus {
     Restricted,
     /// 当前平台不需要这个权限（如 Windows 上的 Accessibility）。
     NotApplicable,
+    /// 当前没有可用的麦克风输入设备（不是权限问题）。
+    NoDevice,
+}
+
+/// 错误字符串是否暗示“当前没有可用输入设备”（区别于权限被拒）。
+/// cpal 在不同平台返回的文案不统一，靠关键字粗判。
+pub(crate) fn is_no_device_error(lower: &str) -> bool {
+    [
+        "no default input device",
+        "no default input",
+        "no input device",
+        "no device",
+        "device not found",
+        "device not available",
+        "not connected",
+        "unplugged",
+        "disconnected",
+    ]
+    .iter()
+    .any(|pattern| lower.contains(pattern))
 }
 
 // ─────────────────────────── macOS ───────────────────────────
@@ -322,7 +344,7 @@ mod platform {
         let host = cpal::default_host();
         let Some(device) = host.default_input_device() else {
             log::warn!("[mic] no default input device");
-            return PermissionStatus::Denied;
+            return PermissionStatus::NoDevice;
         };
         let supported = match device.default_input_config() {
             Ok(config) => config,
@@ -340,6 +362,12 @@ mod platform {
         check_microphone()
     }
 
+    /// 轻量检测是否存在输入设备：只枚举设备、不开输入流，
+    /// 供听写启动前快速区分「没插麦克风」与「有设备但权限被拒」。
+    pub fn has_microphone_input_device() -> bool {
+        cpal::default_host().default_input_device().is_some()
+    }
+
     pub fn windows_microphone_access_explicitly_denied() -> bool {
         #[cfg(target_os = "windows")]
         {
@@ -355,7 +383,9 @@ mod platform {
     fn classify_audio_probe_error(message: String) -> PermissionStatus {
         let lower = message.to_lowercase();
         log::warn!("[mic] input probe failed: {message}");
-        if lower.contains("denied")
+        if super::is_no_device_error(&lower) {
+            PermissionStatus::NoDevice
+        } else if lower.contains("denied")
             || lower.contains("permission")
             || lower.contains("authoriz")
             || lower.contains("access")
@@ -460,10 +490,55 @@ pub use platform::{
     check_accessibility, check_microphone, request_accessibility, request_microphone,
 };
 
+#[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
+pub use platform::has_microphone_input_device;
+
+#[cfg(any(target_os = "macos", target_os = "android"))]
+pub fn has_microphone_input_device() -> bool {
+    // macOS / Android 的权限检查走系统授权回调，不依赖这里；
+    // 录音启动失败路径另有 NoInputDevice 兜底文案。
+    false
+}
+
 #[cfg(target_os = "windows")]
 pub use platform::windows_microphone_access_explicitly_denied;
 
 #[cfg(not(target_os = "windows"))]
 pub fn windows_microphone_access_explicitly_denied() -> bool {
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_no_device_error;
+
+    #[test]
+    fn no_device_errors_are_recognized() {
+        for message in [
+            "no default input device",
+            "No input device is available",
+            "device not found",
+            "default device is not connected",
+            "unplugged microphone",
+        ] {
+            assert!(
+                is_no_device_error(&message.to_lowercase()),
+                "should classify as no-device: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn permission_errors_are_not_no_device() {
+        for message in [
+            "access denied",
+            "permission denied",
+            "not authorized",
+        ] {
+            assert!(
+                !is_no_device_error(&message.to_lowercase()),
+                "should NOT classify as no-device: {message}"
+            );
+        }
+    }
 }

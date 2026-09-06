@@ -77,6 +77,7 @@ import {
   qaToggleRecording,
   qaWindowDismiss,
 } from '../lib/ipc';
+import { acceptQaSessionEvent, nextQaSelectionWarning, splitQaUserMessage } from '../lib/qaMessage';
 import type { QaChatMessage, QaStatePayload } from '../lib/types';
 import '../components/chat/chat.css';
 
@@ -97,7 +98,7 @@ function getPreviewMessages(): QaChatMessage[] {
     {
       role: 'user',
       content:
-        '# 选区原文\nThe mitochondria is the powerhouse of the cell.\n\n# 我的问题\n这句话为什么会成为梗？',
+        '<selected_text>\nThe mitochondria is the powerhouse of the cell.\n</selected_text>\n\n# 我的问题\n这句话为什么会成为梗？',
     },
     {
       role: 'assistant',
@@ -125,9 +126,11 @@ export function QaPanel({ embedded = false, onRequestClose }: QaPanelProps = {})
   const [status, setStatus] = useState<Status>('idle');
   const [errorMsg, setErrorMsg] = useState<string>('');
   const [selectionPreview, setSelectionPreview] = useState<string>('');
+  const [selectionWarning, setSelectionWarning] = useState<string>('');
   const [composerText, setComposerText] = useState<string>('');
   /** 流式 LLM 答案：answer_delta 累积、answer 事件来时清空（最终内容已落到 messages）。 */
   const [streamingAnswer, setStreamingAnswer] = useState<string>('');
+  const activeSessionIdRef = useRef<string | null>(null);
   const { enterEpoch, closing } = useChatPanelLifecycle();
   const tRef = useRef(t);
   tRef.current = t;
@@ -151,9 +154,15 @@ export function QaPanel({ embedded = false, onRequestClose }: QaPanelProps = {})
         const { listen } = await import('@tauri-apps/api/event');
         const stateHandle = await listen<QaStatePayload>('qa:state', event => {
           const payload = event.payload;
+          const sessionEvent = acceptQaSessionEvent(activeSessionIdRef.current, payload);
+          if (!sessionEvent.accepted) {
+            return;
+          }
+          activeSessionIdRef.current = sessionEvent.sessionId;
           if (payload.messages) {
             setMessages(payload.messages);
           }
+          setSelectionWarning(current => nextQaSelectionWarning(current, payload));
           switch (payload.kind) {
             case 'idle':
               setStatus('idle');
@@ -205,7 +214,9 @@ export function QaPanel({ embedded = false, onRequestClose }: QaPanelProps = {})
           }
         });
         const dismissHandle = await listen<unknown>('qa:dismiss', () => {
+          activeSessionIdRef.current = null;
           setSelectionPreview('');
+          setSelectionWarning('');
           setComposerText('');
           if (embeddedRef.current) {
             onRequestCloseRef.current?.();
@@ -230,6 +241,18 @@ export function QaPanel({ embedded = false, onRequestClose }: QaPanelProps = {})
       unlistenDismiss?.();
     };
   }, []);
+
+  useEffect(() => {
+    if (!closing) return;
+    activeSessionIdRef.current = null;
+    setMessages([]);
+    setStatus('idle');
+    setErrorMsg('');
+    setStreamingAnswer('');
+    setSelectionPreview('');
+    setSelectionWarning('');
+    setComposerText('');
+  }, [closing]);
 
   // ── Esc 关闭 ────────────────────────────────────────────────────────
   useEffect(() => {
@@ -382,6 +405,16 @@ export function QaPanel({ embedded = false, onRequestClose }: QaPanelProps = {})
           {status === 'recording' && selectionPreview && (
             <SelectionChip text={selectionPreview} t={t} />
           )}
+          {selectionWarning === 'linux_selection_tools_missing' && (
+            <div
+              role="status"
+              aria-live="polite"
+              aria-atomic="true"
+              className="w-full rounded-md border border-amber-500/35 bg-amber-500/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-200"
+            >
+              {t('qa.linuxSelectionToolsMissing')}
+            </div>
+          )}
           <Composer
             value={composerText}
             status={status}
@@ -510,8 +543,8 @@ function MessageRow({
   githubLogin: string;
 }) {
   if (message.role === 'user') {
-    // 第一轮可能含 "# 选区原文 ... # 我的问题 ..." → 抽出问题单独显示，选区作引用块淡显在上。
-    const { selection, question } = splitFirstTurnUser(message.content);
+    // 任意轮次都可能带选区信封：抽出问题单独显示，选区作引用块淡显在上。
+    const { selection, question } = splitQaUserMessage(message);
     return (
       // 用户消息 = 新轮次锚点行（MessageScrollerItem scrollAnchor），右挂 GitHub 头像。
       <MessageScrollerItem messageId={`m${index}`} scrollAnchor className="olchat-enter">
@@ -545,13 +578,6 @@ function MessageRow({
       </Message>
     </MessageScrollerItem>
   );
-}
-
-function splitFirstTurnUser(content: string): { selection: string; question: string } {
-  // 后端拼法：`# 选区原文\n{sel}\n\n# 我的问题\n{q}`。简单 split，对齐 coordinator.rs 的写法。
-  const m = content.match(/^# 选区原文\n([\s\S]*?)\n\n# 我的问题\n([\s\S]+)$/);
-  if (!m) return { selection: '', question: content };
-  return { selection: m[1].trim(), question: m[2].trim() };
 }
 
 /** 录音时的选区上下文条：贴在输入区上方，让用户看到「在追问哪段文字」。 */

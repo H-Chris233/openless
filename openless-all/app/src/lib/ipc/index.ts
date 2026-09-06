@@ -102,6 +102,7 @@ export {
     setComboHotkey,
     validateShortcutBinding,
     setDictationHotkey,
+    setSelectionPolishHotkey,
     setTranslationHotkey,
     setSwitchStyleHotkey,
     setOpenAppHotkey,
@@ -127,9 +128,16 @@ export {
     qaSubmitText,
 } from "./qa"
 
+export {
+    getSelectionPolishPreview,
+    confirmSelectionPolishPreview,
+    cancelSelectionPolishPreview,
+} from './selection-polish-preview'
+
 // less-computer
 export {
     lessComputerWindowDismiss,
+    lessComputerWindowOpen,
     lessComputerApprove,
     lessComputerSubmitText,
     lessComputerSync,
@@ -170,6 +178,7 @@ export type {
 export {
     codingAgentDetect,
     codingAgentDetectOpencode,
+    codingAgentListOpencodeModels,
     codingAgentRunTest,
     codingAgentCancelTest,
     codingAgentCommandRisk,
@@ -188,8 +197,21 @@ export {
 } from "./marketplace"
 
 // github-oauth
-export type { GithubDeviceStartResponse, GithubDevicePollResult } from "./github-oauth"
-export { githubDeviceFlowStart, githubDeviceFlowPoll } from "./github-oauth"
+export type {
+    GithubDeviceStartResponse,
+    GithubDevicePollResult,
+    MarketplaceAuthStatus,
+} from "./github-oauth"
+export {
+    githubDeviceFlowStart,
+    githubDeviceFlowPoll,
+    githubDeviceFlowCancel,
+    githubPollIntervalMs,
+    githubSlowDownIntervalMs,
+    githubFlowExpiresAt,
+    marketplaceAuthStatus,
+    marketplaceLogout,
+} from "./github-oauth"
 
 // marketplace-cache
 export {

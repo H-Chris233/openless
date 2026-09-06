@@ -10,6 +10,7 @@ import { useMobileLayout } from '../lib/useMobileLayout';
 import type { ActivityDay, CredentialsStatus, DictationSession, PolishMode } from '../lib/types';
 import { useHotkeySettings } from '../state/HotkeySettingsContext';
 import { Btn, Card, PageHeader, Pill } from './_atoms';
+import { ASR_PRESETS } from './settings/shared';
 
 function useModeLabels(): Record<PolishMode, string> {
   const { t } = useTranslation();
@@ -25,24 +26,17 @@ interface OverviewProps {
   onOpenHistory?: () => void;
 }
 
-const ASR_NAME_KEY_BY_ID: Record<string, string> = {
-  volcengine: 'asrVolcengine',
-  bailian: 'asrBailian',
-  siliconflow: 'asrSiliconflow',
-  zhipu: 'asrZhipu',
-  groq: 'asrGroq',
-  whisper: 'asrWhisper',
-  openrouter: 'asrOpenrouter',
-  'xiaomi-mimo-asr': 'asrXiaomiMimo',
-  'foundry-local-whisper': 'asrFoundryLocalWhisper',
-  'sherpa-onnx-local': 'asrSherpaOnnxLocal',
-  'local-qwen3': 'asrLocalQwen3',
-};
+// id → i18n nameKey，从 ASR_PRESETS 单一来源派生，避免这里再手维护一份 id 列表
+// （之前漏了 bailian-qwen3-realtime / apple-speech，会退化成显示裸 id）。
+const ASR_NAME_KEY_BY_ID: Record<string, string> = Object.fromEntries(
+  ASR_PRESETS.map(p => [p.id, p.nameKey]),
+);
 
 const LLM_NAME_KEY_BY_ID: Record<string, string> = {
   ark: 'ark',
   deepseek: 'deepseek',
   siliconflow: 'siliconflow',
+  atlascloud: 'atlascloud',
   openai: 'openai',
   codex_oauth: 'codexOAuth',
   mimo: 'mimo',
@@ -82,15 +76,17 @@ export function Overview({ onOpenHistory }: OverviewProps) {
   }, []);
 
   // 年度活动热力图数据（独立于历史内容存储，清空历史不影响）。加载失败仅隐藏卡片。
+  // 移动端跳过 IPC 与渲染（issue #861）：热力图横向宽度固定，窄屏易溢出并拖慢 WebView。
   const [activity, setActivity] = useState<ActivityDay[] | null>(null);
   useEffect(() => {
+    if (mobile) return;
     getActivityStats()
       .then(setActivity)
       .catch(error => {
         console.error('[overview] failed to load activity stats', error);
         setActivity(null);
       });
-  }, []);
+  }, [mobile]);
 
   const refreshCredentials = useCallback(() => {
     const requestSeq = credentialsRequestSeq.current + 1;
@@ -210,16 +206,22 @@ export function Overview({ onOpenHistory }: OverviewProps) {
 
       {/* 年度活动热力图（8starlabs Heatmap 规格）：过去一年每日听写次数。
           数据来自独立的 activity 计数存储，与历史保留策略解耦；
-          可在设置 → 通用 → 外观 里单独关闭。 */}
-      {prefs?.showOverviewActivityHeatmap !== false && activity && activity.length > 0 && (
-        <ActivityHeatmapCard activity={activity} />
-      )}
+          可在设置 → 通用 → 外观 里单独关闭。
+          移动端（useMobileLayout）不渲染，避免窄屏横向溢出（issue #861）。 */}
+      {!mobile &&
+        prefs?.showOverviewActivityHeatmap !== false &&
+        activity &&
+        activity.length > 0 && (
+          <ActivityHeatmapCard activity={activity} />
+        )}
 
       {/* 底部一行 = flex:1 撑满剩余高度（父 wrapper 是 display:flex/column）。
           只有「最近识别」内部允许滚动；其他卡片按内容自然高度，不破裂底部圆角。
           issue #243 follow-up：去掉外层 overflow 后底部圆角被裁的视觉问题。 */}
       <div style={{ display: 'grid', gridTemplateColumns: mobile ? '1fr' : '1fr 1.4fr', gap: 12, flex: mobile ? undefined : 1, minHeight: mobile ? undefined : 0 }}>
-        <Card padding={18} style={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+        {/* overflow:hidden：窗口过小时这一行 flex:1 会被压到比内容还矮，柱状图（固定高）
+            原本会溢出卡片圆角外（issue #782）。裁进卡片内，与右侧「最近识别」卡片一致。 */}
+        <Card padding={18} style={{ display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
             <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink-2)' }}>{t('overview.weekTitle')}</span>
             <span style={{ fontSize: 11, color: 'var(--ol-ink-4)' }}>{t('overview.weekUnit')}</span>
@@ -342,7 +344,9 @@ function ActivityHeatmapCard({ activity }: { activity: ActivityDay[] }) {
     };
   }, [activity, i18n.language]);
   return (
-    <Card padding={18} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+    // marginBottom 与上方 provider / metrics 两行的 18px 节奏保持一致：否则「年度活动」
+    // 会直接贴住下面「近 7 天 / 最近识别」那一行，中间没有间隔（issue #781）。
+    <Card padding={18} style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 18 }}>
       <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ol-ink-2)' }}>
         {t('overview.activityTitle')}
       </span>
@@ -409,6 +413,21 @@ function WeekChart({ data }: { data: number[] }) {
 
 function RecentRow({ session, modeLabel }: { session: DictationSession; modeLabel: Record<PolishMode, string> }) {
   const { t } = useTranslation();
+  const [copied, setCopied] = useState(false);
+
+  const onCopy = async () => {
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable');
+      // 与 History 一致：润色失败/未产出时 finalText 为空，回退到识别原文，
+      // 避免复制到空字符串。
+      await navigator.clipboard.writeText(session.finalText.trim() ? session.finalText : session.rawTranscript);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch (error) {
+      console.error('[overview] failed to copy recent entry', error);
+    }
+  };
+
   return (
     <div style={{ padding: '12px 18px', borderBottom: '0.5px solid var(--ol-line-soft)', display: 'flex', gap: 12, alignItems: 'flex-start' }}>
       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 4, minWidth: 60 }}>
@@ -420,9 +439,20 @@ function RecentRow({ session, modeLabel }: { session: DictationSession; modeLabe
       <div style={{ flex: 1, fontSize: 12.5, color: 'var(--ol-ink-2)', whiteSpace: 'pre-line', lineHeight: 1.55, overflow: 'hidden', textOverflow: 'ellipsis', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' }}>
         {session.finalText.split('\n')[0]}
       </div>
-      <span style={{ fontSize: 10.5, color: 'var(--ol-ink-4)', fontFamily: 'var(--ol-font-mono)' }}>
-        {formatDuration(session.durationMs ?? 0, t)}
-      </span>
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 6 }}>
+        <span style={{ fontSize: 10.5, color: 'var(--ol-ink-4)', fontFamily: 'var(--ol-font-mono)' }}>
+          {formatDuration(session.durationMs ?? 0, t)}
+        </span>
+        <Btn
+          size="sm"
+          variant="ghost"
+          icon={copied ? 'check' : 'copy'}
+          onClick={() => void onCopy()}
+          style={{ padding: '3px 8px' }}
+        >
+          {copied ? t('common.copied') : t('common.copy')}
+        </Btn>
+      </div>
     </div>
   );
 }

@@ -80,7 +80,7 @@ impl MimoBatchASR {
         let wav = encode_wav_16k_mono(&samples);
         let body = mimo_chat_body(&self.model, &wav);
         let url = mimo_chat_completions_url(&self.base_url)?;
-        let client = reqwest::Client::new();
+        let client = crate::net::http();
         let resp = client
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.api_key.trim()))
@@ -181,7 +181,9 @@ fn pcm_duration_ms(pcm: &[u8]) -> u64 {
     super::pcm::pcm_duration_ms(pcm)
 }
 
-fn split_pcm_by_duration(pcm: &[u8], max_chunk_duration_ms: u64) -> Vec<&[u8]> {
+/// 按时长把 PCM 切成多段（base64 进 JSON 的批量 ASR 都受单请求体积/时长限制）。
+/// `dashscope_multimodal` 复用同一套切分逻辑，故 `pub(crate)`。
+pub(crate) fn split_pcm_by_duration(pcm: &[u8], max_chunk_duration_ms: u64) -> Vec<&[u8]> {
     if max_chunk_duration_ms == 0 {
         return vec![pcm];
     }
@@ -195,7 +197,9 @@ fn split_pcm_by_duration(pcm: &[u8], max_chunk_duration_ms: u64) -> Vec<&[u8]> {
     pcm.chunks(bytes_per_chunk).collect()
 }
 
-fn join_transcript_chunks(chunks: &[String]) -> String {
+/// 把分段识别文本按 CJK/标点规则拼回一句（段间按需补空格）。
+/// `dashscope_multimodal` 复用同一套拼接逻辑，故 `pub(crate)`。
+pub(crate) fn join_transcript_chunks(chunks: &[String]) -> String {
     let mut joined = String::new();
     for chunk in chunks.iter().map(|chunk| chunk.trim()) {
         if chunk.is_empty() {

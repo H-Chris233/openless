@@ -154,7 +154,11 @@ export function PermissionsSection() {
       <SettingRow label={t('settings.permissions.micLabel')}>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'flex-end', width: '100%', flexWrap: 'wrap', minWidth: 0 }}>
           <PermissionPill status={microphone} />
-          {microphone !== 'granted' && microphone !== 'notApplicable' && microphone !== 'loading' && (
+          {microphone === 'noDevice' ? (
+            <Btn variant="ghost" size="sm" onClick={refreshPermissions}>
+              {t('common.retry')}
+            </Btn>
+          ) : microphone !== 'granted' && microphone !== 'notApplicable' && microphone !== 'loading' && (
             <Btn variant="ghost" size="sm" onClick={reRequestMicrophone}>
               {microphone === 'denied' || microphone === 'restricted' ? t('settings.permissions.openSystem') : t('settings.permissions.grant')}
             </Btn>
@@ -247,6 +251,9 @@ function PermissionPill({ status }: { status: PermissionStatus | 'loading' }) {
   }
   if (status === 'notApplicable') {
     return <Pill tone="default">{t('settings.permissions.notApplicable')}</Pill>;
+  }
+  if (status === 'noDevice') {
+    return <Pill tone="outline">{t('settings.permissions.micNoDevice')}</Pill>;
   }
   if (status === 'denied' || status === 'restricted') {
     return <Pill tone="outline">{t('settings.permissions.denied')}</Pill>;

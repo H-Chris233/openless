@@ -50,6 +50,18 @@ export interface DictationSession {
   /** 该会话是否在录音时归档了原始 wav（取决于当时 prefs.recordAudioForDebug）。
    *  true 时前端在 History 渲染播放按钮，凭 id 通过 read_audio_recording IPC 拿字节流。 */
   hasAudioRecording: boolean | null;
+  /** 本次转写用的 ASR provider id（如 "volcengine" / "local-qwen3"）。旧历史为 null。 */
+  asrProvider: string | null;
+  /** 本次转写用的 ASR 模型 id。provider 无模型概念时为 null。 */
+  asrModel: string | null;
+  /** 本次润色用的 LLM provider id。Raw 直通（未调用 LLM）时为 null。 */
+  llmProvider: string | null;
+  /** 本次润色用的 LLM 模型 id。Raw 直通时为 null。 */
+  llmModel: string | null;
+  /** 松键后等待转写结果的实测耗时（毫秒）。流式 ASR 是收尾延迟，批式是完整转写耗时。 */
+  asrMs: number | null;
+  /** LLM 润色/翻译调用的实测耗时（毫秒）。未调用 LLM 时为 null。 */
+  polishMs: number | null;
 }
 
 export interface DictionaryEntry {
@@ -95,7 +107,7 @@ export type HotkeyTrigger =
   | 'mediaPlayPause'
   | 'custom';
 
-export type HotkeyMode = 'toggle' | 'hold' | 'doubleClick';
+export type HotkeyMode = 'toggle' | 'hold' | 'doubleClick' | 'auto';
 
 export interface HotkeyKey {
   code: string;
@@ -185,6 +197,9 @@ export type UpdateChannel = 'stable' | 'beta';
 
 export type ThemeMode = 'system' | 'light' | 'dark';
 
+/** 选区润色结果直接替换，或先在可编辑预览中确认。 */
+export type SelectionPolishOutputMode = 'directReplace' | 'previewConfirm';
+
 export interface CustomStylePrompts {
   raw: string;
   light: string;
@@ -215,6 +230,8 @@ export interface StylePack {
   version: string;
   kind: StylePackKind;
   baseMode: PolishMode;
+  /** For selected written text. Empty values in legacy packs use a safe backend default. */
+  selectionPrompt: string;
   prompt: string;
   examples: StylePackExample[];
   tags: string[];
@@ -264,17 +281,26 @@ export interface UserPreferences {
   customStylePrompts: CustomStylePrompts;
   launchAtLogin: boolean;
   showCapsule: boolean;
+  /** 录音胶囊样式（'siri' | 'classic'）。见 CapsulePayload.capsuleStyle 的运行时下发。 */
+  capsuleStyle: CapsuleStyle;
   /** 录音期间临时静音系统输出，停止/取消/出错后恢复原静音状态。 */
   muteDuringRecording: boolean;
   /** 按下录音热键进入 recording 状态时，播放一段合成提示音提醒「已开始录音」。
    *  默认开启；在 capsule 窗口用 Web Audio API 合成，不依赖 showCapsule。 */
   audioCueOnRecord: boolean;
+  /** Toggle 模式「说完自动停止」（issue #860）。默认关闭；开启后检测到语音、
+   *  连续静音达到 silenceAutoStopSeconds 时自动停止并提交，一直没说话则 10 秒后取消。 */
+  silenceAutoStopEnabled: boolean;
+  /** 语音后的连续静音阈值（秒）。可选 1 / 1.5 / 2 / 3 / 4 / 5，默认 3。 */
+  silenceAutoStopSeconds: number;
   /** 录音输入设备名称。空字符串 = 使用系统默认麦克风。 */
   microphoneDeviceName: string;
   activeAsrProvider: string;
   activeLlmProvider: string;
   /** LLM 思考模式开关。默认关闭；OpenAI 普通 chat 模型会跳过不支持的字段。详见 issue #402。 */
   llmThinkingEnabled: boolean;
+  /** 是否使用系统代理（issue #869）。默认开启；关闭后所有请求直连，境外服务（GitHub 登录/更新等）可能连不上。 */
+  useSystemProxy: boolean;
   /** 仅 Windows/Linux：粘贴成功后是否恢复用户原剪贴板。默认 true。详见 issue #111。 */
   restoreClipboardAfterPaste: boolean;
   /** 仅 Windows/Linux：模拟粘贴时按下的快捷键。详见 issue #360：kitty/alacritty
@@ -301,6 +327,12 @@ export interface UserPreferences {
   outputLanguagePreference: 'auto' | 'zhCn' | 'zhTw' | 'en' | 'ja' | 'ko';
   /** 划词语音问答快捷键。null = 未启用。详见 issue #118。 */
   qaHotkey: QaHotkeyBinding | null;
+  /** 选区润色快捷键。null = 已停用。 */
+  selectionPolishHotkey: ShortcutBinding | null;
+  /** The style pack used only by selected written-text polishing. */
+  selectionPolishStylePackId: string;
+  /** 选区润色结果的交付方式。 */
+  selectionPolishOutputMode: SelectionPolishOutputMode;
   /** 是否把 Q&A 历史写到本地存档。详见 issue #118。 */
   qaSaveHistory: boolean;
   /** 自定义录音组合键。当 hotkey.trigger == 'custom' 时使用。null = 未设置。 */
@@ -389,7 +421,7 @@ export interface UserPreferences {
   audioRecordingMaxEntries: number | null;
   /** Marketplace HTTP 基地址。空 = 本地开发默认 http://127.0.0.1:8090；生产填 https://api.<domain>。 */
   marketplaceBaseUrl: string;
-  /** Marketplace dev-mode 模拟登录用户名（GitHub login 风格）。生产换 OAuth token 后此字段废弃。 */
+  /** GitHub login 展示缓存。不用于认证；OAuth token 只存在 Rust CredentialsVault。 */
   marketplaceDevLogin: string;
   /** 是否启用远程输入（局域网手机录音）HTTPS+WS 服务。默认 false。 */
   remoteInputEnabled: boolean;
@@ -460,14 +492,20 @@ export type QaStateKind =
 export interface QaChatMessage {
   role: 'user' | 'assistant';
   content: string;
+  /** 未经模型安全信封转义的选区原文，仅用于 UI 文本展示。 */
+  selectionText?: string;
 }
 
 export interface QaStatePayload {
   kind: QaStateKind;
+  /** 后端会话 token；前端用它丢弃关闭/重开后迟到的旧轮事件。 */
+  session_id?: string;
   /** 后端权威：当前已有的多轮对话历史（user → assistant 交替）。answer 事件带完整版。 */
   messages?: QaChatMessage[];
   /** recording 状态时附带的选区预览（前 60 字）。 */
   selection_preview?: string | null;
+  /** Linux 选区工具缺失时的非阻断提醒码。 */
+  selection_warning?: 'linux_selection_tools_missing' | null;
   /** error 状态时附带的提示。 */
   error?: string;
   /** answer_delta 事件时附带的本帧增量字符串。 */
@@ -532,6 +570,9 @@ export type CapsuleState =
   | 'cancelled'
   | 'error';
 
+/** 录音胶囊样式：'siri' = 流光 Siri 光效版（默认）；'classic' = Openless 经典药丸版。 */
+export type CapsuleStyle = 'siri' | 'classic';
+
 export interface CapsulePayload {
   state: CapsuleState;
   level: number; // 0..1 RMS
@@ -548,6 +589,16 @@ export interface CapsulePayload {
    * 再开口；麦克风就绪后翻 false，光条点亮进入正式录音。只对 recording 有意义。
    */
   warming?: boolean;
+  /**
+   * 用户选择的胶囊样式（siri / classic）。随每次状态事件下发；缺失时回落默认
+   * 'siri'，兼容旧后端 payload。
+   */
+  capsuleStyle?: CapsuleStyle;
+  /**
+   * 选区润色复用 capsule 的无焦点原生窗口，但渲染为轻量状态提示；缺失时保持原有
+   * 语音/QA 胶囊行为，兼容旧后端 payload。
+   */
+  selectionPolish?: boolean;
 }
 
 export interface CredentialsStatus {
@@ -572,7 +623,8 @@ export type PermissionStatus =
   | 'denied'
   | 'notDetermined'
   | 'restricted'
-  | 'notApplicable';
+  | 'notApplicable'
+  | 'noDevice';
 
 /** Runtime platform kind returned by `get_platform_capabilities`. */
 export type PlatformKind = 'desktop' | 'android' | 'mobile';

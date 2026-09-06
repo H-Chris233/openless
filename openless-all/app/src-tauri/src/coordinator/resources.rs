@@ -5,7 +5,7 @@ use crate::recorder::Recorder;
 use crate::types::CapsuleState;
 use tauri::Manager;
 
-use super::{emit_capsule, ActiveAsr, Inner};
+use super::{emit_capsule, ActiveAsr, AsrCallLabel, Inner};
 
 pub(super) struct SessionResource<T> {
     pub(super) session_id: SessionId,
@@ -54,12 +54,30 @@ pub(super) fn take_session_resource<T>(
     }
 }
 
-pub(super) fn store_asr_for_session(inner: &Arc<Inner>, session_id: SessionId, asr: ActiveAsr) {
+/// 存放本次会话的 ASR 句柄 + 构建时 (provider, model) 快照。label 必须来自构建
+/// 现场（凭据/alias 归一化后的实际值），不能事后重读全局设置——签名强制每个
+/// 构建分支都交出快照，漏一个就编译不过（PR #826 review）。
+pub(super) fn store_asr_for_session(
+    inner: &Arc<Inner>,
+    session_id: SessionId,
+    asr: ActiveAsr,
+    label: AsrCallLabel,
+) {
     *inner.asr.lock() = Some(SessionResource::new(session_id, asr));
+    *inner.asr_label.lock() = Some(SessionResource::new(session_id, label));
 }
 
 pub(super) fn take_asr_for_session(inner: &Arc<Inner>, session_id: SessionId) -> Option<ActiveAsr> {
     let mut slot = inner.asr.lock();
+    take_session_resource(&mut slot, session_id)
+}
+
+/// 取走会话的 ASR 构建时快照（与 take_asr_for_session 相同的 session_id 守卫）。
+pub(super) fn take_asr_label_for_session(
+    inner: &Arc<Inner>,
+    session_id: SessionId,
+) -> Option<AsrCallLabel> {
+    let mut slot = inner.asr_label.lock();
     take_session_resource(&mut slot, session_id)
 }
 
@@ -68,7 +86,12 @@ pub(super) fn cancel_active_asr(asr: ActiveAsr) {
         ActiveAsr::Volcengine(v) => v.cancel(),
         ActiveAsr::Whisper(w) => w.cancel(),
         ActiveAsr::Mimo(m) => m.cancel(),
+        ActiveAsr::DashScopeMultimodal(m) => m.cancel(),
+        ActiveAsr::ElevenLabs(e) => e.cancel(),
         ActiveAsr::Bailian(b) => b.cancel(),
+        ActiveAsr::Qwen3Realtime(q) => q.cancel(),
+        ActiveAsr::StepfunRealtime(s) => s.cancel(),
+        ActiveAsr::Xfyun(x) => x.cancel(),
         #[cfg(target_os = "windows")]
         ActiveAsr::FoundryLocalWhisper(local) => local.cancel(),
         #[cfg(target_os = "windows")]
@@ -200,8 +223,34 @@ pub(super) fn release_recording_mute(inner: &Arc<Inner>, owner: &'static str) {
     }
 }
 
-pub(super) fn stop_qa_recorder(inner: &Arc<Inner>) {
-    if let Some(rec) = inner.qa_recorder.lock().take() {
+pub(super) fn store_qa_asr_for_session(inner: &Arc<Inner>, session_id: SessionId, asr: ActiveAsr) {
+    *inner.qa_asr.lock() = Some(SessionResource::new(session_id, asr));
+}
+
+pub(super) fn take_qa_asr_for_session(
+    inner: &Arc<Inner>,
+    session_id: SessionId,
+) -> Option<ActiveAsr> {
+    take_session_resource(&mut inner.qa_asr.lock(), session_id)
+}
+
+pub(super) fn cancel_qa_asr_for_session(inner: &Arc<Inner>, session_id: SessionId) {
+    if let Some(asr) = take_qa_asr_for_session(inner, session_id) {
+        cancel_active_asr(asr);
+    }
+}
+
+pub(super) fn store_qa_recorder_for_session(
+    inner: &Arc<Inner>,
+    session_id: SessionId,
+    recorder: Recorder,
+) {
+    *inner.qa_recorder.lock() = Some(SessionResource::new(session_id, recorder));
+}
+
+pub(super) fn stop_qa_recorder_for_session(inner: &Arc<Inner>, session_id: SessionId) {
+    let recorder = take_session_resource(&mut inner.qa_recorder.lock(), session_id);
+    if let Some(rec) = recorder {
         rec.stop();
         release_recording_mute(inner, "qa");
     }

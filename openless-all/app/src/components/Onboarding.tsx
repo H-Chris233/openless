@@ -302,7 +302,8 @@ function DesktopOnboarding({
     // onboarding finish before we knew macOS needs Accessibility, dropping users
     // into the app with a dead hotkey. Mirrors the gate in App.tsx.
     const aOk = a === 'granted' || a === 'notApplicable';
-    const mOk = m === 'granted' || m === 'notApplicable';
+    // noDevice = 当前没有麦克风设备，不是权限问题，不阻塞进入应用。
+    const mOk = m === 'granted' || m === 'notApplicable' || m === 'noDevice';
     if (aOk && mOk) {
       onComplete();
     }
@@ -429,17 +430,39 @@ function DesktopOnboarding({
           actionLabel={
             microphone === 'granted'
               ? t('onboarding.actionGranted')
+              : microphone === 'noDevice'
+                ? t('common.retry')
               : microphone === 'denied'
                 ? t('onboarding.actionOpenSystem')
                 : t('onboarding.actionRequestMic')
           }
-          onAction={onRequestMicrophone}
+          onAction={microphone === 'noDevice' ? refresh : onRequestMicrophone}
           disabled={busy || microphone === 'granted'}
+          hint={microphone === 'noDevice' ? t('onboarding.micNoDeviceHint') : undefined}
         />
 
         <div style={footerHintStyle}>
           {t('onboarding.footerHint')}
         </div>
+        <button
+          type="button"
+          onClick={onComplete}
+          style={{
+            width: '100%',
+            marginTop: 12,
+            padding: '9px 14px',
+            fontSize: 12.5,
+            fontWeight: 500,
+            fontFamily: 'inherit',
+            border: '0.5px solid var(--ol-line-strong)',
+            borderRadius: 8,
+            background: 'var(--ol-surface)',
+            color: 'var(--ol-ink-2)',
+            cursor: 'pointer',
+          }}
+        >
+          {t('onboarding.continueToSettings')}
+        </button>
       </div>
     </OnboardingSurface>
   );

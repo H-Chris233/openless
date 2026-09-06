@@ -33,6 +33,7 @@ pub fn set_qa_hotkey(
         if let Some(less_computer) = prefs.coding_agent_voice_hotkey.as_ref() {
             reject_qa_less_computer_hotkey_overlap(binding, less_computer)?;
         }
+        reject_existing_selection_polish_hotkey_overlap(binding, &prefs)?;
     }
     prefs.qa_hotkey = binding;
     coord.prefs().set(prefs).map_err(|e| e.to_string())?;
@@ -125,6 +126,19 @@ pub fn chat_panel_focus_keyboard(window: Window) -> Result<(), String> {
 #[tauri::command]
 pub fn less_computer_submit_text(coord: CoordinatorState<'_>, text: String) {
     coord.less_computer_submit_text(text);
+}
+
+/// 主设置页的文字测试入口。浮窗自身无需也不允许反向调用这个命令。
+#[tauri::command]
+pub fn less_computer_window_open(
+    window: Window,
+    coord: CoordinatorState<'_>,
+) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("Less Computer can only be opened from the main window".to_string());
+    }
+    coord.less_computer_window_open();
+    Ok(())
 }
 
 /// 浮窗 mount 时拉取当前会话的事件缓冲（seq 升序）。

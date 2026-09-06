@@ -33,6 +33,7 @@ const Onboarding = lazy(() =>
   import('./components/Onboarding').then(m => ({ default: m.Onboarding })),
 );
 const QaPanel = lazy(() => import('./pages/QaPanel').then(m => ({ default: m.QaPanel })));
+const SelectionPolishPreview = lazy(() => import('./pages/SelectionPolishPreview').then(m => ({ default: m.SelectionPolishPreview })));
 // Less Computer 仅 macOS 开放（后端只在 macOS 注册热键/创建窗口）。Tauri 构建时
 // TAURI_ENV_PLATFORM 是编译期字面量：非 macOS 平台下面两个三元的 import() 分支
 // 被常量折叠 + DCE 整个裁掉，面板 chunk 不进打包产物（门控 = 不打包）。
@@ -49,6 +50,7 @@ const LessComputerGlow = LESS_COMPUTER_BUNDLED
 interface AppProps {
   isCapsule: boolean;
   isQa: boolean;
+  isSelectionPolishPreview: boolean;
   isLessComputer: boolean;
   isLessComputerGlow: boolean;
   forcedOs?: OS | null;
@@ -57,7 +59,7 @@ interface AppProps {
 type Gate = 'onboarding' | 'ready';
 const ANDROID_SETUP_WIZARD_COMPLETE_KEY = 'openless.androidSetupWizardComplete';
 
-export function App({ isCapsule, isQa, isLessComputer, isLessComputerGlow, forcedOs }: AppProps) {
+export function App({ isCapsule, isQa, isSelectionPolishPreview, isLessComputer, isLessComputerGlow, forcedOs }: AppProps) {
   if (isCapsule) {
     return <Capsule os={forcedOs} />;
   }
@@ -67,6 +69,9 @@ export function App({ isCapsule, isQa, isLessComputer, isLessComputerGlow, force
         <QaPanel />
       </Suspense>
     );
+  }
+  if (isSelectionPolishPreview) {
+    return <Suspense fallback={null}><SelectionPolishPreview /></Suspense>;
   }
   if (isLessComputer) {
     return LessComputerPanel ? (
@@ -241,7 +246,9 @@ export function App({ isCapsule, isQa, isLessComputer, isLessComputerGlow, force
       ]);
       if (cancelled) return;
       const aOk = a === 'granted' || a === 'notApplicable';
-      const mOk = m === 'granted' || m === 'notApplicable';
+      // noDevice（当前没有麦克风）不是权限问题：不卡 onboarding，
+      // 让用户进应用后在权限页看到“未检测到麦克风”的明确提示。见 issue #779。
+      const mOk = m === 'granted' || m === 'notApplicable' || m === 'noDevice';
       setGate(aOk && mOk ? 'ready' : 'onboarding');
     })().catch(error => {
       console.warn('[startup] permission gate failed', error);
