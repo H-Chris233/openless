@@ -7,6 +7,7 @@ import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   addCorrectionRule,
+  isTauri,
   listCorrectionRules,
   removeCorrectionRule,
   setCorrectionRuleEnabled,
@@ -49,6 +50,21 @@ export function Corrections() {
 
   useEffect(() => {
     void refresh();
+    if (!isTauri) return;
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    // A cloud restore updates vocabulary and correction stores together.
+    void import('@tauri-apps/api/event')
+      .then(async ({ listen }) => {
+        const stop = await listen('vocab:updated', () => void refresh());
+        if (cancelled) stop();
+        else unlisten = stop;
+      })
+      .catch((error) => console.warn('[corrections] update listener failed', error));
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
   }, []);
 
   const onAddCorrectionRule = async () => {

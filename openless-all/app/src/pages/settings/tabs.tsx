@@ -10,12 +10,12 @@ import { ShortcutsSection } from './ShortcutsSection';
 import { SelectionWorkspaceSection } from './SelectionWorkspaceSection';
 import { LanguageSection } from './LanguageSection';
 import { ThemeSection } from './ThemeSection';
-import { LayoutSection } from './LayoutSection';
 import { ProvidersSection } from './ChannelList';
 import { NetworkSection } from './NetworkSection';
 import { MarketplaceSection } from './MarketplaceSection';
 import { PermissionsSection } from './PermissionsSection';
 import { DataStorageSection } from './DataStorageSection';
+import { CloudSyncSection } from './CloudSyncSection';
 import { LocalModelSection } from './LocalModelSection';
 import { DebugToolsSection } from './DebugToolsSection';
 import { MultimodalPipelineSection } from './MultimodalPipelineSection';
@@ -75,7 +75,6 @@ export function AppearanceTab() {
   return (
     <>
       <ThemeSection />
-      <LayoutSection />
       <LanguageSection />
     </>
   );
@@ -219,6 +218,7 @@ export function PrivacyTab() {
       </div>
       <PermissionsSection />
       <DataStorageSection />
+      <CloudSyncSection />
     </>
   );
 }

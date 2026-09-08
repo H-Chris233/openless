@@ -45,8 +45,8 @@
   --ol-on-accent: #ffffff;
 
   /* Shared glass（近实色：透感基本关闭，保留 token 结构） */
-  --ol-glass-bg: rgba(255, 255, 255, 0.94);
-  --ol-glass-bg-strong: rgba(255, 255, 255, 0.97);
+  --ol-glass-bg: #f8f8fa;
+  --ol-glass-bg-strong: #fcfcfd;
   --ol-glass-border: #e4e4e7;
   --ol-glass-blur: 20px;
   --ol-glass-blur-strong: 36px;
@@ -73,8 +73,8 @@
 
   /* Radii */
   --ol-shell-radius: 32px;
-  --ol-panel-radius: 28px;
-  --ol-card-radius: 22px;
+  --ol-panel-radius: 18px;
+  --ol-card-radius: 14px;
   --ol-pill-radius: 999px;
   --ol-r-sm: 6px;
   --ol-r-md: 10px;
@@ -103,7 +103,7 @@
   --ol-linux-titlebar-bg: rgba(250, 250, 250, 0.92);
   --ol-linux-titlebar-border: #e4e4e7;
 
-  --ol-panel-bg: rgba(255, 255, 255, 0.96);
+  --ol-panel-bg: #ffffff;
   --ol-panel-border: #e4e4e7;
   --ol-panel-shadow:
     0 24px 80px -32px rgba(15, 23, 42, 0.24), 0 12px 36px -18px rgba(15, 23, 42, 0.12);
@@ -154,7 +154,7 @@
   --ol-settings-rail-bg: #f0f0f1;
   --ol-settings-rail-border: rgba(255, 255, 255, 0.52);
   --ol-settings-links-border: rgba(255, 255, 255, 0.46);
-  --ol-settings-content-bg: #ffffff;
+  --ol-settings-content-bg: #f7f7f8;
   --ol-settings-close-bg: rgba(255, 255, 255, 0.38);
   --ol-settings-close-hover-bg: rgba(255, 255, 255, 0.72);
 
@@ -182,7 +182,7 @@
   --ol-segmented-active-bg: #ffffff;
   --ol-segmented-active-shadow: 0 1px 2px rgba(0, 0, 0, 0.06), 0 0 0 0.5px rgba(0, 0, 0, 0.06);
   --ol-select-trigger-bg: var(--ol-control-solid);
-  --ol-select-popover-bg: rgba(255, 255, 255, 0.97);
+  --ol-select-popover-bg: #fcfcfd;
   --ol-select-popover-border: rgba(0, 0, 0, 0.1);
   --ol-select-popover-shadow:
     0 12px 30px -10px rgba(15, 17, 22, 0.25), 0 0 0 0.5px rgba(0, 0, 0, 0.06);
@@ -207,7 +207,7 @@
   );
 
   /* Desktop capsule: follows app theme (light frosted pill / dark solid pill). */
-  --ol-capsule-pill-bg: rgba(255, 255, 255, 0.9);
+  --ol-capsule-pill-bg: #fafafa;
   --ol-capsule-pill-border: rgba(0, 0, 0, 0.1);
   --ol-capsule-pill-shadow:
     0 18px 50px -10px rgba(15, 17, 22, 0.16), 0 0 0 0.5px rgba(0, 0, 0, 0.06);
@@ -216,10 +216,10 @@
   --ol-capsule-btn-bg-confirm: rgba(0, 0, 0, 0.08);
   --ol-capsule-btn-ink: #2a2a2d;
   --ol-capsule-btn-border: rgba(0, 0, 0, 0.1);
-  --ol-capsule-center-ink: rgba(10, 10, 11, 0.72);
+  --ol-capsule-center-ink: #18181b;
   --ol-capsule-confirm-bg: var(--ol-capsule-btn-bg-confirm);
   --ol-capsule-confirm-ink: var(--ol-capsule-btn-ink);
-  --ol-capsule-badge-bg: rgba(255, 255, 255, 0.82);
+  --ol-capsule-badge-bg: #fafafa;
   --ol-capsule-badge-border: rgba(37, 99, 235, 0.25);
 }
 
@@ -260,8 +260,8 @@
   --ol-blue-ring: rgba(116, 183, 255, 0.34);
   --ol-on-accent: #f8fbff;
 
-  --ol-glass-bg: rgba(24, 24, 27, 0.94);
-  --ol-glass-bg-strong: rgba(24, 24, 27, 0.97);
+  --ol-glass-bg: #1c1c20;
+  --ol-glass-bg-strong: #202024;
   --ol-glass-border: #27272a;
 
   --ol-shadow-sm: 0 1px 1px rgba(0, 0, 0, 0.17), 0 0 0 0.5px rgba(226, 232, 240, 0.03);
@@ -281,7 +281,7 @@
   --ol-linux-titlebar-bg: rgba(20, 20, 23, 0.92);
   --ol-linux-titlebar-border: #27272a;
 
-  --ol-panel-bg: linear-gradient(180deg, rgba(24, 24, 27, 0.96), rgba(20, 20, 23, 0.95));
+  --ol-panel-bg: #18181b;
   --ol-panel-border: #27272a;
   --ol-panel-shadow: 0 28px 78px -42px rgba(0, 0, 0, 0.7), inset 0 1px 0 rgba(255, 255, 255, 0.04);
   --ol-card-bg: #18181b;
@@ -338,7 +338,7 @@
     0 1px 2px rgba(0, 0, 0, 0.36), 0 0 0 0.5px rgba(226, 232, 240, 0.1),
     inset 0 1px 0 rgba(255, 255, 255, 0.04);
   --ol-select-trigger-bg: var(--ol-control-solid);
-  --ol-select-popover-bg: rgba(24, 24, 27, 0.98);
+  --ol-select-popover-bg: #202024;
   --ol-select-popover-border: rgba(226, 232, 240, 0.12);
   --ol-select-popover-shadow:
     0 18px 42px -16px rgba(0, 0, 0, 0.62), 0 0 0 0.5px rgba(226, 232, 240, 0.08);
@@ -367,10 +367,10 @@
   --ol-capsule-btn-bg-confirm: #2b3848;
   --ol-capsule-btn-ink: #f4f7fb;
   --ol-capsule-btn-border: rgba(226, 232, 240, 0.14);
-  --ol-capsule-center-ink: rgba(244, 247, 251, 0.72);
+  --ol-capsule-center-ink: #f4f7fb;
   --ol-capsule-confirm-bg: var(--ol-capsule-btn-bg-confirm);
   --ol-capsule-confirm-ink: var(--ol-capsule-btn-ink);
-  --ol-capsule-badge-bg: rgba(27, 34, 44, 0.94);
+  --ol-capsule-badge-bg: #1b222c;
   --ol-capsule-badge-border: rgba(116, 183, 255, 0.3);
 }
 

@@ -10,7 +10,7 @@
   'use strict';
 
   // ============================================================
-  // i18n —— 文案字典（与 PC 端 src/i18n 对齐的 5 种语言）
+  // i18n —— 文案字典（与 PC 端 src/i18n 对齐的 8 种语言）
   // ============================================================
   var I18N = {
     'zh-CN': {
@@ -183,6 +183,184 @@
       copy: 'Copy',
       copied: 'Copied ✓',
     },
+    es: {
+      title: 'Entrada remota de OpenLess',
+      brandTitle: 'Entrada remota de OpenLess',
+      brandSub: 'Graba desde el móvil y escribe en el ordenador en tiempo real',
+      pinFieldLabel: 'Código de emparejamiento (6 dígitos mostrados en el ordenador)',
+      btnConnect: 'Conectar',
+      btnConnecting: 'Conectando…',
+      modeToggle: 'Tocar',
+      insertLabel: 'Escribir en el ordenador',
+      modeHold: 'Mantener',
+      offlineTitle: 'Desconectado',
+      offlineSub: 'Se ha perdido la conexión con el ordenador.',
+      btnReconnect: 'Volver a conectar',
+      certTip:
+        'En la primera visita, el navegador mostrará «No es seguro» por el certificado local autofirmado. En Chrome para Android: «Avanzado» → «Continuar». En Safari para iOS: «Mostrar detalles» → «Visitar este sitio web».',
+      tipToggle: 'Toca el botón grande para grabar y vuelve a tocarlo para terminar y transcribir.',
+      tipHold: 'Mantén pulsado el botón para hablar y suéltalo para terminar y transcribir.',
+      labelToggleIdle: 'Toca para empezar',
+      labelToggleRec: 'Toca para terminar',
+      labelHoldIdle: 'Mantén para hablar',
+      labelHoldRec: 'Suelta para terminar',
+      ready: 'Listo',
+      preparingMic: 'Preparando el micrófono…',
+      preparingBackend: 'Preparando el servicio…',
+      statusRecording: '🎤 Grabando',
+      statusTranscribing: '🔄 Transcribiendo',
+      statusPolishing: '✨ Puliendo el texto',
+      statusDone: '✅ Se han insertado {n} caracteres',
+      cancelled: 'Cancelado',
+      connLost: 'Conexión perdida',
+      errPinFormat: 'Introduce el código de emparejamiento de 6 dígitos.',
+      errPinWrong: 'El código no es correcto. Inténtalo de nuevo.',
+      errPinLocked: 'El emparejamiento está bloqueado. Genera otro código en el ordenador.',
+      errConnFail:
+        'No se pudo conectar. Comprueba que el móvil confía en el certificado del ordenador e inténtalo de nuevo.',
+      errConnCreate: 'No se pudo establecer la conexión. Comprueba la red.',
+      errConnTimeout:
+        'Se agotó el tiempo de conexión. Sigue los pasos de abajo para confiar en el certificado e inténtalo de nuevo.',
+      busy: 'Ordenador ocupado: {reason}',
+      busyDefault: 'espera un momento',
+      micDenied: '❌ Permiso de micrófono denegado. Actívalo en los ajustes del navegador.',
+      micNotFound: '❌ No hay ningún micrófono disponible.',
+      micBusy: '❌ Otra aplicación está usando el micrófono.',
+      micTimeout: '❌ Se agotó el tiempo de preparación del micrófono. Inténtalo de nuevo.',
+      pcmQueueOverflow: '❌ El búfer de audio está lleno. Inténtalo de nuevo.',
+      micUnknown: '❌ No se pudo iniciar la grabación{name}.',
+      errGeneric: 'Se ha producido un error',
+      helpTitle: '¿No puedes conectar? Comprueba el certificado en el móvil',
+      helpAndroid:
+        '① En Android u otros navegadores: abre esta página en una pestaña de incógnito, elige «Continuar» ante el aviso «No es seguro» e introduce el código.',
+      helpIos:
+        '② En Safari para iOS: abre una pestaña privada, toca «Mostrar detalles → Visitar este sitio web» ante el aviso de privacidad e introduce el código. No hace falta instalar el certificado.',
+      helpDownloadCert: '⬇ Descargar e instalar el certificado',
+      helpCopyLink: '⧉ Copiar enlace',
+      helpCopied: 'Copiado ✓',
+      copy: 'Copiar',
+      copied: 'Copiado ✓',
+    },
+    fr: {
+      title: 'Saisie à distance OpenLess',
+      brandTitle: 'Saisie à distance OpenLess',
+      brandSub: 'Enregistrez sur votre téléphone et écrivez sur votre ordinateur en temps réel',
+      pinFieldLabel: 'Code de jumelage (6 chiffres affichés sur votre ordinateur)',
+      btnConnect: 'Connecter',
+      btnConnecting: 'Connexion…',
+      modeToggle: 'Toucher',
+      insertLabel: 'Saisir sur le PC',
+      modeHold: 'Maintenir',
+      offlineTitle: 'Déconnecté',
+      offlineSub: 'La connexion à votre ordinateur a été perdue.',
+      btnReconnect: 'Reconnecter',
+      certTip:
+        'À la première visite, le navigateur affiche « Non sécurisé » à cause du certificat local autosigné. Chrome sur Android : « Paramètres avancés » → « Continuer ». Safari sur iOS : « Afficher les détails » → « Visiter ce site web ».',
+      tipToggle:
+        'Touchez le grand bouton pour enregistrer, puis à nouveau pour terminer et transcrire.',
+      tipHold:
+        'Maintenez le grand bouton pour parler, puis relâchez-le pour terminer et transcrire.',
+      labelToggleIdle: 'Toucher pour démarrer',
+      labelToggleRec: 'Toucher pour arrêter',
+      labelHoldIdle: 'Maintenir pour parler',
+      labelHoldRec: 'Relâcher pour arrêter',
+      ready: 'Prêt',
+      preparingMic: 'Préparation du microphone…',
+      preparingBackend: 'Préparation du service…',
+      statusRecording: '🎤 Enregistrement',
+      statusTranscribing: '🔄 Transcription',
+      statusPolishing: '✨ Retouche du texte',
+      statusDone: '✅ {n} caractères insérés',
+      cancelled: 'Annulé',
+      connLost: 'Connexion perdue',
+      errPinFormat: 'Saisissez le code de jumelage à 6 chiffres.',
+      errPinWrong: 'Code incorrect. Réessayez.',
+      errPinLocked: 'Jumelage verrouillé. Générez un nouveau code sur votre ordinateur.',
+      errConnFail:
+        'Connexion impossible. Vérifiez que le téléphone accepte le certificat de votre ordinateur, puis réessayez.',
+      errConnCreate: 'Impossible de se connecter. Vérifiez votre réseau.',
+      errConnTimeout:
+        'Délai de connexion dépassé. Suivez les instructions ci-dessous pour accepter le certificat, puis réessayez.',
+      busy: 'Ordinateur occupé : {reason}',
+      busyDefault: 'veuillez patienter',
+      micDenied: '❌ Accès au microphone refusé. Autorisez-le dans les réglages du navigateur.',
+      micNotFound: '❌ Aucun microphone disponible.',
+      micBusy: '❌ Le microphone est utilisé par une autre application.',
+      micTimeout: '❌ La préparation du microphone a expiré. Réessayez.',
+      pcmQueueOverflow: '❌ Le tampon audio est plein. Réessayez.',
+      micUnknown: '❌ Impossible de démarrer l’enregistrement{name}.',
+      errGeneric: 'Une erreur est survenue',
+      helpTitle: 'Connexion impossible ? Vérifiez le certificat sur votre téléphone',
+      helpAndroid:
+        '① Sur Android ou un autre navigateur : ouvrez cette page en navigation privée, choisissez « Continuer » après l’avertissement de sécurité, puis saisissez le code.',
+      helpIos:
+        '② Sur Safari pour iOS : ouvrez un onglet privé, touchez « Afficher les détails → Visiter ce site web » après l’avertissement, puis saisissez le code. Aucune installation de certificat n’est nécessaire.',
+      helpDownloadCert: '⬇ Télécharger et installer le certificat',
+      helpCopyLink: '⧉ Copier le lien',
+      helpCopied: 'Copié ✓',
+      copy: 'Copier',
+      copied: 'Copié ✓',
+    },
+    de: {
+      title: 'OpenLess Ferneingabe',
+      brandTitle: 'OpenLess Ferneingabe',
+      brandSub: 'Auf dem Smartphone aufnehmen und in Echtzeit am Computer schreiben',
+      pinFieldLabel: 'Kopplungscode (6 Ziffern auf dem Computer)',
+      btnConnect: 'Verbinden',
+      btnConnecting: 'Verbindung wird hergestellt…',
+      modeToggle: 'Tippen',
+      insertLabel: 'Am Computer einfügen',
+      modeHold: 'Gedrückt halten',
+      offlineTitle: 'Getrennt',
+      offlineSub: 'Die Verbindung zum Computer wurde getrennt.',
+      btnReconnect: 'Erneut verbinden',
+      certTip:
+        'Beim ersten Besuch meldet der Browser „Nicht sicher“, da das lokale Zertifikat selbst signiert ist. In Chrome für Android: „Erweitert“ → „Weiter“. In Safari für iOS: „Details einblenden“ → „Diese Website besuchen“.',
+      tipToggle:
+        'Tippe auf die große Schaltfläche, um aufzunehmen. Tippe erneut, um die Aufnahme zu beenden und zu transkribieren.',
+      tipHold:
+        'Halte die große Schaltfläche zum Sprechen gedrückt. Lass sie los, um die Aufnahme zu beenden und zu transkribieren.',
+      labelToggleIdle: 'Zum Starten tippen',
+      labelToggleRec: 'Zum Beenden tippen',
+      labelHoldIdle: 'Zum Sprechen halten',
+      labelHoldRec: 'Zum Beenden loslassen',
+      ready: 'Bereit',
+      preparingMic: 'Mikrofon wird vorbereitet…',
+      preparingBackend: 'Dienst wird vorbereitet…',
+      statusRecording: '🎤 Aufnahme läuft',
+      statusTranscribing: '🔄 Transkription läuft',
+      statusPolishing: '✨ Text wird überarbeitet',
+      statusDone: '✅ {n} Zeichen eingefügt',
+      cancelled: 'Abgebrochen',
+      connLost: 'Verbindung getrennt',
+      errPinFormat: 'Gib den 6-stelligen Kopplungscode ein.',
+      errPinWrong: 'Der Code ist falsch. Versuche es erneut.',
+      errPinLocked: 'Die Kopplung ist gesperrt. Erstelle am Computer einen neuen Code.',
+      errConnFail:
+        'Die Verbindung ist fehlgeschlagen. Prüfe, ob das Smartphone dem Zertifikat des Computers vertraut, und versuche es erneut.',
+      errConnCreate: 'Die Verbindung konnte nicht hergestellt werden. Prüfe dein Netzwerk.',
+      errConnTimeout:
+        'Zeitüberschreitung bei der Verbindung. Befolge die Schritte unten, um dem Zertifikat zu vertrauen, und versuche es erneut.',
+      busy: 'Computer beschäftigt: {reason}',
+      busyDefault: 'bitte warten',
+      micDenied: '❌ Mikrofonzugriff verweigert. Erlaube ihn in den Browsereinstellungen.',
+      micNotFound: '❌ Kein Mikrofon verfügbar.',
+      micBusy: '❌ Eine andere App verwendet das Mikrofon.',
+      micTimeout: '❌ Zeitüberschreitung beim Vorbereiten des Mikrofons. Versuche es erneut.',
+      pcmQueueOverflow: '❌ Der Audiopuffer ist voll. Versuche es erneut.',
+      micUnknown: '❌ Die Aufnahme konnte nicht gestartet werden{name}.',
+      errGeneric: 'Ein Fehler ist aufgetreten',
+      helpTitle: 'Keine Verbindung? Prüfe das Zertifikat auf deinem Smartphone',
+      helpAndroid:
+        '① Android oder andere Browser: Öffne diese Seite in einem privaten Tab, wähle bei der Sicherheitswarnung „Weiter“ und gib den Kopplungscode ein.',
+      helpIos:
+        '② Safari für iOS: Öffne einen privaten Tab und tippe bei der Warnung auf „Details einblenden → Diese Website besuchen“. Gib dann den Code ein. Eine Zertifikatsinstallation ist nicht erforderlich.',
+      helpDownloadCert: '⬇ Zertifikat herunterladen und installieren',
+      helpCopyLink: '⧉ Link kopieren',
+      helpCopied: 'Kopiert ✓',
+      copy: 'Kopieren',
+      copied: 'Kopiert ✓',
+    },
     ja: {
       title: 'OpenLess リモート入力',
       brandTitle: 'OpenLess リモート入力',
@@ -303,9 +481,8 @@
 
   // 解析显示语言：优先 PC 注入的 window.__OL_LANG__，回退手机系统语言。
   var LANG = (function () {
-    var supported = { 'zh-CN': 1, 'zh-TW': 1, en: 1, ja: 1, ko: 1 };
     var injected = (window.__OL_LANG__ || '').trim();
-    if (supported[injected]) return injected;
+    if (Object.prototype.hasOwnProperty.call(I18N, injected)) return injected;
     var nav = (navigator.language || '').toLowerCase();
     if (nav.indexOf('zh') === 0) {
       if (
@@ -317,9 +494,8 @@
         return 'zh-TW';
       return 'zh-CN';
     }
-    if (nav.indexOf('ja') === 0) return 'ja';
-    if (nav.indexOf('ko') === 0) return 'ko';
-    if (nav.indexOf('en') === 0) return 'en';
+    var base = nav.split('-')[0];
+    if (Object.prototype.hasOwnProperty.call(I18N, base)) return base;
     return 'zh-CN';
   })();
   var L = I18N[LANG] || I18N['zh-CN'];

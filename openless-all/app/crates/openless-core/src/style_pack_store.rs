@@ -95,6 +95,20 @@ impl StylePackStore {
         Ok(self.lock()?.clone())
     }
 
+    pub(crate) fn cloud_sync_access(
+        &self,
+    ) -> Result<(std::sync::MutexGuard<'_, Vec<StylePack>>, &Path, &Path), BackendError> {
+        let path = self
+            .path
+            .as_deref()
+            .ok_or_else(|| persistence_error("style pack store has no persistent path"))?;
+        let assets = self
+            .asset_root
+            .as_deref()
+            .ok_or_else(|| persistence_error("style pack asset root unavailable"))?;
+        Ok((self.lock()?, path, assets))
+    }
+
     pub fn list_with_active(&self, active_id: &str) -> Result<Vec<StylePack>, BackendError> {
         let mut packs = self.list()?;
         for pack in &mut packs {
@@ -263,7 +277,14 @@ impl StylePackStore {
     /// Returns an error for an unknown pack, an invalid image or path, or a read failure.
     pub fn icon_data_url(&self, id: &str) -> Result<Option<String>, BackendError> {
         let pack = self.get(id)?;
-        let Some(path) = pack.icon_path else {
+        self.icon_data_url_for_pack(&pack)
+    }
+
+    pub(crate) fn icon_data_url_for_pack(
+        &self,
+        pack: &StylePack,
+    ) -> Result<Option<String>, BackendError> {
+        let Some(path) = &pack.icon_path else {
             return Ok(None);
         };
         let root = self
@@ -549,6 +570,12 @@ impl StylePackStore {
             None => Ok(()),
         }
     }
+}
+
+pub(crate) fn normalize_cloud_style_packs(packs: &mut Vec<StylePack>) {
+    reconcile_builtin_packs(packs);
+    ensure_at_least_one_enabled(packs);
+    sort_packs(packs);
 }
 
 pub fn migrate_style_packs_from_preferences(

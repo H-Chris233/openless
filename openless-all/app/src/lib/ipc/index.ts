@@ -273,3 +273,7 @@ export { takeSplashPlayback, SPLASH_MAJOR } from './splash';
 
 // utils
 export { openExternal, exportErrorLog, logClientError, debugReadCursorContext } from './utils';
+
+// Personal cloud backups use the native credential store and Core-owned data.
+export { cloudSyncStatus, cloudSyncUpload, cloudSyncRestore, cloudSyncDelete } from './cloud-sync';
+export type { CloudSyncStatus, CloudSyncUiPreferences, CloudSyncRestoreResult } from './cloud-sync';

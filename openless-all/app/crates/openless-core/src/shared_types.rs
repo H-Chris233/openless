@@ -330,8 +330,7 @@ pub struct UserPreferences {
     pub custom_style_prompts: CustomStylePrompts,
     pub launch_at_login: bool,
     pub show_capsule: bool,
-    /// 录音胶囊样式：'siri' = 流光 Siri 光效版（默认）；'classic' = Openless 经典药丸版。
-    /// 由 capsule:state 事件的 capsuleStyle 字段下发到胶囊 webview，下次录音即生效。
+    /// 录音胶囊外观。偏好事件同步到各窗口，录音状态同时携带当前样式。
     #[serde(default)]
     pub capsule_style: CapsuleStyle,
     /// 录音期间临时静音系统输出，停止/取消/出错后恢复原静音状态。
@@ -2270,8 +2269,7 @@ pub enum CapsuleState {
     Error,
 }
 
-/// 录音胶囊样式。由 UserPreferences.capsule_style 透传到 capsule:state payload，
-/// 胶囊 webview 据此选择渲染流光 Siri 光效舞台还是经典药丸。
+/// 录音胶囊外观；序列化值用于偏好存储与各 Host 的窗口事件。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum CapsuleStyle {
@@ -2280,6 +2278,8 @@ pub enum CapsuleStyle {
     Siri,
     /// Openless 默认风格：经典毛玻璃药丸（音量条 + 取消/确认按钮）。
     Classic,
+    /// 传统深色胶囊：蓝色波形，处理时收窄成状态提示。
+    Typeless,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2868,16 +2868,20 @@ mod tests {
         let prefs: UserPreferences = serde_json::from_str("{}").unwrap();
         assert_eq!(prefs.capsule_style, CapsuleStyle::Siri);
 
-        // 设置里切到 Classic 后：set_settings 存盘（camelCase wire 键）→ 重启
-        // get_settings 读回，必须保持 Classic（配置文件持久化 roundtrip）。
-        let classic = UserPreferences {
-            capsule_style: CapsuleStyle::Classic,
-            ..Default::default()
-        };
-        let json = serde_json::to_string(&classic).unwrap();
-        assert!(json.contains(r#""capsuleStyle":"classic""#));
-        let restored: UserPreferences = serde_json::from_str(&json).unwrap();
-        assert_eq!(restored.capsule_style, CapsuleStyle::Classic);
+        for (style, wire_name) in [
+            (CapsuleStyle::Siri, "siri"),
+            (CapsuleStyle::Classic, "classic"),
+            (CapsuleStyle::Typeless, "typeless"),
+        ] {
+            let preferences = UserPreferences {
+                capsule_style: style,
+                ..Default::default()
+            };
+            let value = serde_json::to_value(&preferences).unwrap();
+            assert_eq!(value["capsuleStyle"], wire_name);
+            let restored: UserPreferences = serde_json::from_value(value).unwrap();
+            assert_eq!(restored.capsule_style, style);
+        }
     }
 
     #[test]

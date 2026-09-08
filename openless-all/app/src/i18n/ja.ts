@@ -6,6 +6,40 @@ import { en } from './en';
 // 更新してください（更新されない key は ...en で英語にフォールバックします）。
 export const ja: typeof zhCN = {
   ...en,
+  cloudSync: {
+    title: 'クラウド同期',
+    description: 'GitHub アカウントで辞書、スタイル、個人設定をデバイス間で同期します。',
+    signIn: 'GitHub でログイン',
+    account: '同期アカウント',
+    refresh: '状態を更新',
+    loading: 'クラウドの状態を確認中…',
+    noBackup: 'クラウドバックアップはありません',
+    available: 'クラウドバックアップがあります',
+    summary: '単語 {{dictionary}} 件 · 修正规則 {{corrections}} 件 · スタイル {{stylePacks}} 件',
+    updated: '更新日時：{{time}}',
+    upload: 'クラウドにバックアップ',
+    restore: 'クラウドから復元',
+    delete: 'クラウドバックアップを削除',
+    working: '同期中…',
+    uploadSuccess: 'クラウドに保存しました',
+    restoreSuccess: 'クラウドの設定を復元しました',
+    deleteSuccess: 'クラウドバックアップを削除しました',
+    failed: '同期に失敗しました：{{error}}',
+    conflict:
+      'クラウドの内容が更新されています。状態を更新してから、バックアップまたは復元を選んでください。',
+    unavailable: '公式の同期サービスを利用できません。後でもう一度お試しください。',
+    signInRequired: '先に GitHub でログインしてください。',
+    restoreTitle: 'クラウドバックアップを復元しますか？',
+    restoreDescription:
+      'クラウドの辞書、修正规則、スタイル、同期設定で、このデバイスの対応する内容を置き換えます。API キー、デバイスのパス、権限は保持されます。',
+    deleteTitle: 'クラウドバックアップを削除しますか？',
+    deleteDescription:
+      'この GitHub アカウントのクラウドバックアップだけを削除します。ローカルデータは保持されます。',
+    confirmRestore: '復元して置き換える',
+    confirmDelete: 'バックアップを削除',
+    scope:
+      '辞書、修正规則、スタイルのアイコン、共通設定を同期します。API キー、ログイン情報、デバイス固有の設定は本機に保持されます。',
+  },
   app: {
     name: 'OpenLess',
     tagline: '自然に話し、きれいに書く',
@@ -137,7 +171,7 @@ export const ja: typeof zhCN = {
     more: 'その他',
   },
   marketplace: {
-    kicker: 'MARKETPLACE',
+    kicker: 'マーケット',
     title: 'スタイルパック マーケット',
     desc: 'コミュニティのスタイルパックを閲覧・インストール・共有。',
     searchPlaceholder: '名前 / 説明 / タグを検索…',
@@ -246,7 +280,7 @@ export const ja: typeof zhCN = {
     shortcutLabel: '録音ショートカット',
     shortcutHint: '開始 / 停止',
     betaTag: 'BETA',
-    betaNote: 'すべてのデータはローカルにのみ保存されます。',
+    betaNote: 'ローカル保存、任意でクラウドバックアップ',
     navHint: {
       overview: 'ステータス概要：使用状況・プロバイダー・権限の状態',
       history: '入力履歴：過去の書き起こしを検索・再生・コピー',
@@ -372,7 +406,7 @@ export const ja: typeof zhCN = {
       permissionsHint:
         '録音やショートカットが反応しない場合は、「権限とデータ」で権限、マイク、ショートカットの状態を確認してください。',
     },
-    kicker: 'DASHBOARD',
+    kicker: '概要',
     title: '本日の概要',
     desc: '本日のディクテーション統計とシステム状態。',
     pressPrefix: '押す',
@@ -437,7 +471,7 @@ export const ja: typeof zhCN = {
   },
   history: {
     exportError: '録音のエクスポートに失敗しました。もう一度お試しください。',
-    kicker: 'HISTORY',
+    kicker: '履歴',
     title: '履歴',
     desc: 'ローカルに保存された認識記録。',
     filterAll: 'すべて',
@@ -507,7 +541,14 @@ export const ja: typeof zhCN = {
     dismiss: '閉じる',
   },
   vocab: {
-    kicker: 'DICTIONARY',
+    selectAllVisible: '現在の結果を選択',
+    selectedCount: '{{count}} 語を選択中',
+    selectWord: '「{{phrase}}」を選択',
+    deleteSelected: '選択項目を削除（{{count}}）',
+    batchDeleteFailed:
+      '{{count}} 語を削除できませんでした。選択状態を保持しています。再試行できます。',
+
+    kicker: '辞書',
     title: '辞書',
     desc: '新語や専門用語を追加して認識精度を向上。',
     sectionTitle: '項目',
@@ -567,7 +608,7 @@ export const ja: typeof zhCN = {
     },
   },
   style: {
-    kicker: 'STYLE',
+    kicker: 'スタイル',
     title: '出力スタイル',
     desc: '録音のデフォルト出力スタイルを選択。',
     masterToggle: '全体有効化',
@@ -597,7 +638,7 @@ export const ja: typeof zhCN = {
       },
       structured: {
         name: '明確な構造',
-        desc: '複数のトピックや手順がある場合は、自動的に箇条書きに整理します。',
+        desc: '開発の相談、技術的な問題解決、製品への意見を、用語を正確に保って整理します。',
         sample: '1. トピック 1\na. ポイント\nb. ポイント\n2. トピック 2\na. ポイント\nb. ポイント',
       },
       formal: {
@@ -607,6 +648,18 @@ export const ja: typeof zhCN = {
       },
     },
     pack: {
+      builtinTags: {
+        minimalEdits: '最小限の修正',
+        strongCorrection: '誤認識を補正',
+        communication: 'コミュニケーション',
+        natural: '自然な文章',
+        organized: '整理',
+        workplaceCommunication: '仕事のやり取り',
+        aiCoding: 'AIコーディング',
+        technicalStructure: '技術内容の構造化',
+      },
+      newName: '名称未設定のスタイル',
+      newDescription: 'このスタイルを使う場面を簡潔に説明してください。',
       uploadIcon: '{{name}} の SVG アイコンをアップロード',
       resetIcon: '既定のアイコンに戻す',
       iconSaved: 'アイコンを保存しました',
@@ -635,7 +688,7 @@ export const ja: typeof zhCN = {
       selectionActivated: '「{{name}}」を選択範囲の推敲に設定しました',
       selectionActivateFailed: '選択範囲の推敲スタイル切替に失敗：{{err}}',
       selectionChars: '{{count}} 文字',
-      kicker: 'STYLE PACKS',
+      kicker: 'スタイルパック',
       title: 'スタイルパック',
       desc: 'ローカルスタイルパックを管理。',
       marketplaceBtn: 'マーケット',
@@ -733,7 +786,13 @@ export const ja: typeof zhCN = {
     },
   },
   translation: {
-    kicker: 'TRANSLATION',
+    searchLanguages: '言語を検索…',
+    noMatchingLanguages: '一致する言語がありません',
+    selectedLanguages: '{{count}} 言語を選択中',
+
+    languageSupportHint:
+      '音声認識で使える言語はサービスによって異なります。翻訳先はアプリの表示言語とは独立しています。',
+    kicker: '翻訳',
     title: '翻訳',
     desc: '録音後に自動翻訳してから入力。',
     statusEnabled: '有効',
@@ -834,7 +893,7 @@ export const ja: typeof zhCN = {
       previewConfirm: 'プレビューして確認',
       previewConfirmHint: '編集可能なウィンドウで結果を確認してから、元の選択範囲を置き換えます。',
     },
-    kicker: 'SETTINGS',
+    kicker: '設定',
     title: '設定',
     desc: '録音、プロバイダー、ショートカット、権限の設定。',
     network: {
@@ -947,6 +1006,7 @@ export const ja: typeof zhCN = {
       openPanelAction: 'Less Computer を開く',
     },
     debug: {
+      cursorLabel: 'カーソル',
       title: 'デバッグツール',
       desc: '認識の問題を調査するときに使用。通常はオフのままで構いません。',
       cursorProbeLabel: 'カーソル文脈プローブ',
@@ -1004,6 +1064,7 @@ export const ja: typeof zhCN = {
       microphoneMonitorError: '入力レベルの監視に失敗：{{message}}',
       capsuleLabel: '録音カプセル',
       capsuleDesc: '録音 / 転写中、画面下部に半透明のカプセルを表示。',
+      capsuleStyleTypeless: 'Typeless コンパクトスタイル',
       capsuleStyleLabel: 'カプセルスタイル',
       capsuleStyleSiri: '光条 Siri スタイル',
       capsuleStyleClassic: 'Openless デフォルトスタイル',
@@ -1569,6 +1630,9 @@ export const ja: typeof zhCN = {
       confirm: '有効化する',
     },
     language: {
+      es: 'Español',
+      fr: 'Français',
+      de: 'Deutsch',
       title: '表示言語',
       desc: 'UI の表示言語を切り替えます。現在のセッションに即時反映され、次回起動時も維持されます。',
       label: '言語',
@@ -1802,6 +1866,7 @@ export const ja: typeof zhCN = {
     },
   },
   windowChrome: {
+    restore: '元のサイズに戻す',
     minimize: '最小化',
     maximize: '最大化',
     close: '閉じる',

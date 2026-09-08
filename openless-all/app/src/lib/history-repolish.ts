@@ -1,4 +1,4 @@
-import type { DictationSession, PolishMode, StylePack } from './types';
+import type { DictationSession, StylePack } from './types';
 
 /**
  * 「用原风格重试」要用的风格包 id。
@@ -18,16 +18,8 @@ export function resolveRepolishRetryPackId(
   return allPacks.some((pack) => pack.id === session.stylePackId) ? session.stylePackId : undefined;
 }
 
-/**
- * 风格包在界面上的显示名。
- *
- * 内置包例外：后端内置包名是硬编码中文（"轻度润色"…），直接显示会在英/日/韩界面
- * 串语言，所以内置包一律走 i18n 的 mode 名（与历史条目 Pill 同一原则）。自定义包
- * 显示用户起的原名。
- */
-export function packDisplayName(pack: StylePack, modeLabel: Record<PolishMode, string>): string {
-  return pack.kind === 'builtin' ? modeLabel[pack.baseMode] : pack.name.trim();
-}
+// History shares the card label policy, including user-renamed builtins.
+export { stylePackDisplayName as packDisplayName } from './stylePackPresentation';
 
 /** 「换风格」下拉的默认选中项：当前激活包优先，其次第一个可用包，空列表返回 ''。 */
 export function defaultPackId(packs: StylePack[]): string {

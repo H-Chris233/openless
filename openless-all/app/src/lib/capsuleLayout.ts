@@ -1,4 +1,5 @@
 import type { OS } from '../components/WindowChrome';
+import type { CapsuleStyle } from './types';
 
 export type CapsuleMessageKind = 'default' | 'processing' | 'error';
 
@@ -30,6 +31,10 @@ const VOICE_ORB_STAGE_WIDTH = 460;
 const VOICE_ORB_STAGE_HEIGHT = 180;
 const VOICE_ORB_TEXT_WIDTH = 400;
 
+export function parseCapsuleStyle(value: unknown): CapsuleStyle | undefined {
+  return value === 'siri' || value === 'classic' || value === 'typeless' ? value : undefined;
+}
+
 export function getCapsulePillMetrics(os: OS): CapsulePillMetrics {
   void os;
   return {
@@ -40,14 +45,18 @@ export function getCapsulePillMetrics(os: OS): CapsulePillMetrics {
   };
 }
 
-export function getCapsuleHostMetrics(os: OS, translationActive: boolean): CapsuleHostMetrics {
+export function getCapsuleHostMetrics(
+  os: OS,
+  translationActive: boolean,
+  style: CapsuleStyle = 'siri',
+): CapsuleHostMetrics {
   const stage = getCapsulePillMetrics(os);
   void translationActive;
   return {
     width: stage.width,
-    height: stage.height,
+    height: style === 'siri' ? stage.height : style === 'classic' ? 100 : 128,
     horizontalInset: 0,
-    bottomInset: 0,
+    bottomInset: style === 'siri' ? 0 : 16,
     badgeGap: 8,
     boxSizing: 'border-box',
   };

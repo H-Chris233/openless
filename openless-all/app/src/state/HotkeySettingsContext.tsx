@@ -10,7 +10,6 @@ import {
 } from 'react';
 import { getHotkeyCapability, getSettings, isTauri, setSettings } from '../lib/ipc';
 import type { HotkeyBinding, HotkeyCapability, UserPreferences } from '../lib/types';
-import i18n, { outputPrefsForLocale, type SupportedLocale } from '../i18n';
 import { applyThemeFromPreference } from '../lib/themeMode';
 import { applyStackedLayoutFromPrefs } from '../lib/stackedLayout';
 import { applyConservativeLayout } from '../lib/conservativeLayout';
@@ -128,35 +127,6 @@ export function HotkeySettingsProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     latestPrefsRef.current = prefs;
   }, [prefs]);
-
-  useEffect(() => {
-    const currentPrefs = latestPrefsRef.current;
-    if (!currentPrefs) return;
-    const lang = (i18n.resolvedLanguage || i18n.language || '').toLowerCase();
-    const resolvedLocale: SupportedLocale =
-      lang.startsWith('zh-tw') || lang.includes('hant')
-        ? 'zh-TW'
-        : lang.startsWith('zh-cn') || lang.startsWith('zh')
-          ? 'zh-CN'
-          : lang.startsWith('ja')
-            ? 'ja'
-            : lang.startsWith('ko')
-              ? 'ko'
-              : 'en';
-    const nextLocalePrefs = outputPrefsForLocale(resolvedLocale);
-    if (
-      currentPrefs.chineseScriptPreference === nextLocalePrefs.chineseScriptPreference &&
-      currentPrefs.outputLanguagePreference === nextLocalePrefs.outputLanguagePreference
-    ) {
-      return;
-    }
-    const merged = { ...currentPrefs, ...nextLocalePrefs };
-    latestPrefsRef.current = merged;
-    setPrefs(merged);
-    void queueSetSettings(merged).catch((error) => {
-      console.warn('[settings] sync locale output preferences failed', error);
-    });
-  }, [prefs, queueSetSettings]);
 
   const updatePrefs = useCallback(
     async (next: UserPreferences | ((current: UserPreferences) => UserPreferences)) => {

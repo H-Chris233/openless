@@ -25,6 +25,7 @@ import {
 import { useMobileLayout } from '../lib/useMobileLayout';
 import type { DictationSession, PolishMode, StylePack } from '../lib/types';
 import { countCodePoints } from '../lib/unicode';
+import { formatHistoryTime, formatLocaleDecimal, formatLocaleNumber } from '../lib/localeFormat';
 import { useHotkeySettings } from '../state/HotkeySettingsContext';
 import { Btn, Card, PageHeader, Pill } from './_atoms';
 import { SelectLite } from '../components/ui/SelectLite';
@@ -67,7 +68,8 @@ function styleLabelFor(
 }
 
 export function History() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const locale = i18n.resolvedLanguage || i18n.language;
   const os = detectOS();
   const MODE_LABEL = useModeLabel();
   const [query, setQuery] = useState('');
@@ -494,7 +496,7 @@ export function History() {
                             color: 'var(--ol-ink-3)',
                           }}
                         >
-                          {formatTime(s.createdAt)}
+                          {formatHistoryTime(s.createdAt, locale)}
                         </span>
                         <span
                           style={{
@@ -503,7 +505,7 @@ export function History() {
                             fontFamily: 'var(--ol-font-mono)',
                           }}
                         >
-                          {formatDuration(s.durationMs, t)}
+                          {formatDuration(s.durationMs, t, locale)}
                         </span>
                       </div>
                       <div
@@ -571,7 +573,7 @@ export function History() {
                         flexShrink: 0,
                       }}
                     >
-                      {formatTime(item.createdAt)}
+                      {formatHistoryTime(item.createdAt, locale)}
                     </span>
                     <span style={{ display: 'flex', minWidth: 0 }} title={styleLabel(item)}>
                       <Pill size="sm" tone="default" style={TRUNCATED_PILL_STYLE}>
@@ -586,7 +588,9 @@ export function History() {
                     {/* 「录音」前缀：与下方识别/润色耗时区分——录音时长发生在松键前，
                       不该与流水线各步耗时加总（用户反馈"时间对不上"）。 */}
                     <span style={{ fontSize: 11, color: 'var(--ol-ink-4)' }}>
-                      {t('history.recorded', { duration: formatDuration(item.durationMs, t) })}
+                      {t('history.recorded', {
+                        duration: formatDuration(item.durationMs, t, locale),
+                      })}
                     </span>
                   </div>
                   <div style={{ display: 'flex', gap: 6 }}>
@@ -685,7 +689,7 @@ export function History() {
                           whiteSpace: 'nowrap',
                         }}
                       >
-                        {item.asrMs != null ? formatStepDuration(item.asrMs, t) : ''}
+                        {item.asrMs != null ? formatStepDuration(item.asrMs, t, locale) : ''}
                       </span>
                     </>
                   )}
@@ -708,7 +712,7 @@ export function History() {
                           whiteSpace: 'nowrap',
                         }}
                       >
-                        {item.polishMs != null ? formatStepDuration(item.polishMs, t) : ''}
+                        {item.polishMs != null ? formatStepDuration(item.polishMs, t, locale) : ''}
                       </span>
                     </>
                   )}
@@ -1297,26 +1301,25 @@ function AudioRecordingPlayer({
   );
 }
 
-function formatTime(iso: string): string {
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return iso;
-  const now = new Date();
-  const sameDay = d.toDateString() === now.toDateString();
-  const pad = (n: number) => String(n).padStart(2, '0');
-  if (sameDay) return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
-  return `${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
 /** 流水线单步耗时：<1s 显示整数毫秒（流式收尾常在几十 ms，0.1s 精度会把不同结果
  *  拍成同一个值，模型对比就失真了——PR #826 review）；≥1s 沿用 0.1s 精度。 */
-function formatStepDuration(ms: number, t: ReturnType<typeof useTranslation>['t']): string {
-  if (ms < 1000) return t('common.durationMillis', { value: Math.round(ms) });
-  return formatDuration(ms, t);
+function formatStepDuration(
+  ms: number,
+  t: ReturnType<typeof useTranslation>['t'],
+  locale: string,
+): string {
+  if (ms < 1000)
+    return t('common.durationMillis', { value: formatLocaleNumber(Math.round(ms), locale) });
+  return formatDuration(ms, t, locale);
 }
 
-function formatDuration(ms: number | null, t: ReturnType<typeof useTranslation>['t']): string {
+function formatDuration(
+  ms: number | null,
+  t: ReturnType<typeof useTranslation>['t'],
+  locale: string,
+): string {
   if (ms == null || ms <= 0) return '—';
   const sec = ms / 1000;
-  if (sec < 60) return t('common.durationSeconds', { value: sec.toFixed(1) });
-  return t('common.durationMinutes', { value: (sec / 60).toFixed(1) });
+  if (sec < 60) return t('common.durationSeconds', { value: formatLocaleDecimal(sec, locale) });
+  return t('common.durationMinutes', { value: formatLocaleDecimal(sec / 60, locale) });
 }

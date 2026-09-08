@@ -1,13 +1,10 @@
-// 语言切换面板：跟随系统 / 简中 / 繁中 / 英文 / 日文 (Beta) / 韩文 (Beta)。
-// 切换语言同时把对应的 outputPrefs（中文偏好、输出语言）合并进 prefs。
+// 界面语言单独持久化；不覆盖工作语言或翻译目标。
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useHotkeySettings } from '../../state/HotkeySettingsContext';
 import {
   FOLLOW_SYSTEM,
   getLocalePreference,
-  outputPrefsForLocale,
   setLocalePreference,
   type SupportedLocale,
 } from '../../i18n';
@@ -16,9 +13,10 @@ import { Card } from '../_atoms';
 import { SettingRow } from './shared';
 
 export function LanguageSection() {
-  const { t } = useTranslation();
-  const { updatePrefs } = useHotkeySettings();
+  const { t, i18n } = useTranslation();
   const [pref, setPref] = useState<SupportedLocale | typeof FOLLOW_SYSTEM>(getLocalePreference());
+
+  useEffect(() => setPref(getLocalePreference()), [i18n.resolvedLanguage]);
 
   const options = useMemo(
     () => [
@@ -28,23 +26,17 @@ export function LanguageSection() {
       { value: 'en', label: t('settings.language.en') },
       { value: 'ja', label: t('settings.language.ja') },
       { value: 'ko', label: t('settings.language.ko') },
+      { value: 'es', label: t('settings.language.es') },
+      { value: 'fr', label: t('settings.language.fr') },
+      { value: 'de', label: t('settings.language.de') },
     ],
     [t],
   );
 
   const apply = async (next: SupportedLocale | typeof FOLLOW_SYSTEM) => {
     setPref(next);
-    const resolved = await setLocalePreference(next);
-    const localePrefs = outputPrefsForLocale(resolved);
-    await updatePrefs((current) => {
-      if (
-        current.chineseScriptPreference === localePrefs.chineseScriptPreference &&
-        current.outputLanguagePreference === localePrefs.outputLanguagePreference
-      ) {
-        return current;
-      }
-      return { ...current, ...localePrefs };
-    });
+    // Interface language is independent from speech recognition and translation targets.
+    await setLocalePreference(next);
   };
 
   return (

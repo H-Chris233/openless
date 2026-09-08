@@ -49,7 +49,7 @@ export function SavedToast({
     padding: '4px 11px',
     borderRadius: 999,
     border: failed ? '0.5px solid rgba(239,68,68,0.22)' : '0.5px solid rgba(37,99,235,0.16)',
-    background: failed ? 'rgba(254,242,242,0.92)' : 'rgba(239,244,255,0.92)',
+    background: failed ? '#fef2f2' : '#eff4ff',
     color: failed ? '#dc2626' : '#2563eb',
     fontSize: 11.5,
     fontWeight: 600,

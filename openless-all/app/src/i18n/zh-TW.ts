@@ -4,6 +4,37 @@ import type { zhCN } from './zh-CN';
 // 新增 key 時，必須同步更新 en.ts，避免切換到 English 後出現中文殘留。
 
 export const zhTW: typeof zhCN = {
+  cloudSync: {
+    title: '雲端同步',
+    description: '使用 GitHub 帳號，在裝置之間同步詞典、風格與個人偏好。',
+    signIn: '使用 GitHub 登入',
+    account: '同步帳號',
+    refresh: '重新整理狀態',
+    loading: '正在讀取雲端狀態…',
+    noBackup: '雲端尚無備份',
+    available: '雲端備份已就緒',
+    summary: '{{dictionary}} 個詞條 · {{corrections}} 條修正规則 · {{stylePacks}} 個風格',
+    updated: '更新於 {{time}}',
+    upload: '備份至雲端',
+    restore: '從雲端還原',
+    delete: '刪除雲端備份',
+    working: '正在同步…',
+    uploadSuccess: '已備份至雲端',
+    restoreSuccess: '已還原雲端設定',
+    deleteSuccess: '已刪除雲端備份',
+    failed: '同步失敗：{{error}}',
+    conflict: '雲端已有更新。請重新整理狀態後，再決定備份或還原。',
+    unavailable: '官方同步服務暫時無法使用，請稍後重試。',
+    signInRequired: '請先登入 GitHub。',
+    restoreTitle: '還原雲端備份？',
+    restoreDescription:
+      '雲端的詞典、修正规則、風格和同步偏好將覆蓋本機對應內容。API 金鑰、裝置目錄與權限維持本機設定。',
+    deleteTitle: '刪除雲端備份？',
+    deleteDescription: '僅刪除此 GitHub 帳號的雲端備份，本機資料會保留。',
+    confirmRestore: '還原並取代',
+    confirmDelete: '刪除備份',
+    scope: '同步詞典、修正规則、風格圖示與常用偏好。API 金鑰、登入憑據與裝置專屬設定保留在本機。',
+  },
   app: {
     name: 'OpenLess',
     tagline: '自然說話，完美書寫',
@@ -134,7 +165,7 @@ export const zhTW: typeof zhCN = {
     more: '更多',
   },
   marketplace: {
-    kicker: 'MARKETPLACE',
+    kicker: '風格市場',
     title: '風格包市場',
     desc: '瀏覽、安裝和分享社區風格包。',
     searchPlaceholder: '搜尋名稱 / 描述 / 標籤…',
@@ -241,7 +272,7 @@ export const zhTW: typeof zhCN = {
     shortcutLabel: '錄音快捷鍵',
     shortcutHint: '開始 / 停止',
     betaTag: 'BETA',
-    betaNote: '所有數據都只保存在本機。',
+    betaNote: '本機儲存，可選雲端備份',
     navHint: {
       overview: '狀態總覽：用量統計、提供商與權限健康檢查',
       history: '聽寫歷史：搜尋、回放與複製過往轉寫',
@@ -361,7 +392,7 @@ export const zhTW: typeof zhCN = {
       tryDictationDesc: '將游標放到要輸入的位置。{{shortcut}}',
       permissionsHint: '錄音或快捷鍵沒有反應？在「權限與資料」中查看權限、麥克風和快捷鍵狀態。',
     },
-    kicker: 'DASHBOARD',
+    kicker: '概覽',
     title: '今日概覽',
     desc: '今日口述統計與系統狀態。',
     pressPrefix: '按',
@@ -426,7 +457,7 @@ export const zhTW: typeof zhCN = {
   },
   history: {
     exportError: '匯出錄音失敗，請重試。',
-    kicker: 'HISTORY',
+    kicker: '歷史記錄',
     title: '歷史記錄',
     desc: '本機保存的識別記錄。',
     filterAll: '全部',
@@ -495,7 +526,13 @@ export const zhTW: typeof zhCN = {
     dismiss: '關閉',
   },
   vocab: {
-    kicker: 'DICTIONARY',
+    selectAllVisible: '選取目前結果',
+    selectedCount: '已選取 {{count}} 個詞',
+    selectWord: '選取「{{phrase}}」',
+    deleteSelected: '刪除已選（{{count}}）',
+    batchDeleteFailed: '{{count}} 個詞條刪除失敗，已保留選取，可重試。',
+
+    kicker: '詞典',
     title: '詞典',
     desc: '添加生詞或專業術語，提高識別準確率。',
     sectionTitle: '詞條',
@@ -553,7 +590,7 @@ export const zhTW: typeof zhCN = {
     },
   },
   style: {
-    kicker: 'STYLE',
+    kicker: '風格',
     title: '輸出風格',
     desc: '選擇錄音的預設輸出風格。',
     masterToggle: '整體啓用',
@@ -581,7 +618,7 @@ export const zhTW: typeof zhCN = {
       },
       structured: {
         name: '清晰結構',
-        desc: '多個主題或步驟時，自動組織爲分點列表。',
+        desc: '面向程式協作、技術排障和產品回饋，準確保留術語並整理結構。',
         sample: '1. 主題一\na. 要點\nb. 要點\n2. 主題二\na. 要點\nb. 要點',
       },
       formal: {
@@ -591,6 +628,18 @@ export const zhTW: typeof zhCN = {
       },
     },
     pack: {
+      builtinTags: {
+        minimalEdits: '最小改寫',
+        strongCorrection: '強糾錯',
+        communication: '溝通',
+        natural: '自然',
+        organized: '條理',
+        workplaceCommunication: '工作溝通',
+        aiCoding: 'AI 程式開發',
+        technicalStructure: '技術結構化',
+      },
+      newName: '未命名風格',
+      newDescription: '簡短描述這個風格的使用情境。',
       uploadIcon: '為「{{name}}」上傳 SVG 圖示',
       resetIcon: '還原預設圖示',
       iconSaved: '圖示已儲存',
@@ -618,7 +667,7 @@ export const zhTW: typeof zhCN = {
       selectionActivated: '已將「{{name}}」用於選區潤色',
       selectionActivateFailed: '選區潤色風格切換失敗：{{err}}',
       selectionChars: '{{count}} 字元',
-      kicker: 'STYLE PACKS',
+      kicker: '風格包',
       title: '風格包',
       desc: '管理本機風格包。',
       marketplaceBtn: '風格市場',
@@ -715,7 +764,12 @@ export const zhTW: typeof zhCN = {
     },
   },
   translation: {
-    kicker: 'TRANSLATION',
+    searchLanguages: '搜尋語言…',
+    noMatchingLanguages: '沒有符合的語言',
+    selectedLanguages: '已選擇 {{count}} 種語言',
+
+    languageSupportHint: '語音服務支援的語種可能不同；翻譯目標不受介面語言限制。',
+    kicker: '翻譯',
     title: '翻譯',
     desc: '錄音後自動翻譯為目標語言再插入。',
     statusEnabled: '已啓用',
@@ -812,7 +866,7 @@ export const zhTW: typeof zhCN = {
       previewConfirm: '預覽確認',
       previewConfirmHint: '在可編輯彈窗中核對結果，再確認覆蓋原選區。',
     },
-    kicker: 'SETTINGS',
+    kicker: '設定',
     title: '設置',
     desc: '錄音、提供商、快捷鍵與權限配置。',
     network: {
@@ -913,6 +967,7 @@ export const zhTW: typeof zhCN = {
       openPanelAction: '開啟 Less Computer',
     },
     debug: {
+      cursorLabel: '游標',
       title: '除錯工具',
       desc: '排查辨識問題時使用，平時無需開啟。',
       cursorProbeLabel: '游標上下文探針',
@@ -979,6 +1034,7 @@ export const zhTW: typeof zhCN = {
       microphoneMonitorError: '輸入電平監聽失敗：{{message}}',
       capsuleLabel: '錄音膠囊',
       capsuleDesc: '錄音 / 轉寫時在屏幕底部顯示半透明膠囊。',
+      capsuleStyleTypeless: 'Typeless 傳統風格',
       capsuleStyleLabel: '膠囊樣式',
       capsuleStyleSiri: '流光 Siri 風格',
       capsuleStyleClassic: 'Openless 預設風格',
@@ -1487,6 +1543,9 @@ export const zhTW: typeof zhCN = {
       confirm: '確認啓用',
     },
     language: {
+      es: 'Español',
+      fr: 'Français',
+      de: 'Deutsch',
       title: '界面語言',
       desc: '切換 UI 顯示語言。當前會話即時生效，下次啓動自動沿用。',
       label: '語言',
@@ -1713,6 +1772,7 @@ export const zhTW: typeof zhCN = {
     },
   },
   windowChrome: {
+    restore: '還原',
     minimize: '最小化',
     maximize: '最大化',
     close: '關閉',

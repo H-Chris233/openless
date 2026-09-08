@@ -7,6 +7,12 @@ import { getActivityStats, getCredentials, listHistory } from '../lib/ipc';
 import { Heatmap } from '../components/Heatmap';
 import { useMobileLayout } from '../lib/useMobileLayout';
 import { countCodePoints } from '../lib/unicode';
+import {
+  formatHistoryTime,
+  formatLocaleDate,
+  formatLocaleDecimal,
+  formatLocaleNumber,
+} from '../lib/localeFormat';
 import { isDesktop } from '../lib/platform';
 import { getOverviewSetup, type OverviewSettingsSection } from '../lib/overviewSetup';
 import {
@@ -61,7 +67,8 @@ const LLM_NAME_KEY_BY_ID: Record<string, string> = {
 };
 
 export function Overview({ onOpenHistory, onOpenSettings }: OverviewProps) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const locale = i18n.resolvedLanguage || i18n.language;
   const mobile = useMobileLayout();
   const modeLabel = useModeLabels();
   const [history, setHistory] = useState<DictationSession[]>([]);
@@ -341,7 +348,7 @@ export function Overview({ onOpenHistory, onOpenSettings }: OverviewProps) {
           <Metric
             icon="hash"
             label={t('overview.metricChars')}
-            value={historyError ? '—' : metrics.charsToday.toLocaleString()}
+            value={historyError ? '—' : formatLocaleNumber(metrics.charsToday, locale)}
             trend={
               historyError
                 ? t('overview.historyLoadError')
@@ -351,13 +358,13 @@ export function Overview({ onOpenHistory, onOpenSettings }: OverviewProps) {
           <Metric
             icon="mic"
             label={t('overview.metricDuration')}
-            value={historyError ? '—' : formatDuration(metrics.totalDurationMs, t)}
+            value={historyError ? '—' : formatDuration(metrics.totalDurationMs, t, locale)}
             trend={historyError ? t('overview.historyLoadError') : ''}
           />
           <Metric
             icon="clock"
             label={t('overview.metricAvg')}
-            value={historyError ? '—' : formatDuration(metrics.avgLatencyMs, t)}
+            value={historyError ? '—' : formatDuration(metrics.avgLatencyMs, t, locale)}
             trend={
               historyError
                 ? t('overview.historyLoadError')
@@ -369,7 +376,7 @@ export function Overview({ onOpenHistory, onOpenSettings }: OverviewProps) {
           <Metric
             icon="bolt"
             label={t('overview.metricTotal')}
-            value={historyError ? '—' : String(history.length)}
+            value={historyError ? '—' : formatLocaleNumber(history.length, locale)}
             trend={historyError ? t('overview.historyLoadError') : t('overview.metricTotalTrend')}
           />
         </div>
@@ -564,7 +571,7 @@ function ActivityHeatmapCard({ activity }: { activity: ActivityDay[] }) {
     const year = now.getFullYear();
     const start = new Date(year, 0, 1);
     const end = new Date(year, 11, 31);
-    const lang = i18n.language || 'en';
+    const lang = i18n.resolvedLanguage || i18n.language || 'en';
     const monthFormat = new Intl.DateTimeFormat(lang, { month: 'short' });
     const dayFormat = new Intl.DateTimeFormat(lang, { weekday: 'short' });
     const dateFormat = new Intl.DateTimeFormat(lang, { dateStyle: 'medium' });
@@ -583,7 +590,7 @@ function ActivityHeatmapCard({ activity }: { activity: ActivityDay[] }) {
         date: (date: Date) => dateFormat.format(date),
       },
     };
-  }, [activity, i18n.language]);
+  }, [activity, i18n.resolvedLanguage, i18n.language]);
   return (
     <Card padding={12} style={{ display: 'flex', flexDirection: 'column', gap: 6, minWidth: 0 }}>
       <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--ol-ink-2)', flexShrink: 0 }}>
@@ -724,7 +731,8 @@ function PeriodMetricsCard({
   loadError: boolean;
   onRetry: () => void;
 }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const locale = i18n.resolvedLanguage || i18n.language;
   const periodOptions = ACTIVITY_PERIODS.map((days) => ({
     value: days,
     label: t(`overview.period.last${days}Days`),
@@ -796,11 +804,11 @@ function PeriodMetricsCard({
                 lineHeight: 1.1,
               }}
             >
-              {formatMetricValue(series.total, metric, t)}
+              {formatMetricValue(series.total, metric, t, locale)}
             </div>
             <div style={{ fontSize: 12, color: 'var(--ol-ink-4)', marginTop: 5 }}>
               {t('overview.period.dailyAverage', {
-                value: formatMetricValue(series.dailyAverage, metric, t),
+                value: formatMetricValue(series.dailyAverage, metric, t, locale),
               })}
             </div>
           </div>
@@ -820,7 +828,8 @@ function PeriodChart({
   series: ReturnType<typeof buildPeriodSeries>;
   metric: ActivityMetric;
 }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const locale = i18n.resolvedLanguage || i18n.language;
   const { buckets } = series;
   const max = Math.max(...buckets.map((b) => b.value), 1);
   const dense = buckets.length > 7;
@@ -844,7 +853,7 @@ function PeriodChart({
           return (
             <div
               key={bucket.date}
-              title={`${bucket.date} · ${formatMetricValue(bucket.value, metric, t)}`}
+              title={`${formatLocaleDate(bucket.date, locale, { dateStyle: 'medium' })} · ${formatMetricValue(bucket.value, metric, t, locale)}`}
               style={{
                 flex: 1,
                 minWidth: 0,
@@ -865,7 +874,7 @@ function PeriodChart({
                     flexShrink: 0,
                   }}
                 >
-                  {formatMetricValue(bucket.value, metric, t)}
+                  {formatMetricValue(bucket.value, metric, t, locale)}
                 </div>
               )}
               <div
@@ -896,7 +905,7 @@ function PeriodChart({
       >
         {dense
           ? [0, midIndex, lastIndex].map((i) => (
-              <span key={i}>{shortDateLabel(buckets[i].date)}</span>
+              <span key={i}>{formatLocaleDate(buckets[i].date, locale)}</span>
             ))
           : buckets.map((bucket) => (
               <span key={bucket.date}>
@@ -911,13 +920,6 @@ function PeriodChart({
   );
 }
 
-/** `YYYY-MM-DD` → `M/D`。日期键是后端按本地日历写的，直接切字符串即可，
- *  不要 new Date(key) —— 那会按 UTC 解析再转回本地，跨时区会差一天。 */
-function shortDateLabel(dateKey: string): string {
-  const [, month, day] = dateKey.split('-');
-  return `${Number(month)}/${Number(day)}`;
-}
-
 function weekDayLabel(dateKey: string, names: string[]): string {
   const [year, month, day] = dateKey.split('-').map(Number);
   return names[new Date(year, month - 1, day).getDay()];
@@ -928,21 +930,31 @@ function formatMetricValue(
   value: number,
   metric: ActivityMetric,
   t: ReturnType<typeof useTranslation>['t'],
+  locale: string,
 ): string {
-  if (metric === 'duration') return formatLongDuration(value, t);
-  return Math.round(value).toLocaleString();
+  if (metric === 'duration') return formatLongDuration(value, t, locale);
+  return formatLocaleNumber(Math.round(value), locale);
 }
 
 /** 周期总时长可能是几十小时，不能沿用只处理秒/分的 formatDuration。 */
-function formatLongDuration(ms: number, t: ReturnType<typeof useTranslation>['t']): string {
+function formatLongDuration(
+  ms: number,
+  t: ReturnType<typeof useTranslation>['t'],
+  locale: string,
+): string {
   if (ms <= 0) return '0';
   const totalSeconds = Math.round(ms / 1000);
-  if (totalSeconds < 60) return t('common.durationSeconds', { value: totalSeconds });
+  if (totalSeconds < 60)
+    return t('common.durationSeconds', { value: formatLocaleNumber(totalSeconds, locale) });
   const totalMinutes = Math.floor(totalSeconds / 60);
-  if (totalMinutes < 60) return t('overview.period.minutes', { value: totalMinutes });
+  if (totalMinutes < 60)
+    return t('overview.period.minutes', { value: formatLocaleNumber(totalMinutes, locale) });
   const hours = Math.floor(totalMinutes / 60);
   const minutes = totalMinutes % 60;
-  return t('overview.period.hoursMinutes', { hours, minutes });
+  return t('overview.period.hoursMinutes', {
+    hours: formatLocaleNumber(hours, locale),
+    minutes: formatLocaleNumber(minutes, locale),
+  });
 }
 
 function RecentRow({
@@ -952,7 +964,8 @@ function RecentRow({
   session: DictationSession;
   modeLabel: Record<PolishMode, string>;
 }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const locale = i18n.resolvedLanguage || i18n.language;
   const [copied, setCopied] = useState(false);
 
   const onCopy = async () => {
@@ -992,7 +1005,7 @@ function RecentRow({
         <span
           style={{ fontSize: 12.5, fontFamily: 'var(--ol-font-mono)', color: 'var(--ol-ink-3)' }}
         >
-          {formatTime(session.createdAt)}
+          {formatHistoryTime(session.createdAt, locale)}
         </span>
         <Pill size="sm" tone="default">
           {modeLabel[session.mode]}
@@ -1016,7 +1029,7 @@ function RecentRow({
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 6 }}>
         <span style={{ fontSize: 12, color: 'var(--ol-ink-4)', fontFamily: 'var(--ol-font-mono)' }}>
-          {formatDuration(session.durationMs ?? 0, t)}
+          {formatDuration(session.durationMs ?? 0, t, locale)}
         </span>
         <Btn
           size="sm"
@@ -1032,19 +1045,13 @@ function RecentRow({
   );
 }
 
-function formatTime(iso: string): string {
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return iso;
-  const now = new Date();
-  const sameDay = d.toDateString() === now.toDateString();
-  const pad = (n: number) => String(n).padStart(2, '0');
-  if (sameDay) return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
-  return `${d.getMonth() + 1}/${d.getDate()}`;
-}
-
-function formatDuration(ms: number, t: ReturnType<typeof useTranslation>['t']): string {
+function formatDuration(
+  ms: number,
+  t: ReturnType<typeof useTranslation>['t'],
+  locale: string,
+): string {
   if (ms <= 0) return '—';
   const sec = ms / 1000;
-  if (sec < 60) return t('common.durationSeconds', { value: sec.toFixed(1) });
+  if (sec < 60) return t('common.durationSeconds', { value: formatLocaleDecimal(sec, locale) });
   return `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, '0')}`;
 }

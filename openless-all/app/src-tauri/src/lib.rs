@@ -231,6 +231,10 @@ macro_rules! app_invoke_handler_desktop {
             commands::github_device_flow_poll,
             commands::github_device_flow_cancel,
             commands::marketplace_auth_status,
+            commands::cloud_sync_status,
+            commands::cloud_sync_upload,
+            commands::cloud_sync_restore,
+            commands::cloud_sync_delete,
             commands::marketplace_logout,
             commands::list_vocab,
             commands::add_vocab,
@@ -472,6 +476,10 @@ macro_rules! app_invoke_handler_mobile {
             $crate::commands::github_device_flow_poll,
             $crate::commands::github_device_flow_cancel,
             $crate::commands::marketplace_auth_status,
+            $crate::commands::cloud_sync_status,
+            $crate::commands::cloud_sync_upload,
+            $crate::commands::cloud_sync_restore,
+            $crate::commands::cloud_sync_delete,
             $crate::commands::marketplace_logout,
             $crate::commands::list_vocab,
             $crate::commands::add_vocab,
@@ -835,6 +843,7 @@ fn run_desktop() {
             // Spin up hotkey listener; coordinator owns the lifecycle.
             let app_handle = app.handle().clone();
             coordinator.tauri_host().bind(app_handle);
+            coordinator.sync_capsule_style_from_preferences();
             crate::tauri_events::start(app.handle().clone(), Arc::clone(&core_backend));
             coordinator.start_hotkey_listener();
             // QA / custom combo hotkeys use `global-hotkey` (Carbon on macOS).
@@ -952,6 +961,45 @@ impl TrayLabels {
                 light: "Light polish",
                 structured: "Structured",
                 formal: "Formal",
+            },
+            "es" => Self {
+                toggle: "Mostrar ventana principal",
+                style: "Estilo de salida",
+                microphone: "Seleccionar micrófono",
+                default_microphone: "Micrófono del sistema",
+                no_microphones: "No se encontraron micrófonos",
+                default_device_suffix: " (Predeterminado del sistema)",
+                quit: "Salir de OpenLess",
+                raw: "Texto original",
+                light: "Pulido ligero",
+                structured: "Estructurado",
+                formal: "Formal",
+            },
+            "fr" => Self {
+                toggle: "Afficher la fenêtre principale",
+                style: "Style de sortie",
+                microphone: "Choisir le microphone",
+                default_microphone: "Microphone du système",
+                no_microphones: "Aucun microphone détecté",
+                default_device_suffix: " (Par défaut du système)",
+                quit: "Quitter OpenLess",
+                raw: "Texte original",
+                light: "Retouche légère",
+                structured: "Structuré",
+                formal: "Formel",
+            },
+            "de" => Self {
+                toggle: "Hauptfenster anzeigen",
+                style: "Ausgabestil",
+                microphone: "Mikrofon auswählen",
+                default_microphone: "Systemmikrofon",
+                no_microphones: "Keine Mikrofone gefunden",
+                default_device_suffix: " (Systemstandard)",
+                quit: "OpenLess beenden",
+                raw: "Originaltext",
+                light: "Leichte Überarbeitung",
+                structured: "Strukturiert",
+                formal: "Formell",
             },
             "zh-TW" => Self {
                 toggle: "顯示主視窗",
@@ -1930,18 +1978,6 @@ fn bottom_center_position(
     (x, y)
 }
 
-fn bottom_visual_position(
-    frame: LogicalMonitorFrame,
-    window_width: f64,
-    visual_height: f64,
-    bottom_padding: f64,
-    bottom_inset: f64,
-) -> (f64, f64) {
-    let x = frame.x + ((frame.width - window_width) / 2.0).max(0.0);
-    let y = frame.y + (frame.height - visual_height - bottom_padding - bottom_inset).max(0.0);
-    (x, y)
-}
-
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn frame_contains_point(frame: LogicalMonitorFrame, x: f64, y: f64) -> bool {
     x >= frame.x && x < frame.x + frame.width && y >= frame.y && y < frame.y + frame.height
@@ -1968,6 +2004,10 @@ pub(crate) struct CapsuleTargetMonitor {
     pub(crate) physical_y: i32,
     pub(crate) physical_width: u32,
     pub(crate) physical_height: u32,
+    pub(crate) work_x: i32,
+    pub(crate) work_y: i32,
+    pub(crate) work_width: u32,
+    pub(crate) work_height: u32,
     pub(crate) scale: f64,
 }
 
@@ -1979,6 +2019,16 @@ impl CapsuleTargetMonitor {
             self.physical_y,
             self.physical_width,
             self.physical_height,
+            self.scale,
+        )
+    }
+
+    fn logical_work_area(self) -> LogicalMonitorFrame {
+        logical_monitor_frame(
+            self.work_x,
+            self.work_y,
+            self.work_width,
+            self.work_height,
             self.scale,
         )
     }
@@ -2019,6 +2069,10 @@ fn monitor_for_anchor_point<R: tauri::Runtime>(
             physical_y: monitor.position().y,
             physical_width: monitor.size().width,
             physical_height: monitor.size().height,
+            work_x: monitor.work_area().position.x,
+            work_y: monitor.work_area().position.y,
+            work_width: monitor.work_area().size.width,
+            work_height: monitor.work_area().size.height,
             scale: monitor.scale_factor(),
         }),
         x,
@@ -3162,13 +3216,22 @@ pub(crate) fn foreground_window_monitor() -> Option<ForegroundMonitor> {
     }
 }
 
-/// 把 capsule 窗口移到屏幕底部居中，与 Swift `CapsuleWindowController.repositionToBottomCenter` 同效。
-/// 留 80pt 给 macOS Dock；Windows 任务栏一般在底部 48pt 以内，整体也合适。
+/// 初始化和卡片归还路径使用默认舞台；录音显示路径显式传入当前样式。
 pub(crate) fn position_capsule_bottom_center<R: tauri::Runtime>(
     window: &tauri::WebviewWindow<R>,
     translation_active: bool,
 ) -> tauri::Result<()> {
-    let bounds = capsule_window_bounds(translation_active);
+    position_capsule_bottom_center_with_style(window, translation_active, types::CapsuleStyle::Siri)
+}
+
+/// 使用系统报告的可用工作区，自动避开 Dock / taskbar，并随自动隐藏设置更新。
+pub(crate) fn position_capsule_bottom_center_with_style<R: tauri::Runtime>(
+    window: &tauri::WebviewWindow<R>,
+    _translation_active: bool,
+    style: types::CapsuleStyle,
+) -> tauri::Result<()> {
+    let bounds = capsule_window_bounds_for_style(style);
+    const EDGE_GAP: f64 = 12.0;
 
     // Windows：跟随「正在输入的 App」所在显示器摆放，避免多显示器下胶囊
     // 总是固定出现在主屏 / 胶囊自己那块屏。
@@ -3183,21 +3246,14 @@ pub(crate) fn position_capsule_bottom_center<R: tauri::Runtime>(
                 phys_h.max(1) as u32,
             ))?;
 
-            let mon_w = mon.right - mon.left;
-            let x = mon.left + ((mon_w - phys_w) / 2).max(0);
-            // 与既有行为一致：「距底部 visual高度 + 80 + inset」，按 physical px 计算。
-            let offset_from_bottom =
-                (capsule_visual_height(translation_active) + 80.0 + bounds.bottom_inset) * scale;
-            let y = ((mon.bottom as f64) - offset_from_bottom).round() as i32;
-
-            // #470：四边都夹到「工作区」内（去掉任务栏），保证整窗可见。GetMonitorInfoW
-            // 取不到 rcWork 时（理论上不会，rcWork 总随 rcMonitor 一同填）退回整屏矩形。
             let (work_l, work_t, work_r, work_b) =
                 if mon.work_right > mon.work_left && mon.work_bottom > mon.work_top {
                     (mon.work_left, mon.work_top, mon.work_right, mon.work_bottom)
                 } else {
                     (mon.left, mon.top, mon.right, mon.bottom)
                 };
+            let x = work_l + ((work_r - work_l - phys_w) / 2).max(0);
+            let y = work_b - phys_h - (EDGE_GAP * scale).round() as i32;
             let (clamped_x, clamped_y) =
                 clamp_to_monitor(x, y, phys_w, phys_h, work_l, work_t, work_r, work_b);
             log::debug!(
@@ -3218,13 +3274,11 @@ pub(crate) fn position_capsule_bottom_center<R: tauri::Runtime>(
     {
         if let Some(mon) = capsule_target_monitor(window) {
             window.set_size(LogicalSize::new(bounds.width, bounds.height))?;
-            let frame = mon.logical_frame();
-            let (x, y) = bottom_visual_position(
-                frame,
+            let (x, y) = bottom_center_position(
+                mon.logical_work_area(),
                 bounds.width,
-                capsule_visual_height(translation_active),
-                80.0,
-                bounds.bottom_inset,
+                bounds.height,
+                EDGE_GAP,
             );
             log::debug!(
                 "[capsule] mac position: mon=({},{}) size=({}x{}) scale={:.2} -> logical=({:.1},{:.1})",
@@ -3248,16 +3302,10 @@ pub(crate) fn position_capsule_bottom_center<R: tauri::Runtime>(
     window.set_size(LogicalSize::new(bounds.width, bounds.height))?;
 
     let scale = monitor.scale_factor();
-    let size = monitor.size();
-    let pos = monitor.position();
+    let size = &monitor.work_area().size;
+    let pos = &monitor.work_area().position;
     let frame = logical_monitor_frame(pos.x, pos.y, size.width, size.height, scale);
-    let (x, y) = bottom_visual_position(
-        frame,
-        bounds.width,
-        capsule_visual_height(translation_active),
-        80.0,
-        bounds.bottom_inset,
-    );
+    let (x, y) = bottom_center_position(frame, bounds.width, bounds.height, EDGE_GAP);
     window.set_position(LogicalPosition::new(x, y))?;
     Ok(())
 }
@@ -3273,17 +3321,23 @@ fn capsule_window_bounds(translation_active: bool) -> CapsuleWindowBounds {
     // 纯光效语音舞台（siri-glsl 原始比例）：光条横贯 ~420px + 发光扩散余量。
     // 与前端 src/lib/capsuleLayout.ts 的 VOICE_ORB_STAGE_* 保持一致。
     let _ = translation_active;
+    capsule_window_bounds_for_style(types::CapsuleStyle::Siri)
+}
+
+fn capsule_window_bounds_for_style(style: types::CapsuleStyle) -> CapsuleWindowBounds {
     CapsuleWindowBounds {
         width: 460.0,
-        height: 180.0,
+        height: match style {
+            types::CapsuleStyle::Siri => 180.0,
+            types::CapsuleStyle::Classic => 100.0,
+            types::CapsuleStyle::Typeless => 128.0,
+        },
         bottom_inset: 0.0,
     }
 }
 
 fn capsule_visual_height(_translation_active: bool) -> f64 {
-    // 故意小于窗口高(180)：窗口整体下沉 40px，让光条视觉中心落回原胶囊的高度
-    // 附近（bottom_visual_position 以此值算窗口顶 y = 屏底 - 80 - visual_height）。
-    // 底部 40px 只是发光余量，窗口透明 + 鼠标穿透，压到 Dock 上方无碍。
+    // QA 面板沿用此视觉高度计算垂直间距；胶囊本身按样式尺寸和系统工作区定位。
     140.0
 }
 
@@ -3294,16 +3348,18 @@ fn capsule_height_for_qa() -> f64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        bottom_center_position, bottom_visual_position, capsule_height_for_qa,
-        capsule_visual_height, capsule_window_bounds, clamp_to_monitor, frame_contains_point,
-        frame_distance_to_point_squared, logical_monitor_frame, parse_tray_style_pack_menu_id,
-        resolve_tray_style_pack_id, rotate_log_if_too_large, tray_style_menu_enabled,
-        tray_style_pack_menu_entries, tray_style_pack_menu_id, LogicalMonitorFrame, TrayLabels,
-        LOG_ROTATE_LIMIT_BYTES,
+        bottom_center_position, capsule_height_for_qa, capsule_visual_height,
+        capsule_window_bounds, capsule_window_bounds_for_style, clamp_to_monitor,
+        frame_contains_point, frame_distance_to_point_squared, logical_monitor_frame,
+        parse_tray_style_pack_menu_id, resolve_tray_style_pack_id, rotate_log_if_too_large,
+        tray_style_menu_enabled, tray_style_pack_menu_entries, tray_style_pack_menu_id,
+        LogicalMonitorFrame, TrayLabels, LOG_ROTATE_LIMIT_BYTES,
     };
     #[cfg(target_os = "macos")]
     use super::{pick_monitor_for_anchor_point, CapsuleTargetMonitor};
-    use crate::types::{builtin_style_pack_for_mode, PolishMode, StylePack, StylePackKind};
+    use crate::types::{
+        builtin_style_pack_for_mode, CapsuleStyle, PolishMode, StylePack, StylePackKind,
+    };
     use std::io::Write;
 
     #[test]
@@ -3396,6 +3452,19 @@ mod tests {
 
         let chinese = TrayLabels::for_locale("zh-CN");
         assert_eq!(chinese.style_pack_name(PolishMode::Structured), "清晰结构");
+        assert_eq!(TrayLabels::for_locale("es").quit, "Salir de OpenLess");
+        assert_eq!(
+            TrayLabels::for_locale("fr").toggle,
+            "Afficher la fenêtre principale"
+        );
+        assert_eq!(
+            TrayLabels::for_locale("de").microphone,
+            "Mikrofon auswählen"
+        );
+        assert_eq!(
+            TrayLabels::for_locale("fr").style_pack_name(PolishMode::Structured),
+            "Structuré"
+        );
         assert_eq!(TrayLabels::for_locale("unknown").toggle, "显示主窗口");
     }
 
@@ -3483,6 +3552,33 @@ mod tests {
     }
 
     #[test]
+    fn capsule_tracks_reserved_and_auto_hidden_system_bars() {
+        let monitor = LogicalMonitorFrame {
+            x: -1440.0,
+            y: 0.0,
+            width: 1440.0,
+            height: 900.0,
+        };
+        let work_area = LogicalMonitorFrame {
+            height: 830.0,
+            ..monitor
+        };
+        for style in [
+            CapsuleStyle::Siri,
+            CapsuleStyle::Classic,
+            CapsuleStyle::Typeless,
+        ] {
+            let bounds = capsule_window_bounds_for_style(style);
+            let (x, reserved_y) =
+                bottom_center_position(work_area, bounds.width, bounds.height, 12.0);
+            let (_, hidden_y) = bottom_center_position(monitor, bounds.width, bounds.height, 12.0);
+            assert_eq!(x, -950.0);
+            assert_eq!(reserved_y + bounds.height, 818.0);
+            assert_eq!(hidden_y - reserved_y, 70.0);
+        }
+    }
+
+    #[test]
     fn capsule_window_bounds_stay_fixed_for_translation_badge() {
         let bounds = capsule_window_bounds(true);
         assert_eq!(
@@ -3492,7 +3588,7 @@ mod tests {
     }
 
     #[test]
-    fn capsule_visual_height_sinks_stage_toward_dock() {
+    fn capsule_visual_height_keeps_the_qa_anchor_reference() {
         assert_eq!(capsule_visual_height(true), 140.0);
     }
 
@@ -3554,6 +3650,10 @@ mod tests {
                 physical_y: 0,
                 physical_width: 3024,
                 physical_height: 1964,
+                work_x: 0,
+                work_y: 48,
+                work_width: 3024,
+                work_height: 1760,
                 scale: 2.0,
             },
             CapsuleTargetMonitor {
@@ -3561,6 +3661,10 @@ mod tests {
                 physical_y: 0,
                 physical_width: 2560,
                 physical_height: 1440,
+                work_x: 1512,
+                work_y: 24,
+                work_width: 2560,
+                work_height: 1320,
                 scale: 1.0,
             },
         ]
@@ -3613,20 +3717,6 @@ mod tests {
         let pos = bottom_center_position(frame, 380.0, 440.0, 184.0);
 
         assert_eq!(pos, (-910.0, 276.0));
-    }
-
-    #[test]
-    fn bottom_visual_position_keeps_capsule_on_upper_monitor() {
-        let frame = LogicalMonitorFrame {
-            x: 0.0,
-            y: -900.0,
-            width: 1440.0,
-            height: 900.0,
-        };
-
-        let pos = bottom_visual_position(frame, 220.0, 96.0, 80.0, 0.0);
-
-        assert_eq!(pos, (610.0, -176.0));
     }
 
     // ---- #470: capsule 四边 clamp（纯函数，合成多显示器 / 负原点 / 1.5x DPI 输入）----

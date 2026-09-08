@@ -6,6 +6,38 @@ import { en } from './en';
 // 갱신해 주세요(갱신되지 않은 key 는 ...en 으로 영어로 fallback 됩니다).
 export const ko: typeof zhCN = {
   ...en,
+  cloudSync: {
+    title: '클라우드 동기화',
+    description: 'GitHub 계정으로 사전, 스타일, 개인 설정을 기기 간에 동기화합니다.',
+    signIn: 'GitHub로 로그인',
+    account: '동기화 계정',
+    refresh: '상태 새로고침',
+    loading: '클라우드 상태 확인 중…',
+    noBackup: '클라우드 백업 없음',
+    available: '클라우드 백업 있음',
+    summary: '단어 {{dictionary}}개 · 교정 규칙 {{corrections}}개 · 스타일 {{stylePacks}}개',
+    updated: '업데이트: {{time}}',
+    upload: '클라우드에 백업',
+    restore: '클라우드에서 복원',
+    delete: '클라우드 백업 삭제',
+    working: '동기화 중…',
+    uploadSuccess: '클라우드에 백업했습니다',
+    restoreSuccess: '클라우드 설정을 복원했습니다',
+    deleteSuccess: '클라우드 백업을 삭제했습니다',
+    failed: '동기화 실패: {{error}}',
+    conflict: '클라우드 내용이 변경되었습니다. 상태를 새로고친 후 백업 또는 복원을 선택하세요.',
+    unavailable: '공식 동기화 서비스를 이용할 수 없습니다. 나중에 다시 시도하세요.',
+    signInRequired: '먼저 GitHub로 로그인하세요.',
+    restoreTitle: '클라우드 백업을 복원할까요?',
+    restoreDescription:
+      '클라우드의 사전, 교정 규칙, 스타일, 동기화 설정으로 해당 로컬 내용을 덮어씁니다. API 키, 기기 경로, 권한은 유지됩니다.',
+    deleteTitle: '클라우드 백업을 삭제할까요?',
+    deleteDescription: '이 GitHub 계정의 클라우드 백업만 삭제합니다. 로컬 데이터는 유지됩니다.',
+    confirmRestore: '복원 및 덮어쓰기',
+    confirmDelete: '백업 삭제',
+    scope:
+      '사전, 교정 규칙, 스타일 아이콘, 공통 설정을 동기화합니다. API 키, 로그인 정보, 기기별 설정은 이 기기에 유지됩니다.',
+  },
   app: {
     name: 'OpenLess',
     tagline: '자연스럽게 말하고, 정확하게 작성하세요',
@@ -137,7 +169,7 @@ export const ko: typeof zhCN = {
     more: '더보기',
   },
   marketplace: {
-    kicker: 'MARKETPLACE',
+    kicker: '마켓',
     title: '스타일 팩 마켓',
     desc: '커뮤니티 스타일 팩 둘러보기, 설치, 공유.',
     searchPlaceholder: '이름 / 설명 / 태그 검색…',
@@ -246,7 +278,7 @@ export const ko: typeof zhCN = {
     shortcutLabel: '녹음 단축키',
     shortcutHint: '시작 / 정지',
     betaTag: 'BETA',
-    betaNote: '모든 데이터는 로컬에만 저장됩니다.',
+    betaNote: '로컬 저장, 선택적 클라우드 백업',
     navHint: {
       overview: '상태 개요: 사용량 통계, 제공자 및 권한 상태',
       history: '받아쓰기 기록: 과거 전사 검색·재생·복사',
@@ -372,7 +404,7 @@ export const ko: typeof zhCN = {
       permissionsHint:
         '녹음이나 단축키가 반응하지 않나요? 권한 및 데이터에서 권한, 마이크, 단축키 상태를 확인하세요.',
     },
-    kicker: 'DASHBOARD',
+    kicker: '개요',
     title: '오늘 개요',
     desc: '오늘의 받아쓰기 통계와 시스템 상태.',
     pressPrefix: '누르기',
@@ -437,7 +469,7 @@ export const ko: typeof zhCN = {
   },
   history: {
     exportError: '녹음을 내보내지 못했습니다. 다시 시도해 주세요.',
-    kicker: 'HISTORY',
+    kicker: '기록',
     title: '기록',
     desc: '로컬에 저장된 인식 기록.',
     filterAll: '전체',
@@ -507,7 +539,14 @@ export const ko: typeof zhCN = {
     dismiss: '닫기',
   },
   vocab: {
-    kicker: 'DICTIONARY',
+    selectAllVisible: '현재 결과 선택',
+    selectedCount: '단어 {{count}}개 선택됨',
+    selectWord: '“{{phrase}}” 선택',
+    deleteSelected: '선택 항목 삭제({{count}})',
+    batchDeleteFailed:
+      '단어 {{count}}개를 삭제하지 못했습니다. 다시 시도할 수 있도록 선택을 유지합니다.',
+
+    kicker: '사전',
     title: '사전',
     desc: '새 단어나 전문 용어를 추가하여 인식 정확도 향상.',
     sectionTitle: '항목',
@@ -566,7 +605,7 @@ export const ko: typeof zhCN = {
     },
   },
   style: {
-    kicker: 'STYLE',
+    kicker: '스타일',
     title: '출력 스타일',
     desc: '녹음의 기본 출력 스타일 선택.',
     masterToggle: '전체 활성화',
@@ -596,7 +635,7 @@ export const ko: typeof zhCN = {
       },
       structured: {
         name: '명확한 구조',
-        desc: '여러 주제나 단계가 있을 때 자동으로 항목별 목록으로 정리합니다.',
+        desc: '개발 협업, 기술 문제 해결, 제품 피드백을 정확한 용어와 명확한 구조로 정리합니다.',
         sample: '1. 주제 1\na. 포인트\nb. 포인트\n2. 주제 2\na. 포인트\nb. 포인트',
       },
       formal: {
@@ -606,6 +645,18 @@ export const ko: typeof zhCN = {
       },
     },
     pack: {
+      builtinTags: {
+        minimalEdits: '최소 수정',
+        strongCorrection: '정확한 교정',
+        communication: '의사소통',
+        natural: '자연스러움',
+        organized: '체계적 정리',
+        workplaceCommunication: '업무 소통',
+        aiCoding: 'AI 코딩',
+        technicalStructure: '기술 내용 구조화',
+      },
+      newName: '이름 없는 스타일',
+      newDescription: '이 스타일을 언제 사용하는지 간단히 설명하세요.',
       uploadIcon: '{{name}}의 SVG 아이콘 업로드',
       resetIcon: '기본 아이콘 복원',
       iconSaved: '아이콘이 저장되었습니다',
@@ -635,7 +686,7 @@ export const ko: typeof zhCN = {
       selectionActivated: '선택 영역 다듬기에 "{{name}}"을(를) 설정했습니다',
       selectionActivateFailed: '선택 영역 다듬기 스타일 전환 실패: {{err}}',
       selectionChars: '{{count}}자',
-      kicker: 'STYLE PACKS',
+      kicker: '스타일 팩',
       title: '스타일 팩',
       desc: '로컬 스타일 팩 관리.',
       marketplaceBtn: '마켓',
@@ -733,7 +784,13 @@ export const ko: typeof zhCN = {
     },
   },
   translation: {
-    kicker: 'TRANSLATION',
+    searchLanguages: '언어 검색…',
+    noMatchingLanguages: '일치하는 언어가 없습니다',
+    selectedLanguages: '언어 {{count}}개 선택됨',
+
+    languageSupportHint:
+      '음성 서비스에 따라 지원 언어가 다릅니다. 번역 언어는 앱 표시 언어와 별개입니다.',
+    kicker: '번역',
     title: '번역',
     desc: '녹음 후 대상 언어로 자동 번역하여 삽입.',
     statusEnabled: '활성화됨',
@@ -832,7 +889,7 @@ export const ko: typeof zhCN = {
       previewConfirm: '미리보기 후 확인',
       previewConfirmHint: '편집 가능한 창에서 결과를 확인한 뒤 원래 선택 영역을 교체합니다.',
     },
-    kicker: 'SETTINGS',
+    kicker: '설정',
     title: '설정',
     desc: '녹음, 공급자, 단축키, 권한 설정.',
     network: {
@@ -941,6 +998,7 @@ export const ko: typeof zhCN = {
       openPanelAction: 'Less Computer 열기',
     },
     debug: {
+      cursorLabel: '커서',
       title: '디버그 도구',
       desc: '인식 문제를 진단할 때 사용합니다. 평소에는 꺼두어도 됩니다.',
       cursorProbeLabel: '커서 문맥 프로브',
@@ -998,6 +1056,7 @@ export const ko: typeof zhCN = {
       microphoneMonitorError: '입력 레벨 모니터링 실패: {{message}}',
       capsuleLabel: '녹음 캡슐',
       capsuleDesc: '녹음 / 전사 중 화면 하단에 반투명 캡슐을 표시합니다.',
+      capsuleStyleTypeless: 'Typeless 컴팩트 스타일',
       capsuleStyleLabel: '캡슐 스타일',
       capsuleStyleSiri: '시리 광선 스타일',
       capsuleStyleClassic: 'Openless 기본 스타일',
@@ -1558,6 +1617,9 @@ export const ko: typeof zhCN = {
       confirm: '활성화',
     },
     language: {
+      es: 'Español',
+      fr: 'Français',
+      de: 'Deutsch',
       title: '인터페이스 언어',
       desc: 'UI 표시 언어를 전환합니다. 현재 세션에 즉시 반영되며 다음 실행에도 유지됩니다.',
       label: '언어',
@@ -1790,6 +1852,7 @@ export const ko: typeof zhCN = {
     },
   },
   windowChrome: {
+    restore: '이전 크기로 복원',
     minimize: '최소화',
     maximize: '최대화',
     close: '닫기',

@@ -4,6 +4,7 @@ import { Icon } from './Icon';
 import { readStylePackIcon, setStylePackIcon } from '../lib/ipc';
 import { isStyleIconDataUrl, rasterizeStyleSvg } from '../lib/stylePackIcon';
 import type { StylePack } from '../lib/types';
+import { getStylePackPresentation } from '../lib/stylePackPresentation';
 
 const DEFAULT_ICONS = { raw: 'mic', light: 'feather', structured: 'layout', formal: 'doc' };
 
@@ -17,6 +18,7 @@ export function StylePackIconPicker({
   onStatus: (failed: boolean, message: string) => void;
 }) {
   const { t } = useTranslation();
+  const { name } = getStylePackPresentation(pack, t);
   const [src, setSrc] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -65,8 +67,8 @@ export function StylePackIconPicker({
         data-custom={src ? 'true' : undefined}
         onClick={() => inputRef.current?.click()}
         disabled={busy}
-        aria-label={t('style.pack.uploadIcon', { name: pack.name })}
-        title={t('style.pack.uploadIcon', { name: pack.name })}
+        aria-label={t('style.pack.uploadIcon', { name })}
+        title={t('style.pack.uploadIcon', { name })}
       >
         {src ? (
           <img src={src} width={24} height={24} alt="" onError={() => setSrc(null)} />

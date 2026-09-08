@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { CapsuleStylePreview } from '../../components/TypelessCapsule';
 import { ShortcutRecorder } from '../../components/ShortcutRecorder';
 import { playRecordStartCue } from '../../lib/audioCue';
 import { defaultDictationHotkey } from '../../lib/hotkey';
@@ -428,19 +429,20 @@ export function RecordingInputSection() {
         )}
         {os !== 'linux' && !isAndroid && (
           <SettingRow label={t('settings.recording.capsuleStyleLabel')}>
-            <SelectLite
-              value={prefs.capsuleStyle ?? 'siri'}
-              onChange={(next) => savePrefs({ ...prefs, capsuleStyle: next as CapsuleStyle })}
-              options={[
-                { value: 'siri', label: t('settings.recording.capsuleStyleSiri') },
-                { value: 'classic', label: t('settings.recording.capsuleStyleClassic') },
-              ]}
-              ariaLabel={t('settings.recording.capsuleStyleLabel')}
-              // 与麦克风/语言等下拉同款视觉：走 SelectLite 默认触发器底色
-              //（--ol-select-trigger-bg），而不是 inputStyle 的 surface-2；宽度
-              // 220 与同区粘贴快捷键行、语言区保持一致（minWidth 200 防缩窄）。
-              style={{ maxWidth: 220, minWidth: 200 }}
-            />
+            <div style={{ minWidth: 0 }}>
+              <SelectLite
+                value={prefs.capsuleStyle ?? 'siri'}
+                onChange={(next) => savePrefs({ ...prefs, capsuleStyle: next as CapsuleStyle })}
+                options={[
+                  { value: 'siri', label: t('settings.recording.capsuleStyleSiri') },
+                  { value: 'classic', label: t('settings.recording.capsuleStyleClassic') },
+                  { value: 'typeless', label: t('settings.recording.capsuleStyleTypeless') },
+                ]}
+                ariaLabel={t('settings.recording.capsuleStyleLabel')}
+                style={{ maxWidth: 220, minWidth: 200 }}
+              />
+              <CapsuleStylePreview style={prefs.capsuleStyle ?? 'siri'} />
+            </div>
           </SettingRow>
         )}
         <SettingRow

@@ -804,24 +804,7 @@ pub fn whisper_supports_verbose_json(provider_id: &str, advanced: AdvancedAsrCon
 }
 
 pub fn zenmux_language_code(native_name: &str) -> Option<String> {
-    let code = match native_name.trim() {
-        "简体中文" | "繁体中文" => "zh",
-        "English" => "en",
-        "日本語" => "ja",
-        "한국어" => "ko",
-        "Français" => "fr",
-        "Deutsch" => "de",
-        "Español" => "es",
-        "Italiano" => "it",
-        "Português" => "pt",
-        "Русский" => "ru",
-        "العربية" => "ar",
-        "Tiếng Việt" => "vi",
-        "ไทย" => "th",
-        "हिन्दी" => "hi",
-        _ => return None,
-    };
-    Some(code.to_string())
+    crate::language_catalog::asr_language_code(native_name)
 }
 
 pub fn volc_resource_history_label(resource_id: &str) -> Option<String> {

@@ -84,8 +84,16 @@ assert(
 
 // 内置包显示名走 i18n mode 名，自定义包用原名。
 assert(
-  packDisplayName(pack('builtin.light', true, 'builtin', 'light'), modeLabel) === 'Light polish',
+  packDisplayName(
+    { ...pack('builtin.light', true, 'builtin', 'light'), name: '轻度润色' },
+    modeLabel,
+  ) === 'Light polish',
   'builtin packs should display the i18n mode label',
+);
+assert(
+  packDisplayName(pack('builtin.light', true, 'builtin', 'light'), modeLabel) ===
+    '包 builtin.light',
+  'user-renamed builtin packs retain their chosen name',
 );
 assert(
   packDisplayName(pack('custom-alive', true), modeLabel) === '包 custom-alive',

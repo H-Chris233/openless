@@ -36,11 +36,12 @@
 | --- | --- | --- |
 | 启动与窗口分支 | `src/main.tsx`、`src/App.tsx` | typed IPC 启动快照；Tauri 配置与运行时窗口 |
 | 主界面、页面与设置 | `src/components/FloatingShell.tsx`、`src/pages/`、`src/pages/settings/` | `src/state/` 组织界面状态；业务规则归 Core |
-| 多语言、主题、组件 | `src/i18n/`、`src/styles/`、`src/components/` | 五语言文案；tokens/global 样式 |
+| 多语言、主题、组件 | `src/i18n/`、`src/styles/`、`src/components/` | 八种界面语言；tokens/global 样式 |
 | 新增或调整 IPC | `src/lib/ipc/`、`src-tauri/src/commands/`、`src-tauri/src/lib.rs` | Rust/TypeScript 类型、注册、事件与 `contract/` 同步 |
 | 共享业务入口 | `crates/openless-core/src/api.rs` | `events.rs`、`ports.rs`、`domains.rs`、`config.rs` |
 | 听写和服务 | Core `dictation_engine.rs`、`provider_*`、`asr/`、`polish.rs` | Host 的录音、插入和本地模型适配 |
 | 历史、词库、纠错、风格包 | Core `history.rs`、`vocabulary.rs`、`correction.rs`、`style_pack_store.rs` | Tauri `persistence/` 与对应 command |
+| 官方云同步 | Core `cloud_sync.rs`、`cloud_sync_types.rs`、`cloud_sync_validation.rs`、`cloud_sync_transaction.rs` | Tauri `commands/cloud_sync.rs`；GitHub 身份、有限字段与版本冲突见 [云同步合同](cloud-sync.md) |
 | Tauri 组装与系统能力 | `src-tauri/src/coordinator.rs`、`core_adapters.rs`、`tauri_coordinator_host.rs` | 窗口、热键、权限、平台输入与生命周期 |
 | Linux 原生接入 | `linux-egui/src/main.rs`、`lib.rs`、`backend.rs` | `audio/credentials/fcitx5/hotkeys/settings` 等 Host 模块；见 [交接](linux-egui-handoff/README.md) |
 | Android 集成 | `android/`、`src-tauri/src/android/` | `@android` 别名与 `merge-android-*.mjs` 生成链 |
@@ -60,6 +61,7 @@ Core 其余模块按领域列于 [架构模块地图](architecture.md)。平台�
 | `src-tauri/tauri.conf.json` / `src-tauri/capabilities/` | 应用元数据、初始窗口、打包与 Tauri 能力权限 |
 | `src-tauri/vendor/` | 原生 ASR 引擎与子模块；升级按 [qwen-asr 清单](qwen-asr-submodule-upgrade-checklist.md) |
 | `src/lib/ipc/provider-descriptors.generated.json` | Core 导出的公开 provider 目录；生成命令见 [架构](architecture.md) |
+| `contract/language-catalog.json` | 工作语言的原生保存值、显示代码、ASR 代码与 Apple locale；前端及 Core 直接共用，新增语种不分别修改三份映射 |
 | `src-tauri/gen/` | Tauri 平台生成目录；Android 手写源与合成脚本保留在 `android/`、`scripts/` |
 | `node_modules/`、`dist/`、各 `target/` | 依赖和构建产物，不作为源码或 docs 的事实来源 |
 

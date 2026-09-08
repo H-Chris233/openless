@@ -2,6 +2,7 @@ import {
   getCapsuleHostMetrics,
   getCapsuleMessageLayout,
   getCapsulePillMetrics,
+  parseCapsuleStyle,
 } from './capsuleLayout.ts';
 
 function assertEqual<T>(actual: T, expected: T, name: string) {
@@ -80,3 +81,20 @@ assertEqual(winProcessingLayout.allowWrap, true, 'windows processing label wraps
 const macErrorLayout = getCapsuleMessageLayout('mac', 'error');
 assertEqual(macErrorLayout.lineClamp, 1, 'mac error message stays single-line');
 assertEqual(macErrorLayout.allowWrap, false, 'mac error message stays nowrap');
+
+for (const os of ['mac', 'win', 'linux'] as const) {
+  const classic = getCapsuleHostMetrics(os, false, 'classic');
+  const typeless = getCapsuleHostMetrics(os, true, 'typeless');
+  assertEqual(classic.height, 100, `${os}: classic uses the compact native window`);
+  assertEqual(typeless.height, 128, `${os}: typeless reserves room for the translation badge`);
+  assertEqual(typeless.bottomInset, 16, `${os}: visible capsule sits close to the work-area edge`);
+  assertEqual(typeless.width, 460, `${os}: error text remains inside the shared window`);
+}
+for (const style of ['siri', 'classic', 'typeless'] as const) {
+  assertEqual(parseCapsuleStyle(style), style, `${style} is accepted from preferences and events`);
+}
+assertEqual(
+  parseCapsuleStyle('unknown'),
+  undefined,
+  'unknown styles do not replace the active choice',
+);

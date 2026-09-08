@@ -329,7 +329,9 @@ export function ShortcutRecorder({
             }}
           >
             {t('settings.recording.comboRecordHint')}
-            <div style={{ fontSize: 11, color: 'var(--ol-ink-4)', marginTop: 4 }}>Esc 取消</div>
+            <div style={{ fontSize: 11, color: 'var(--ol-ink-4)', marginTop: 4 }}>
+              Esc · {t('common.cancel')}
+            </div>
           </motion.div>
         ) : (
           <motion.div

@@ -1,7 +1,38 @@
 // 简体中文资源 — 与产品当前文案保持一致。
-// 五个语言文件共享同一结构；新增或删除 key 时同步更新全部语言。
+// 八个语言文件共享同一结构；新增或删除 key 时同步更新全部语言。
 
 export const zhCN = {
+  cloudSync: {
+    title: '云同步',
+    description: '使用 GitHub 账号，在设备之间同步词典、风格与个人偏好。',
+    signIn: '使用 GitHub 登录',
+    account: '同步账号',
+    refresh: '刷新状态',
+    loading: '正在读取云端状态…',
+    noBackup: '云端尚无备份',
+    available: '云端备份已就绪',
+    summary: '{{dictionary}} 个词条 · {{corrections}} 条纠正规则 · {{stylePacks}} 个风格',
+    updated: '更新于 {{time}}',
+    upload: '备份到云端',
+    restore: '从云端恢复',
+    delete: '删除云端备份',
+    working: '正在同步…',
+    uploadSuccess: '已备份到云端',
+    restoreSuccess: '已恢复云端配置',
+    deleteSuccess: '云端备份已删除',
+    failed: '同步失败：{{error}}',
+    conflict: '云端已有更新。请刷新状态后，再决定备份或恢复。',
+    unavailable: '官方同步服务暂不可用，请稍后重试。',
+    signInRequired: '请先登录 GitHub。',
+    restoreTitle: '恢复云端备份？',
+    restoreDescription:
+      '云端的词典、纠正规则、风格和同步偏好将覆盖本机对应内容。API 密钥、设备目录与权限保持本机设置。',
+    deleteTitle: '删除云端备份？',
+    deleteDescription: '仅删除这个 GitHub 账号的云端备份，本机数据会保留。',
+    confirmRestore: '恢复并替换',
+    confirmDelete: '删除备份',
+    scope: '同步词典、纠正规则、风格图标与常用偏好。API 密钥、登录凭据及设备专属设置保留在本机。',
+  },
   app: {
     name: 'OpenLess',
     tagline: '自然说话，完美书写',
@@ -132,7 +163,7 @@ export const zhCN = {
     more: '更多',
   },
   marketplace: {
-    kicker: 'MARKETPLACE',
+    kicker: '风格市场',
     title: '风格包市场',
     desc: '浏览、安装和分享社区风格包。',
     searchPlaceholder: '搜索名称 / 描述 / 标签…',
@@ -239,7 +270,7 @@ export const zhCN = {
     shortcutLabel: '录音快捷键',
     shortcutHint: '开始 / 停止',
     betaTag: 'BETA',
-    betaNote: '所有数据都只保存在本机。',
+    betaNote: '本地存储，可选云端备份',
     navHint: {
       overview: '状态总览：用量统计、提供商与权限健康检查',
       history: '听写历史：搜索、回放与复制过往转写',
@@ -359,7 +390,7 @@ export const zhCN = {
       tryDictationDesc: '把光标放到要输入的地方。{{shortcut}}',
       permissionsHint: '录音或快捷键没有反应？在「权限与数据」中查看权限、麦克风和快捷键状态。',
     },
-    kicker: 'DASHBOARD',
+    kicker: '概览',
     title: '今日概览',
     desc: '今日口述统计与系统状态。',
     pressPrefix: '按',
@@ -424,7 +455,7 @@ export const zhCN = {
   },
   history: {
     exportError: '导出录音失败，请重试。',
-    kicker: 'HISTORY',
+    kicker: '历史记录',
     title: '历史记录',
     desc: '本机保存的识别记录。',
     filterAll: '全部',
@@ -493,7 +524,13 @@ export const zhCN = {
     dismiss: '关闭',
   },
   vocab: {
-    kicker: 'DICTIONARY',
+    selectAllVisible: '选择当前结果',
+    selectedCount: '已选择 {{count}} 个词',
+    selectWord: '选择「{{phrase}}」',
+    deleteSelected: '删除已选（{{count}}）',
+    batchDeleteFailed: '{{count}} 个词条删除失败，已保留选中，可重试。',
+
+    kicker: '词典',
     title: '词典',
     desc: '添加生词或专业术语，提高识别准确率。',
     sectionTitle: '词条',
@@ -551,7 +588,7 @@ export const zhCN = {
     },
   },
   style: {
-    kicker: 'STYLE',
+    kicker: '风格',
     title: '输出风格',
     desc: '选择录音的默认输出风格。',
     masterToggle: '整体启用',
@@ -579,7 +616,7 @@ export const zhCN = {
       },
       structured: {
         name: '清晰结构',
-        desc: '多个主题或步骤时，自动组织为分点列表。',
+        desc: '面向编程协作、技术排障和产品反馈，准确保留术语并梳理结构。',
         sample: '1. 主题一\na. 要点\nb. 要点\n2. 主题二\na. 要点\nb. 要点',
       },
       formal: {
@@ -589,6 +626,18 @@ export const zhCN = {
       },
     },
     pack: {
+      builtinTags: {
+        minimalEdits: '最小改写',
+        strongCorrection: '强纠错',
+        communication: '沟通',
+        natural: '自然',
+        organized: '条理',
+        workplaceCommunication: '工作沟通',
+        aiCoding: 'AI 编程',
+        technicalStructure: '技术结构化',
+      },
+      newName: '未命名风格',
+      newDescription: '简短描述这个风格的使用场景。',
       uploadIcon: '为「{{name}}」上传 SVG 图标',
       resetIcon: '恢复默认图标',
       iconSaved: '图标已保存',
@@ -616,7 +665,7 @@ export const zhCN = {
       selectionActivated: '已将「{{name}}」用于选区润色',
       selectionActivateFailed: '选区润色风格切换失败：{{err}}',
       selectionChars: '{{count}} 字符',
-      kicker: 'STYLE PACKS',
+      kicker: '风格包',
       title: '风格包',
       desc: '管理本地风格包。',
       marketplaceBtn: '风格市场',
@@ -713,7 +762,12 @@ export const zhCN = {
     },
   },
   translation: {
-    kicker: 'TRANSLATION',
+    searchLanguages: '搜索语言…',
+    noMatchingLanguages: '没有匹配的语言',
+    selectedLanguages: '已选择 {{count}} 种语言',
+
+    languageSupportHint: '语音服务支持的语种可能不同；翻译目标不受界面语言限制。',
+    kicker: '翻译',
     title: '翻译',
     desc: '录音后自动翻译为目标语言再插入。',
     statusEnabled: '已启用',
@@ -811,7 +865,7 @@ export const zhCN = {
       previewConfirm: '预览确认',
       previewConfirmHint: '在可编辑弹窗中核对结果，再确认覆盖原选区。',
     },
-    kicker: 'SETTINGS',
+    kicker: '设置',
     title: '设置',
     desc: '录音、提供商、快捷键与权限配置。',
     network: {
@@ -913,6 +967,7 @@ export const zhCN = {
       openPanelAction: '打开 Less Computer',
     },
     debug: {
+      cursorLabel: '光标',
       title: '调试工具',
       desc: '排查识别问题时使用，平时无需开启。',
       cursorProbeLabel: '光标上下文探针',
@@ -966,6 +1021,7 @@ export const zhCN = {
       microphoneMonitorError: '输入电平监听失败：{{message}}',
       capsuleLabel: '录音胶囊',
       capsuleDesc: '录音 / 转写时显示屏幕底部胶囊。',
+      capsuleStyleTypeless: 'Typeless 传统风格',
       capsuleStyleLabel: '胶囊样式',
       capsuleStyleSiri: '流光 Siri 风格',
       capsuleStyleClassic: 'Openless 默认风格',
@@ -1501,6 +1557,9 @@ export const zhCN = {
       confirm: '确认启用',
     },
     language: {
+      es: 'Español',
+      fr: 'Français',
+      de: 'Deutsch',
       title: '界面语言',
       desc: '切换 UI 显示语言。当前会话即时生效，下次启动自动沿用。',
       label: '语言',
@@ -1727,6 +1786,7 @@ export const zhCN = {
     },
   },
   windowChrome: {
+    restore: '还原',
     minimize: '最小化',
     maximize: '最大化',
     close: '关闭',

@@ -17,6 +17,7 @@
 
 ## 接口契约
 
+- [官方云同步](cloud-sync.md)：可同步字段、GitHub 身份边界、版本冲突、本地恢复与验证。
 - [Linux egui 后端契约](linux-egui-backend-contract.md)：`contract/backend-2.0.json`、启动快照、事件面与公开签名。
 
 ## 平台与运营

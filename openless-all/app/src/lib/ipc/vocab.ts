@@ -3,31 +3,44 @@ import { invokeOrMock } from './shared';
 import { mockVocab, mockCorrectionRules } from './mock-data';
 
 export function listVocab(): Promise<DictionaryEntry[]> {
-  return invokeOrMock('list_vocab', undefined, () => mockVocab);
+  return invokeOrMock('list_vocab', undefined, () => mockVocab.map((entry) => ({ ...entry })));
 }
 
 export function addVocab(phrase: string, note?: string): Promise<DictionaryEntry> {
-  return invokeOrMock('add_vocab', { phrase, note }, () => ({
-    id: `vocab-new-${Date.now()}`,
-    phrase,
-    note: note ?? null,
-    enabled: true,
-    hits: 0,
-    createdAt: new Date().toISOString(),
-  }));
+  return invokeOrMock('add_vocab', { phrase, note }, () => {
+    const entry = {
+      id: crypto.randomUUID(),
+      phrase,
+      note: note ?? null,
+      enabled: true,
+      hits: 0,
+      createdAt: new Date().toISOString(),
+    };
+    mockVocab.unshift(entry);
+    return { ...entry };
+  });
 }
 
 export function removeVocab(id: string): Promise<void> {
-  return invokeOrMock('remove_vocab', { id }, () => undefined);
+  return invokeOrMock('remove_vocab', { id }, () => {
+    const index = mockVocab.findIndex((entry) => entry.id === id);
+    if (index >= 0) mockVocab.splice(index, 1);
+  });
 }
 
 export function setVocabEnabled(id: string, enabled: boolean): Promise<void> {
-  return invokeOrMock('set_vocab_enabled', { id, enabled }, () => undefined);
+  return invokeOrMock('set_vocab_enabled', { id, enabled }, () => {
+    const entry = mockVocab.find((entry) => entry.id === id);
+    if (entry) entry.enabled = enabled;
+  });
 }
 
 /** 编辑词条文本：id / hits / enabled 保持不变（后端 update_vocab）。 */
 export function updateVocab(id: string, phrase: string): Promise<void> {
-  return invokeOrMock('update_vocab', { id, phrase }, () => undefined);
+  return invokeOrMock('update_vocab', { id, phrase }, () => {
+    const entry = mockVocab.find((entry) => entry.id === id);
+    if (entry) entry.phrase = phrase;
+  });
 }
 
 export function listCorrectionRules(): Promise<CorrectionRule[]> {

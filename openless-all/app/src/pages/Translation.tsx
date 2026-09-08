@@ -9,23 +9,57 @@ import { useTranslation } from 'react-i18next';
 import { Card, PageHeader } from './_atoms';
 import { SavedToast } from '../components/SavedToast';
 import { SelectLite } from '../components/ui/SelectLite';
-import { listStylePacks } from '../lib/ipc';
-import { SUPPORTED_LANGUAGES } from '../lib/types';
+import { isTauri, listStylePacks } from '../lib/ipc';
+import { filterLanguages, localizedLanguages, nativeLanguageName } from '../lib/languageCatalog';
+import { Icon } from '../components/Icon';
+import { getStylePackPresentation } from '../lib/stylePackPresentation';
 import { isTranslationEnabled, isTranslationTargetRedundant } from '../lib/translationTarget';
 import { useHotkeySettings } from '../state/HotkeySettingsContext';
 import { formatComboLabel } from '../lib/hotkey';
-import type { UserPreferences } from '../lib/types';
+import type { StylePack, UserPreferences } from '../lib/types';
+import './Translation.css';
 
 type SaveState = 'idle' | 'saving' | 'saved' | 'failed';
 
 export function Translation() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const { prefs, loading, error, refresh, updatePrefs: savePrefs } = useHotkeySettings();
   const [saveState, setSaveState] = useState<SaveState>('idle');
   const [saveMessage, setSaveMessage] = useState('');
-  const [activeStylePackName, setActiveStylePackName] = useState<string | null>(null);
+  const [activeStylePack, setActiveStylePack] = useState<StylePack | null>(null);
+  const activeStylePackName = activeStylePack
+    ? getStylePackPresentation(activeStylePack, t).name
+    : null;
   const [stylePackLoadFailed, setStylePackLoadFailed] = useState(false);
   const statusTimer = useRef<number | null>(null);
+  const [languageQuery, setLanguageQuery] = useState('');
+  const locale = i18n.resolvedLanguage ?? i18n.language;
+  const languages = useMemo(
+    () =>
+      localizedLanguages(locale, [
+        ...(prefs?.workingLanguages ?? []),
+        prefs?.translationTargetLanguage ?? '',
+      ]),
+    [locale, prefs?.workingLanguages, prefs?.translationTargetLanguage],
+  );
+  const filteredLanguages = useMemo(
+    () => filterLanguages(languages, languageQuery),
+    [languages, languageQuery],
+  );
+  const targetOptions = useMemo(() => {
+    const options = filteredLanguages.map((language) => ({
+      value: language.nativeName,
+      label: language.label,
+    }));
+    const selected = prefs?.translationTargetLanguage;
+    if (selected && !options.some((option) => option.value === selected)) {
+      const language = languages.find(
+        (language) => language.nativeName === nativeLanguageName(selected),
+      );
+      options.unshift({ value: selected, label: language?.label ?? selected });
+    }
+    return [{ value: '', label: t('translation.target.disabled') }, ...options];
+  }, [filteredLanguages, languages, prefs?.translationTargetLanguage, t]);
 
   useEffect(
     () => () => {
@@ -37,24 +71,41 @@ export function Translation() {
   useEffect(() => {
     const activeStylePackId = prefs?.activeStylePackId;
     let cancelled = false;
-    setActiveStylePackName(null);
+    let unlisten: (() => void) | undefined;
+    let request = 0;
+    setActiveStylePack(null);
     setStylePackLoadFailed(false);
-    void listStylePacks()
-      .then((packs) => {
-        if (cancelled) return;
-        const activePack =
-          packs.find((pack) => pack.active && pack.enabled) ??
-          packs.find((pack) => pack.id === activeStylePackId && pack.enabled);
-        setActiveStylePackName(activePack?.name ?? null);
-        setStylePackLoadFailed(!activePack);
-      })
-      .catch((loadError) => {
-        console.warn('[translation] failed to load active style pack', loadError);
-        if (!cancelled) setStylePackLoadFailed(true);
-      });
+    const loadStyle = () => {
+      const current = ++request;
+      return listStylePacks()
+        .then((packs) => {
+          if (cancelled || current !== request) return;
+          const activePack =
+            packs.find((pack) => pack.active && pack.enabled) ??
+            packs.find((pack) => pack.id === activeStylePackId && pack.enabled);
+          setActiveStylePack(activePack ?? null);
+          setStylePackLoadFailed(!activePack);
+        })
+        .catch((loadError) => {
+          console.warn('[translation] failed to load active style pack', loadError);
+          if (!cancelled && current === request) setStylePackLoadFailed(true);
+        });
+    };
+    void loadStyle();
+    if (isTauri) {
+      // Restore can replace an active pack's contents without changing its ID.
+      void import('@tauri-apps/api/event')
+        .then(async ({ listen }) => {
+          const stop = await listen('prefs:changed', () => void loadStyle());
+          if (cancelled) stop();
+          else unlisten = stop;
+        })
+        .catch((error) => console.warn('[translation] preference listener failed', error));
+    }
 
     return () => {
       cancelled = true;
+      unlisten?.();
     };
   }, [prefs?.activeStylePackId]);
 
@@ -131,17 +182,16 @@ export function Translation() {
     );
   }
 
-  const onWorkingLanguagesChange = (workingLanguages: string[]) => {
-    void persistPrefs(
-      (current) => ({ ...current, workingLanguages }),
-      t('translation.save.workingFailed'),
-    );
-  };
   const toggleWorkingLanguage = (lang: string) => {
-    const next = prefs.workingLanguages.includes(lang)
-      ? prefs.workingLanguages.filter((l) => l !== lang)
-      : [...prefs.workingLanguages, lang];
-    onWorkingLanguagesChange(next);
+    void persistPrefs((current) => {
+      const selected = current.workingLanguages.some((value) => nativeLanguageName(value) === lang);
+      return {
+        ...current,
+        workingLanguages: selected
+          ? current.workingLanguages.filter((value) => nativeLanguageName(value) !== lang)
+          : [...current.workingLanguages, lang],
+      };
+    }, t('translation.save.workingFailed'));
   };
   const onTargetChange = (translationTargetLanguage: string) => {
     void persistPrefs(
@@ -159,14 +209,6 @@ export function Translation() {
     prefs.workingLanguages,
   );
   const enabled = isTranslationEnabled(prefs.translationTargetLanguage) && !redundantTarget;
-
-  const targetOptions = useMemo(
-    () => [
-      { value: '', label: t('translation.target.disabled') },
-      ...SUPPORTED_LANGUAGES.map((lang) => ({ value: lang, label: lang })),
-    ],
-    [t],
-  );
 
   return (
     <>
@@ -219,37 +261,73 @@ export function Translation() {
 
         <SavedToast saveState={saveState} message={saveMessage} />
 
+        <div className="ol-translation-toolbar">
+          <label className="ol-language-search">
+            <Icon name="search" size={15} />
+            <input
+              type="search"
+              value={languageQuery}
+              onChange={(event) => setLanguageQuery(event.target.value)}
+              placeholder={t('translation.searchLanguages')}
+              aria-label={t('translation.searchLanguages')}
+            />
+          </label>
+          <span className="ol-translation-count">
+            {t('translation.selectedLanguages', { count: prefs.workingLanguages.length })}
+          </span>
+        </div>
+
         {/* 宽屏下「工作语言 / 目标语言」并排两栏（窄屏自动叠成一栏），
             语言 chips 用对齐的均匀网格代替自由换行，避免参差的标签云。 */}
         <div className="ol-translation-grid">
           {/* 1. 工作语言 */}
           <Card style={{ display: 'flex', flexDirection: 'column' }}>
-            <div style={{ fontSize: 13.5, fontWeight: 600, marginBottom: 12 }}>
+            <div style={{ fontSize: 13.5, fontWeight: 600, marginBottom: 6 }}>
               {t('translation.working.title')}
             </div>
+            <p className="ol-translation-description">{t('translation.working.desc')}</p>
             <div
-              style={{
-                display: 'grid',
-                gridTemplateColumns: 'repeat(auto-fill, minmax(104px, 1fr))',
-                gap: 8,
-              }}
+              className="ol-language-grid ol-thinscroll"
+              role="group"
+              aria-label={t('translation.working.title')}
             >
-              {SUPPORTED_LANGUAGES.map((lang) => {
-                const checked = prefs.workingLanguages.includes(lang);
+              {filteredLanguages.map((language) => {
+                const checked = prefs.workingLanguages.some(
+                  (value) => nativeLanguageName(value) === language.nativeName,
+                );
                 return (
                   <button
-                    key={lang}
+                    key={language.nativeName}
                     type="button"
-                    className="ol-chip"
+                    className="ol-language-choice"
+                    data-selected={checked}
                     aria-pressed={checked}
-                    title={lang}
-                    onClick={() => toggleWorkingLanguage(lang)}
+                    title={language.label}
+                    onClick={() => toggleWorkingLanguage(language.nativeName)}
                   >
-                    {lang}
+                    <span>
+                      <span className="ol-language-name" dir="auto">
+                        {language.displayName}
+                      </span>
+                      {language.displayName !== language.nativeName && (
+                        <span className="ol-language-native" dir="auto">
+                          {language.nativeName}
+                        </span>
+                      )}
+                    </span>
+                    <span className="ol-language-check">
+                      {checked && <Icon name="check" size={13} />}
+                    </span>
                   </button>
                 );
               })}
+              {filteredLanguages.length === 0 && (
+                <p className="ol-language-empty" role="status">
+                  {t('translation.noMatchingLanguages')}
+                </p>
+              )}
             </div>
+            <p className="ol-translation-language-hint">{t('translation.languageSupportHint')}</p>
           </Card>
 
           {/* 2. 翻译目标语言 */}

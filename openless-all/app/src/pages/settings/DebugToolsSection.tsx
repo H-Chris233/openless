@@ -179,7 +179,9 @@ export function DebugToolsSection() {
               {probeResult.window && (
                 <div style={{ marginTop: 4, whiteSpace: 'pre-wrap' }}>
                   {probeResult.window.text.slice(0, probeResult.window.cursor)}
-                  <span style={{ color: 'var(--ol-blue)', fontWeight: 700 }}>⟦光标⟧</span>
+                  <span style={{ color: 'var(--ol-blue)', fontWeight: 700 }}>
+                    ⟦{t('settings.debug.cursorLabel')}⟧
+                  </span>
                   {probeResult.window.text.slice(probeResult.window.cursor)}
                 </div>
               )}

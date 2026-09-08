@@ -3,7 +3,7 @@ import ReactDOM from 'react-dom/client';
 import { App } from './App';
 import { SplashVideo } from './components/SplashVideo';
 import { detectOS } from './components/WindowChrome';
-import i18n from './i18n'; // 副作用：触发 i18next init
+import { i18nReady } from './i18n';
 import { initThemeMode } from './lib/themeMode';
 import './styles/tokens.css';
 import './styles/global.css';
@@ -45,10 +45,5 @@ const renderApp = () => {
   );
 };
 
-// i18n 必须就绪后才能渲染：否则首次渲染拿到的 t() 返回 key 字面量。
-// react-i18next useSuspense=false 时不会自动等，只有事件触发后重渲染才能拿到译文。
-if (i18n.isInitialized) {
-  renderApp();
-} else {
-  i18n.on('initialized', renderApp);
-}
+// Mount only after the selected local language chunk is ready; avoid mixed-language startup.
+void i18nReady.then(renderApp);

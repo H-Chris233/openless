@@ -55,7 +55,7 @@ export function SettingsModal({
   initialSettingsSection,
   closing = false,
 }: SettingsModalProps) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const mobile = useMobileLayout();
   const conservative = useConservativeLayout();
   const [section, setSection] = useState<SettingsSectionId>(initialSettingsSection ?? 'general');
@@ -117,8 +117,19 @@ export function SettingsModal({
       setRailThumb(null);
       return;
     }
-    setRailThumb({ top: btn.offsetTop, height: btn.offsetHeight });
-  }, [section, searching, mobile, sections.length]);
+    const measure = () => {
+      const next = { top: btn.offsetTop, height: btn.offsetHeight };
+      setRailThumb((current) =>
+        current?.top === next.top && current.height === next.height ? current : next,
+      );
+    };
+    measure();
+    // Translated labels may wrap when the language, font scale or window width changes.
+    const observer = new ResizeObserver(measure);
+    observer.observe(nav);
+    observer.observe(btn);
+    return () => observer.disconnect();
+  }, [section, searching, mobile, sections.length, i18n.resolvedLanguage]);
 
   useEffect(() => {
     let cancelled = false;
@@ -283,7 +294,7 @@ export function SettingsModal({
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        padding: mobile ? 0 : 20,
+        padding: mobile ? 0 : '64px 28px 24px',
         zIndex: mobile ? 70 : 50,
         animation: mobile
           ? undefined
@@ -304,9 +315,9 @@ export function SettingsModal({
         onKeyDown={handleKeyDown}
         style={{
           width: '100%',
-          maxWidth: mobile ? undefined : 1020,
+          maxWidth: mobile ? undefined : 960,
           height: '100%',
-          maxHeight: mobile ? undefined : 760,
+          maxHeight: mobile ? undefined : 680,
           minHeight: 0,
           background: 'var(--ol-settings-content-bg)',
           borderRadius: mobile ? 0 : 14,
@@ -364,7 +375,7 @@ export function SettingsModal({
         >
           <aside
             style={{
-              width: mobile ? undefined : 232,
+              width: mobile ? undefined : 214,
               flexShrink: 0,
               minHeight: 0,
               overflow: 'auto',
@@ -444,12 +455,14 @@ export function SettingsModal({
                             zIndex: 1,
                             flexShrink: 0,
                             padding: '10px',
-                            whiteSpace: 'nowrap',
+                            whiteSpace: 'normal',
                           }
                     }
                   >
                     {!mobile && <Icon name={item.icon} size={16} />}
-                    {item.title}
+                    <span style={{ minWidth: 0, overflowWrap: mobile ? undefined : 'anywhere' }}>
+                      {item.title}
+                    </span>
                   </button>
                 );
               })}

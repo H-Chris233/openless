@@ -84,6 +84,13 @@ impl DictionaryStore {
         read_or_default(&self.path)
     }
 
+    /// Cloud restore locks every participating store before preparing or replacing any file.
+    pub(crate) fn cloud_sync_access(
+        &self,
+    ) -> Result<(std::sync::MutexGuard<'_, ()>, &Path), BackendError> {
+        Ok((self.lock_store()?, &self.path))
+    }
+
     /// Manual entries are intentionally inserted at the front.
     pub fn add(
         &self,

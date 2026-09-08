@@ -234,13 +234,6 @@ impl ActiveLLMProvider {
         }
     }
 
-    /// 流式润色仅支持 OpenAI-compatible；Codex 使用 Responses API，保留 1.x 的
-    /// 非流式润色能力。调用方须先检查此能力，不能把不同的 SSE 协议混用。
-    /// Gemini 由共享 cloud_providers 单独分流，不进入 ActiveLLMProvider 枚举。
-    pub fn supports_streaming_polish(&self) -> bool {
-        matches!(self, Self::OpenAI(_))
-    }
-
     pub async fn polish_streaming<F, C>(
         &self,
         raw_text: &str,
@@ -279,9 +272,24 @@ impl ActiveLLMProvider {
                     )
                     .await
             }
-            Self::Codex(_) => Err(LLMError::Network(
-                "streaming polish not implemented for codex provider (v1)".into(),
-            )),
+            Self::Codex(provider) => {
+                provider
+                    .polish_streaming(
+                        raw_text,
+                        mode,
+                        hotwords,
+                        style_system_prompt,
+                        working_languages,
+                        chinese_script_preference,
+                        output_language_preference,
+                        front_app,
+                        cursor_context,
+                        prior_turns,
+                        on_delta,
+                        should_cancel,
+                    )
+                    .await
+            }
         }
     }
 
@@ -365,6 +373,53 @@ impl ActiveLLMProvider {
                         chinese_script_preference,
                         output_language_preference,
                         front_app,
+                    )
+                    .await
+            }
+        }
+    }
+
+    pub async fn translate_to_streaming<F, C>(
+        &self,
+        raw_text: &str,
+        target_language: &str,
+        working_languages: &[String],
+        chinese_script_preference: ChineseScriptPreference,
+        output_language_preference: OutputLanguagePreference,
+        front_app: Option<&str>,
+        on_delta: F,
+        should_cancel: C,
+    ) -> Result<String, LLMError>
+    where
+        F: Fn(&str) + Send + Sync,
+        C: Fn() -> bool + Send + Sync,
+    {
+        match self {
+            Self::OpenAI(provider) => {
+                provider
+                    .translate_to_streaming(
+                        raw_text,
+                        target_language,
+                        working_languages,
+                        chinese_script_preference,
+                        output_language_preference,
+                        front_app,
+                        on_delta,
+                        should_cancel,
+                    )
+                    .await
+            }
+            Self::Codex(provider) => {
+                provider
+                    .translate_to_streaming(
+                        raw_text,
+                        target_language,
+                        working_languages,
+                        chinese_script_preference,
+                        output_language_preference,
+                        front_app,
+                        on_delta,
+                        should_cancel,
                     )
                     .await
             }
@@ -610,11 +665,42 @@ impl OpenAICompatibleLLMProvider {
             chinese_script_preference,
             front_app,
         );
-        // 翻译不在本次改动范围，沿用配置里的固定预算，行为与改动前一致。
+        // Non-streaming callers retain the configured total request budget.
         self.chat_completion(
             &system_prompt,
             &user_prompt,
             Duration::from_secs(self.config.request_timeout_secs),
+        )
+        .await
+    }
+
+    pub async fn translate_to_streaming<F, C>(
+        &self,
+        raw_text: &str,
+        target_language: &str,
+        working_languages: &[String],
+        chinese_script_preference: ChineseScriptPreference,
+        _output_language_preference: OutputLanguagePreference,
+        front_app: Option<&str>,
+        on_delta: F,
+        should_cancel: C,
+    ) -> Result<String, LLMError>
+    where
+        F: Fn(&str) + Send + Sync,
+        C: Fn() -> bool + Send + Sync,
+    {
+        let (system_prompt, user_prompt) = compose_translate_prompts(
+            raw_text,
+            target_language,
+            working_languages,
+            chinese_script_preference,
+            front_app,
+        );
+        self.chat_completion_messages_streaming(
+            build_polish_history_messages(&system_prompt, &[], &user_prompt),
+            StreamingTimeouts::for_input(raw_text.chars().count()),
+            on_delta,
+            should_cancel,
         )
         .await
     }
@@ -1182,7 +1268,7 @@ impl CodexOAuthLLMProvider {
         cursor_context: Option<&str>,
         prior_turns: &[(String, String)],
     ) -> Result<String, LLMError> {
-        let (system_prompt, user_prompt) = compose_polish_prompts(
+        self.polish_streaming(
             raw_text,
             mode,
             hotwords,
@@ -1192,20 +1278,11 @@ impl CodexOAuthLLMProvider {
             output_language_preference,
             front_app,
             cursor_context,
-            !prior_turns.is_empty(),
-        );
-        log::info!(
-            "[style-pack] llm polish assembled provider=codex-oauth model={} mode={:?} base_prompt_chars={} effective_prompt_chars={} hotwords={} front_app={} prior_turns={}",
-            self.config.model,
-            mode,
-            style_system_prompt.chars().count(),
-            system_prompt.chars().count(),
-            hotwords.len(),
-            front_app.is_some(),
-            prior_turns.len()
-        );
-        let messages = build_polish_history_messages(&system_prompt, prior_turns, &user_prompt);
-        self.codex_responses(messages, |_| {}, || false).await
+            prior_turns,
+            |_| {},
+            || false,
+        )
+        .await
     }
 
     pub async fn translate_to(
@@ -1217,20 +1294,17 @@ impl CodexOAuthLLMProvider {
         _output_language_preference: OutputLanguagePreference,
         front_app: Option<&str>,
     ) -> Result<String, LLMError> {
-        let mut system_prompt = prompts::translate_system_prompt(target_language);
-        if let Some(premise) = context_premise(
+        self.translate_to_streaming(
+            raw_text,
+            target_language,
             working_languages,
             chinese_script_preference,
-            OutputLanguagePreference::Auto,
+            _output_language_preference,
             front_app,
-        ) {
-            system_prompt = format!("{}\n\n{}", premise, system_prompt);
-        }
-        let messages = vec![
-            json!({ "role": "system", "content": system_prompt }),
-            json!({ "role": "user", "content": prompts::user_prompt(raw_text) }),
-        ];
-        self.codex_responses(messages, |_| {}, || false).await
+            |_| {},
+            || false,
+        )
+        .await
     }
 
     pub async fn answer_chat_streaming<F, C>(
@@ -1264,6 +1338,75 @@ impl CodexOAuthLLMProvider {
         }
         self.codex_responses(request_messages, on_delta, should_cancel)
             .await
+    }
+
+    pub async fn polish_streaming<F, C>(
+        &self,
+        raw_text: &str,
+        mode: PolishMode,
+        hotwords: &[String],
+        style_system_prompt: &str,
+        working_languages: &[String],
+        chinese_script_preference: ChineseScriptPreference,
+        output_language_preference: OutputLanguagePreference,
+        front_app: Option<&str>,
+        cursor_context: Option<&str>,
+        prior_turns: &[(String, String)],
+        on_delta: F,
+        should_cancel: C,
+    ) -> Result<String, LLMError>
+    where
+        F: Fn(&str) + Send + Sync,
+        C: Fn() -> bool + Send + Sync,
+    {
+        let (system_prompt, user_prompt) = compose_polish_prompts(
+            raw_text,
+            mode,
+            hotwords,
+            style_system_prompt,
+            working_languages,
+            chinese_script_preference,
+            output_language_preference,
+            front_app,
+            cursor_context,
+            !prior_turns.is_empty(),
+        );
+        self.codex_responses(
+            build_polish_history_messages(&system_prompt, prior_turns, &user_prompt),
+            on_delta,
+            should_cancel,
+        )
+        .await
+    }
+
+    pub async fn translate_to_streaming<F, C>(
+        &self,
+        raw_text: &str,
+        target_language: &str,
+        working_languages: &[String],
+        chinese_script_preference: ChineseScriptPreference,
+        _output_language_preference: OutputLanguagePreference,
+        front_app: Option<&str>,
+        on_delta: F,
+        should_cancel: C,
+    ) -> Result<String, LLMError>
+    where
+        F: Fn(&str) + Send + Sync,
+        C: Fn() -> bool + Send + Sync,
+    {
+        let (system_prompt, user_prompt) = compose_translate_prompts(
+            raw_text,
+            target_language,
+            working_languages,
+            chinese_script_preference,
+            front_app,
+        );
+        self.codex_responses(
+            build_polish_history_messages(&system_prompt, &[], &user_prompt),
+            on_delta,
+            should_cancel,
+        )
+        .await
     }
 
     async fn codex_responses<F, C>(
@@ -3717,8 +3860,9 @@ mod tests {
                 .with_base_url(format!("http://{}", addr))
                 .with_auth_path(auth_path.clone()),
         );
+        let deltas = StdMutex::new(String::new());
         let output = provider
-            .polish(
+            .polish_streaming(
                 "原文",
                 PolishMode::Raw,
                 &[],
@@ -3729,11 +3873,14 @@ mod tests {
                 None,
                 None,
                 &[],
+                |delta| deltas.lock().unwrap().push_str(delta),
+                || false,
             )
             .await
             .unwrap();
 
         assert_eq!(output, "最终🙂文本。");
+        assert_eq!(*deltas.lock().unwrap(), output);
         server.join().unwrap();
         let _ = std::fs::remove_file(auth_path);
     }

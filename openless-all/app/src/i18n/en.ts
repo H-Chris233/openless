@@ -4,6 +4,41 @@ import type { zhCN } from './zh-CN';
 
 // Type-level guarantee that en mirrors the zh-CN shape.
 export const en: typeof zhCN = {
+  cloudSync: {
+    title: 'Cloud sync',
+    description:
+      'Use your GitHub account to sync your dictionary, styles, and preferences across devices.',
+    signIn: 'Sign in with GitHub',
+    account: 'Sync account',
+    refresh: 'Refresh status',
+    loading: 'Checking cloud status…',
+    noBackup: 'No cloud backup yet',
+    available: 'Cloud backup available',
+    summary: '{{dictionary}} words · {{corrections}} corrections · {{stylePacks}} styles',
+    updated: 'Updated {{time}}',
+    upload: 'Back up to cloud',
+    restore: 'Restore from cloud',
+    delete: 'Delete cloud backup',
+    working: 'Syncing…',
+    uploadSuccess: 'Cloud backup saved',
+    restoreSuccess: 'Cloud settings restored',
+    deleteSuccess: 'Cloud backup deleted',
+    failed: 'Sync failed: {{error}}',
+    conflict:
+      'The cloud copy has changed. Refresh its status before choosing to back up or restore.',
+    unavailable: 'The official sync service is currently unavailable. Try again later.',
+    signInRequired: 'Sign in with GitHub first.',
+    restoreTitle: 'Restore cloud backup?',
+    restoreDescription:
+      'Cloud dictionary entries, corrections, styles, and synced preferences will replace their local equivalents. API keys, device paths, and permissions stay on this device.',
+    deleteTitle: 'Delete cloud backup?',
+    deleteDescription:
+      'This removes only the cloud backup for this GitHub account. Local data is kept.',
+    confirmRestore: 'Restore and replace',
+    confirmDelete: 'Delete backup',
+    scope:
+      'Sync dictionary entries, corrections, style icons, and common preferences. API keys, credentials, and device settings stay on this device.',
+  },
   app: {
     name: 'OpenLess',
     tagline: 'Speak naturally, write perfectly',
@@ -244,7 +279,7 @@ export const en: typeof zhCN = {
     shortcutLabel: 'Recording shortcut',
     shortcutHint: 'Start / Stop',
     betaTag: 'BETA',
-    betaNote: 'All data stays on this device.',
+    betaNote: 'Local storage, optional cloud backup',
     navHint: {
       overview: 'Status overview: usage stats, provider & permission health',
       history: 'Dictation history: search, replay and copy past transcripts',
@@ -508,6 +543,12 @@ export const en: typeof zhCN = {
     dismiss: 'Dismiss',
   },
   vocab: {
+    selectAllVisible: 'Select current results',
+    selectedCount: '{{count}} words selected',
+    selectWord: 'Select “{{phrase}}”',
+    deleteSelected: 'Delete selected ({{count}})',
+    batchDeleteFailed: 'Could not delete {{count}} words. They remain selected so you can retry.',
+
     kicker: 'DICTIONARY',
     title: 'Dictionary',
     desc: 'Add terms or jargon to improve recognition accuracy.',
@@ -598,7 +639,7 @@ export const en: typeof zhCN = {
       },
       structured: {
         name: 'Structured',
-        desc: 'Auto-organizes into a numbered outline when you cover several topics or steps.',
+        desc: 'Organize coding discussions, troubleshooting and product feedback with precise terminology.',
         sample: '1. Topic one\na. Point\nb. Point\n2. Topic two\na. Point\nb. Point',
       },
       formal: {
@@ -608,6 +649,18 @@ export const en: typeof zhCN = {
       },
     },
     pack: {
+      builtinTags: {
+        minimalEdits: 'Minimal edits',
+        strongCorrection: 'Strong corrections',
+        communication: 'Communication',
+        natural: 'Natural',
+        organized: 'Organized',
+        workplaceCommunication: 'Work communication',
+        aiCoding: 'AI coding',
+        technicalStructure: 'Technical structure',
+      },
+      newName: 'Untitled style',
+      newDescription: 'Briefly describe when to use this style.',
       uploadIcon: 'Upload an SVG icon for {{name}}',
       resetIcon: 'Restore default icon',
       iconSaved: 'Icon saved',
@@ -734,6 +787,12 @@ export const en: typeof zhCN = {
     },
   },
   translation: {
+    searchLanguages: 'Search languages…',
+    noMatchingLanguages: 'No matching languages',
+    selectedLanguages: '{{count}} languages selected',
+
+    languageSupportHint:
+      'Available speech languages depend on your provider. Translation targets are independent of the app language.',
     kicker: 'TRANSLATION',
     title: 'Translation',
     desc: 'Auto-translate recordings into a target language before insertion.',
@@ -951,6 +1010,7 @@ export const en: typeof zhCN = {
       openPanelAction: 'Open Less Computer',
     },
     debug: {
+      cursorLabel: 'Cursor',
       title: 'Debug tools',
       desc: 'For troubleshooting recognition issues; off by default.',
       cursorProbeLabel: 'Cursor context probe',
@@ -1006,6 +1066,7 @@ export const en: typeof zhCN = {
       microphoneMonitorError: 'Failed to monitor input level: {{message}}',
       capsuleLabel: 'Recording capsule',
       capsuleDesc: 'Show a translucent capsule at the bottom of the screen while recording.',
+      capsuleStyleTypeless: 'Typeless compact style',
       capsuleStyleLabel: 'Capsule style',
       capsuleStyleSiri: 'Shimmer Siri style',
       capsuleStyleClassic: 'OpenLess default style',
@@ -1588,6 +1649,9 @@ export const en: typeof zhCN = {
       confirm: 'Enable',
     },
     language: {
+      es: 'Español',
+      fr: 'Français',
+      de: 'Deutsch',
       title: 'Interface language',
       desc: 'Switch the UI language. Applies to the current session immediately and persists across launches.',
       label: 'Language',
@@ -1822,6 +1886,7 @@ export const en: typeof zhCN = {
     },
   },
   windowChrome: {
+    restore: 'Restore',
     minimize: 'Minimize',
     maximize: 'Maximize',
     close: 'Close',

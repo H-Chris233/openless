@@ -48,6 +48,7 @@ pub(crate) use crate::types::{
 };
 
 mod channels;
+mod cloud_sync;
 mod credentials;
 mod dictation;
 mod dictionary;
@@ -77,6 +78,7 @@ mod sherpa_asr;
 mod style_packs;
 
 pub use channels::*;
+pub use cloud_sync::*;
 pub use credentials::*;
 pub use dictation::*;
 pub use dictionary::*;

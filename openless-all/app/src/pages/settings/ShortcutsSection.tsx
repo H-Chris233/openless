@@ -26,6 +26,7 @@ import { useHotkeySettings } from '../../state/HotkeySettingsContext';
 import { Card } from '../_atoms';
 import { SettingRow } from './shared';
 import { detectOS } from '../../components/WindowChrome';
+import { getStylePackPresentation } from '../../lib/stylePackPresentation';
 
 export function ShortcutsSection() {
   const { t } = useTranslation();
@@ -60,14 +61,15 @@ export function ShortcutsSection() {
   const stylePackHotkeys: StylePackHotkey[] = prefs.stylePackHotkeys ?? [];
   // 下拉列出全部风格包（含停用的，激活时后端自动启用）；已被其它行绑定的包置灰防重复。
   const stylePackOptions = (currentPackId: string) =>
-    stylePacks.map((pack) => ({
-      value: pack.id,
-      label: pack.enabled
-        ? pack.name
-        : `${pack.name}${t('settings.shortcuts.stylePackDisabledSuffix')}`,
-      disabled:
-        pack.id !== currentPackId && stylePackHotkeys.some((entry) => entry.packId === pack.id),
-    }));
+    stylePacks.map((pack) => {
+      const { name } = getStylePackPresentation(pack, t);
+      return {
+        value: pack.id,
+        label: pack.enabled ? name : `${name}${t('settings.shortcuts.stylePackDisabledSuffix')}`,
+        disabled:
+          pack.id !== currentPackId && stylePackHotkeys.some((entry) => entry.packId === pack.id),
+      };
+    });
   // 整表替换：失败时统一在本区域显示，并继续抛给 ShortcutRecorder 结束录制状态。
   const saveStylePackHotkeys = async (next: StylePackHotkey[]) => {
     setStylePackError(null);

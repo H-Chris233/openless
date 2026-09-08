@@ -113,9 +113,14 @@ assertMatch(
 
 assertMatch(
   windowChromeTsx,
-  /const MAC_TITLEBAR_HEIGHT = 28;/,
-  'macOS titlebar spacer should stay visually compact around the native traffic lights',
+  /const MAC_TITLEBAR_HEIGHT = 44;/,
+  'macOS drag region should reserve the native traffic-light area',
 );
+assertEqual(mainWindow.trafficLightPosition.x, 16, 'traffic lights should have a 16px left inset');
+assertEqual(mainWindow.trafficLightPosition.y, 16, 'traffic lights should have an equal top inset');
+assertEqual(mainWindow.width, 1300, 'main window should use the reviewed default width');
+assertEqual(mainWindow.height, 835, 'main window should use the reviewed default height');
+assertEqual(mainWindow.resizable, true, 'users should still be able to resize the main window');
 assertMatch(
   libRs,
   /show_main_window[\s\S]*?set_focus\(\)/,
@@ -169,7 +174,7 @@ assertMatch(
 );
 
 if (
-  !/export function getCapsuleHostMetrics\(\s*os: OS,\s*translationActive: boolean,?\s*\): CapsuleHostMetrics/.test(
+  !/export function getCapsuleHostMetrics\(\s*os: OS,\s*translationActive: boolean,\s*style: CapsuleStyle = 'siri',?\s*\): CapsuleHostMetrics/.test(
     capsuleLayoutTs,
   )
 ) {
@@ -188,16 +193,20 @@ assertMatch(
 
 assertMatch(
   capsuleLayoutTs,
-  /const stage = getCapsulePillMetrics\(os\);[\s\S]*?width: stage\.width,[\s\S]*?height: stage\.height,[\s\S]*?horizontalInset: 0,[\s\S]*?bottomInset: 0,[\s\S]*?badgeGap: 8,[\s\S]*?boxSizing: 'border-box'/,
-  'capsule host metrics should mirror the shared voice-orb stage without legacy Windows insets',
+  /const stage = getCapsulePillMetrics\(os\);[\s\S]*?width: stage\.width,[\s\S]*?height: style === 'siri' \? stage\.height : style === 'classic' \? 100 : 128,[\s\S]*?horizontalInset: 0,[\s\S]*?bottomInset: style === 'siri' \? 0 : 16,[\s\S]*?badgeGap: 8,[\s\S]*?boxSizing: 'border-box'/,
+  'capsule host metrics should preserve Siri and reserve compact surfaces for Classic and Typeless',
 );
 
-if (!/const hostMetrics = getCapsuleHostMetrics\(os,\s*translation\);/.test(capsuleTsx)) {
+if (
+  !/const hostMetrics = getCapsuleHostMetrics\(os,\s*translation,\s*capsuleStyle\);/.test(
+    capsuleTsx,
+  )
+) {
   throw new Error('capsule should derive host metrics from the shared layout contract');
 }
 
 if (
-  !/return\s*\(\s*<div\s*style=\{\{[\s\S]*?width:\s*'100%',[\s\S]*?height:\s*'100%',[\s\S]*?position:\s*'relative',[\s\S]*?display:\s*'flex',[\s\S]*?alignItems:\s*'center',[\s\S]*?justifyContent:\s*'center',[\s\S]*?paddingLeft:\s*hostMetrics\.horizontalInset,[\s\S]*?paddingRight:\s*hostMetrics\.horizontalInset,[\s\S]*?\}\}/.test(
+  !/return\s*\(\s*<div\s*style=\{\{[\s\S]*?width:\s*'100%',[\s\S]*?height:\s*'100%',[\s\S]*?position:\s*'relative',[\s\S]*?display:\s*'flex',[\s\S]*?alignItems:\s*capsuleStyle === 'siri' \? 'center' : 'flex-end',[\s\S]*?justifyContent:\s*'center',[\s\S]*?paddingLeft:\s*hostMetrics\.horizontalInset,[\s\S]*?paddingRight:\s*hostMetrics\.horizontalInset,[\s\S]*?\}\}/.test(
     capsuleTsx,
   )
 ) {
@@ -211,8 +220,8 @@ if (
   throw new Error('capsule host should consume the shared horizontal inset contract');
 }
 
-if (!/paddingBottom:\s*os === 'win' \? hostMetrics\.bottomInset : 0/.test(capsuleTsx)) {
-  throw new Error('windows capsule host should respect the shared bottom inset');
+if (!/paddingBottom:\s*hostMetrics\.bottomInset/.test(capsuleTsx)) {
+  throw new Error('all capsule hosts should respect their style-specific bottom inset');
 }
 
 if (!/const badgeBottom = Math\.round\(metrics\.height \* 0\.73\);/.test(capsuleTsx)) {
@@ -221,8 +230,8 @@ if (!/const badgeBottom = Math\.round\(metrics\.height \* 0\.73\);/.test(capsule
 
 assertMatch(
   libRs,
-  /fn capsule_window_bounds\(translation_active: bool\)[\s\S]*?width: 460\.0,[\s\S]*?height: 180\.0,[\s\S]*?bottom_inset: 0\.0,/,
-  'runtime capsule bounds should match the shared 460x180 voice-orb stage',
+  /fn capsule_window_bounds_for_style\(style: types::CapsuleStyle\)[\s\S]*?width: 460\.0,[\s\S]*?types::CapsuleStyle::Siri => 180\.0,[\s\S]*?types::CapsuleStyle::Classic => 100\.0,[\s\S]*?types::CapsuleStyle::Typeless => 128\.0,[\s\S]*?bottom_inset: 0\.0,/,
+  'native capsule bounds should match the frontend dimensions for all three styles',
 );
 
 assertMatch(

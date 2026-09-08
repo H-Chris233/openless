@@ -338,7 +338,7 @@ export interface UserPreferences {
   customStylePrompts: CustomStylePrompts;
   launchAtLogin: boolean;
   showCapsule: boolean;
-  /** 录音胶囊样式（'siri' | 'classic'）。见 CapsulePayload.capsuleStyle 的运行时下发。 */
+  /** 录音胶囊外观；保存后同步到胶囊窗口。 */
   capsuleStyle: CapsuleStyle;
   /** 录音期间临时静音系统输出，停止/取消/出错后恢复原静音状态。 */
   muteDuringRecording: boolean;
@@ -662,31 +662,13 @@ export interface LessComputerSyncResult {
   voiceState?: LessComputerVoiceEvent;
 }
 
-/** 内置语言列表 — 前端 Settings UI 用，后端只接收原生名字符串拼 prompt。
- *  添加新语言时直接在这里加一项（原生名），无需修改后端。 */
-export const SUPPORTED_LANGUAGES: readonly string[] = [
-  '简体中文',
-  '繁体中文',
-  'English',
-  '日本語',
-  '한국어',
-  'Français',
-  'Deutsch',
-  'Español',
-  'Italiano',
-  'Português',
-  'Русский',
-  'العربية',
-  'Tiếng Việt',
-  'ไทย',
-  'हिन्दी',
-] as const;
+export { SUPPORTED_LANGUAGES } from './languageCatalog';
 
 export type CapsuleState =
   'idle' | 'recording' | 'transcribing' | 'polishing' | 'done' | 'cancelled' | 'error';
 
 /** 录音胶囊样式：'siri' = 流光 Siri 光效版（默认）；'classic' = Openless 经典药丸版。 */
-export type CapsuleStyle = 'siri' | 'classic';
+export type CapsuleStyle = 'siri' | 'classic' | 'typeless';
 
 export interface CapsulePayload {
   state: CapsuleState;

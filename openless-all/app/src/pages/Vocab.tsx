@@ -66,12 +66,16 @@ export function Vocab() {
   const cardRefs = useRef(new Map<string, HTMLDivElement>());
   const prevCardTops = useRef(new Map<string, number>());
   const [removingIds, setRemovingIds] = useState<Set<string>>(new Set());
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [batchBusy, setBatchBusy] = useState(false);
 
   const refresh = async () => {
     try {
       setError(null);
       const data = await listVocab();
       setEntries(data);
+      const ids = new Set(data.map((entry) => entry.id));
+      setSelectedIds((current) => new Set([...current].filter((id) => ids.has(id))));
     } catch (e) {
       // 之前没 try/catch,后端 decode 失败时 spinner 永久卡死。
       setError(e instanceof Error ? e.message : String(e));
@@ -130,13 +134,38 @@ export function Vocab() {
     }
   };
 
-  const onRemove = async (id: string) => {
-    await fadeOutCard(id);
-    await removeVocab(id);
-    setEntries((prev) => prev.filter((e) => e.id !== id));
-    setRemovingIds((prev) => {
-      const next = new Set(prev);
-      next.delete(id);
+  const removeEntries = async (ids: string[]) => {
+    if (batchBusy || ids.length === 0) return;
+    setBatchBusy(true);
+    setError(null);
+    const removed = new Set<string>();
+    let failures = 0;
+    try {
+      // Bound IPC concurrency and retain unsuccessful selections for retry.
+      for (let start = 0; start < ids.length; start += 8) {
+        const batch = ids.slice(start, start + 8);
+        const results = await Promise.allSettled(batch.map((id) => removeVocab(id)));
+        results.forEach((result, index) => {
+          if (result.status === 'fulfilled') removed.add(batch[index]);
+          else failures += 1;
+        });
+      }
+      await Promise.all([...removed].map((id) => fadeOutCard(id)));
+      setEntries((current) => current.filter((entry) => !removed.has(entry.id)));
+      setSelectedIds((current) => new Set([...current].filter((id) => !removed.has(id))));
+      if (failures) setError(t('vocab.batchDeleteFailed', { count: failures }));
+      else flashSaved();
+    } finally {
+      setRemovingIds(new Set());
+      setBatchBusy(false);
+    }
+  };
+
+  const toggleSelection = (id: string) => {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
       return next;
     });
   };
@@ -322,29 +351,14 @@ export function Vocab() {
           { opacity: 1, transform: 'scale(1)' },
           { opacity: 0, transform: 'scale(0.92)' },
         ],
-        { duration: 160, easing: 'cubic-bezier(0.4, 0, 1, 1)' },
+        { duration: 140, easing: 'ease-out', fill: 'forwards' },
       ).finished;
     } catch {
       /* 动画被打断（筛选切换/卸载）不阻塞删除 */
     }
   };
 
-  const onRemoveAllLearnedEntries = async () => {
-    // 逐条删而不是加一条批量后端命令：词条是几十条量级，为此多开一条 IPC 不值得，
-    // 而且逐条删失败一条也不影响其余。
-    await Promise.all(learnedEntries.map((entry) => fadeOutCard(entry.id)));
-    const removed: string[] = [];
-    for (const entry of learnedEntries) {
-      try {
-        await removeVocab(entry.id);
-        removed.push(entry.id);
-      } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
-      }
-    }
-    setEntries((prev) => prev.filter((e) => !removed.includes(e.id)));
-    setRemovingIds(new Set());
-  };
+  const onRemoveAllLearnedEntries = () => removeEntries(learnedEntries.map((entry) => entry.id));
 
   const needle = query.trim().toLowerCase();
   const visibleEntries = entries.filter(
@@ -379,6 +393,17 @@ export function Vocab() {
         desc={t('vocab.desc')}
         right={
           <div style={{ display: 'flex', gap: 8 }}>
+            {selectedIds.size > 0 && (
+              <button
+                type="button"
+                className="ol-vocab-delete-selected"
+                disabled={batchBusy}
+                onClick={() => void removeEntries([...selectedIds])}
+              >
+                <Icon name="trash" size={15} />
+                {t('vocab.deleteSelected', { count: selectedIds.size })}
+              </button>
+            )}
             <Btn
               variant="primary"
               icon="plus"
@@ -428,6 +453,35 @@ export function Vocab() {
             </button>
           ))}
         </div>
+        <label className="ol-vocab-select-all">
+          <input
+            type="checkbox"
+            disabled={batchBusy || visibleEntries.length === 0}
+            checked={
+              visibleEntries.length > 0 &&
+              visibleEntries.every((entry) => selectedIds.has(entry.id))
+            }
+            ref={(element) => {
+              if (element)
+                element.indeterminate =
+                  visibleEntries.some((entry) => selectedIds.has(entry.id)) &&
+                  !visibleEntries.every((entry) => selectedIds.has(entry.id));
+            }}
+            onChange={(event) => {
+              const checked = event.target.checked;
+              setSelectedIds((current) => {
+                const next = new Set(current);
+                visibleEntries.forEach((entry) =>
+                  checked ? next.add(entry.id) : next.delete(entry.id),
+                );
+                return next;
+              });
+            }}
+          />
+          {selectedIds.size
+            ? t('vocab.selectedCount', { count: selectedIds.size })
+            : t('vocab.selectAllVisible')}
+        </label>
         <div style={{ flex: 1 }} />
         {/* 圆形控件原地展开成搜索框 —— 放大镜固定在右缘不动，
             占位文字「搜索」在框内；收起走同一条 width 过渡（从哪来回到哪去）。 */}
@@ -544,14 +598,15 @@ export function Vocab() {
               key={entry.id}
               entry={entry}
               auto={sourceOf(entry) === 'auto'}
-              removing={removingIds.has(entry.id)}
+              removing={removingIds.has(entry.id) || batchBusy}
+              selected={selectedIds.has(entry.id)}
+              onSelect={() => toggleSelection(entry.id)}
               cardRef={(element) => {
                 if (element) cardRefs.current.set(entry.id, element);
                 else cardRefs.current.delete(entry.id);
               }}
               onToggle={() => void onToggle(entry)}
               onEdit={() => openEdit(entry)}
-              onRemove={() => void onRemove(entry.id)}
             />
           ))}
         </div>
@@ -864,11 +919,21 @@ interface WordCardProps {
   cardRef: (element: HTMLDivElement | null) => void;
   onToggle: () => void;
   onEdit: () => void;
-  onRemove: () => void;
+  selected: boolean;
+  onSelect: () => void;
 }
 
 /** 词条卡片：默认只显图标+文字+命中数；hover/focus-within 变灰并浮现编辑/删除。 */
-function WordCard({ entry, auto, removing, cardRef, onToggle, onEdit, onRemove }: WordCardProps) {
+function WordCard({
+  entry,
+  auto,
+  removing,
+  selected,
+  cardRef,
+  onToggle,
+  onEdit,
+  onSelect,
+}: WordCardProps) {
   const { t } = useTranslation();
   const enabled = entry.enabled;
   return (
@@ -876,6 +941,7 @@ function WordCard({ entry, auto, removing, cardRef, onToggle, onEdit, onRemove }
       ref={cardRef}
       className="ol-word-card"
       data-disabled={enabled ? undefined : 'true'}
+      data-selected={selected ? 'true' : undefined}
       style={removing ? { pointerEvents: 'none' } : undefined}
     >
       <span className="ol-word-card-icon" aria-hidden>
@@ -901,17 +967,15 @@ function WordCard({ entry, auto, removing, cardRef, onToggle, onEdit, onRemove }
             <Icon name="pencil" size={14} />
           </button>
         </Tooltip>
-        <Tooltip content={t('common.delete')} placement="top">
-          <button
-            type="button"
-            className="ol-word-card-action"
-            aria-label={t('vocab.removeAria')}
-            onClick={onRemove}
-          >
-            <Icon name="trash" size={14} />
-          </button>
-        </Tooltip>
       </span>
+      <input
+        type="checkbox"
+        className="ol-word-card-select"
+        checked={selected}
+        disabled={removing}
+        aria-label={t('vocab.selectWord', { phrase: entry.phrase })}
+        onChange={onSelect}
+      />
     </div>
   );
 }

@@ -41,7 +41,7 @@ import {
   Plus,
   RefreshCw,
   Search,
-  Settings2,
+  Settings,
   ShieldCheck,
   SlidersHorizontal,
   Sparkles,
@@ -63,7 +63,7 @@ export const ICONS: Record<string, LucideIcon> = {
   style: SlidersHorizontal,
   translate: Languages,
   selectionAsk: MessageSquareText,
-  settings: Settings2,
+  settings: Settings,
   help: CircleHelp,
   mic: Mic,
   search: Search,
@@ -142,7 +142,7 @@ export function Icon({
       stroke={stroke}
       strokeWidth={strokeWidth}
       fill={fill}
-      style={style}
+      style={{ flexShrink: 0, ...style }}
       className={className}
       aria-hidden="true"
       focusable="false"

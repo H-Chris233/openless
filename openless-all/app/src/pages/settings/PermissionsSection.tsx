@@ -1,5 +1,5 @@
 // 权限/连通性面板：麦克风 / 辅助功能 / 全局热键 / Windows IME / 网络。
-// 内含三个状态 Pill + 适配器名称翻译辅助函数。
+// Normal states use localized labels; failed native checks retain their diagnostic details.
 
 import { useEffect, useState, type CSSProperties } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -231,7 +231,7 @@ export function PermissionsSection() {
       {platformCaps?.supportsDesktopHotkey === true && (
         <SettingRow label={t('settings.permissions.hotkeyLabel')}>
           <div style={permissionActionsStyle}>
-            {hotkey?.message && (
+            {hotkey?.state === 'failed' && hotkey.message && (
               <span
                 style={{
                   fontSize: 11.5,

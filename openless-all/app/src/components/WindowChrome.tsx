@@ -1,4 +1,5 @@
 import { Icon } from './Icon';
+import { useTranslation } from 'react-i18next';
 import {
   type CSSProperties,
   type ReactNode,
@@ -23,8 +24,8 @@ export function detectOS(): OS {
   return 'mac';
 }
 
-const MAC_TITLEBAR_HEIGHT = 28;
-const MAC_SYSTEM_CONTROLS_RESERVED_WIDTH = 76;
+const MAC_TITLEBAR_HEIGHT = 44;
+const MAC_SYSTEM_CONTROLS_RESERVED_WIDTH = 88;
 const LINUX_TITLEBAR_HEIGHT = 36;
 const WIN_CONSOLE_RADIUS = 10;
 
@@ -46,12 +47,6 @@ export function WindowChrome({ os = 'mac', children, height = 800 }: WindowChrom
 
   const useSolidSurface = os === 'linux' || os === 'android';
 
-  // 主窗口底色是不透明渐变（--ol-window-bg），backdrop-filter 模糊不到任何
-  // 内容（非透明窗口拿不到窗口背后的像素，见 global.css .ol-frost 注释）——
-  // 之前 blur(36px) 是纯合成开销死代码，macOS WKWebView 在切换模型/高频
-  // 重渲染时合成层故障，整窗「消失一下又恢复」。全平台统一 none。
-  const useBackdropFilter = false;
-
   return (
     <div
       className="ol-winchrome"
@@ -71,12 +66,9 @@ export function WindowChrome({ os = 'mac', children, height = 800 }: WindowChrom
           border:
             os === 'win' ? 'none' : os === 'mac' ? 'none' : '0.5px solid var(--ol-window-border)',
           background: useSolidSurface ? 'var(--ol-surface)' : 'var(--ol-window-bg)',
-          backdropFilter: useBackdropFilter
-            ? 'blur(var(--ol-glass-blur-strong)) saturate(190%)'
-            : 'none',
-          WebkitBackdropFilter: useBackdropFilter
-            ? 'blur(var(--ol-glass-blur-strong)) saturate(190%)'
-            : 'none',
+          // The main window is opaque; backdrop blur would only add a compositing layer.
+          backdropFilter: 'none',
+          WebkitBackdropFilter: 'none',
           animation:
             os === 'win' ? undefined : 'ol-window-enter 0.42s var(--ol-motion-spring) both',
           transition:
@@ -112,6 +104,7 @@ export function WindowChrome({ os = 'mac', children, height = 800 }: WindowChrom
 type TauriWindow = import('@tauri-apps/api/window').Window;
 
 function LinuxTitlebar() {
+  const { t } = useTranslation();
   const [maximized, setMaximized] = useState(false);
   const winRef = useRef<TauriWindow | null>(null);
 
@@ -198,17 +191,22 @@ function LinuxTitlebar() {
         style={{ display: 'flex', gap: 4, pointerEvents: 'auto' }}
         onMouseDown={(e) => e.stopPropagation()}
       >
-        <button onClick={onMinimize} aria-label="Minimize" style={ctrlBtn}>
+        <button onClick={onMinimize} aria-label={t('windowChrome.minimize')} style={ctrlBtn}>
           <MinimizeSvg />
         </button>
         <button
           onClick={onToggleMaximize}
-          aria-label={maximized ? 'Restore' : 'Maximize'}
+          aria-label={t(maximized ? 'windowChrome.restore' : 'windowChrome.maximize')}
           style={ctrlBtn}
         >
           {maximized ? <RestoreSvg /> : <MaximizeSvg />}
         </button>
-        <button onClick={onClose} aria-label="Close" className="ol-linux-close-btn" style={ctrlBtn}>
+        <button
+          onClick={onClose}
+          aria-label={t('windowChrome.close')}
+          className="ol-linux-close-btn"
+          style={ctrlBtn}
+        >
           <CloseSvg />
         </button>
       </div>

@@ -44,8 +44,8 @@ const STYLE_TAB_IDS: AppTab[] = ['style', 'marketplace'];
 
 /** macOS 上侧栏顶部需让开原生红绿灯的高度。红绿灯在 (20,20)，按钮组高约 14px，
  *  上下留等距 20px → 避让带总高 54px，红绿灯恰好竖直居中、左缘与导航图标列对齐。 */
-const MAC_TRAFFIC_LIGHT_CLEARANCE = 54;
-const SIDEBAR_WIDTH = 282;
+const MAC_TRAFFIC_LIGHT_CLEARANCE = 44;
+const SIDEBAR_WIDTH = 226;
 
 /** tab → 页面组件映射（渲染主内容用；与侧栏树解耦，含未直接列在树上的页）。 */
 const PAGE_CMP: Record<Exclude<AppTab, 'localAsr'>, ComponentType> = {
@@ -78,7 +78,7 @@ const NAV_TREE: NavNode[] = [
     kind: 'group',
     key: 'tools',
     icon: 'selectionAsk',
-    children: [{ id: 'selectionAsk' }, { id: 'translation' }, { id: 'corrections' }],
+    children: [{ id: 'translation' }, { id: 'selectionAsk' }, { id: 'corrections' }],
   },
 ];
 
@@ -183,10 +183,17 @@ function FloatingShellBody({
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const credentials = await getCredentials();
-      const promptDeferredValue = window.sessionStorage.getItem(PROVIDER_SETUP_PROMPT_DEFERRED_KEY);
-      if (!cancelled && shouldShowProviderSetupPrompt(credentials, promptDeferredValue)) {
-        setProviderPromptOpen(true);
+      try {
+        const credentials = await getCredentials();
+        const promptDeferredValue = window.sessionStorage.getItem(
+          PROVIDER_SETUP_PROMPT_DEFERRED_KEY,
+        );
+        if (!cancelled && shouldShowProviderSetupPrompt(credentials, promptDeferredValue)) {
+          setProviderPromptOpen(true);
+        }
+      } catch (error) {
+        // A locked/unavailable credential store is not an unconfigured provider.
+        console.warn('[startup] credential status unavailable', error);
       }
     })();
     return () => {
@@ -517,8 +524,8 @@ function FloatingShellBody({
                 padding: mobile
                   ? '16px 16px calc(16px + env(safe-area-inset-bottom, 0px) + 56px)'
                   : displayTab === 'overview'
-                    ? '24px 28px 24px'
-                    : '24px 28px 32px',
+                    ? `${os === 'mac' ? 80 : 56}px 28px 24px`
+                    : `${os === 'mac' ? 80 : 56}px 28px 32px`,
                 // position:relative 让页面里的"已保存"toast 用 absolute top:16 right:16
                 // 锚到这块控制台卡的右上角，而不是横在页头变成长横幅。
                 position: 'relative',
