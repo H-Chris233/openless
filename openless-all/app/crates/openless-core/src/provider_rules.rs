@@ -34,6 +34,7 @@ const ASR_PROVIDER_TYPES: &[(&str, &str)] = &[
     ("groq", "asrGroq"),
     ("whisper", "asrWhisper"),
     ("openrouter", "asrOpenrouter"),
+    ("orcarouter", "orcarouter"),
     ("zenmux", "asrZenmux"),
     (OPENAI_COMPATIBLE_ASR_PROVIDER_ID, "asrOpenAiCompatible"),
     ("xiaomi-mimo-asr", "asrXiaomiMimo"),
@@ -58,6 +59,7 @@ const LLM_PROVIDER_TYPES: &[(&str, &str)] = &[
     ("mimo", "mimo"),
     ("cometapi", "cometapi"),
     ("openrouterFree", "openrouterFree"),
+    ("orcarouter", "orcarouter"),
     ("alibabaCoding", "alibabaCoding"),
     ("codingPlanX", "codingPlanX"),
     ("minimax", "minimax"),
@@ -456,6 +458,7 @@ pub fn default_asr_endpoint(provider_type: &str) -> Option<&'static str> {
         "groq" => Some("https://api.groq.com/openai/v1"),
         "whisper" => Some("https://api.openai.com/v1"),
         "openrouter" => Some("https://openrouter.ai/api/v1"),
+        "orcarouter" => Some(crate::asr::mimo::ORCAROUTER_DEFAULT_ENDPOINT),
         "zenmux" => Some("https://zenmux.ai/api/v1"),
         "xiaomi-mimo-asr" => Some("https://api.xiaomimimo.com/v1"),
         _ => None,
@@ -474,6 +477,7 @@ pub fn default_asr_model(provider_type: &str) -> Option<&'static str> {
         "groq" => Some("whisper-large-v3-turbo"),
         "whisper" => Some("whisper-1"),
         "openrouter" => Some("openai/whisper-large-v3-turbo"),
+        "orcarouter" => Some(crate::asr::mimo::ORCAROUTER_DEFAULT_MODEL),
         "zenmux" => Some(crate::asr::whisper::ZENMUX_DEFAULT_MODEL),
         "xiaomi-mimo-asr" => Some(crate::asr::mimo::DEFAULT_MODEL),
         _ => None,
@@ -492,6 +496,7 @@ pub fn default_llm_endpoint(provider_type: &str) -> Option<&'static str> {
         "mimo" => Some("https://api.xiaomimimo.com/v1"),
         "cometapi" => Some("https://api.cometapi.com/v1"),
         "openrouterFree" => Some("https://openrouter.ai/api/v1"),
+        "orcarouter" => Some(crate::asr::mimo::ORCAROUTER_DEFAULT_ENDPOINT),
         "alibabaCoding" => Some("https://coding-intl.dashscope.aliyuncs.com/v1"),
         "codingPlanX" => Some("https://api.codingplanx.ai/v1"),
         "minimax" => Some("https://api.minimaxi.com/v1"),
@@ -511,6 +516,7 @@ pub fn default_llm_model(provider_type: &str) -> Option<&'static str> {
         crate::polish::CODEX_OAUTH_PROVIDER_ID => Some(crate::polish::CODEX_DEFAULT_MODEL),
         "mimo" => Some("xiaomi/mimo-v2-flash"),
         "openrouterFree" => Some("qwen/qwen3-coder:free"),
+        "orcarouter" => Some("orcarouter/fusion-flash"),
         "alibabaCoding" => Some("qwen3-coder-plus"),
         "codingPlanX" => Some("gpt-5-mini"),
         "minimax" => Some("MiniMax-M3"),
@@ -566,7 +572,7 @@ pub fn active_asr_provider_kind(id: &str) -> ActiveAsrProviderKind {
         BAILIAN_PROVIDER_ID => ActiveAsrProviderKind::Bailian,
         QWEN3_REALTIME_PROVIDER_ID => ActiveAsrProviderKind::Qwen3Realtime,
         STEPFUN_REALTIME_PROVIDER_ID => ActiveAsrProviderKind::StepfunRealtime,
-        MIMO_PROVIDER_ID => ActiveAsrProviderKind::Mimo,
+        MIMO_PROVIDER_ID | crate::asr::mimo::ORCAROUTER_PROVIDER_ID => ActiveAsrProviderKind::Mimo,
         DASHSCOPE_MULTIMODAL_PROVIDER_ID => ActiveAsrProviderKind::DashScopeMultimodal,
         ELEVENLABS_PROVIDER_ID => ActiveAsrProviderKind::ElevenLabs,
         XFYUN_PROVIDER_ID => ActiveAsrProviderKind::Xfyun,
@@ -588,7 +594,7 @@ pub fn is_stepfun_realtime_provider(id: &str) -> bool {
 }
 
 pub fn is_mimo_provider(id: &str) -> bool {
-    id == MIMO_PROVIDER_ID
+    matches!(id, MIMO_PROVIDER_ID | crate::asr::mimo::ORCAROUTER_PROVIDER_ID)
 }
 
 pub fn is_dashscope_multimodal_provider(id: &str) -> bool {

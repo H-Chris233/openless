@@ -103,6 +103,12 @@ export function shouldRecycleDraft(draftId: string | null, touched: boolean): bo
   return draftId != null && !touched;
 }
 
+/** OrcaRouter 渠道使用统一的无空格品牌名；只填空名称，不覆盖用户自定义命名。 */
+export function defaultChannelNameForProvider(providerType: string, currentName: string): string {
+  if (currentName.trim() || providerType !== 'orcarouter') return currentName;
+  return 'OrcaRouter';
+}
+
 function presetLabel(
   kind: ChannelKind,
   providerType: string,
@@ -752,6 +758,11 @@ function ChannelModal({
       if (!preset) return;
       const endpointAccount = kind === 'llm' ? 'ark.endpoint' : 'asr.endpoint';
       const modelAccount = kind === 'llm' ? 'ark.model_id' : 'asr.model';
+      if (next === 'orcarouter') {
+        if (preset.defaultEndpoint) await setCredential(endpointAccount, preset.defaultEndpoint, channel.id);
+        if (preset.defaultModel) await setCredential(modelAccount, preset.defaultModel, channel.id);
+        return;
+      }
       if (preset.defaultEndpoint && !(await readCredential(endpointAccount, channel.id))?.trim()) {
         await setCredential(endpointAccount, preset.defaultEndpoint, channel.id);
       }
@@ -771,6 +782,11 @@ function ChannelModal({
       await setChannelProviderType(kind, channel.id, next);
       await fillProviderDefaults(next);
       setProviderType(next);
+      const defaultName = defaultChannelNameForProvider(next, name);
+      if (defaultName !== name) {
+        await renameChannel(kind, channel.id, defaultName);
+        setName(defaultName);
+      }
       await onChanged();
     } catch (error) {
       console.error('[channels] change provider failed', error);

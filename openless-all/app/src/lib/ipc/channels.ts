@@ -76,6 +76,14 @@ const mockChannels: Record<ChannelKind, Channel[]> = {
             order: 1,
             lastTest: null,
         },
+        {
+            id: "orcarouter-asr",
+            name: "OrcaRouter-ASR",
+            providerType: "orcarouter",
+            enabled: false,
+            order: 2,
+            lastTest: null,
+        },
     ],
 }
 
@@ -153,7 +161,11 @@ export function renameChannel(
     id: string,
     name: string,
 ): Promise<void> {
-    return invokeOrMock("rename_channel", { kind, id, name }, () => undefined)
+    return invokeOrMock("rename_channel", { kind, id, name }, () => {
+        const channel = mockChannels[kind].find(item => item.id === id)
+        if (channel) channel.name = name
+        return undefined
+    })
 }
 
 export function deleteChannel(kind: ChannelKind, id: string): Promise<void> {
@@ -171,7 +183,11 @@ export function setChannelEnabled(
     return invokeOrMock(
         "set_channel_enabled",
         { kind, id, enabled },
-        () => undefined,
+        () => {
+            const channel = mockChannels[kind].find(item => item.id === id)
+            if (channel) channel.enabled = enabled
+            return undefined
+        },
     )
 }
 

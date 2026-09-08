@@ -223,6 +223,7 @@ export const ASR_LABELS = [
   { id: 'groq', nameKey: 'asrGroq' },
   { id: 'whisper', nameKey: 'asrWhisper' },
   { id: 'openrouter', nameKey: 'asrOpenrouter' },
+  { id: 'orcarouter', nameKey: 'orcarouter' },
   { id: 'zenmux', nameKey: 'asrZenmux' },
   { id: 'openai-compatible', nameKey: 'asrOpenAiCompatible' },
   { id: 'xiaomi-mimo-asr', nameKey: 'asrXiaomiMimo' },
