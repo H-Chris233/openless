@@ -53,10 +53,26 @@ esac
 if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ] || [ -n "${TAURI_SIGNING_PRIVATE_KEY_PATH:-}" ]; then
   TAURI_BUILD_ARGS+=(--config '{"bundle":{"createUpdaterArtifacts":true}}')
 fi
-npm run tauri -- "${TAURI_BUILD_ARGS[@]}"
+# bundle_dmg（AppleScript）在 Xcode beta 上可能失败；.app 已生成时继续，由下方兜底补 DMG。
+npm run tauri -- "${TAURI_BUILD_ARGS[@]}" || echo "⚠ tauri build 退出码非零（可能仅 DMG 打包失败），继续校验"
 
 APP_VERSION="$(node -p "require('./package.json').version")"
 DMG_PATH="$DMG_DIR/OpenLess_${APP_VERSION}_${MAC_BUNDLE_ARCH}.dmg"
+
+if [ ! -d "$APP" ]; then
+  echo "✗ 未生成 $APP —— 编译或打包失败，中止"
+  exit 1
+fi
+
+# DMG 兜底：OpenLess.app + /Applications 替身（拖拽安装）。
+if [ ! -f "$DMG_PATH" ]; then
+  echo "⚠ Tauri 未生成 DMG，使用 hdiutil 兜底（含 Applications 替身）"
+  DMG_STAGE="$(mktemp -d "${TMPDIR:-/tmp}/openless-dmg-stage.XXXXXX")"
+  cp -R "$APP" "$DMG_STAGE/OpenLess.app"
+  ln -s /Applications "$DMG_STAGE/Applications"
+  hdiutil create -volname "OpenLess" -srcfolder "$DMG_STAGE" -ov -format UDZO "$DMG_PATH" > /dev/null
+  rm -rf "$DMG_STAGE"
+fi
 
 echo "▶ 校验 Info.plist / 签名"
 /usr/libexec/PlistBuddy -c "Print :NSMicrophoneUsageDescription" "$INFO" > /dev/null
