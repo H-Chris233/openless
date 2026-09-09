@@ -159,6 +159,18 @@
     },
     {
       "authRequirement": "api_key",
+      "defaultEndpoint": "https://api.orcarouter.ai/v1",
+      "defaultModel": "google/gemini-2.5-flash",
+      "defaultRequestFormat": null,
+      "kind": "asr",
+      "labelKey": "orcarouter",
+      "providerType": "orcarouter",
+      "staticModels": [],
+      "supportedRequestFormats": [],
+      "validationProbe": "asr_silence"
+    },
+    {
+      "authRequirement": "api_key",
       "defaultEndpoint": "https://zenmux.ai/api/v1",
       "defaultModel": "qwen/qwen3-asr-flash",
       "defaultRequestFormat": null,
@@ -442,6 +454,22 @@
       "kind": "llm",
       "labelKey": "openrouterFree",
       "providerType": "openrouterFree",
+      "staticModels": [],
+      "supportedRequestFormats": [
+        "chat_completions",
+        "responses",
+        "messages"
+      ],
+      "validationProbe": "llm_text"
+    },
+    {
+      "authRequirement": "api_key_unless_custom_endpoint",
+      "defaultEndpoint": "https://api.orcarouter.ai/v1",
+      "defaultModel": "orcarouter/fusion-flash",
+      "defaultRequestFormat": "chat_completions",
+      "kind": "llm",
+      "labelKey": "orcarouter",
+      "providerType": "orcarouter",
       "staticModels": [],
       "supportedRequestFormats": [
         "chat_completions",

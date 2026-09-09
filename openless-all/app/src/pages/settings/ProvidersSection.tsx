@@ -133,6 +133,7 @@ export const LLM_LABELS = [
   ['mimo', 'mimo'],
   ['cometapi', 'cometapi'],
   ['openrouterFree', 'openrouterFree'],
+  ['orcarouter', 'orcarouter'],
   ['alibabaCoding', 'alibabaCoding'],
   ['codingPlanX', 'codingPlanX'],
   ['minimax', 'minimax'],
@@ -187,6 +188,7 @@ export function ChannelCredentialFields({
   const { prefs, updatePrefs } = useHotkeySettings();
   const [llmModelRevision, setLlmModelRevision] = useState(0);
   const [configRevision, setConfigRevision] = useState(0);
+  const [orcarouterCatalogRevision, setOrcarouterCatalogRevision] = useState(0);
   const [blockedFields, setBlockedFields] = useState<Record<string, boolean>>({});
   const trackField = useCallback((account: string, blocked: boolean) => {
     setBlockedFields((previous) =>
@@ -252,7 +254,12 @@ export function ChannelCredentialFields({
             formats={descriptor.supportedRequestFormats}
             onUserMutation={onLlmMutation}
             onBlockedChange={trackField}
-            onSaved={onTested}
+            onSaved={(changedAccounts) => {
+              if (providerType === 'orcarouter' && changedAccounts?.includes('ark.request_format')) {
+                setOrcarouterCatalogRevision((value) => value + 1);
+              }
+              onTested?.();
+            }}
           />
         )}
         {codexOAuthSelected ? (
@@ -312,6 +319,23 @@ export function ChannelCredentialFields({
             description={t('settings.channels.modelHint')}
           />
         </div>
+        {providerType === 'orcarouter' ? (
+          <CatalogModelField
+            key={`${channelId}:catalog:${orcarouterCatalogRevision}`}
+            kind="llm"
+            provider={channelId}
+            baseUrl={defaultEndpoint ?? ''}
+            defaultModel={defaultModel ?? ''}
+            onUserMutation={onLlmMutation}
+            onBlockedChange={trackField}
+            trailing={
+              <LlmThinkingToggle
+                enabled={prefs?.llmThinkingEnabled ?? false}
+                onToggle={onLlmThinkingToggle}
+              />
+            }
+          />
+        ) : (
         <CredentialField
           key={`${channelId}:model:${llmModelRevision}`}
           label={t('settings.providers.modelLabel')}
@@ -329,6 +353,7 @@ export function ChannelCredentialFields({
             />
           }
         />
+        )}
         {['custom', 'custom_responses', 'custom_messages'].includes(providerType) && (
           <CredentialField
             key={`${channelId}:temperature`}
@@ -353,6 +378,7 @@ export function ChannelCredentialFields({
           onModelSelected={() => setLlmModelRevision((v) => v + 1)}
           onTested={onTested}
           onUserMutation={onUserMutation}
+          showFetchModels={providerType !== 'orcarouter'}
         />
       </>
     );
@@ -501,6 +527,29 @@ export function ChannelCredentialFields({
       <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.6 }}>
         {t('settings.providers.localEngineNoCredentials')}
       </div>
+    );
+  }
+
+  if (providerType === 'orcarouter') {
+    return (
+      <>
+        <CredentialField key={`${channelId}:api_key`} label={t('settings.providers.apiKeyLabel')}
+          account="asr.api_key" provider={channelId} mono mask onUserMutation={onUserMutation} />
+        <CredentialField key={`${channelId}:endpoint`} label={t('settings.providers.baseUrlLabel')}
+          account="asr.endpoint" provider={channelId}
+          placeholder={defaultEndpoint ?? undefined} defaultValue={defaultEndpoint ?? undefined}
+          onUserMutation={onUserMutation} />
+        <CatalogModelField
+          kind="asr"
+          provider={channelId}
+          baseUrl={defaultEndpoint ?? ''}
+          defaultModel={defaultModel ?? ''}
+          onUserMutation={onUserMutation}
+        />
+        <ProviderTools kind="asr" modelAccount="asr.model" provider={channelId}
+          onModelSelected={() => setAsrModelRevision(v => v + 1)} onTested={onTested}
+          onUserMutation={onUserMutation} showFetchModels={false} />
+      </>
     );
   }
 
@@ -805,6 +854,178 @@ function BailianProtocolHint({ currentModel }: { currentModel: string }) {
 }
 
 type ProviderToolStatus = 'idle' | 'loading' | 'success' | 'empty' | 'error';
+
+/**
+ * OrcaRouter exposes a large, changing catalog. Keep its own router models at
+ * the top, then sort the remaining vendor/model ids for predictable scanning.
+ */
+export function prioritizeOrcaRouterModels(models: string[]): string[] {
+  return [...models].sort((left, right) => {
+    const leftOwn = left.startsWith('orcarouter/');
+    const rightOwn = right.startsWith('orcarouter/');
+    if (leftOwn !== rightOwn) return leftOwn ? -1 : 1;
+    return left.localeCompare(right);
+  });
+}
+
+function CatalogModelField({
+  kind,
+  provider,
+  baseUrl,
+  defaultModel,
+  trailing,
+  onUserMutation,
+  onBlockedChange,
+}: {
+  kind: 'llm' | 'asr';
+  provider: string;
+  baseUrl: string;
+  defaultModel: string;
+  trailing?: ReactNode;
+  onUserMutation?: () => void;
+  onBlockedChange?: (account: string, blocked: boolean) => void;
+}) {
+  const { t } = useTranslation();
+  const baseLayoutStack = useLayoutStack();
+  const conservative = useConservativeLayout();
+  const layoutStack = conservative || baseLayoutStack;
+  const [models, setModels] = useState<string[]>([]);
+  const [selectedModel, setSelectedModel] = useState('');
+  const [status, setStatus] = useState<ProviderToolStatus>('loading');
+  const [message, setMessage] = useState(t('settings.providers.loadingModels'));
+  const requestRef = useRef(0);
+  const endpointAccount = kind === 'llm' ? 'ark.endpoint' : 'asr.endpoint';
+  const modelAccount = kind === 'llm' ? 'ark.model_id' : 'asr.model';
+
+  useEffect(() => {
+    onBlockedChange?.(modelAccount, status !== 'success');
+  }, [modelAccount, status, onBlockedChange]);
+
+  const loadModels = async (initialize: boolean) => {
+    const requestId = ++requestRef.current;
+    setStatus('loading');
+    setMessage(t('settings.providers.loadingModels'));
+    try {
+      // A newly created/migrated channel may not have received its preset yet.
+      // Fill only an empty endpoint here; an explicit endpoint edit remains
+      // respected, matching the behavior of the other named providers.
+      if (initialize) {
+        const endpoint = await readCredential(endpointAccount, provider);
+        if (!endpoint?.trim()) {
+          await setCredential(endpointAccount, baseUrl, provider);
+        }
+      }
+      const [savedModel, result] = await Promise.all([
+        readCredential(modelAccount, provider),
+        listProviderModels(kind, provider, 'orcarouter'),
+      ]);
+      if (requestId !== requestRef.current) return;
+      const nextModels = prioritizeOrcaRouterModels(result.models);
+      setModels(nextModels);
+      if (nextModels.length === 0) {
+        setSelectedModel('');
+        setStatus('empty');
+        setMessage(t('settings.providers.modelsEmpty'));
+        return;
+      }
+
+      const current = savedModel?.trim() ?? '';
+      const nextModel = nextModels.includes(current)
+        ? current
+        : nextModels.includes(defaultModel)
+          ? defaultModel
+          : nextModels[0];
+      if (nextModel !== current) {
+        await setCredential(modelAccount, nextModel, provider);
+      }
+      if (requestId !== requestRef.current) return;
+      setSelectedModel(nextModel);
+      setStatus('success');
+      setMessage(t('settings.providers.modelsLoaded', { count: nextModels.length }));
+    } catch (error) {
+      if (requestId !== requestRef.current) return;
+      setModels([]);
+      setStatus('error');
+      setMessage(providerErrorMessage(error, t));
+    }
+  };
+
+  useEffect(() => {
+    void loadModels(true);
+    return () => {
+      requestRef.current += 1;
+    };
+    // The channel id defines the credential scope; changing it must reload the catalog.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [provider]);
+
+  const applyModel = async (model: string) => {
+    onUserMutation?.();
+    setStatus('loading');
+    setMessage(t('common.saving'));
+    try {
+      await setCredential(modelAccount, model, provider);
+      setSelectedModel(model);
+      setStatus('success');
+      setMessage(t('settings.providers.modelSaved', { model }));
+      emitSaved('saved', t('common.saved'));
+    } catch (error) {
+      setStatus('error');
+      setMessage(providerErrorMessage(error, t));
+      emitSaved('failed', t('common.operationFailed'));
+    }
+  };
+
+  return (
+    <SettingRow label={t('settings.providers.modelLabel')}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, width: '100%', maxWidth: layoutStack ? '100%' : 420 }}>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center', width: '100%', flexWrap: layoutStack ? 'wrap' : 'nowrap' }}>
+          <SelectLite
+            value={selectedModel}
+            onChange={(model) => void applyModel(model)}
+            options={models.map((model) => ({ value: model, label: model }))}
+            placeholder={status === 'loading'
+              ? t('settings.providers.loadingModels')
+              : t('settings.providers.selectModel')}
+            disabled={status === 'loading' || models.length === 0}
+            searchable
+            searchPlaceholder={t('settings.providers.searchModels')}
+            emptyMessage={t('settings.providers.noMatchingModels')}
+            ariaLabel={t('settings.providers.selectModel')}
+            style={{
+              flex: layoutStack ? '1 1 100%' : 1,
+              width: '100%',
+              minWidth: 0,
+              maxWidth: '100%',
+              fontFamily: 'var(--ol-font-mono)',
+            }}
+          />
+          <button
+            onClick={() => {
+              onUserMutation?.();
+              void loadModels(false);
+            }}
+            title={t('common.refresh')}
+            aria-label={t('common.refresh')}
+            style={iconBtnStyle}
+            disabled={status === 'loading'}
+          >
+            <Icon name="refresh" size={13} />
+          </button>
+          {trailing}
+        </div>
+        <span style={{ fontSize: 11, color: status === 'error' ? 'var(--ol-warn)' : status === 'success' ? 'var(--ol-ok)' : 'var(--ol-ink-4)', lineHeight: 1.4 }}>
+          {message}
+        </span>
+        <span style={{ fontSize: 11, color: 'var(--ol-ink-4)', lineHeight: 1.4 }}>
+          {t(kind === 'asr'
+            ? 'settings.providers.orcarouterAsrCatalogHint'
+            : 'settings.providers.orcarouterCatalogHint')}
+        </span>
+      </div>
+    </SettingRow>
+  );
+}
 
 function ProviderTools({
   kind,

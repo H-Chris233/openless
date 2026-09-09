@@ -1,4 +1,7 @@
-export const mockCredentialValues = new Map<string, string>();
+export const mockCredentialValues = new Map<string, string>([
+  ['orcarouter-asr:asr.endpoint', 'https://api.orcarouter.ai/v1'],
+  ['orcarouter-asr:asr.model', 'google/gemini-2.5-flash'],
+]);
 import type {
   ActivityDay,
   CorrectionRule,

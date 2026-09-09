@@ -61,7 +61,7 @@ export function LlmProtocolFields({
   formats: LlmRequestFormat[];
   onUserMutation: () => void;
   onBlockedChange: (account: string, blocked: boolean) => void;
-  onSaved?: () => void;
+  onSaved?: (changedAccounts?: string[]) => void;
 }) {
   const { t } = useTranslation();
   const [values, setValues] = useState<ProtocolValues>(emptyValues);
@@ -107,14 +107,14 @@ export function LlmProtocolFields({
     setSaving(true);
     setError(null);
     try {
-      for (const account of accounts) {
-        if (next[account] !== saved[account])
-          await setCredential(account, next[account], channelId);
+      const changedAccounts = accounts.filter((account) => next[account] !== saved[account]);
+      for (const account of changedAccounts) {
+        await setCredential(account, next[account], channelId);
       }
       if (mounted.current) {
         setSaved(next);
         emitSaved('saved', t('common.saved'));
-        onSaved?.();
+        onSaved?.(changedAccounts);
       }
     } catch {
       if (mounted.current) {

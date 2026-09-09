@@ -55,6 +55,7 @@ pub const SHARED_CLOUD_ASR_PROVIDER_TYPES: &[&str] = &[
     "groq",
     "whisper",
     "openrouter",
+    "orcarouter",
     "zenmux",
     "openai-compatible",
     "xiaomi-mimo-asr",
@@ -72,6 +73,7 @@ pub const SHARED_CLOUD_LLM_PROVIDER_TYPES: &[&str] = &[
     "mimo",
     "cometapi",
     "openrouterFree",
+    "orcarouter",
     "alibabaCoding",
     "codingPlanX",
     "minimax",
@@ -437,14 +439,16 @@ async fn build_cloud_transcription_session(
         ActiveAsrProviderKind::Mimo => {
             require_configured(&api_key, "ASR API key")?;
             let effective_model = non_blank_owned(model)
-                .unwrap_or_else(|| crate::asr::mimo::DEFAULT_MODEL.to_string());
+                .unwrap_or_else(|| default_asr_model(provider_type).unwrap().to_string());
+            let endpoint = non_blank_owned(endpoint)
+                .unwrap_or_else(|| default_asr_endpoint(provider_type).unwrap().to_string());
+            let provider = if provider_type == crate::asr::mimo::ORCAROUTER_PROVIDER_ID {
+                MimoBatchASR::new_orcarouter(api_key, endpoint, effective_model.clone())
+            } else {
+                MimoBatchASR::new(api_key, endpoint, effective_model.clone())
+            };
             (
-                CloudTranscriptionSessionKind::Mimo(Arc::new(MimoBatchASR::new(
-                    api_key,
-                    non_blank_owned(endpoint)
-                        .unwrap_or_else(|| crate::asr::mimo::DEFAULT_ENDPOINT.to_string()),
-                    effective_model.clone(),
-                ))),
+                CloudTranscriptionSessionKind::Mimo(Arc::new(provider)),
                 Some(effective_model),
             )
         }

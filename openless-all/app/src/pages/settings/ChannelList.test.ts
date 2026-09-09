@@ -1,6 +1,6 @@
 import type { OS } from '../../components/WindowChrome';
 import type { ProviderDescriptor } from '../../lib/ipc';
-import { presetsFor, shouldRecycleDraft } from './ChannelList';
+import { defaultChannelNameForProvider, presetsFor, shouldRecycleDraft } from './ChannelList';
 
 const localProviders = [
   'local-qwen3',
@@ -100,6 +100,16 @@ if (shouldRecycleDraft('draft-1', true)) {
 }
 if (shouldRecycleDraft(null, false)) {
   throw new Error('an existing channel must never enter draft cleanup');
+}
+
+if (defaultChannelNameForProvider('orcarouter', '') !== 'OrcaRouter') {
+  throw new Error('a blank OrcaRouter channel must receive the OrcaRouter default name');
+}
+if (defaultChannelNameForProvider('orcarouter', 'My primary key') !== 'My primary key') {
+  throw new Error('the OrcaRouter default name must not overwrite a custom channel name');
+}
+if (defaultChannelNameForProvider('openai', '') !== '') {
+  throw new Error('non-OrcaRouter channel naming must remain unchanged');
 }
 
 console.log('ChannelList platform filtering and draft lifecycle tests passed');

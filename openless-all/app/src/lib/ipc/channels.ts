@@ -76,6 +76,14 @@ const mockChannels: Record<ChannelKind, Channel[]> = {
       order: 1,
       lastTest: null,
     },
+    {
+      id: 'orcarouter-asr',
+      name: 'OrcaRouter-ASR',
+      providerType: 'orcarouter',
+      enabled: false,
+      order: 2,
+      lastTest: null,
+    },
   ],
 };
 
@@ -146,7 +154,11 @@ export function deleteChannelIfBlank(kind: ChannelKind, id: string): Promise<boo
 }
 
 export function renameChannel(kind: ChannelKind, id: string, name: string): Promise<void> {
-  return invokeOrMock('rename_channel', { kind, id, name }, () => undefined);
+  return invokeOrMock('rename_channel', { kind, id, name }, () => {
+    const channel = mockChannels[kind].find((channel) => channel.id === id);
+    if (channel) channel.name = name;
+    return undefined;
+  });
 }
 
 export function deleteChannel(kind: ChannelKind, id: string): Promise<void> {
@@ -158,7 +170,11 @@ export function deleteChannel(kind: ChannelKind, id: string): Promise<void> {
 }
 
 export function setChannelEnabled(kind: ChannelKind, id: string, enabled: boolean): Promise<void> {
-  return invokeOrMock('set_channel_enabled', { kind, id, enabled }, () => undefined);
+  return invokeOrMock('set_channel_enabled', { kind, id, enabled }, () => {
+    const channel = mockChannels[kind].find((channel) => channel.id === id);
+    if (channel) channel.enabled = enabled;
+    return undefined;
+  });
 }
 
 /** ids 是拖拽后的完整顺序；后端会把未提及的渠道排到末尾。 */
