@@ -8,6 +8,9 @@
   --ol-typeless-confirm-ink: #ffffff;
   position: relative;
   font-family: var(--ol-font-sans);
+  /* 整体缩到 1/7 面积（线性 1/√7≈0.378），与 174×48 的胶囊窗口配套；
+     尺寸基准见 src-tauri/src/lib.rs 的 capsule_window_bounds_for_style。 */
+  zoom: 0.378;
 }
 
 .ol-typeless-capsule {

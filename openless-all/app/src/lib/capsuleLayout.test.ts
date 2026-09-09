@@ -86,9 +86,13 @@ for (const os of ['mac', 'win', 'linux'] as const) {
   const classic = getCapsuleHostMetrics(os, false, 'classic');
   const typeless = getCapsuleHostMetrics(os, true, 'typeless');
   assertEqual(classic.height, 100, `${os}: classic uses the compact native window`);
-  assertEqual(typeless.height, 128, `${os}: typeless reserves room for the translation badge`);
-  assertEqual(typeless.bottomInset, 16, `${os}: visible capsule sits close to the work-area edge`);
-  assertEqual(typeless.width, 460, `${os}: error text remains inside the shared window`);
+  assertEqual(typeless.height, 48, `${os}: typeless window is 1/7 of the old 460x128 area`);
+  assertEqual(typeless.width, 174, `${os}: typeless window keeps the 1/7 stage width`);
+  assertEqual(
+    typeless.bottomInset,
+    0,
+    `${os}: typeless pill hugs the work-area bottom edge`,
+  );
 }
 for (const style of ['siri', 'classic', 'typeless'] as const) {
   assertEqual(parseCapsuleStyle(style), style, `${style} is accepted from preferences and events`);

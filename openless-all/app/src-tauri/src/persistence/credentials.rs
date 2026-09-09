@@ -61,6 +61,14 @@ const KEYRING_CHUNK_MAX_UTF16_UNITS: usize = 1000;
 
 static CREDENTIALS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
+// Keychain 访问节流：每进程只补写/扫描一次，避免重复授权弹窗。
+#[cfg(not(target_os = "android"))]
+static SINGLE_ITEM_MIGRATION_ATTEMPTED: AtomicBool = AtomicBool::new(false);
+#[cfg(not(target_os = "android"))]
+static LEGACY_KEYRING_PROBE: OnceLock<Result<Option<CredsRoot>, String>> = OnceLock::new();
+#[cfg(any(not(target_os = "android"), test))]
+static VAULT_SOURCE_LOGGED: AtomicBool = AtomicBool::new(false);
+
 // A rejected Marketplace token must become unusable before best-effort durable
 // deletion starts. Keychain/credential-manager deletion can fail or prompt, so
 // this process-local tombstone is authoritative for every read until a newly
@@ -1262,9 +1270,26 @@ fn delete_keyring_password(account: &str) {
 fn load_keyring_credentials() -> Result<Option<CredsRoot>> {
     load_keyring_credentials_with(
         get_keyring_password,
-        set_keyring_password,
+        set_keyring_password_for_migration,
         cfg!(target_os = "macos"),
     )
+}
+
+/// credentials.v2 补写每进程只尝试一次。
+#[cfg(not(target_os = "android"))]
+fn set_keyring_password_for_migration(account: &str, value: &str) -> Result<()> {
+    if SINGLE_ITEM_MIGRATION_ATTEMPTED.swap(true, Ordering::SeqCst) {
+        return Ok(());
+    }
+    set_keyring_password(account, value)
+}
+
+/// 首次成功定位凭据来源时记一条日志，用于诊断「未配置」误报。
+#[cfg(any(not(target_os = "android"), test))]
+fn log_vault_source_once(source: &str) {
+    if !VAULT_SOURCE_LOGGED.swap(true, Ordering::SeqCst) {
+        log::info!("[vault] credential source: {source}");
+    }
 }
 
 #[cfg(not(target_os = "android"))]
@@ -1282,14 +1307,17 @@ fn load_keyring_credentials_with(
 ) -> Result<Option<CredsRoot>> {
     if consolidate {
         if let Some(json) = read(KEYRING_SINGLE_CREDENTIALS_ACCOUNT)? {
+            log_vault_source_once("credentials.v2 (single item)");
             return decode_single_credentials(&json).map(Some);
         }
     }
     let Some(json_or_manifest) = read(KEYRING_CREDENTIALS_ACCOUNT)? else {
+        log_vault_source_once("empty (no stored credentials)");
         return Ok(None);
     };
 
     let json = if let Some(manifest) = read_chunk_manifest(&json_or_manifest) {
+        log_vault_source_once("credentials.v1 chunks");
         let mut json = String::new();
         for index in 0..manifest.chunks {
             let account = chunk_account(manifest.generation.as_deref(), index);
@@ -1379,20 +1407,36 @@ fn migrate_legacy_sources_for_update() -> Result<CredsRoot> {
 
     #[cfg(not(target_os = "android"))]
     {
-        let legacy_vault = load_legacy_keyring_credentials_for_update()?;
-        if legacy_vault_has_credentials(&legacy_vault) {
-            save_credentials(&legacy_vault)?;
-            let persisted = credentials_cache()
-                .lock()
-                .as_ref()
-                .cloned()
-                .unwrap_or(legacy_vault);
-            remove_legacy_keyring_credentials();
-            return Ok(persisted);
-        }
+        // 旧版逐账户条目扫描每进程只跑一次并缓存；失败时重放同一错误，不重扫。
+        let probe = LEGACY_KEYRING_PROBE.get_or_init(|| {
+            migrate_legacy_keyring_accounts().map_err(|error| format!("{error:#}"))
+        });
+        return match probe {
+            Ok(Some(root)) => Ok(root.clone()),
+            Ok(None) => Ok(CredsRoot::default()),
+            Err(message) => Err(anyhow!(message.clone())),
+        };
     }
 
+    #[cfg(target_os = "android")]
     Ok(CredsRoot::default())
+}
+
+/// 扫描旧版逐账户 Keychain 条目并迁移到当前存储。Some = 找到旧凭据。
+#[cfg(not(target_os = "android"))]
+fn migrate_legacy_keyring_accounts() -> Result<Option<CredsRoot>> {
+    let legacy_vault = load_legacy_keyring_credentials_for_update()?;
+    if !legacy_vault_has_credentials(&legacy_vault) {
+        return Ok(None);
+    }
+    save_credentials(&legacy_vault)?;
+    let persisted = credentials_cache()
+        .lock()
+        .as_ref()
+        .cloned()
+        .unwrap_or(legacy_vault);
+    remove_legacy_keyring_credentials();
+    Ok(Some(persisted))
 }
 
 fn load_credentials_into_cache_with(

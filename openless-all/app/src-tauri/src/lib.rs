@@ -545,11 +545,12 @@ fn run_desktop() {
     #[cfg(not(target_os = "windows"))]
     let coordinator = Arc::new(coordinator::Coordinator::new());
     let core_backend = coordinator.backend();
-    #[cfg(target_os = "windows")]
-    if let Err(error) = commands::sync_active_asr_provider_to_vault(
-        &core_backend.get_preferences().active_asr_provider,
-    ) {
-        log::warn!("[startup] sync active ASR provider from preferences failed: {error}");
+    // 启动时把偏好里的 active ASR 同步进凭据库；get_credentials 按凭据库的 active 渠道取密钥。
+    let startup_active_asr = core_backend.get_preferences().active_asr_provider;
+    if !startup_active_asr.is_empty() {
+        if let Err(error) = commands::sync_active_asr_provider_to_vault(&startup_active_asr) {
+            log::warn!("[startup] sync active ASR provider from preferences failed: {error}");
+        }
     }
     let builder = tauri::Builder::default();
     // macOS：胶囊要叠到别的 app 的全屏 Space 之上，必须是「非激活 NSPanel」(普通
@@ -3232,6 +3233,11 @@ pub(crate) fn position_capsule_bottom_center_with_style<R: tauri::Runtime>(
 ) -> tauri::Result<()> {
     let bounds = capsule_window_bounds_for_style(style);
     const EDGE_GAP: f64 = 12.0;
+    // typeless 贴紧工作区底边（工作区已由系统排除 Dock / taskbar）。
+    let bottom_gap = match style {
+        types::CapsuleStyle::Typeless => 0.0,
+        _ => EDGE_GAP,
+    };
 
     // Windows：跟随「正在输入的 App」所在显示器摆放，避免多显示器下胶囊
     // 总是固定出现在主屏 / 胶囊自己那块屏。
@@ -3253,7 +3259,7 @@ pub(crate) fn position_capsule_bottom_center_with_style<R: tauri::Runtime>(
                     (mon.left, mon.top, mon.right, mon.bottom)
                 };
             let x = work_l + ((work_r - work_l - phys_w) / 2).max(0);
-            let y = work_b - phys_h - (EDGE_GAP * scale).round() as i32;
+            let y = work_b - phys_h - (bottom_gap * scale).round() as i32;
             let (clamped_x, clamped_y) =
                 clamp_to_monitor(x, y, phys_w, phys_h, work_l, work_t, work_r, work_b);
             log::debug!(
@@ -3278,7 +3284,7 @@ pub(crate) fn position_capsule_bottom_center_with_style<R: tauri::Runtime>(
                 mon.logical_work_area(),
                 bounds.width,
                 bounds.height,
-                EDGE_GAP,
+                bottom_gap,
             );
             log::debug!(
                 "[capsule] mac position: mon=({},{}) size=({}x{}) scale={:.2} -> logical=({:.1},{:.1})",
@@ -3305,7 +3311,7 @@ pub(crate) fn position_capsule_bottom_center_with_style<R: tauri::Runtime>(
     let size = &monitor.work_area().size;
     let pos = &monitor.work_area().position;
     let frame = logical_monitor_frame(pos.x, pos.y, size.width, size.height, scale);
-    let (x, y) = bottom_center_position(frame, bounds.width, bounds.height, EDGE_GAP);
+    let (x, y) = bottom_center_position(frame, bounds.width, bounds.height, bottom_gap);
     window.set_position(LogicalPosition::new(x, y))?;
     Ok(())
 }
@@ -3326,11 +3332,16 @@ fn capsule_window_bounds(translation_active: bool) -> CapsuleWindowBounds {
 
 fn capsule_window_bounds_for_style(style: types::CapsuleStyle) -> CapsuleWindowBounds {
     CapsuleWindowBounds {
-        width: 460.0,
+        // typeless 窗口面积是旧尺寸（460×128）的 1/7；前端用 CSS zoom 同步缩放内容，
+        // 见 CapsuleStyles.css 与 src/lib/capsuleLayout.ts。
+        width: match style {
+            types::CapsuleStyle::Typeless => 174.0,
+            types::CapsuleStyle::Siri | types::CapsuleStyle::Classic => 460.0,
+        },
         height: match style {
             types::CapsuleStyle::Siri => 180.0,
             types::CapsuleStyle::Classic => 100.0,
-            types::CapsuleStyle::Typeless => 128.0,
+            types::CapsuleStyle::Typeless => 48.0,
         },
         bottom_inset: 0.0,
     }
@@ -3572,7 +3583,7 @@ mod tests {
             let (x, reserved_y) =
                 bottom_center_position(work_area, bounds.width, bounds.height, 12.0);
             let (_, hidden_y) = bottom_center_position(monitor, bounds.width, bounds.height, 12.0);
-            assert_eq!(x, -950.0);
+            assert_eq!(x, work_area.x + (work_area.width - bounds.width) / 2.0);
             assert_eq!(reserved_y + bounds.height, 818.0);
             assert_eq!(hidden_y - reserved_y, 70.0);
         }
@@ -3585,6 +3596,12 @@ mod tests {
             (bounds.width, bounds.height, bounds.bottom_inset),
             (460.0, 180.0, 0.0)
         );
+    }
+
+    #[test]
+    fn typeless_capsule_window_is_one_seventh_of_the_old_area() {
+        let bounds = capsule_window_bounds_for_style(CapsuleStyle::Typeless);
+        assert_eq!((bounds.width, bounds.height), (174.0, 48.0));
     }
 
     #[test]
