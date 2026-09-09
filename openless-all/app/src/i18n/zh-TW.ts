@@ -54,6 +54,7 @@ export const zhTW: typeof zhCN = {
     hide: '隱藏',
     saved: '已保存',
     saving: '保存中',
+    experimental: '實驗性',
     copied: '已複製',
     operationFailed: '操作失敗',
     add: '添加',
@@ -1536,7 +1537,7 @@ export const zhTW: typeof zhCN = {
       },
     },
     advanced: {
-      multimodalPipelineTitle: '多模態辨識管線（實驗性）',
+      multimodalPipelineTitle: '多模態辨識管線',
       multimodalPipelineTitleHint:
         '用單一多模態模型一步完成語音辨識；與傳統 ASR + LLM 設定完全隔離。',
       multimodalPipelineLabel: '啟用多模態辨識管線',
@@ -1552,7 +1553,7 @@ export const zhTW: typeof zhCN = {
       streamingInsertSaveClipboardLabel: '同步到剪貼簿',
       streamingInsertSaveClipboardHint:
         '插入成功後把最終文字寫入剪貼簿，方便 Cmd+V 再次貼上；關閉後流式過程不動剪貼簿。',
-      localAsrTitle: '本地 ASR 模型（實驗性）',
+      localAsrTitle: '本地 ASR 模型',
       localAsrDesc: '把轉寫從雲端切到本機推理。僅推薦離線 / 隱私敏感場景。',
       localAsrWarningShort: '本地推理較慢，配置不足時可能吞字。',
       qwen3Desc: '啓動之後，ASR 提供商將被接管。',

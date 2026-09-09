@@ -58,6 +58,7 @@ export const en: typeof zhCN = {
     hide: 'Hide',
     saved: 'Saved',
     saving: 'Saving…',
+    experimental: 'Experimental',
     copied: 'Copied',
     operationFailed: 'Operation failed',
     add: 'Add',
@@ -1277,7 +1278,7 @@ export const en: typeof zhCN = {
         asrXiaomiMimo: 'Xiaomi MiMo ASR',
         asrIflytek: 'iFlytek Realtime ASR',
         asrElevenLabs: 'ElevenLabs Scribe',
-        asrSherpaOnnxLocal: 'Local sherpa-onnx (experimental)',
+        asrSherpaOnnxLocal: 'Local sherpa-onnx (Experimental)',
         asrFoundryLocalWhisper: 'Local Whisper (Foundry Local)',
         asrLocalWhisper: 'Local Whisper (batch)',
         asrLocalQwen3: 'Local Qwen3-ASR',
@@ -1639,14 +1640,14 @@ export const en: typeof zhCN = {
       },
     },
     advanced: {
-      multimodalPipelineTitle: 'Multimodal recognition pipeline (experimental)',
+      multimodalPipelineTitle: 'Multimodal recognition pipeline',
       multimodalPipelineTitleHint:
         'One-pass audio recognition with a single multimodal model; traditional ASR + LLM configuration is fully isolated from it.',
       multimodalPipelineLabel: 'Enable multimodal pipeline',
       multimodalPipelineHint:
         'Adds a Traditional / Multimodal switch on the AI providers page. Traditional = ASR + LLM; Multimodal = one audio-capable model. The two configurations are stored separately and never share credentials.',
       streamingInsertTitle: 'Streaming insertion',
-      streamingInsertTitleLinux: 'Streaming insertion (experimental)',
+      streamingInsertTitleLinux: 'Streaming insertion (Experimental)',
       streamingInsertDesc:
         'Streams text to cursor character by character, reducing perceived latency. Falls back to one-shot paste when conditions are not met.',
       streamingInsertLabel: 'Streaming insertion',
@@ -1659,7 +1660,7 @@ export const en: typeof zhCN = {
       streamingInsertSaveClipboardLabel: 'Copy to clipboard',
       streamingInsertSaveClipboardHint:
         'After a successful insert, write the final text to the clipboard so Cmd+V can paste it again. Off = clipboard is never touched.',
-      localAsrTitle: 'Local ASR models (experimental)',
+      localAsrTitle: 'Local ASR models',
       localAsrDesc:
         'Move transcription from cloud ASR to on-device inference. Offline / privacy-sensitive use only.',
       localAsrWarningShort: 'Local inference is slower; under-spec hardware may drop words.',

@@ -26,11 +26,11 @@ export function getDefaultStyleSystemPrompts(): Promise<StyleSystemPrompts> {
   }));
 }
 
-export function setSettings(prefs: UserPreferences): Promise<void> {
+export function setSettings(prefs: UserPreferences): Promise<UserPreferences> {
   return invokeOrMock('set_settings', { prefs }, () => {
     const thinkingChanged = mockSettings.llmThinkingEnabled !== prefs.llmThinkingEnabled;
     mockSetSettings(prefs);
     if (thinkingChanged) invalidateMockChannelTests('llm');
-    return undefined;
+    return prefs;
   });
 }

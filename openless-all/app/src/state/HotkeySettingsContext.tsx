@@ -10,10 +10,12 @@ import {
 } from 'react';
 import { getHotkeyCapability, getSettings, isTauri, setSettings } from '../lib/ipc';
 import type { HotkeyBinding, HotkeyCapability, UserPreferences } from '../lib/types';
+import i18n, { outputPrefsForLocale, type SupportedLocale } from '../i18n';
 import { applyThemeFromPreference } from '../lib/themeMode';
 import { applyStackedLayoutFromPrefs } from '../lib/stackedLayout';
 import { applyConservativeLayout } from '../lib/conservativeLayout';
 import { emitSaved } from '../lib/savedEvent';
+import { PreferencesWriteGate } from './preferencesWriteGate';
 
 interface HotkeySettingsContextValue {
   prefs: UserPreferences | null;
@@ -39,6 +41,7 @@ export function HotkeySettingsProvider({ children }: { children: ReactNode }) {
   const persistQueueRef = useRef<Promise<void>>(Promise.resolve());
   const latestPrefsRef = useRef<UserPreferences | null>(null);
   const persistedPrefsRef = useRef<UserPreferences | null>(null);
+  const writeGateRef = useRef(new PreferencesWriteGate<UserPreferences>());
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -78,15 +81,35 @@ export function HotkeySettingsProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  const queueSetSettings = useCallback((resolved: UserPreferences) => {
-    const task = persistQueueRef.current
-      .catch(() => undefined)
-      .then(async () => {
-        await setSettings(resolved);
-      });
-    persistQueueRef.current = task;
-    return task;
+  const applyIncomingPrefs = useCallback((nextPrefs: UserPreferences) => {
+    latestPrefsRef.current = nextPrefs;
+    persistedPrefsRef.current = nextPrefs;
+    setPrefs(nextPrefs);
+    applyThemeFromPreference(nextPrefs.themeMode ?? 'system');
+    applyStackedLayoutFromPrefs(nextPrefs.stackedRowLayout);
+    applyConservativeLayout(nextPrefs.conservativeLayout === true);
   }, []);
+
+  const queueSetSettings = useCallback(
+    (resolved: UserPreferences) => {
+      const finishWrite = writeGateRef.current.beginWrite();
+      let savedPrefs: UserPreferences | null = null;
+      const task = persistQueueRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          savedPrefs = await setSettings(resolved);
+        })
+        .then(() => {
+          persistedPrefsRef.current = savedPrefs;
+        })
+        .finally(() => {
+          if (finishWrite() && savedPrefs) applyIncomingPrefs(savedPrefs);
+        });
+      persistQueueRef.current = task;
+      return task;
+    },
+    [applyIncomingPrefs],
+  );
 
   useEffect(() => {
     void refresh();
@@ -102,12 +125,10 @@ export function HotkeySettingsProvider({ children }: { children: ReactNode }) {
         const handle = await listen<UserPreferences>('prefs:changed', (event) => {
           const nextPrefs = event.payload;
           if (!nextPrefs) return;
-          latestPrefsRef.current = nextPrefs;
-          persistedPrefsRef.current = nextPrefs;
-          setPrefs(nextPrefs);
-          applyThemeFromPreference(nextPrefs.themeMode ?? 'system');
-          applyStackedLayoutFromPrefs(nextPrefs.stackedRowLayout);
-          applyConservativeLayout(nextPrefs.conservativeLayout === true);
+          // 一次保存的广播先于其 IPC promise resolve 到达。若不拦截，较旧的
+          // 排队保存会覆盖较新的乐观点击，让开关看起来「弹回去」。
+          const applicable = writeGateRef.current.receiveIncoming(nextPrefs);
+          if (applicable) applyIncomingPrefs(applicable);
         });
         if (cancelled) {
           handle();
@@ -122,7 +143,7 @@ export function HotkeySettingsProvider({ children }: { children: ReactNode }) {
       cancelled = true;
       unlisten?.();
     };
-  }, []);
+  }, [applyIncomingPrefs]);
 
   useEffect(() => {
     latestPrefsRef.current = prefs;
@@ -155,6 +176,38 @@ export function HotkeySettingsProvider({ children }: { children: ReactNode }) {
     [queueSetSettings],
   );
 
+  // App 语言与输出语言偏好保持一致：界面切到某个语言后，输出偏好
+  // （chineseScriptPreference / outputLanguagePreference）跟随该语言，
+  // 避免「界面中文、输出英文」的隐性不一致。
+  useEffect(() => {
+    const currentPrefs = latestPrefsRef.current;
+    if (!currentPrefs) return;
+    const lang = (i18n.resolvedLanguage || i18n.language || '').toLowerCase();
+    const resolvedLocale: SupportedLocale =
+      lang.startsWith('zh-tw') || lang.includes('hant')
+        ? 'zh-TW'
+        : lang.startsWith('zh-cn') || lang.startsWith('zh')
+          ? 'zh-CN'
+          : lang.startsWith('ja')
+            ? 'ja'
+            : lang.startsWith('ko')
+              ? 'ko'
+              : 'en';
+    const nextLocalePrefs = outputPrefsForLocale(resolvedLocale);
+    if (
+      currentPrefs.chineseScriptPreference === nextLocalePrefs.chineseScriptPreference &&
+      currentPrefs.outputLanguagePreference === nextLocalePrefs.outputLanguagePreference
+    ) {
+      return;
+    }
+    const merged = { ...currentPrefs, ...nextLocalePrefs };
+    latestPrefsRef.current = merged;
+    setPrefs(merged);
+    void queueSetSettings(merged).catch((error) => {
+      console.warn('[settings] sync locale output preferences failed', error);
+    });
+  }, [prefs, queueSetSettings]);
+
   const value = useMemo<HotkeySettingsContextValue>(
     () => ({
       prefs,
@@ -168,8 +221,7 @@ export function HotkeySettingsProvider({ children }: { children: ReactNode }) {
     [capability, error, loading, prefs, refresh, updatePrefs],
   );
 
-  return <HotkeySettingsContext.Provider value={value}>{children}</HotkeySettingsContext.Provider>;
-}
+  return <HotkeySettingsContext.Provider value={value}>{children}</HotkeySettingsContext.Provider>;}
 
 export function useHotkeySettings() {
   const value = useContext(HotkeySettingsContext);

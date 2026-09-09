@@ -48,6 +48,40 @@ export function SectionTitle({
   );
 }
 
+export function ExperimentalSectionTitle({
+    children,
+    badge,
+    hint,
+    style,
+}: {
+    children: ReactNode
+    badge: string
+    hint?: string
+    style?: CSSProperties
+}) {
+    return (
+        <SectionTitle hint={hint} style={style}>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 7, flexWrap: "wrap" }}>
+                <span>{children}</span>
+                <span
+                    style={{
+                        padding: "2px 6px",
+                        borderRadius: 999,
+                        background: "var(--ol-blue-soft)",
+                        color: "var(--ol-blue)",
+                        fontSize: 10,
+                        fontWeight: 600,
+                        lineHeight: 1.3,
+                        letterSpacing: 0,
+                    }}
+                >
+                    {badge}
+                </span>
+            </span>
+        </SectionTitle>
+    )
+}
+
 // 页面瘦身：设置页描述文案全部隐藏（保留组件签名 + 调用点，便于需要时恢复）。
 export function SectionDesc(_props: { children: ReactNode; style?: CSSProperties }) {
   return null;

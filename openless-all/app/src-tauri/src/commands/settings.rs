@@ -48,6 +48,7 @@ impl<'a> TauriSettingsRuntime<'a> {
 impl openless_core::SettingsRuntime for TauriSettingsRuntime<'_> {
     fn prepare(
         &self,
+<<<<<<< HEAD
         plan: &openless_core::SettingsEffectPlan,
     ) -> Result<openless_core::SettingsEffectReceipt, openless_core::SettingsEffectFailure> {
         let mut receipt = openless_core::SettingsEffectReceipt::default();
@@ -55,6 +56,299 @@ impl openless_core::SettingsRuntime for TauriSettingsRuntime<'_> {
             if let Err(error) = self.apply_windows_keyboard(&change.next) {
                 return Err(openless_core::SettingsEffectFailure::after_side_effect(
                     error, receipt,
+=======
+        prefs: UserPreferences,
+    ) -> Result<(), String> {
+        (**self).write_settings_preserving_current_style_preferences(prefs)
+    }
+
+    fn sync_active_asr_provider(&self, provider: &str) -> Result<(), String> {
+        (**self).sync_active_asr_provider(provider)
+    }
+
+    fn refresh_dictation_hotkey(&self) {
+        (**self).refresh_dictation_hotkey();
+    }
+
+    fn refresh_qa_hotkey(&self) {
+        (**self).refresh_qa_hotkey();
+    }
+
+    fn refresh_combo_hotkey(&self) {
+        (**self).refresh_combo_hotkey();
+    }
+
+    fn refresh_translation_hotkey(&self) {
+        (**self).refresh_translation_hotkey();
+    }
+
+    fn refresh_switch_style_hotkey(&self) {
+        (**self).refresh_switch_style_hotkey();
+    }
+
+    fn refresh_open_app_hotkey(&self) {
+        (**self).refresh_open_app_hotkey();
+    }
+
+    fn refresh_selection_polish_hotkey(&self) {
+        (**self).refresh_selection_polish_hotkey();
+    }
+
+    fn refresh_coding_agent_hotkey(&self) {
+        (**self).refresh_coding_agent_hotkey();
+    }
+
+    fn refresh_style_pack_hotkeys(&self) {
+        (**self).refresh_style_pack_hotkeys();
+    }
+}
+
+/// 非核心热键，用于保存兜底的冲突化解。dictation 是核心热键，永不参与调整。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NonCoreHotkey {
+    Translation,
+    Qa,
+    SwitchStyle,
+    OpenApp,
+    SelectionPolish,
+    LessComputer,
+}
+
+impl NonCoreHotkey {
+    fn get(&self, prefs: &UserPreferences) -> Option<ShortcutBinding> {
+        match self {
+            Self::Translation => Some(prefs.translation_hotkey.clone()),
+            Self::Qa => prefs.qa_hotkey.clone(),
+            Self::SwitchStyle => prefs.switch_style_hotkey.clone(),
+            Self::OpenApp => prefs.open_app_hotkey.clone(),
+            Self::SelectionPolish => prefs.selection_polish_hotkey.clone(),
+            Self::LessComputer => prefs.coding_agent_voice_hotkey.clone(),
+        }
+    }
+
+    fn set(&self, prefs: &mut UserPreferences, value: Option<ShortcutBinding>) {
+        match self {
+            // translation 是必填键，None 表示恢复失败时保持旧值不动。
+            Self::Translation => {
+                if let Some(value) = value {
+                    prefs.translation_hotkey = value;
+                }
+            }
+            Self::Qa => prefs.qa_hotkey = value,
+            Self::SwitchStyle => prefs.switch_style_hotkey = value,
+            Self::OpenApp => prefs.open_app_hotkey = value,
+            Self::SelectionPolish => prefs.selection_polish_hotkey = value,
+            Self::LessComputer => prefs.coding_agent_voice_hotkey = value,
+        }
+    }
+}
+
+/// 单个非核心热键是否非法。与 `reject_non_dictation_side_specific_shortcuts`
+/// 的逐键校验保持精确一致，避免把非冲突键一并停用。
+fn non_core_hotkey_invalid(key: NonCoreHotkey, binding: &ShortcutBinding) -> bool {
+    if crate::shortcut_binding::reject_side_specific_non_dictation(binding).is_err() {
+        return true;
+    }
+    match key {
+        NonCoreHotkey::SelectionPolish => {
+            crate::shortcut_binding::validate_binding(binding).is_err()
+                || reject_bare_shift_dictation_shortcut(binding).is_err()
+        }
+        _ => false,
+    }
+}
+
+/// 保存兜底（#904）：热键冲突不能把整份设置挡在保存之外。
+///
+/// 按核心度从高到低处理每个非核心热键：凡与更高优先级键重叠、或本身非法
+/// （侧特定修饰键等）的，恢复为旧值；旧值仍冲突/非法（历史遗留，例如 1.3.15
+/// 升级注入的选区润色默认键与录音键重复）时停用（translation 回退默认 Shift）。
+/// 返回被调整的键数量。dictation 永远保留，不参与调整。
+pub(crate) fn reconcile_hotkey_collisions(
+    prefs: &mut UserPreferences,
+    previous: &UserPreferences,
+) -> usize {
+    // 处理顺序 = 核心度从高到低：处理某项时，更高优先级的键已定稿。
+    const ORDER: [NonCoreHotkey; 6] = [
+        NonCoreHotkey::Translation,
+        NonCoreHotkey::Qa,
+        NonCoreHotkey::SwitchStyle,
+        NonCoreHotkey::OpenApp,
+        NonCoreHotkey::SelectionPolish,
+        NonCoreHotkey::LessComputer,
+    ];
+    let mut higher: Vec<ShortcutBinding> = vec![prefs.dictation_hotkey.clone()];
+    let mut adjusted = 0;
+    for key in ORDER {
+        let Some(current) = key.get(prefs) else {
+            continue;
+        };
+        let collides = higher
+            .iter()
+            .any(|held| crate::shortcut_binding::bindings_overlap(held, &current));
+        if !collides && !non_core_hotkey_invalid(key, &current) {
+            higher.push(current);
+            continue;
+        }
+        let fallback = key.get(previous).filter(|candidate| {
+            !higher
+                .iter()
+                .any(|held| crate::shortcut_binding::bindings_overlap(held, candidate))
+                && !non_core_hotkey_invalid(key, candidate)
+        });
+        // translation 不能停用：旧值仍冲突/非法时回退到默认 Shift（不会与任何键重叠）。
+        let resolved = if key == NonCoreHotkey::Translation && fallback.is_none() {
+            Some(UserPreferences::default().translation_hotkey.clone())
+        } else {
+            fallback
+        };
+        key.set(prefs, resolved.clone());
+        adjusted += 1;
+        if let Some(value) = resolved {
+            higher.push(value);
+        }
+    }
+    // 风格包直达快捷键是最低优先级：与更高优先级键重叠、非法或集合内重复的条目，
+    // 先尝试恢复该风格包的旧绑定，仍不行则整条移除（不影响其余设置落盘）。
+    let mut kept: Vec<StylePackHotkey> = Vec::new();
+    for entry in &prefs.style_pack_hotkeys {
+        let candidate_ok = |candidate: &StylePackHotkey| {
+            !candidate.pack_id.trim().is_empty()
+                && crate::shortcut_binding::validate_binding(&candidate.binding).is_ok()
+                && crate::shortcut_binding::reject_side_specific_non_dictation(&candidate.binding)
+                    .is_ok()
+                && reject_modifier_only_action_shortcut(&candidate.binding).is_ok()
+                && !kept.iter().any(|held: &StylePackHotkey| {
+                    held.pack_id == candidate.pack_id
+                        || crate::shortcut_binding::bindings_overlap(
+                            &held.binding,
+                            &candidate.binding,
+                        )
+                })
+                && !higher.iter().any(|held| {
+                    crate::shortcut_binding::bindings_overlap(held, &candidate.binding)
+                })
+        };
+        if candidate_ok(entry) {
+            kept.push(entry.clone());
+            continue;
+        }
+        adjusted += 1;
+        if let Some(fallback) = previous
+            .style_pack_hotkeys
+            .iter()
+            .find(|old| old.pack_id == entry.pack_id)
+            .filter(|old| candidate_ok(old))
+        {
+            kept.push(fallback.clone());
+        }
+    }
+    if kept != prefs.style_pack_hotkeys {
+        prefs.style_pack_hotkeys = kept;
+    }
+    adjusted
+}
+
+pub(crate) fn persist_settings<T: SettingsWriter>(
+    coord: &T,
+    prefs: UserPreferences,
+) -> Result<UserPreferences, String> {
+    persist_settings_with_keyboard_apply(
+        coord,
+        prefs,
+        crate::windows_ime_profile::apply_windows_openless_keyboard_list_pref,
+    )
+}
+
+pub(crate) fn persist_settings_with_keyboard_apply<T: SettingsWriter>(
+    coord: &T,
+    mut prefs: UserPreferences,
+    apply_keyboard_list: impl Fn(&UserPreferences) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut previous = coord.read_settings();
+    sync_dictation_hotkey_legacy_fields(&mut previous);
+    sync_dictation_hotkey_legacy_fields(&mut prefs);
+    if let Err(collision_error) = reject_hotkey_collisions(&prefs) {
+        // 兜底（#904）：热键冲突（含历史遗留的重复键）不能拒绝整份设置保存。
+        // 自动把冲突/非法的非核心热键恢复旧值或停用，其余设置照常落盘。
+        let adjusted = reconcile_hotkey_collisions(&mut prefs, &previous);
+        reject_hotkey_collisions(&prefs).map_err(|leftover| {
+            format!("{collision_error}; 自动化解 {adjusted} 项后仍无法通过校验: {leftover}")
+        })?;
+        log::warn!(
+            "[settings] 热键冲突已自动化解（调整 {adjusted} 项）后保存: {collision_error}"
+        );
+    }
+    let dictation_shortcut_changed = previous.dictation_hotkey != prefs.dictation_hotkey;
+    let dictation_mode_changed = previous.hotkey.mode != prefs.hotkey.mode;
+    let qa_changed = previous.qa_hotkey != prefs.qa_hotkey;
+    let translation_changed = previous.translation_hotkey != prefs.translation_hotkey;
+    let switch_style_changed = previous.switch_style_hotkey != prefs.switch_style_hotkey;
+    let open_app_changed = previous.open_app_hotkey != prefs.open_app_hotkey;
+    let style_pack_hotkeys_changed = previous.style_pack_hotkeys != prefs.style_pack_hotkeys;
+    let selection_polish_changed =
+        previous.selection_polish_hotkey != prefs.selection_polish_hotkey;
+    let coding_agent_changed = previous.coding_agent_enabled != prefs.coding_agent_enabled
+        || previous.coding_agent_voice_hotkey != prefs.coding_agent_voice_hotkey;
+    let windows_keyboard_list_changed = previous.windows_sendinput_insertion_only
+        != prefs.windows_sendinput_insertion_only
+        || previous.windows_show_openless_in_keyboard_list
+            != prefs.windows_show_openless_in_keyboard_list;
+    let active_asr_provider_changed = previous.active_asr_provider != prefs.active_asr_provider;
+    let active_asr_provider = prefs.active_asr_provider.clone();
+
+    if windows_keyboard_list_changed {
+        apply_keyboard_list(&prefs)?;
+    }
+
+    if active_asr_provider_changed {
+        if let Err(asr_err) = coord.sync_active_asr_provider(&active_asr_provider) {
+            if windows_keyboard_list_changed {
+                if let Err(kb_rollback_err) = apply_keyboard_list(&previous) {
+                    return Err(format!(
+                        "{asr_err}; additionally failed to rollback keyboard list visibility: {kb_rollback_err}"
+                    ));
+                }
+                log::warn!(
+                    "[windows-ime] rolled back keyboard list visibility after ASR provider sync failure"
+                );
+            }
+            return Err(asr_err);
+        }
+    }
+
+    if let Err(error) = coord.write_settings_preserving_current_style_preferences(prefs.clone()) {
+        if active_asr_provider_changed {
+            match coord.sync_active_asr_provider(&previous.active_asr_provider) {
+                Ok(()) => {
+                    if windows_keyboard_list_changed {
+                        if let Err(rollback_err) = apply_keyboard_list(&previous) {
+                            return Err(format!(
+                                "{error}; additionally failed to rollback keyboard list visibility: {rollback_err}"
+                            ));
+                        }
+                        log::warn!(
+                            "[windows-ime] rolled back keyboard list visibility after settings write failure"
+                        );
+                    }
+                    return Err(error);
+                }
+                Err(rollback_error) => {
+                    // ASR vault 无法回滚时 roll-forward prefs；键盘列表保持新状态，避免三者分叉。
+                    coord
+                        .write_settings_preserving_current_style_preferences(prefs)
+                        .map_err(|roll_forward_error| {
+                            format!(
+                                "{error}; additionally failed to restore active ASR provider: {rollback_error}; additionally failed to preserve active ASR provider consistency: {roll_forward_error}"
+                            )
+                        })?;
+                }
+            }
+        } else if windows_keyboard_list_changed {
+            if let Err(rollback_err) = apply_keyboard_list(&previous) {
+                return Err(format!(
+                    "{error}; additionally failed to rollback keyboard list visibility: {rollback_err}"
+>>>>>>> fix/settings-experimental-consistency
                 ));
             }
             receipt
@@ -206,7 +500,7 @@ async fn invalidate_llm_tests_if_thinking_changed(
             .await
             .map_err(|error| error.to_string())?;
     }
-    Ok(())
+    Ok(prefs)
 }
 
 #[cfg(not(mobile))]
@@ -215,7 +509,7 @@ pub async fn set_settings(
     coord: CoordinatorState<'_>,
     app: AppHandle,
     mut prefs: UserPreferences,
-) -> Result<(), String> {
+) -> Result<UserPreferences, String> {
     // 捕获旧值用于远程输入服务的 diff（persist 后端口/开关变化时启停/重启）。
     let remote_prev = coord.backend().get_preferences();
     let packs = coord
@@ -271,7 +565,7 @@ pub async fn set_settings(
             .await
             .map_err(|error| error.message)?;
     }
-    Ok(())
+    Ok(prefs)
 }
 
 #[cfg(mobile)]

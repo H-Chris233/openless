@@ -59,6 +59,7 @@ export const ja: typeof zhCN = {
     hide: '非表示',
     saved: '保存しました',
     saving: '保存中',
+    experimental: '実験的',
     copied: 'コピーしました',
     operationFailed: '操作に失敗しました',
     add: '追加',
@@ -1620,7 +1621,7 @@ export const ja: typeof zhCN = {
       },
     },
     advanced: {
-      multimodalPipelineTitle: 'マルチモーダル認識パイプライン（実験的）',
+      multimodalPipelineTitle: 'マルチモーダル認識パイプライン',
       multimodalPipelineTitleHint:
         '1つのマルチモーダルモデルで音声認識を一括実行。従来の ASR + LLM 設定から完全に分離されます。',
       multimodalPipelineLabel: 'マルチモーダルパイプラインを有効化',
@@ -1640,7 +1641,7 @@ export const ja: typeof zhCN = {
       streamingInsertSaveClipboardLabel: 'クリップボードに保存',
       streamingInsertSaveClipboardHint:
         '挿入成功後に最終テキストをクリップボードへ書き込み、Cmd+V で再貼付け可能にします。OFF ではクリップボードに触れません。',
-      localAsrTitle: 'ローカル ASR モデル（実験的）',
+      localAsrTitle: 'ローカル ASR モデル',
       localAsrDesc: '転写をクラウドから本機推論に切り替えます。オフライン／プライバシー重視向け。',
       localAsrWarningShort: 'ローカル推論は遅く、スペック不足では欠字の可能性があります。',
       qwen3Desc: '有効化すると ASR プロバイダーが引き継がれます。',

@@ -57,6 +57,7 @@ export const ko: typeof zhCN = {
     hide: '숨기기',
     saved: '저장됨',
     saving: '저장 중',
+    experimental: '실험적',
     copied: '복사됨',
     operationFailed: '작업 실패',
     add: '추가',
@@ -1609,7 +1610,7 @@ export const ko: typeof zhCN = {
       },
     },
     advanced: {
-      multimodalPipelineTitle: '멀티모달 인식 파이프라인 (실험적)',
+      multimodalPipelineTitle: '멀티모달 인식 파이프라인 ',
       multimodalPipelineTitleHint:
         '단일 멀티모달 모델로 음성 인식을 한 번에 처리합니다. 기존 ASR + LLM 설정과 완전히 분리됩니다.',
       multimodalPipelineLabel: '멀티모달 파이프라인 활성화',
@@ -1628,7 +1629,7 @@ export const ko: typeof zhCN = {
       streamingInsertSaveClipboardLabel: '클립보드에 저장',
       streamingInsertSaveClipboardHint:
         '삽입 성공 후 최종 텍스트를 클립보드에 기록하여 Cmd+V 로 다시 붙여넣을 수 있게 합니다. 끄면 클립보드를 건드리지 않습니다.',
-      localAsrTitle: '로컬 ASR 모델 (실험적)',
+      localAsrTitle: '로컬 ASR 모델 ',
       localAsrDesc:
         '전사를 클라우드에서 로컬 추론으로 전환합니다. 오프라인 / 프라이버시용에만 권장됩니다.',
       localAsrWarningShort: '로컬 추론은 느리며, 사양 부족 시 글자 누락이 발생할 수 있습니다.',
