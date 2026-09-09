@@ -11,6 +11,7 @@ export type AuthRequirement =
   | 'api_key_unless_custom_endpoint'
   | 'volcengine'
   | 'xfyun'
+  | 'tencent_cloud'
   | 'o_auth'
 
 export interface ProviderDescriptor {

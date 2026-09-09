@@ -94,7 +94,7 @@ export const LLM_LABELS = [
   ['codex_oauth', 'codexOAuth'], ['mimo', 'mimo'], ['cometapi', 'cometapi'],
   ['openrouterFree', 'openrouterFree'], ['orcarouter', 'orcarouter'], ['alibabaCoding', 'alibabaCoding'],
   ['codingPlanX', 'codingPlanX'], ['minimax', 'minimax'], ['stepfun', 'stepfun'],
-  ['opencode', 'opencode'],
+  ['opencode', 'opencode'], ['tencentTokenHub', 'tencentTokenHub'],
   ['custom', 'customChatCompletions'], ['custom_responses', 'customResponses'], ['custom_messages', 'customMessages'],
 ].map(([id, nameKey]) => ({ id, nameKey })) as readonly { id: string; nameKey: string }[];
 
@@ -280,6 +280,11 @@ export function ChannelCredentialFields({
         <ProviderTools key={`${configRevision}:${form?.revision}`} disabled={Object.values(blockedFields).some(Boolean) || (!!descriptor.supportedRequestFormats?.length && blockedFields.protocol === undefined)} kind="llm" provider={channelId}
           onTested={onTested}
           onUserMutation={onUserMutation} />
+        {providerType === 'tencentTokenHub' && (
+          <div style={{ marginTop: 2, fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.6 }}>
+            {t('settings.providers.tencentTokenHubNote')}
+          </div>
+        )}
       </>
     );
   }
@@ -357,6 +362,29 @@ export function ChannelCredentialFields({
           account="xfyun.api_key" provider={channelId} mono mask onUserMutation={onUserMutation} />
         <div style={{ marginTop: 2, fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.6 }}>
           {t('settings.providers.xfyunNote')}
+        </div>
+        <ProviderTools key={form?.revision} disabled={Object.values(form?.blocked ?? {}).some(Boolean)} kind="asr" provider={channelId}
+          onTested={onTested}
+          onUserMutation={onUserMutation} />
+      </>
+    );
+  }
+
+  if (descriptor?.authRequirement === 'tencent_cloud') {
+    return (
+      <>
+        <CredentialField key={`${channelId}:app_id`} label={t('settings.providers.tencentCloudAppIdLabel')}
+          account="tencent_cloud.app_id" provider={channelId} mono onUserMutation={onUserMutation} />
+        <CredentialField key={`${channelId}:secret_id`} label={t('settings.providers.tencentCloudSecretIdLabel')}
+          account="tencent_cloud.secret_id" provider={channelId} mono mask onUserMutation={onUserMutation} />
+        <CredentialField key={`${channelId}:secret_key`} label={t('settings.providers.tencentCloudSecretKeyLabel')}
+          account="tencent_cloud.secret_key" provider={channelId} mono mask onUserMutation={onUserMutation} />
+        <CredentialField key={`${channelId}:model`} label={t('settings.providers.modelLabel')}
+          account="asr.model" provider={channelId} mono
+          placeholder={descriptor?.defaultModel || 'Hy-ASR-3.0-preview'}
+          defaultValue={descriptor?.defaultModel || 'Hy-ASR-3.0-preview'} onUserMutation={onUserMutation} />
+        <div style={{ marginTop: 2, fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.6 }}>
+          {t('settings.providers.tencentCloudNote')}
         </div>
         <ProviderTools key={form?.revision} disabled={Object.values(form?.blocked ?? {}).some(Boolean)} kind="asr" provider={channelId}
           onTested={onTested}
