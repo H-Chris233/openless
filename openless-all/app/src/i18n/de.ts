@@ -1274,6 +1274,10 @@ export const de: typeof zhCN = {
       pipelineIsolationNotice:
         'Die beiden Modi speichern ihre Zugangsdaten vollständig getrennt. Beim Wechsel bleiben die Daten des anderen Modus gespeichert und werden beim Zurückwechseln wieder verwendet.',
       presets: {
+        opencode: 'OpenCode Zen',
+        customChatCompletions: 'Benutzerdefiniert · Chat Completions',
+        customResponses: 'Benutzerdefiniert · Responses',
+        customMessages: 'Benutzerdefiniert · Messages',
         ark: 'ARK (Volcengine Ark)',
         deepseek: 'DeepSeek',
         siliconflow: 'SiliconFlow',
@@ -1377,8 +1381,30 @@ export const de: typeof zhCN = {
       thinkingModeLabel: 'Denkmodus',
       thinkingModeOn: 'Ein',
       thinkingModeOff: 'Aus',
+      requestFormatLabel: 'Anfrageformat',
+      messagesThinkingLabel: 'Denkmodus',
+      thinkingAdaptive: 'Adaptiv',
+      thinkingBudget: 'Festes Budget',
+      maxTokensLabel: 'Maximale Ausgabetokens',
+      thinkingBudgetLabel: 'Tokenbudget für das Denken',
+      responsesThinkingHint:
+        'Bei einigen Modellen lässt sich das Denken nur reduzieren, nicht abschalten. Anfragen mit Denken senden keinen Temperaturparameter.',
+      messagesThinkingHint:
+        'Ältere Modelle oder kompatible Gateways benötigen möglicherweise ein festes Budget unterhalb der Ausgabegrenze. Anfragen mit Denken senden keinen Temperaturparameter.',
+      llmRequestFormatInvalid: 'Ungültiges Anfrageformat. Wähle ein unterstütztes Format.',
+      llmThinkingModeInvalid: 'Ungültiger Denkmodus. Wähle einen unterstützten Modus.',
+      llmTokenLimitInvalid: 'Tokenlimits müssen positive ganze Zahlen sein.',
+      llmThinkingBudgetInvalid:
+        'Das Denkbudget muss mindestens 1024 betragen und im festen Modus unter der Ausgabegrenze liegen.',
+      llmResponseIncomplete:
+        'Die Antwort ist unvollständig oder hat die Ausgabegrenze erreicht. Bereits ausgegebener Text bleibt erhalten.',
+      llmProtocolHeaderConflict:
+        'Messages setzt die Authentifizierungs- und Versionsheader automatisch. Entferne x-api-key und anthropic-version aus den zusätzlichen Headern.',
+      llmStreamError:
+        'Der Server hat einen Streamfehler gemeldet. Prüfe das Modell und die Anfrageparameter.',
+      saveProtocol: 'Protokolleinstellungen speichern',
       thinkingModeHint:
-        '„Aus“ deaktiviert oder minimiert das Nachdenken mit offiziellen Anbieterparametern. „Ein“ verwendet die Vorgaben des Kanals. Ohne zusätzliche Prompt-Anweisungen oder Anpassungen für einzelne Modelle.',
+        'Aktiviere, deaktiviere oder reduziere das Denken mit den vom Anfrageformat und Modell unterstützten Parametern. Dem Prompt werden keine Steueranweisungen hinzugefügt.',
       bailianVocabularyIdLabel: 'Wörterbuch-ID für Begriffe (optional)',
       bailianVocabularyIdNote:
         'Wenn du bei DashScope ein Begriffswörterbuch erstellt hast, gib seine vocab-... ID ein. Leer lassen, um keine Begriffe zu übergeben.',
@@ -1804,6 +1830,10 @@ export const de: typeof zhCN = {
         'Neueste Beta prüfen und herunterladen, anschließend den Updatedialog anzeigen',
       betaChannelChecking: 'Wird geprüft…',
       updateDialog: {
+        stableChannelSwitch: {
+          title: 'Zum stabilen Kanal wechseln',
+          desc: 'Aktuelle Version: OpenLess {{currentVersion}}\nZielversion: OpenLess {{version}}\nDadurch wechselst du vom Beta-Kanal zum stabilen Kanal. Fortfahren?',
+        },
         available: {
           title: 'Update verfügbar',
           desc: 'OpenLess {{version}} ist verfügbar. Jetzt aktualisieren?',

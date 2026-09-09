@@ -76,7 +76,10 @@ pub const SHARED_CLOUD_LLM_PROVIDER_TYPES: &[&str] = &[
     "codingPlanX",
     "minimax",
     "stepfun",
+    "opencode",
     "custom",
+    "custom_responses",
+    "custom_messages",
 ];
 
 pub const SHARED_OMNI_PROVIDER_TYPES: &[&str] = &["openai", "gemini", "dashscope-omni", "custom"];
@@ -1122,12 +1125,9 @@ async fn build_cloud_polisher_provider(
         return Ok(CloudPolisherProvider::Gemini(provider));
     }
 
-    let base_url = endpoint
-        .trim()
-        .trim_end_matches('/')
-        .trim_end_matches("/chat/completions")
-        .trim_end_matches('/')
-        .to_string();
+    let protocol =
+        crate::llm_protocol::LlmProtocolConfig::load(credentials, channel_id, provider_type)
+            .await?;
     let temperature = read_channel_credential(
         credentials,
         CredentialNamespace::Llm,
@@ -1153,10 +1153,11 @@ async fn build_cloud_polisher_provider(
     let config = crate::polish::OpenAICompatibleConfig::new(
         provider_type,
         "OpenLess LLM",
-        base_url,
+        endpoint,
         api_key,
         model,
     )
+    .with_protocol(protocol)
     .with_thinking_enabled(context.polish.llm_thinking_enabled)
     .with_temperature(crate::polish::openai_compatible_temperature_for_provider(
         provider_type,
@@ -1970,14 +1971,22 @@ mod tests {
         }
     }
 
-    async fn assert_translation_streams_before_completion(
+    async fn assert_translation_streams_for_protocol(
         gemini: bool,
+        format: crate::llm_protocol::LlmRequestFormat,
+        preset: &str,
         cancel: bool,
         fallback: bool,
     ) {
+        use crate::llm_protocol::LlmRequestFormat;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        async fn check_request(socket: &mut tokio::net::TcpStream, gemini: bool) {
+        async fn check_request(
+            socket: &mut tokio::net::TcpStream,
+            gemini: bool,
+            format: LlmRequestFormat,
+            prefix: &str,
+        ) {
             let mut request = Vec::new();
             let mut buf = [0_u8; 4096];
             loop {
@@ -2001,6 +2010,25 @@ mod tests {
                             assert!(headers.contains(":streamGenerateContent?alt=sse"));
                         } else {
                             assert_eq!(body["stream"], true);
+                            let suffix = match format {
+                                LlmRequestFormat::ChatCompletions => "chat/completions",
+                                LlmRequestFormat::Responses => "responses",
+                                LlmRequestFormat::Messages => "messages",
+                            };
+                            assert!(
+                                headers.starts_with(&format!("POST {prefix}/{suffix}?tenant=1 "))
+                            );
+                            let lower = headers.to_ascii_lowercase();
+                            if format == LlmRequestFormat::Messages {
+                                assert!(lower.contains("x-api-key: fixture-key"));
+                                assert!(lower.contains("anthropic-version: 2023-06-01"));
+                                assert!(!lower.contains("authorization:"));
+                                assert!(body["system"]
+                                    .as_str()
+                                    .is_some_and(|text| !text.is_empty()));
+                            } else {
+                                assert!(lower.contains("authorization: bearer fixture-key"));
+                            }
                         }
                         break;
                     }
@@ -2009,32 +2037,88 @@ mod tests {
         }
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let prefix = if preset == "opencode" {
+            "/zen/go/v1"
+        } else {
+            "/gateway/v1"
+        };
+        let endpoint = if gemini {
+            format!("http://{}", listener.local_addr().unwrap())
+        } else {
+            format!(
+                "http://{}{prefix}/chat/completions?tenant=1",
+                listener.local_addr().unwrap()
+            )
+        };
         let (source_sent, source_ready) = tokio::sync::oneshot::channel();
         let (advance, next) = tokio::sync::oneshot::channel();
         let (finish, finishing) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            check_request(&mut socket, gemini).await;
+            check_request(&mut socket, gemini, format, prefix).await;
             socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n").await.unwrap();
             let event = |text: &str| {
                 let value = if gemini {
                     serde_json::json!({"candidates":[{"content":{"parts":[{"text":text}]}}]})
                 } else {
-                    serde_json::json!({"choices":[{"delta":{"content":text}}]})
+                    match format {
+                        LlmRequestFormat::ChatCompletions => {
+                            serde_json::json!({"choices":[{"delta":{"content":text}}]})
+                        }
+                        LlmRequestFormat::Responses => {
+                            serde_json::json!({"type":"response.output_text.delta","delta":text})
+                        }
+                        LlmRequestFormat::Messages => {
+                            serde_json::json!({"type":"content_block_delta","delta":{"type":"text_delta","text":text}})
+                        }
+                    }
                 };
                 let data = format!("data: {value}\n\n");
                 format!("{:X}\r\n{data}\r\n", data.len())
             };
+            let end = if gemini {
+                ""
+            } else {
+                match format {
+                    LlmRequestFormat::ChatCompletions => "data: [DONE]\n\n",
+                    LlmRequestFormat::Responses => "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n",
+                    LlmRequestFormat::Messages => "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n",
+                }
+            };
+            let terminal = if end.is_empty() {
+                String::new()
+            } else {
+                format!("{:X}\r\n{end}\r\n", end.len())
+            };
+            if !gemini {
+                let hidden = "[[OPENLESS_TRANSLATION]]do not expose reasoning";
+                let value = match format {
+                    LlmRequestFormat::ChatCompletions => {
+                        serde_json::json!({"choices":[{"delta":{"reasoning_content":hidden}}]})
+                    }
+                    LlmRequestFormat::Responses => {
+                        serde_json::json!({"type":"response.reasoning_summary_text.delta","delta":hidden})
+                    }
+                    LlmRequestFormat::Messages => {
+                        serde_json::json!({"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":hidden}})
+                    }
+                };
+                let frame = format!("data: {value}\n\n");
+                socket
+                    .write_all(format!("{:X}\r\n{frame}\r\n", frame.len()).as_bytes())
+                    .await
+                    .unwrap();
+            }
             if fallback {
                 socket
                     .write_all(event("malformed combined output").as_bytes())
                     .await
                     .unwrap();
+                socket.write_all(terminal.as_bytes()).await.unwrap();
                 socket.write_all(b"0\r\n\r\n").await.unwrap();
                 socket.shutdown().await.unwrap();
                 (socket, _) = listener.accept().await.unwrap();
-                check_request(&mut socket, gemini).await;
+                check_request(&mut socket, gemini, format, prefix).await;
                 socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n").await.unwrap();
             } else {
                 socket
@@ -2059,6 +2143,7 @@ mod tests {
                 return;
             }
             let _ = socket.write_all(event(" 🌍\n").as_bytes()).await;
+            let _ = socket.write_all(terminal.as_bytes()).await;
             let _ = socket.write_all(b"0\r\n\r\n").await;
         });
 
@@ -2079,16 +2164,24 @@ mod tests {
             "fixture-key",
         )
         .await;
+        if !gemini {
+            let request_format = match format {
+                LlmRequestFormat::ChatCompletions => "chat_completions",
+                LlmRequestFormat::Responses => "responses",
+                LlmRequestFormat::Messages => "messages",
+            };
+            write_channel_secret(
+                credentials.as_ref(),
+                CredentialNamespace::Llm,
+                "translation",
+                crate::llm_protocol::REQUEST_FORMAT_ACCOUNT,
+                request_format,
+            )
+            .await;
+        }
         let polisher = Arc::new(SharedCloudTextPolisher::new(credentials));
         let mut context = DictationContext {
-            llm: ProviderInvocation::new(
-                "translation",
-                if gemini {
-                    "gemini"
-                } else {
-                    "openai-compatible"
-                },
-            ),
+            llm: ProviderInvocation::new("translation", if gemini { "gemini" } else { preset }),
             ..DictationContext::default()
         };
         context.llm.model = Some("fixture-model".into());
@@ -2174,6 +2267,34 @@ mod tests {
                     },
                 ]
             );
+        }
+    }
+
+    async fn assert_translation_streams_before_completion(
+        gemini: bool,
+        cancel: bool,
+        fallback: bool,
+    ) {
+        assert_translation_streams_for_protocol(
+            gemini,
+            crate::llm_protocol::LlmRequestFormat::ChatCompletions,
+            "openai-compatible",
+            cancel,
+            fallback,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn translation_streams_safely_across_channel_protocols_and_zen() {
+        for format in crate::llm_protocol::LlmRequestFormat::ALL {
+            for preset in ["custom", "opencode"] {
+                for fallback in [false, true] {
+                    assert_translation_streams_for_protocol(false, format, preset, false, fallback)
+                        .await;
+                }
+            }
+            assert_translation_streams_for_protocol(false, format, "custom", true, false).await;
         }
     }
 

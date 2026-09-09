@@ -2,6 +2,7 @@
 // Core 选择排序后的第一个启用渠道；凭据通过 readCredential/setCredential 按渠道 ID 读写。
 
 import { invokeOrMock } from './shared';
+import { mockCredentialValues } from './mock-data';
 
 export type ChannelKind = 'llm' | 'asr';
 
@@ -82,13 +83,33 @@ export function listChannels(kind: ChannelKind): Promise<Channel[]> {
   return invokeOrMock('list_channels', { kind }, () => mockChannels[kind]);
 }
 
+export function invalidateMockChannelTest(id: string): void {
+  const channel = mockChannels.llm.find((channel) => channel.id === id);
+  if (channel) channel.lastTest = null;
+}
+
+export function invalidateMockChannelTests(kind: ChannelKind): void {
+  for (const channel of mockChannels[kind]) channel.lastTest = null;
+}
+
 /** 返回后端分配的渠道 id。 */
 export function createChannel(
   kind: ChannelKind,
   providerType: string,
   name: string,
 ): Promise<string> {
-  return invokeOrMock('create_channel', { kind, providerType, name }, () => providerType);
+  return invokeOrMock('create_channel', { kind, providerType, name }, () => {
+    const id = `${providerType}-${Date.now()}-${mockChannels[kind].length}`;
+    mockChannels[kind].push({
+      id,
+      name,
+      providerType,
+      enabled: true,
+      order: mockChannels[kind].length,
+      lastTest: null,
+    });
+    return id;
+  });
 }
 
 /** 在已建好的草稿卡片上换供应商（单弹窗添加流程的常规操作）。 */
@@ -97,12 +118,31 @@ export function setChannelProviderType(
   id: string,
   providerType: string,
 ): Promise<void> {
-  return invokeOrMock('set_channel_provider_type', { kind, id, providerType }, () => undefined);
+  return invokeOrMock('set_channel_provider_type', { kind, id, providerType }, () => {
+    const channel = mockChannels[kind].find((channel) => channel.id === id);
+    if (channel && channel.providerType !== providerType) {
+      channel.providerType = providerType;
+      channel.lastTest = null;
+      if (kind === 'llm') mockCredentialValues.delete(`${id}:ark.request_format`);
+    }
+  });
 }
 
 /** 关闭添加弹窗时回收没填任何东西的草稿；返回是否真的删了。 */
 export function deleteChannelIfBlank(kind: ChannelKind, id: string): Promise<boolean> {
-  return invokeOrMock('delete_channel_if_blank', { kind, id }, () => true);
+  return invokeOrMock('delete_channel_if_blank', { kind, id }, () => {
+    const channel = mockChannels[kind].find((channel) => channel.id === id);
+    const prefix = `${id}:`;
+    const hasCredentials = [...mockCredentialValues].some(
+      ([key, value]) => key.startsWith(prefix) && value.length > 0,
+    );
+    if (!channel || channel.name.trim() || hasCredentials) return false;
+    mockChannels[kind] = mockChannels[kind].filter((channel) => channel.id !== id);
+    for (const key of mockCredentialValues.keys()) {
+      if (key.startsWith(prefix)) mockCredentialValues.delete(key);
+    }
+    return true;
+  });
 }
 
 export function renameChannel(kind: ChannelKind, id: string, name: string): Promise<void> {
@@ -110,7 +150,11 @@ export function renameChannel(kind: ChannelKind, id: string, name: string): Prom
 }
 
 export function deleteChannel(kind: ChannelKind, id: string): Promise<void> {
-  return invokeOrMock('delete_channel', { kind, id }, () => undefined);
+  return invokeOrMock('delete_channel', { kind, id }, () => {
+    mockChannels[kind] = mockChannels[kind].filter((channel) => channel.id !== id);
+    for (const key of mockCredentialValues.keys())
+      if (key.startsWith(`${id}:`)) mockCredentialValues.delete(key);
+  });
 }
 
 export function setChannelEnabled(kind: ChannelKind, id: string, enabled: boolean): Promise<void> {
@@ -142,5 +186,8 @@ export function recordChannelTest(
   latencyMs: number | null,
   error: string | null,
 ): Promise<void> {
-  return invokeOrMock('record_channel_test', { kind, id, ok, latencyMs, error }, () => undefined);
+  return invokeOrMock('record_channel_test', { kind, id, ok, latencyMs, error }, () => {
+    const channel = mockChannels[kind].find((channel) => channel.id === id);
+    if (channel) channel.lastTest = { ok, latencyMs, error, at: Math.floor(Date.now() / 1000) };
+  });
 }

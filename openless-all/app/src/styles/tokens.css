@@ -111,9 +111,8 @@
   --ol-card-border: #e4e4e7;
   --ol-card-shadow:
     0 10px 30px -18px rgba(15, 23, 42, 0.16), 0 0 0 0.5px rgba(255, 255, 255, 0.55) inset;
-  /* 玻璃面板背景（半透明，配 backdrop-filter）；FloatingShell 主区非不透明分支用，
-     light/dark 取值不同需保持主题感知。 */
-  --ol-panel-glass-bg: rgba(255, 255, 255, 0.94);
+  /* Keep text surfaces opaque; texture is applied above this solid base. */
+  --ol-panel-glass-bg: #ffffff;
 
   /* （参考 Codex 侧栏）：侧栏底色与右侧纯白内容区拉开明确层次，
      此前 #fafafa 对白底几乎无区分。 */
@@ -246,7 +245,7 @@
   --ol-bg-base: #09090b;
   --ol-bg-elevated: #141417;
   /* 玻璃面板背景暗色取值（近实色）。 */
-  --ol-panel-glass-bg: rgba(24, 24, 27, 0.96);
+  --ol-panel-glass-bg: #18181b;
 
   --ol-ink: #fafafa;
   --ol-ink-2: #d4d4d8;

@@ -63,6 +63,7 @@ const LLM_NAME_KEY_BY_ID: Record<string, string> = {
   codingPlanX: 'codingPlanX',
   minimax: 'minimax',
   stepfun: 'stepfun',
+  opencode: 'opencode',
   custom: 'custom',
 };
 

@@ -1256,6 +1256,10 @@ export const en: typeof zhCN = {
         codingPlanX: 'CodingPlanX',
         minimax: 'MiniMax (M3)',
         stepfun: 'StepFun',
+        opencode: 'OpenCode Zen',
+        customChatCompletions: 'Custom · Chat Completions',
+        customResponses: 'Custom · Responses',
+        customMessages: 'Custom · Messages',
         custom: 'Custom',
         asrVolcengine: 'Volcengine bigasr',
         asrBailian: 'Alibaba Bailian realtime ASR',
@@ -1343,8 +1347,29 @@ export const en: typeof zhCN = {
       thinkingModeLabel: 'Thinking',
       thinkingModeOn: 'On',
       thinkingModeOff: 'Off',
+      requestFormatLabel: 'Request format',
+      messagesThinkingLabel: 'Thinking mode',
+      thinkingAdaptive: 'Adaptive',
+      thinkingBudget: 'Fixed budget',
+      maxTokensLabel: 'Maximum output tokens',
+      thinkingBudgetLabel: 'Thinking budget tokens',
+      responsesThinkingHint:
+        'Some models can only reduce thinking, not turn it off. Reasoning requests omit temperature.',
+      messagesThinkingHint:
+        'Older models or compatible gateways may need a fixed budget below the output limit. Thinking requests omit temperature.',
+      llmRequestFormatInvalid: 'Invalid request format. Select a supported format.',
+      llmThinkingModeInvalid: 'Invalid thinking mode. Select a supported mode.',
+      llmTokenLimitInvalid: 'Token limits must be positive integers.',
+      llmThinkingBudgetInvalid:
+        'Thinking budget must be at least 1024 and below the output limit in fixed-budget mode.',
+      llmResponseIncomplete:
+        'The response was incomplete or reached its output limit. Already emitted text is retained.',
+      llmProtocolHeaderConflict:
+        'Messages sets authentication and version headers automatically. Remove x-api-key and anthropic-version from extra headers.',
+      llmStreamError: 'The server returned a stream error. Check the model and request parameters.',
+      saveProtocol: 'Save protocol settings',
       thinkingModeHint:
-        'Off disables or minimizes thinking with provider-level official parameters. On enables thinking by channel defaults. No prompt injection or per-model adapters.',
+        'Enable, disable, or reduce thinking using parameters supported by the selected request format and model. No control instructions are injected into prompts.',
       bailianVocabularyIdLabel: 'Hotword Vocabulary ID (optional)',
       bailianVocabularyIdNote:
         'If you have created a DashScope hotword vocabulary, enter its vocab-... ID. Leave blank to skip hotwords.',
@@ -1750,6 +1775,10 @@ export const en: typeof zhCN = {
         available: {
           title: 'Update available',
           desc: 'OpenLess {{version}} is available. Update now?',
+        },
+        stableChannelSwitch: {
+          title: 'Switch to Stable',
+          desc: 'Current version: OpenLess {{currentVersion}}\nTarget version: OpenLess {{version}}\nThis switches from the Beta channel to Stable. Continue?',
         },
         downloading: {
           title: 'Downloading update',

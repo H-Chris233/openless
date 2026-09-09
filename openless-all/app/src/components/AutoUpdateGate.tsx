@@ -55,6 +55,7 @@ export function AutoUpdateGate() {
   return (
     <UpdateDialog
       status={u.status}
+      currentVersion={u.currentVersion}
       version={u.version}
       progress={u.progress}
       downloaded={u.downloaded}

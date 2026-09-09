@@ -1266,6 +1266,10 @@ export const es: typeof zhCN = {
       pipelineIsolationNotice:
         'Cada modo conserva sus propias credenciales. Al cambiar, las del otro modo se guardan sin usarse y se restauran cuando vuelves.',
       presets: {
+        opencode: 'OpenCode Zen',
+        customChatCompletions: 'Personalizado · Chat Completions',
+        customResponses: 'Personalizado · Responses',
+        customMessages: 'Personalizado · Messages',
         ark: 'ARK (Volcengine Ark)',
         deepseek: 'DeepSeek',
         siliconflow: 'SiliconFlow',
@@ -1368,8 +1372,30 @@ export const es: typeof zhCN = {
       thinkingModeLabel: 'Razonamiento',
       thinkingModeOn: 'Activado',
       thinkingModeOff: 'Desactivado',
+      requestFormatLabel: 'Formato de solicitud',
+      messagesThinkingLabel: 'Modo de razonamiento',
+      thinkingAdaptive: 'Adaptativo',
+      thinkingBudget: 'Presupuesto fijo',
+      maxTokensLabel: 'Máximo de tokens de salida',
+      thinkingBudgetLabel: 'Presupuesto de tokens de razonamiento',
+      responsesThinkingHint:
+        'Algunos modelos solo permiten reducir el razonamiento, no desactivarlo. Las solicitudes de razonamiento omiten la temperatura.',
+      messagesThinkingHint:
+        'Los modelos antiguos o servicios compatibles pueden necesitar un presupuesto fijo inferior al límite de salida. Las solicitudes de razonamiento omiten la temperatura.',
+      llmRequestFormatInvalid: 'Formato de solicitud no válido. Selecciona uno compatible.',
+      llmThinkingModeInvalid: 'Modo de razonamiento no válido. Selecciona uno compatible.',
+      llmTokenLimitInvalid: 'Los límites de tokens deben ser números enteros positivos.',
+      llmThinkingBudgetInvalid:
+        'El presupuesto de razonamiento debe ser al menos 1024 y, en modo fijo, inferior al límite de salida.',
+      llmResponseIncomplete:
+        'La respuesta no se completó o alcanzó el límite de salida. Se conserva el texto ya mostrado.',
+      llmProtocolHeaderConflict:
+        'Messages establece automáticamente las cabeceras de autenticación y versión. Elimina x-api-key y anthropic-version de las cabeceras adicionales.',
+      llmStreamError:
+        'El servidor devolvió un error de transmisión. Comprueba el modelo y los parámetros de la solicitud.',
+      saveProtocol: 'Guardar ajustes del protocolo',
       thinkingModeHint:
-        'Al desactivarlo, se reduce o deshabilita el razonamiento con los parámetros oficiales del proveedor. Al activarlo, se usan los valores predeterminados del canal. No se inyectan instrucciones ni se usan adaptadores por modelo.',
+        'Activa, desactiva o reduce el razonamiento mediante los parámetros admitidos por el formato y el modelo. No se añaden instrucciones de control al prompt.',
       bailianVocabularyIdLabel: 'ID del vocabulario de palabras clave (opcional)',
       bailianVocabularyIdNote:
         'Si creaste un vocabulario en DashScope, introduce su ID vocab-... Déjalo vacío para no usar palabras clave.',
@@ -1788,6 +1814,10 @@ export const es: typeof zhCN = {
         'Busca y descarga la última Beta y muestra el diálogo de actualización',
       betaChannelChecking: 'Buscando…',
       updateDialog: {
+        stableChannelSwitch: {
+          title: 'Cambiar al canal estable',
+          desc: 'Versión actual: OpenLess {{currentVersion}}\nVersión de destino: OpenLess {{version}}\nEsto cambia del canal beta al estable. ¿Continuar?',
+        },
         available: {
           title: 'Actualización disponible',
           desc: 'OpenLess {{version}} está disponible. ¿Actualizar ahora?',

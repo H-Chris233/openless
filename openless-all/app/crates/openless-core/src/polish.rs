@@ -1,6 +1,6 @@
 #![cfg_attr(target_os = "linux", allow(dead_code, unused_variables))]
 #![allow(clippy::too_many_arguments)]
-//! OpenAI-compatible chat completions client + polish prompts.
+//! 渠道级文本协议客户端与润色提示词。
 //!
 //! 提示词在 `prompts` 模块中维护：使用 `# 角色 / # 任务 / # 通用规则 / # 输出 / # 示例`
 //! 段落式结构，每个 mode 有独立的 1-shot 示例。重写背景见 issue #47。
@@ -13,6 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::{json, Value};
 use thiserror::Error;
 
+use crate::llm_protocol::{LlmProtocolConfig, LlmRequestFormat, StreamEvent, TextEventStream};
 use crate::shared_types::{ChineseScriptPreference, OutputLanguagePreference, QaChatMessage};
 use crate::types::PolishMode;
 
@@ -94,6 +95,7 @@ pub(crate) fn polish_total_timeout_secs(input_chars: usize) -> Duration {
 
 #[derive(Clone, Debug)]
 pub struct OpenAICompatibleConfig {
+    pub protocol: LlmProtocolConfig,
     pub provider_id: String,
     pub display_name: String,
     pub base_url: String,
@@ -120,6 +122,10 @@ impl OpenAICompatibleConfig {
         let temperature = openai_compatible_temperature_for_provider(&provider_id, None);
 
         Self {
+            protocol: LlmProtocolConfig {
+                format: LlmRequestFormat::default_for(&provider_id),
+                ..Default::default()
+            },
             provider_id,
             display_name: display_name.into(),
             base_url: base_url.into(),
@@ -134,6 +140,11 @@ impl OpenAICompatibleConfig {
 
     pub fn with_thinking_enabled(mut self, enabled: bool) -> Self {
         self.thinking_enabled = enabled;
+        self
+    }
+
+    pub fn with_protocol(mut self, protocol: LlmProtocolConfig) -> Self {
+        self.protocol = protocol;
         self
     }
 
@@ -176,6 +187,7 @@ fn is_builtin_llm_provider(provider_id: &str) -> bool {
             | "codingPlanX"
             | "minimax"
             | "stepfun"
+            | "opencode"
     )
 }
 
@@ -232,6 +244,12 @@ impl ActiveLLMProvider {
                 model: p.config.model.clone(),
             },
         }
+    }
+
+    /// Channel formats use their protocol decoder; Codex uses its dedicated
+    /// Responses transport. Gemini is routed separately by cloud_providers.
+    pub fn supports_streaming_polish(&self) -> bool {
+        matches!(self, Self::OpenAI(_) | Self::Codex(_))
     }
 
     pub async fn polish_streaming<F, C>(
@@ -473,7 +491,6 @@ impl ActiveLLMProvider {
 
 pub struct OpenAICompatibleLLMProvider {
     config: OpenAICompatibleConfig,
-    client: reqwest::Client,
     /// 润色专用客户端：**不带**按输入长度变化的整请求超时，只留一个防连接泄漏的
     /// 硬顶。真正的判据在调用点（流式两把尺子 / 非流式一个总预算）。
     ///
@@ -489,15 +506,8 @@ impl OpenAICompatibleLLMProvider {
         // pool survives across utterances instead of paying a fresh TLS handshake
         // every polish. Falls back to a default client if the builder somehow fails
         // so we still surface a useful error at request time.
-        let timeout = config.request_timeout_secs;
         let no_proxy =
             crate::net::should_bypass_proxy(&config.base_url, crate::net::use_system_proxy());
-        let base_url = config.base_url.clone();
-        let client = crate::net::cached_client((timeout, no_proxy), || {
-            http_client_builder(&base_url, timeout)
-                .build()
-                .unwrap_or_else(|_| reqwest::Client::new())
-        });
         let polish_base_url = config.base_url.clone();
         let polish_client =
             crate::net::cached_client((POLISH_CLIENT_HARD_CAP_SECS, no_proxy), || {
@@ -507,7 +517,6 @@ impl OpenAICompatibleLLMProvider {
             });
         Self {
             config,
-            client,
             polish_client,
         }
     }
@@ -718,7 +727,7 @@ impl OpenAICompatibleLLMProvider {
         user_prompt: &str,
         budget: Duration,
     ) -> Result<String, LLMError> {
-        let url = chat_completions_url(&self.config.base_url);
+        let url = self.config.protocol.format.url(&self.config.base_url)?;
         let messages = build_polish_history_messages(system_prompt, prior_turns, user_prompt);
         let body = self.chat_body(false, messages);
 
@@ -740,7 +749,7 @@ impl OpenAICompatibleLLMProvider {
         user_prompt: &str,
         budget: Duration,
     ) -> Result<String, LLMError> {
-        let url = chat_completions_url(&self.config.base_url);
+        let url = self.config.protocol.format.url(&self.config.base_url)?;
         let body = self.chat_body(
             false,
             vec![
@@ -760,6 +769,9 @@ impl OpenAICompatibleLLMProvider {
     }
 
     fn chat_body(&self, stream: bool, messages: Vec<Value>) -> Value {
+        if self.config.protocol.format != LlmRequestFormat::ChatCompletions {
+            return crate::llm_protocol::request_body(&self.config, stream, messages);
+        }
         let mut body = json!({
             "model": self.config.model,
             "stream": stream,
@@ -810,17 +822,19 @@ impl OpenAICompatibleLLMProvider {
         url: &str,
         body: &serde_json::Value,
     ) -> Result<String, LLMError> {
-        let mut request = self
-            .polish_client
-            .post(url)
-            .header("Content-Type", "application/json");
-        if !self.config.api_key.trim().is_empty() {
-            request = request.header("Authorization", format!("Bearer {}", self.config.api_key));
-        }
-        for (k, v) in &self.config.extra_headers {
-            request = request.header(k.as_str(), v.as_str());
-        }
-        let request = request.json(body);
+        self.config
+            .protocol
+            .validate()
+            .and_then(|_| {
+                self.config
+                    .protocol
+                    .validate_headers(&self.config.extra_headers)
+            })
+            .map_err(|error| LLMError::ParseError(error.message))?;
+        let request = self
+            .authorize(self.polish_client.post(url))
+            .header("Content-Type", "application/json")
+            .json(body);
 
         let response = send_with_transient_retry(request).await?;
 
@@ -838,12 +852,10 @@ impl OpenAICompatibleLLMProvider {
             });
         }
 
-        extract_assistant_content(&body_text)
+        crate::llm_protocol::extract_text(self.config.protocol.format, &body_text)
     }
 
-    /// 与 `chat_completion` 同条 HTTP 通路，但开 `stream: true` 并把 SSE chunk 一边
-    /// 解析、一边通过 `on_delta` 推给调用方（用于实时把答案塞进浮窗气泡）。
-    /// 最终返回拼好的完整字符串供调用方写入对话历史。
+    /// 问答与润色共用协议解码，但问答保留配置中的整请求预算。
     async fn chat_completion_history_streaming<F, C>(
         &self,
         system_prompt: &str,
@@ -855,125 +867,27 @@ impl OpenAICompatibleLLMProvider {
         F: Fn(&str) + Send + Sync,
         C: Fn() -> bool + Send + Sync,
     {
-        let mut msgs: Vec<Value> = Vec::with_capacity(history.len() + 1);
-        msgs.push(json!({ "role": "system", "content": system_prompt }));
-        for m in history {
-            msgs.push(json!({ "role": m.role, "content": m.content }));
+        let mut messages = vec![json!({ "role": "system", "content": system_prompt })];
+        for message in history {
+            messages.push(json!({ "role": message.role, "content": message.content }));
         }
-
-        let url = chat_completions_url(&self.config.base_url);
-        let body = self.chat_body(true, msgs);
-
-        log::info!(
-            "[llm] POST {} provider={} model={} chat_turns={} stream=true",
-            crate::net::sanitized_url_for_logs(&url),
-            self.config.provider_id,
-            self.config.model,
-            history.len()
-        );
-
-        let mut request = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .header("Accept", "text/event-stream");
-        if !self.config.api_key.trim().is_empty() {
-            request = request.header("Authorization", format!("Bearer {}", self.config.api_key));
-        }
-        for (k, v) in &self.config.extra_headers {
-            request = request.header(k.as_str(), v.as_str());
-        }
-        let request = request.json(&body);
-
-        let response = send_with_transient_retry(request).await?;
-
-        let status = response.status();
-        if !status.is_success() {
-            // 失败时仍把 body 读一遍方便诊断
-            let body_text = response.text().await.map_err(llm_error_from_reqwest)?;
-            let preview_end = BODY_PREVIEW_LIMIT.min(body_text.len());
-            let preview = safe_str_slice(&body_text, preview_end);
-            log::error!("[llm] HTTP {} body={}", status.as_u16(), preview);
-            return Err(LLMError::InvalidResponse {
-                status: status.as_u16(),
-                body: preview.to_string(),
-            });
-        }
-
-        // SSE 流：一帧 = 若干行，以 `\n\n` 分隔。每行如 `data: {...}` 或 `data: [DONE]`。
-        // 一个 chunk() 可能包含半帧或多帧；用 buffer 累积后再按 `\n\n` 切。
-        let mut response = response;
-        let mut buffer = String::new();
-        let mut utf8_pending: Vec<u8> = Vec::new();
-        let mut full_text = String::new();
-        let mut cancelled = false;
-        loop {
-            // 取消旗标：用户取消 / 关浮窗时立即 break，不再 drain HTTP body。
-            // 否则 reqwest 会读完整个流（包括 LLM 后续 token）烧 quota。详见 issue #161。
-            if should_cancel() {
-                log::info!("[llm] stream cancelled by caller; breaking SSE loop");
-                cancelled = true;
-                break;
-            }
-            let chunk_opt = response.chunk().await.map_err(llm_error_from_reqwest)?;
-            let Some(chunk) = chunk_opt else { break };
-            append_utf8_sse_chunk(&mut buffer, &mut utf8_pending, &chunk)?;
-
-            while let Some(idx) = buffer.find("\n\n") {
-                let event = buffer[..idx].to_string();
-                buffer.drain(..idx + 2);
-                for line in event.lines() {
-                    let Some(payload) = line
-                        .strip_prefix("data: ")
-                        .or_else(|| line.strip_prefix("data:"))
-                    else {
-                        continue;
-                    };
-                    let payload = payload.trim();
-                    if payload.is_empty() || payload == "[DONE]" {
-                        continue;
-                    }
-                    let v: Value = match serde_json::from_str(payload) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            log::warn!(
-                                "[llm] SSE parse skip: {e}; payload preview: {}",
-                                safe_str_slice(payload, 80)
-                            );
-                            continue;
-                        }
-                    };
-                    if let Some(delta) = v["choices"][0]["delta"]["content"].as_str() {
-                        if !delta.is_empty() {
-                            full_text.push_str(delta);
-                            on_delta(delta);
-                        }
-                    }
-                }
-            }
-        }
-        if !cancelled {
-            finish_utf8_sse_chunks(&mut buffer, &mut utf8_pending)?;
-        }
-
-        log::info!(
-            "[llm] HTTP 200 stream done; total chars={}",
-            full_text.chars().count()
-        );
-
-        if full_text.is_empty() {
-            return Err(LLMError::InvalidResponse {
-                status: 200,
-                body: "empty stream".to_string(),
-            });
-        }
-        Ok(full_text)
+        let budget = Duration::from_secs(self.config.request_timeout_secs);
+        tokio::time::timeout(
+            budget,
+            self.chat_completion_messages_streaming(
+                messages,
+                StreamingTimeouts {
+                    first_token: budget,
+                    idle: budget,
+                },
+                on_delta,
+                should_cancel,
+            ),
+        )
+        .await
+        .map_err(|_| LLMError::Timeout)?
     }
 
-    /// 把已经构造好的 `messages` 列表（包含 system + 历史 + 当前 user）作为
-    /// `stream: true` 的 body 发出去，SSE 一帧一帧解析。供 `polish_streaming` 复用，
-    /// 跟 `chat_completion_history_streaming` 的 SSE 解析逻辑同款 —— 后者多了一步从
-    /// `QaChatMessage[]` 装配 messages 的工作。
     async fn chat_completion_messages_streaming<F, C>(
         &self,
         messages: Vec<Value>,
@@ -985,150 +899,131 @@ impl OpenAICompatibleLLMProvider {
         F: Fn(&str) + Send + Sync,
         C: Fn() -> bool + Send + Sync,
     {
-        let url = chat_completions_url(&self.config.base_url);
+        if should_cancel() {
+            return Err(LLMError::Network("cancelled".into()));
+        }
+        self.config
+            .protocol
+            .validate()
+            .and_then(|_| {
+                self.config
+                    .protocol
+                    .validate_headers(&self.config.extra_headers)
+            })
+            .map_err(|error| LLMError::ParseError(error.message))?;
+        let url = self.config.protocol.format.url(&self.config.base_url)?;
         let body = self.chat_body(true, messages);
-
-        let mut request = self
-            .polish_client
-            .post(&url)
+        log::info!(
+            "[llm] POST {} provider={} model={} format={:?} stream=true",
+            crate::net::sanitized_url_for_logs(&url),
+            self.config.provider_id,
+            self.config.model,
+            self.config.protocol.format
+        );
+        let request = self
+            .authorize(self.polish_client.post(&url))
             .header("Content-Type", "application/json")
-            .header("Accept", "text/event-stream");
-        if !self.config.api_key.trim().is_empty() {
-            request = request.header("Authorization", format!("Bearer {}", self.config.api_key));
-        }
-        for (k, v) in &self.config.extra_headers {
-            request = request.header(k.as_str(), v.as_str());
-        }
-        let request = request.json(&body);
-
-        let response = send_with_transient_retry(request).await?;
-
+            .header("Accept", "text/event-stream")
+            .json(&body);
+        let started = std::time::Instant::now();
+        // 取消要能唤醒正在等待网络数据的请求，不能只在 chunk 之间检查。
+        let cancellation = async {
+            while !should_cancel() {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        };
+        tokio::pin!(cancellation);
+        let mut response = tokio::select! {
+            _ = &mut cancellation => return Err(LLMError::Network("cancelled".into())),
+            result = tokio::time::timeout(timeouts.first_token, send_with_transient_retry(request)) => {
+                result.map_err(|_| LLMError::Timeout)??
+            }
+        };
         let status = response.status();
         if !status.is_success() {
-            let body_text = response.text().await.map_err(llm_error_from_reqwest)?;
-            let preview_end = BODY_PREVIEW_LIMIT.min(body_text.len());
-            let preview = safe_str_slice(&body_text, preview_end);
-            log::error!("[llm] streaming HTTP {} body={}", status.as_u16(), preview);
+            let body_text = tokio::select! {
+                _ = &mut cancellation => return Err(LLMError::Network("cancelled".into())),
+                result = tokio::time::timeout(timeouts.first_token.saturating_sub(started.elapsed()), response.text()) => {
+                    result.map_err(|_| LLMError::Timeout)?.map_err(llm_error_from_reqwest)?
+                }
+            };
             return Err(LLMError::InvalidResponse {
                 status: status.as_u16(),
-                body: preview.to_string(),
+                body: safe_str_slice(&body_text, BODY_PREVIEW_LIMIT.min(body_text.len()))
+                    .to_string(),
             });
         }
-
-        let mut response = response;
-        let mut buffer = String::new();
-        let mut utf8_pending: Vec<u8> = Vec::new();
+        let mut events = TextEventStream::new(self.config.protocol.format);
         let mut full_text = String::new();
-        let mut delta_count: u64 = 0;
         let mut cancelled = false;
-        let stream_started = std::time::Instant::now();
-        let mut first_content_at: Option<Duration> = None;
-        loop {
+        while !events.done {
             if should_cancel() {
-                log::info!(
-                    "[llm] polish stream cancelled by caller after {} deltas ({} chars); breaking SSE loop",
-                    delta_count,
-                    full_text.chars().count()
-                );
                 cancelled = true;
                 break;
             }
-            // 首字之前用「还剩多少首字预算」，首字之后用「两个 chunk 之间能空多久」。
-            // 注意首字预算是从请求发出起算的**总量**，不随 chunk 到达而重置——推理模型
-            // 思考期的 reasoning_content 是一串正常 chunk，若让它续命，用户干等就没有上限。
-            let budget = match first_content_at {
-                None => timeouts
-                    .first_token
-                    .saturating_sub(stream_started.elapsed()),
-                Some(_) => timeouts.idle,
+            let budget = if full_text.is_empty() {
+                timeouts.first_token.saturating_sub(started.elapsed())
+            } else {
+                timeouts.idle
             };
-            let chunk_opt = match tokio::time::timeout(budget, response.chunk()).await {
-                Ok(result) => result.map_err(llm_error_from_reqwest)?,
-                Err(_) => {
-                    // 已经交给 on_delta 的字此刻就在用户屏幕上；上层 dictation 的 Failed
-                    // 分支拿 typed_text 当 final_text，屏幕 / history / 剪贴板保持一致。
-                    match first_content_at {
-                        None => log::error!(
-                            "[llm] polish stream timed out waiting for first content delta (budget {:?}); \
-                             模型可能仍在思考——加长首字预算或换非推理模型",
-                            timeouts.first_token
-                        ),
-                        Some(first) => log::error!(
-                            "[llm] polish stream stalled {:?} after {} chars (first delta at {:?}); \
-                             已落屏的字保留",
-                            timeouts.idle,
-                            full_text.chars().count(),
-                            first
-                        ),
-                    }
-                    return Err(LLMError::Timeout);
+            let chunk = tokio::select! {
+                _ = &mut cancellation => { cancelled = true; break; }
+                result = tokio::time::timeout(budget, response.chunk()) => {
+                    result.map_err(|_| LLMError::Timeout)?.map_err(llm_error_from_reqwest)?
                 }
             };
-            let Some(chunk) = chunk_opt else { break };
-            append_utf8_sse_chunk(&mut buffer, &mut utf8_pending, &chunk)?;
-
-            while let Some(idx) = buffer.find("\n\n") {
-                let event = buffer[..idx].to_string();
-                buffer.drain(..idx + 2);
-                for line in event.lines() {
-                    let Some(payload) = line
-                        .strip_prefix("data: ")
-                        .or_else(|| line.strip_prefix("data:"))
-                    else {
-                        continue;
-                    };
-                    let payload = payload.trim();
-                    if payload.is_empty() || payload == "[DONE]" {
-                        continue;
-                    }
-                    let v: Value = match serde_json::from_str(payload) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            log::warn!(
-                                "[llm] polish SSE parse skip: {e}; payload preview: {}",
-                                safe_str_slice(payload, 80)
-                            );
-                            continue;
-                        }
-                    };
-                    if let Some(delta) = v["choices"][0]["delta"]["content"].as_str() {
-                        if !delta.is_empty() {
-                            if first_content_at.is_none() {
-                                let elapsed = stream_started.elapsed();
-                                first_content_at = Some(elapsed);
-                                // 首字延迟是判断「模型思考太久」还是「网络卡住」的关键读数。
-                                // 之前日志里没有它，7 分钟录音那次只能靠外部实测才量出 43s。
-                                log::info!(
-                                    "[llm] polish stream first content delta after {:.2}s (budget {:?})",
-                                    elapsed.as_secs_f64(),
-                                    timeouts.first_token
-                                );
-                            }
-                            full_text.push_str(delta);
-                            delta_count += 1;
-                            on_delta(delta);
-                        }
-                    }
+            let Some(chunk) = chunk else {
+                break;
+            };
+            events.push(&chunk)?;
+            loop {
+                if should_cancel() {
+                    cancelled = true;
+                    break;
                 }
+                let Some(event) = events.next()? else {
+                    break;
+                };
+                if let StreamEvent::Text(delta) = event {
+                    if full_text.is_empty() {
+                        log::info!(
+                            "[llm] first content delta after {:.2}s",
+                            started.elapsed().as_secs_f64()
+                        );
+                    }
+                    full_text.push_str(&delta);
+                    on_delta(&delta);
+                }
+            }
+            if cancelled {
+                break;
             }
         }
         if !cancelled {
-            finish_utf8_sse_chunks(&mut buffer, &mut utf8_pending)?;
+            events.finish()?;
         }
-
         log::info!(
-            "[llm] polish stream done; total deltas={} chars={}",
-            delta_count,
+            "[llm] stream done; cancelled={} chars={}",
+            cancelled,
             full_text.chars().count()
         );
-
         if full_text.is_empty() {
             return Err(LLMError::InvalidResponse {
                 status: 200,
-                body: "empty polish stream".to_string(),
+                body: "empty polish stream".into(),
             });
         }
         Ok(full_text)
+    }
+
+    fn authorize(&self, mut request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        for (name, value) in self.config.protocol.format.headers(&self.config.api_key) {
+            request = request.header(name, value);
+        }
+        for (name, value) in &self.config.extra_headers {
+            request = request.header(name, value);
+        }
+        request
     }
 }
 
@@ -1905,8 +1800,23 @@ pub(crate) fn apply_openai_compatible_thinking_control(
 ) {
     // 优先按 provider_id 预设分派；custom / 未声明 provider 时回退到 base_url 兜底,
     // 让用户用"自定义"preset 接入 MiniMax 也能正确下发 thinking 控制参数。
-    let control = openai_compatible_thinking_control(provider_id)
-        .or_else(|| openai_compatible_thinking_control_for_base_url(base_url));
+    // Zen 是多模型网关，仅 DeepSeek 模型使用 DeepSeek 的思考参数。
+    let is_opencode = provider_id.trim() == "opencode"
+        || (matches!(
+            provider_id.trim(),
+            "custom" | "custom_responses" | "custom_messages"
+        ) && url::Url::parse(base_url.trim())
+            .ok()
+            .is_some_and(|url| url.host_str() == Some("opencode.ai")));
+    let control = if is_opencode {
+        model
+            .trim()
+            .starts_with("deepseek-")
+            .then_some(ThinkingControl::DeepSeekThinking)
+    } else {
+        openai_compatible_thinking_control(provider_id)
+            .or_else(|| openai_compatible_thinking_control_for_base_url(base_url))
+    };
     match control {
         Some(ThinkingControl::ReasoningEffort) => {
             // OpenAI 官方 Chat Completions 只在推理模型族接受 reasoning_effort；
@@ -2084,7 +1994,7 @@ mod tests {
             "https://user:pass@example.com/v1/chat/completions?token=query-secret#client-fragment"
         );
     }
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Mutex as StdMutex;
     use std::thread;
 
@@ -2379,6 +2289,256 @@ mod tests {
         request
     }
 
+    #[tokio::test]
+    async fn all_text_entrypoints_use_the_selected_protocol_over_http() {
+        for (format, (preset, prefix)) in LlmRequestFormat::ALL.into_iter().flat_map(|format| {
+            [
+                ("custom", "/gateway/v1"),
+                ("opencode", "/zen/v1"),
+                ("opencode", "/zen/go/v1"),
+            ]
+            .map(|entry| (format, entry))
+        }) {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = thread::spawn(move || {
+                for index in 0..6 {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let request = read_http_request(&mut stream);
+                    let split = request.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+                    let headers = String::from_utf8_lossy(&request[..split]).to_ascii_lowercase();
+                    let body: Value = serde_json::from_slice(&request[split + 4..]).unwrap();
+                    let path = match format {
+                        LlmRequestFormat::ChatCompletions => "chat/completions",
+                        LlmRequestFormat::Responses => "responses",
+                        LlmRequestFormat::Messages => "messages",
+                    };
+                    assert!(headers.starts_with(&format!("post {prefix}/{path}?tenant=1 ")));
+                    if format == LlmRequestFormat::Messages {
+                        assert!(headers.contains("x-api-key: fixture-key"));
+                        assert!(headers.contains("anthropic-version: 2023-06-01"));
+                        assert!(!headers.contains("authorization:"));
+                        assert!(body["system"].as_str().is_some_and(|text| !text.is_empty()));
+                    } else {
+                        assert!(headers.contains("authorization: bearer fixture-key"));
+                    }
+                    assert!(!headers.contains("chatgpt-account-id"));
+                    let messages = if format == LlmRequestFormat::Responses {
+                        &body["input"]
+                    } else {
+                        &body["messages"]
+                    };
+                    assert!(messages
+                        .as_array()
+                        .is_some_and(|messages| !messages.is_empty()));
+                    if index == 1 {
+                        assert!(messages
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|m| m["role"] == "assistant" && m["content"] == "prior answer"));
+                    }
+                    if index < 3 {
+                        assert_eq!(body["stream"], false);
+                        let response = match format {
+                            LlmRequestFormat::ChatCompletions => json!({"choices":[{"message":{"content":"你好"}}]}),
+                            LlmRequestFormat::Responses => json!({"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"你好"}]}]}),
+                            LlmRequestFormat::Messages => json!({"stop_reason":"end_turn","content":[{"type":"text","text":"你好"}]}),
+                        }.to_string();
+                        write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).unwrap();
+                    } else {
+                        assert_eq!(body["stream"], true);
+                        let response = match format {
+                            LlmRequestFormat::ChatCompletions => "data: {\"choices\":[{\"delta\":{\"content\":\"你好\"}}]}\r\n\r\ndata: [DONE]\r\n\r\n",
+                            LlmRequestFormat::Responses => "data: {\"type\":\"response.output_text.delta\",\"delta\":\"你好\"}\r\n\r\ndata: {\"type\":\"response.completed\"}\r\n\r\n",
+                            LlmRequestFormat::Messages => "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"你好\"}}\r\n\r\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\r\n\r\ndata: {\"type\":\"message_stop\"}\r\n\r\n",
+                        };
+                        let split = response.find('好').unwrap() + 1;
+                        write_chunked_sse_response(
+                            &mut stream,
+                            &[&response.as_bytes()[..split], &response.as_bytes()[split..]],
+                        );
+                    }
+                }
+            });
+            let config = OpenAICompatibleConfig::new(
+                preset,
+                "test",
+                format!("http://{address}{prefix}/chat/completions?tenant=1"),
+                "fixture-key",
+                "test",
+            )
+            .with_protocol(LlmProtocolConfig {
+                format,
+                ..Default::default()
+            });
+            let provider = OpenAICompatibleLLMProvider::new(config);
+            for history in [vec![], vec![("prior input".into(), "prior answer".into())]] {
+                assert_eq!(
+                    provider
+                        .polish(
+                            "input",
+                            PolishMode::Light,
+                            &[],
+                            "",
+                            &[],
+                            ChineseScriptPreference::Auto,
+                            OutputLanguagePreference::Auto,
+                            None,
+                            None,
+                            &history
+                        )
+                        .await
+                        .unwrap(),
+                    "你好"
+                );
+            }
+            assert_eq!(
+                provider
+                    .translate_to(
+                        "hello",
+                        "Chinese",
+                        &[],
+                        ChineseScriptPreference::Auto,
+                        OutputLanguagePreference::Auto,
+                        None
+                    )
+                    .await
+                    .unwrap(),
+                "你好"
+            );
+            let output = std::sync::Mutex::new(String::new());
+            let delta = |text: &str| output.lock().unwrap().push_str(text);
+            let history = vec![QaChatMessage {
+                role: "user".into(),
+                content: "hello".into(),
+                selection_text: None,
+            }];
+            assert_eq!(
+                provider
+                    .answer_chat_streaming(
+                        &history,
+                        &[],
+                        ChineseScriptPreference::Auto,
+                        OutputLanguagePreference::Auto,
+                        None,
+                        delta,
+                        || false
+                    )
+                    .await
+                    .unwrap(),
+                "你好"
+            );
+            assert_eq!(*output.lock().unwrap(), "你好");
+            output.lock().unwrap().clear();
+            assert_eq!(
+                provider
+                    .polish_streaming(
+                        "input",
+                        PolishMode::Light,
+                        &[],
+                        "",
+                        &[],
+                        ChineseScriptPreference::Auto,
+                        OutputLanguagePreference::Auto,
+                        None,
+                        None,
+                        &[],
+                        delta,
+                        || false
+                    )
+                    .await
+                    .unwrap(),
+                "你好"
+            );
+            assert_eq!(*output.lock().unwrap(), "你好");
+            output.lock().unwrap().clear();
+            assert_eq!(
+                provider
+                    .translate_to_streaming(
+                        "hello",
+                        "Chinese",
+                        &[],
+                        ChineseScriptPreference::Auto,
+                        OutputLanguagePreference::Auto,
+                        None,
+                        delta,
+                        || false,
+                    )
+                    .await
+                    .unwrap(),
+                "你好"
+            );
+            assert_eq!(*output.lock().unwrap(), "你好");
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn opencode_thinking_is_scoped_to_model_host_and_protocol() {
+        for (preset, endpoint, zen) in [
+            ("opencode", "https://opencode.ai/zen/v1", true),
+            ("opencode", "https://gateway.example/v1", true),
+            ("custom", "https://opencode.ai/zen/v1", true),
+            ("custom_responses", "https://opencode.ai/zen/v1", true),
+            ("custom_messages", "https://opencode.ai/zen/v1", true),
+            (
+                "custom",
+                "https://OPENCODE.AI:443/zen/go/v1/chat/completions",
+                true,
+            ),
+            ("custom", "https://opencode.ai.example/zen/v1", false),
+            ("custom", "https://fakeopencode.ai/zen/v1", false),
+            ("custom", "https://opencode.ai@example.com/zen/v1", false),
+            ("custom", "https://example.com/opencode.ai", false),
+        ] {
+            for model in ["deepseek-v4-flash", "minimax-m3", "gateway-model"] {
+                for enabled in [false, true] {
+                    for format in LlmRequestFormat::ALL {
+                        let provider = OpenAICompatibleLLMProvider::new(
+                            OpenAICompatibleConfig::new(preset, "test", endpoint, "key", model)
+                                .with_thinking_enabled(enabled)
+                                .with_protocol(LlmProtocolConfig {
+                                    format,
+                                    ..Default::default()
+                                }),
+                        );
+                        let body =
+                            provider.chat_body(false, vec![json!({"role":"user","content":"hi"})]);
+                        match format {
+                            LlmRequestFormat::ChatCompletions
+                                if zen && model.starts_with("deepseek-") =>
+                            {
+                                assert_eq!(
+                                    body["thinking"]["type"],
+                                    if enabled { "enabled" } else { "disabled" }
+                                );
+                            }
+                            LlmRequestFormat::Messages if enabled => {
+                                assert_eq!(body["thinking"]["type"], "adaptive");
+                            }
+                            _ => assert!(
+                                body.get("thinking").is_none(),
+                                "{preset} {endpoint} {model} {format:?}"
+                            ),
+                        }
+                        assert!(body.get("reasoning_effort").is_none());
+                        assert!(body.get("enable_thinking").is_none());
+                        if format == LlmRequestFormat::Responses {
+                            assert_eq!(
+                                body["reasoning"]["effort"],
+                                if enabled { "medium" } else { "low" }
+                            );
+                            assert!(body.get("messages").is_none());
+                        } else {
+                            assert!(body.get("reasoning").is_none());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn write_chunked_sse_response(stream: &mut std::net::TcpStream, chunks: &[&[u8]]) {
         stream
             .write_all(
@@ -2391,6 +2551,86 @@ mod tests {
             stream.write_all(b"\r\n").unwrap();
         }
         stream.write_all(b"0\r\n\r\n").unwrap();
+    }
+
+    #[tokio::test]
+    async fn protocol_stream_errors_and_cancellation_keep_already_emitted_text() {
+        let cancelled_provider = OpenAICompatibleLLMProvider::new(OpenAICompatibleConfig::new(
+            "custom",
+            "test",
+            "invalid endpoint",
+            "",
+            "test",
+        ));
+        let error = cancelled_provider
+            .chat_completion_messages_streaming(
+                Vec::new(),
+                StreamingTimeouts::for_input(0),
+                |_| panic!("cancelled request emitted text"),
+                || true,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, LLMError::Network(ref message) if message == "cancelled"));
+        for (format, delta, terminal_error) in [
+            (
+                LlmRequestFormat::Responses,
+                r#"{"type":"response.output_text.delta","delta":"partial"}"#,
+                r#"{"type":"response.failed"}"#,
+            ),
+            (
+                LlmRequestFormat::Messages,
+                r#"{"type":"content_block_delta","delta":{"type":"text_delta","text":"partial"}}"#,
+                r#"{"type":"message_delta","delta":{"stop_reason":"max_tokens"}}"#,
+            ),
+        ] {
+            for cancel in [false, true] {
+                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                let address = listener.local_addr().unwrap();
+                let server = thread::spawn(move || {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    read_http_request(&mut stream);
+                    let fixture = format!("data: {delta}\n\ndata: {terminal_error}\n\n");
+                    write_chunked_sse_response(&mut stream, &[fixture.as_bytes()]);
+                });
+                let provider = OpenAICompatibleLLMProvider::new(
+                    OpenAICompatibleConfig::new(
+                        "custom",
+                        "test",
+                        format!("http://{address}"),
+                        "",
+                        "test",
+                    )
+                    .with_protocol(LlmProtocolConfig {
+                        format,
+                        ..Default::default()
+                    }),
+                );
+                let cancelled = AtomicBool::new(false);
+                let output = std::sync::Mutex::new(String::new());
+                let result = provider
+                    .chat_completion_messages_streaming(
+                        vec![json!({"role":"user","content":"hi"})],
+                        StreamingTimeouts::for_input(2),
+                        |text| {
+                            output.lock().unwrap().push_str(text);
+                            cancelled.store(cancel, Ordering::SeqCst);
+                        },
+                        || cancelled.load(Ordering::SeqCst),
+                    )
+                    .await;
+                assert_eq!(*output.lock().unwrap(), "partial");
+                if cancel {
+                    assert_eq!(result.unwrap(), "partial");
+                } else {
+                    assert!(result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("llmResponseIncomplete"));
+                }
+                server.join().unwrap();
+            }
+        }
     }
 
     /// 带间隔的 SSE 发送：每个 chunk 前先睡一段，用来模拟「思考很久才出字」和

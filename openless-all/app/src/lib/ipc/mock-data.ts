@@ -1,3 +1,4 @@
+export const mockCredentialValues = new Map<string, string>();
 import type {
   ActivityDay,
   CorrectionRule,
@@ -109,6 +110,7 @@ export let mockSettings: UserPreferences = {
   startMinimized: false,
   themeMode: 'system',
   updateChannel: 'stable',
+  updateChannelExplicit: false,
   streamingInsert: true,
   streamingInsertDefaultMigrated: true,
   streamingInsertSaveClipboard: true,

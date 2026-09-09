@@ -1,6 +1,7 @@
 import type { CredentialsStatus } from '../types';
 import { invokeOrMock } from './shared';
-import { mockCredentialsStatus } from './mock-data';
+import { mockCredentialsStatus, mockCredentialValues } from './mock-data';
+import { invalidateMockChannelTest } from './channels';
 
 export interface ProviderCheckResult {
   ok: boolean;
@@ -15,7 +16,10 @@ export function getCredentials(): Promise<CredentialsStatus> {
 }
 
 export function setCredential(account: string, value: string, provider?: string): Promise<void> {
-  return invokeOrMock('set_credential', { account, value, provider }, () => undefined);
+  return invokeOrMock('set_credential', { account, value, provider }, () => {
+    mockCredentialValues.set(`${provider ?? ''}:${account}`, value);
+    if (provider && account.startsWith('ark.')) invalidateMockChannelTest(provider);
+  });
 }
 
 export function setActiveAsrProvider(provider: string): Promise<void> {
@@ -31,7 +35,11 @@ export function setActiveOmniProvider(provider: string): Promise<void> {
 }
 
 export function readCredential(account: string, provider?: string): Promise<string | null> {
-  return invokeOrMock<string | null>('read_credential', { account, provider }, () => null);
+  return invokeOrMock<string | null>(
+    'read_credential',
+    { account, provider },
+    () => mockCredentialValues.get(`${provider ?? ''}:${account}`) ?? null,
+  );
 }
 
 /** `channelId` 省略时测当前生效的渠道；卡片上的「测试连通」会带上那张卡片的 id。 */

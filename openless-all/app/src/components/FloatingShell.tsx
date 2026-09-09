@@ -42,8 +42,7 @@ import { useAppState, type AppTab } from '../state/useAppState';
 const MORE_TAB_IDS: AppTab[] = ['vocab', 'translation', 'selectionAsk', 'corrections'];
 const STYLE_TAB_IDS: AppTab[] = ['style', 'marketplace'];
 
-/** macOS 上侧栏顶部需让开原生红绿灯的高度。红绿灯在 (20,20)，按钮组高约 14px，
- *  上下留等距 20px → 避让带总高 54px，红绿灯恰好竖直居中、左缘与导航图标列对齐。 */
+/** Reserve the native traffic-light strip before the sidebar's version row. */
 const MAC_TRAFFIC_LIGHT_CLEARANCE = 44;
 const SIDEBAR_WIDTH = 226;
 

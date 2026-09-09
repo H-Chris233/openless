@@ -372,6 +372,7 @@ mod linux_app {
                     .services()
                     .provider
                     .list_models(openless_core::ProviderRequest {
+                        thinking_enabled: backend.get_preferences().llm_thinking_enabled,
                         kind: provider_kind(kind),
                         channel_id: Some(channel_id.clone()),
                     })
@@ -2500,6 +2501,7 @@ mod linux_app {
             .services()
             .provider
             .validate(openless_core::ProviderRequest {
+                thinking_enabled: backend.get_preferences().llm_thinking_enabled,
                 kind: provider_kind(kind),
                 channel_id: Some(channel_id.clone()),
             })

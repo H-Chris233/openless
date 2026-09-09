@@ -3,6 +3,9 @@ import { ASR_LABELS } from './shared';
 import { presetsFor } from './ChannelList';
 
 const atlascloudPreset = LLM_LABELS.find((p) => p.id === 'atlascloud');
+if (LLM_LABELS.find((p) => p.id === 'opencode')?.nameKey !== 'opencode') {
+  throw new Error('OpenCode LLM label is missing');
+}
 
 if (!atlascloudPreset) {
   throw new Error('Atlas Cloud LLM preset is missing');
@@ -30,6 +33,8 @@ const coreAsr = presetsFor('asr', 'win', true, undefined, [
     authRequirement: 'endpoint_model_optional_api_key',
     validationProbe: 'asr_silence',
     staticModels: [],
+    defaultRequestFormat: null,
+    supportedRequestFormats: [],
   },
 ]);
 
