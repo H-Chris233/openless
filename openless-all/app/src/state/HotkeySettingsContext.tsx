@@ -10,7 +10,6 @@ import {
 } from 'react';
 import { getHotkeyCapability, getSettings, isTauri, setSettings } from '../lib/ipc';
 import type { HotkeyBinding, HotkeyCapability, UserPreferences } from '../lib/types';
-import i18n, { outputPrefsForLocale, type SupportedLocale } from '../i18n';
 import { applyThemeFromPreference } from '../lib/themeMode';
 import { applyStackedLayoutFromPrefs } from '../lib/stackedLayout';
 import { applyConservativeLayout } from '../lib/conservativeLayout';
@@ -176,37 +175,6 @@ export function HotkeySettingsProvider({ children }: { children: ReactNode }) {
     [queueSetSettings],
   );
 
-  // App 语言与输出语言偏好保持一致：界面切到某个语言后，输出偏好
-  // （chineseScriptPreference / outputLanguagePreference）跟随该语言，
-  // 避免「界面中文、输出英文」的隐性不一致。
-  useEffect(() => {
-    const currentPrefs = latestPrefsRef.current;
-    if (!currentPrefs) return;
-    const lang = (i18n.resolvedLanguage || i18n.language || '').toLowerCase();
-    const resolvedLocale: SupportedLocale =
-      lang.startsWith('zh-tw') || lang.includes('hant')
-        ? 'zh-TW'
-        : lang.startsWith('zh-cn') || lang.startsWith('zh')
-          ? 'zh-CN'
-          : lang.startsWith('ja')
-            ? 'ja'
-            : lang.startsWith('ko')
-              ? 'ko'
-              : 'en';
-    const nextLocalePrefs = outputPrefsForLocale(resolvedLocale);
-    if (
-      currentPrefs.chineseScriptPreference === nextLocalePrefs.chineseScriptPreference &&
-      currentPrefs.outputLanguagePreference === nextLocalePrefs.outputLanguagePreference
-    ) {
-      return;
-    }
-    const merged = { ...currentPrefs, ...nextLocalePrefs };
-    latestPrefsRef.current = merged;
-    setPrefs(merged);
-    void queueSetSettings(merged).catch((error) => {
-      console.warn('[settings] sync locale output preferences failed', error);
-    });
-  }, [prefs, queueSetSettings]);
 
   const value = useMemo<HotkeySettingsContextValue>(
     () => ({

@@ -1544,7 +1544,7 @@ export const zhTW: typeof zhCN = {
       multimodalPipelineHint:
         '開啟後，「服務 → AI 提供者」頁出現「傳統模式 / 多模態模式」切換。傳統 = ASR + LLM；多模態 = 單一支援音訊的模型。兩套設定分開儲存、絕不共用憑證。',
       streamingInsertTitle: '流式輸入',
-      streamingInsertTitleLinux: '流式輸入（實驗）',
+      streamingInsertTitleLinux: '流式輸入（實驗性）',
       streamingInsertDesc: '逐字即時插入，降低感知延遲。不滿足條件時回落到一次性貼上。',
       streamingInsertLabel: '流式輸入',
       streamingInsertHintMac: '臨時切到 ABC 輸入源，避免 CJK IME 攔截，會話結束後自動切回。',
