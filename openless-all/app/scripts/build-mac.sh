@@ -35,7 +35,17 @@ export RUSTC_WRAPPER="$PWD/scripts/rustc-macos-proc-macro-wrapper.sh"
 echo "▶ Cargo release strip: ${CARGO_PROFILE_RELEASE_STRIP} (macOS only)"
 echo "▶ Rust proc-macro host wrapper: ${RUSTC_WRAPPER}"
 
+# 只保留最新一份 qwen3-asr-rs 构建目录：本地混跑 cargo check/test/build 会按不同
+# feature 上下文生成多份，各自带一份 metallib，会让暂存脚本拒绝猜测。
+KEEP_QWEN_DIR="$(ls -dt src-tauri/target/release/build/qwen3-asr-rs-* 2>/dev/null | head -1 || true)"
+if [ -n "$KEEP_QWEN_DIR" ]; then
+  for d in src-tauri/target/release/build/qwen3-asr-rs-*; do
+    [ "$d" = "$KEEP_QWEN_DIR" ] || rm -rf "$d"
+  done
+fi
+
 echo "▶ tauri build"
+BUILD_START_TS="$(date +%s)"
 TAURI_BUILD_ARGS=(build --ci)
 case "$(uname -m)" in
   arm64)
@@ -59,8 +69,10 @@ npm run tauri -- "${TAURI_BUILD_ARGS[@]}" || echo "⚠ tauri build 退出码非�
 APP_VERSION="$(node -p "require('./package.json').version")"
 DMG_PATH="$DMG_DIR/OpenLess_${APP_VERSION}_${MAC_BUNDLE_ARCH}.dmg"
 
-if [ ! -d "$APP" ] || [ "$APP/Contents/MacOS/openless" -ot "src-tauri/target/release/openless" ]; then
-  echo "✗ $APP 缺失或早于刚编译的二进制（打包未完成），中止"
+# bundle 必须是本次构建产出的（与构建开始时间比；打包后原始二进制还会被签名
+# 触碰，不能拿它当基准）。
+if [ ! -d "$APP" ] || [ "$(stat -f %m "$APP/Contents/MacOS/openless")" -lt "$BUILD_START_TS" ]; then
+  echo "✗ $APP 缺失或不是本次构建的产物（打包未完成），中止"
   exit 1
 fi
 
