@@ -63,8 +63,9 @@ esac
 if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ] || [ -n "${TAURI_SIGNING_PRIVATE_KEY_PATH:-}" ]; then
   TAURI_BUILD_ARGS+=(--config '{"bundle":{"createUpdaterArtifacts":true}}')
 fi
-# bundle_dmg（AppleScript）在 Xcode beta 上可能失败；.app 已生成时继续，由下方兜底补 DMG。
-npm run tauri -- "${TAURI_BUILD_ARGS[@]}" || echo "⚠ tauri build 退出码非零（可能仅 DMG 打包失败），继续校验"
+# bundle_dmg（AppleScript）在 Xcode beta 上可能退出非零；.app 与 DMG 是否真实
+# 产出交给下方的新鲜度/存在性校验判定，不在这一步盲 abort。
+npm run tauri -- "${TAURI_BUILD_ARGS[@]}" || echo "⚠ tauri build 退出码非零，继续校验产物"
 
 APP_VERSION="$(node -p "require('./package.json').version")"
 DMG_PATH="$DMG_DIR/OpenLess_${APP_VERSION}_${MAC_BUNDLE_ARCH}.dmg"
@@ -75,15 +76,11 @@ if [ ! -d "$APP" ] || [ "$(stat -f %m "$APP/Contents/MacOS/openless")" -lt "$BUI
   echo "✗ $APP 缺失或不是本次构建的产物（打包未完成），中止"
   exit 1
 fi
-
-# DMG 兜底：OpenLess.app + /Applications 替身（拖拽安装）。
+# DMG 一律由 Tauri 生成（带签名/公证链路）；手搓 hdiutil DMG 会绕过这些步骤，
+# bundle contract 测试显式禁止。缺失即失败，不兜底。
 if [ ! -f "$DMG_PATH" ]; then
-  echo "⚠ Tauri 未生成 DMG，使用 hdiutil 兜底（含 Applications 替身）"
-  DMG_STAGE="$(mktemp -d "${TMPDIR:-/tmp}/openless-dmg-stage.XXXXXX")"
-  cp -R "$APP" "$DMG_STAGE/OpenLess.app"
-  ln -s /Applications "$DMG_STAGE/Applications"
-  hdiutil create -volname "OpenLess" -srcfolder "$DMG_STAGE" -ov -format UDZO "$DMG_PATH" > /dev/null
-  rm -rf "$DMG_STAGE"
+  echo "✗ 未找到本次构建的 DMG：$DMG_PATH（tauri build 未完成打包）"
+  exit 1
 fi
 
 echo "▶ 校验 Info.plist / 签名"

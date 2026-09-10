@@ -117,7 +117,9 @@ assertMatch(
   'macOS drag region should reserve the native traffic-light area',
 );
 assertEqual(mainWindow.trafficLightPosition.x, 16, 'traffic lights should have a 16px left inset');
-assertEqual(mainWindow.trafficLightPosition.y, 16, 'traffic lights should have an equal top inset');
+// tao 的 inset_traffic_lights 里 y 只缩放标题栏容器（斜率 1），视觉顶距 ≈ y-14；
+// 左 16 时实测左距 21.5px，y=26 才让顶距与之相等（x==y 反而不等）。
+assertEqual(mainWindow.trafficLightPosition.y, 26, 'traffic lights should have an equal visual top inset');
 assertEqual(mainWindow.width, 1300, 'main window should use the reviewed default width');
 assertEqual(mainWindow.height, 835, 'main window should use the reviewed default height');
 assertEqual(mainWindow.resizable, true, 'users should still be able to resize the main window');
@@ -230,8 +232,8 @@ if (!/const badgeBottom = Math\.round\(metrics\.height \* 0\.73\);/.test(capsule
 
 assertMatch(
   libRs,
-  /fn capsule_window_bounds_for_style\(style: types::CapsuleStyle\)[\s\S]*?width: 460\.0,[\s\S]*?types::CapsuleStyle::Siri => 180\.0,[\s\S]*?types::CapsuleStyle::Classic => 100\.0,[\s\S]*?types::CapsuleStyle::Typeless => 128\.0,[\s\S]*?bottom_inset: 0\.0,/,
-  'native capsule bounds should match the frontend dimensions for all three styles',
+  /fn capsule_window_bounds_for_style\(style: types::CapsuleStyle\)[\s\S]*?types::CapsuleStyle::Typeless => 206\.0,[\s\S]*?CapsuleStyle::Siri \| types::CapsuleStyle::Classic => 460\.0,[\s\S]*?types::CapsuleStyle::Siri => 180\.0,[\s\S]*?types::CapsuleStyle::Classic => 100\.0,[\s\S]*?types::CapsuleStyle::Typeless => 57\.0,[\s\S]*?bottom_inset: 0\.0,/,
+  'native capsule bounds should match the frontend dimensions (typeless = 1/5 area of the original 460x128)',
 );
 
 assertMatch(

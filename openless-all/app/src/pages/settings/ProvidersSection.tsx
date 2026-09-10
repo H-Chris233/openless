@@ -141,6 +141,7 @@ export const LLM_LABELS = [
   ['minimax', 'minimax'],
   ['stepfun', 'stepfun'],
   ['opencode', 'opencode'],
+  ['tencentTokenHub', 'tencentTokenHub'],
   ['custom', 'customChatCompletions'],
   ['custom_responses', 'customResponses'],
   ['custom_messages', 'customMessages'],
