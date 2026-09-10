@@ -14,6 +14,7 @@ import { isTauri } from '../../lib/ipc';
 import { useLayoutStack } from '../../lib/useMobileLayout';
 import {
   FOUNDRY_LOCAL_ASR_MODELS,
+  LOCAL_ASR_KEEP_LOADED_OPTIONS,
   SHERPA_ONNX_ASR_MODELS,
   activateLocalAsr,
   cancelFoundryLocalAsrPrepare,
@@ -47,6 +48,7 @@ import {
   revealSherpaOnnxAsrModelDir,
   setLocalAsrModelsBaseDir,
   setFoundryLocalAsrLanguageHint,
+  setFoundryLocalAsrKeepLoadedSecs,
   setFoundryLocalRuntimeSource,
   setLocalAsrKeepLoadedSecs,
   setLocalAsrMirror,
@@ -159,6 +161,10 @@ type RefreshGuard = () => boolean;
 
 export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
   const { t } = useTranslation();
+  const keepLoadedOptions = LOCAL_ASR_KEEP_LOADED_OPTIONS.map(({ seconds, labelKey }) => ({
+    value: String(seconds),
+    label: t(labelKey),
+  }));
   const stackLayout = useLayoutStack(1000);
   const { prefs, updatePrefs } = useHotkeySettings();
   const [settings, setSettings] = useState<LocalAsrSettings | null>(null);
@@ -349,6 +355,7 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
         runtimeSource: selectedFoundryRuntimeSource,
         activeModel: selectedFoundryAlias,
         loadedModelId: null,
+        keepLoadedSecs: 300,
         endpoint: null,
         error: message,
       });
@@ -927,6 +934,18 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
               foundryLocalRuntimeSource: runtimeSource,
             },
       );
+      await refreshFoundryStatus();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      restoreScroll?.();
+    }
+  };
+
+  const handleFoundryKeepLoadedChange = async (seconds: number, restoreScroll?: () => void) => {
+    try {
+      setError(null);
+      await setFoundryLocalAsrKeepLoadedSecs(seconds);
       await refreshFoundryStatus();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -2131,13 +2150,7 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                         value={String(engineStatus?.keepLoadedSecs ?? 300)}
                         onChange={(v) => void handleKeepLoadedChange(Number(v))}
                         ariaLabel={t('localAsr.keepLoadedLabel')}
-                        options={[
-                          { value: '0', label: t('localAsr.keepImmediate') },
-                          { value: '60', label: t('localAsr.keep1min') },
-                          { value: '300', label: t('localAsr.keep5min') },
-                          { value: '1800', label: t('localAsr.keep30min') },
-                          { value: '86400', label: t('localAsr.keepForever') },
-                        ]}
+                        options={keepLoadedOptions}
                         style={{ fontSize: 13, height: 31, minWidth: 200 }}
                       />
                     </div>
@@ -2491,6 +2504,33 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                     }}
                   />
                 </label>
+                <label
+                  style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 4,
+                    fontSize: 11,
+                    color: 'var(--ol-ink-4)',
+                  }}
+                >
+                  {t('localAsr.keepLoadedLabel')}
+
+                  <SelectLite
+                    value={String(foundryStatus?.keepLoadedSecs ?? 300)}
+                    onChange={(v) => {
+                      const restoreScroll = preserveEmbeddedScroll(foundryControlsRef.current);
+                      void handleFoundryKeepLoadedChange(Number(v), restoreScroll);
+                    }}
+                    disabled={foundryBusy !== null}
+                    ariaLabel={t('localAsr.keepLoadedLabel')}
+                    options={keepLoadedOptions}
+                    style={{
+                      fontSize: 13,
+                      height: 31,
+                      minWidth: 200,
+                    }}
+                  />
+                </label>
               </div>
             </div>
 
@@ -2550,6 +2590,7 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                 </span>
                 {foundryStatus?.loadedModelId ?? t('localAsr.foundryNotLoaded')}
               </div>
+              <div>{t('localAsr.keepLoadedDesc')}</div>
               {foundryStatus?.error && (
                 <div style={{ color: '#9b2c2c' }}>
                   <span>{t('localAsr.foundryError')}: </span>

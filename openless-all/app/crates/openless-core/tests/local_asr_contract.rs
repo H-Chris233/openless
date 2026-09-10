@@ -1458,6 +1458,8 @@ async fn backend_local_asr_service_owns_preferences_and_change_events() {
     assert_eq!(preferences.sherpa_onnx_language_hint, "zh-hans");
     assert_eq!(preferences.foundry_local_runtime_source, "ort-nightly");
     assert_eq!(preferences.foundry_local_asr_keep_loaded_secs, 42);
+    assert_eq!(preferences.local_asr_keep_loaded_secs, 300);
+    assert_eq!(preferences.sherpa_onnx_keep_loaded_secs, 300);
     assert_eq!(
         runtime.invalidated.lock().unwrap().as_slice(),
         [LocalAsrRuntime::Foundry, LocalAsrRuntime::Foundry]
