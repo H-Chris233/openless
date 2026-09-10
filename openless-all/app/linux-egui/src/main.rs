@@ -1628,6 +1628,27 @@ mod linux_app {
                     );
                 }
                 if remote.enabled && remote.running && !remote.urls_stale {
+                    // 首次信任前必须核对根证书指纹：网页与描述文件名称不能证明身份。
+                    ui.label("本机根证书 SHA-256");
+                    match remote.ca_fingerprint_sha256.as_ref().filter(|value| {
+                        value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    }) {
+                        Some(fingerprint) => {
+                            let display = fingerprint
+                                .as_bytes()
+                                .chunks(2)
+                                .map(|pair| std::str::from_utf8(pair).unwrap().to_ascii_uppercase())
+                                .collect::<Vec<_>>()
+                                .join(" ");
+                            ui.add(egui::Label::new(egui::RichText::new(&display).monospace()).wrap());
+                            if ui.button("复制完整指纹").clicked() {
+                                ui.ctx().copy_text(display);
+                            }
+                        }
+                        None => ui.label("完整指纹不可用。请勿安装或信任下载的证书。"),
+                    }
+                    ui.label("安装或开启完全信任前，在手机系统的证书详情中核对全部 SHA-256 字符，必须与此处一致。网页、描述文件名称和标识不能证明证书身份。若不一致或无法查看，请停止并移除已下载或安装的描述文件。");
+                    ui.label("描述文件应只包含一张根证书。若有其他证书、VPN 或设备管理配置，请勿安装。首次下载仍可能被局域网攻击者替换；核验后再信任。根证书可签发其他证书，不再使用时请移除。");
                     ui.monospace(format!("PIN：{pin}"));
                     for url in &remote.urls {
                         ui.monospace(url);

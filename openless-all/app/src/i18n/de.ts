@@ -1806,7 +1806,16 @@ export const de: typeof zhCN = {
       securityHint:
         'Nur im selben lokalen Netzwerk erreichbar und durch den Kopplungscode geschützt. Bei Nichtgebrauch ausschalten.',
       certHint:
-        'Öffne auf dem Smartphone „Erstmalige Einrichtung: diesem Computer vertrauen“, um das Zertifikat zu installieren und ihm zu vertrauen. Ältere Versionen erfordern eine einmalige Einrichtung; danach bleibt die Vertrauensstellung über Neustarts und IP-Wechsel hinweg erhalten.',
+        'Prüfe vor der erstmaligen Vertrauensstellung den Fingerabdruck des Root-Zertifikats. Ältere Versionen erfordern eine einmalige Einrichtung; danach bleibt die Vertrauensstellung über Neustarts und IP-Wechsel hinweg erhalten.',
+      certFingerprintLabel: 'Root-CA-SHA-256 dieses Computers',
+      certFingerprintCopy: 'Vollständigen Fingerabdruck kopieren',
+      certFingerprintCopied: 'Fingerabdruck kopiert',
+      certFingerprintUnavailable:
+        'Der vollständige Fingerabdruck ist nicht verfügbar. Installiere oder vertraue kein heruntergeladenes Zertifikat.',
+      certVerifyHint:
+        'Suche vor dem Aktivieren der vollständigen Vertrauensstellung den SHA-256 in den Zertifikatdetails des Telefons und vergleiche alle 64 Zeichen mit diesem Wert (Leerzeichen und Doppelpunkte ignorieren). Webseite, Profilname oder Bezeichner können die Identität nicht beweisen. Weicht der Fingerabdruck ab oder ist nicht vollständig einsehbar, brich ab und entferne das heruntergeladene oder installierte Profil.',
+      certProfileHint:
+        'Erwarte genau ein Root-Zertifikat. Installiere kein Profil mit zusätzlichen Zertifikaten, VPN- oder Geräteverwaltungseinstellungen.',
       certTrustWarning:
         'Beim ersten Zertifikatsdownload kann die Identität des Computers nicht geprüft werden: Ein bösartiges Gerät im lokalen Netzwerk könnte das Root-Zertifikat in einem Man-in-the-Middle-Angriff ersetzen. Installiere es nur in einem vertrauenswürdigen Heim- oder Privatnetzwerk, niemals in öffentlichen oder geteilten Netzwerken. Die Root-CA kann Zertifikate ausstellen, ihr privater Schlüssel bleibt auf diesem Computer; entferne sie vom Smartphone, wenn du sie nicht mehr brauchst.',
       certSetupLink: 'iPhone-Zertifikatslink kopieren',

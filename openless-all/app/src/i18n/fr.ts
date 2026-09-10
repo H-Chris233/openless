@@ -1813,7 +1813,16 @@ export const fr: typeof zhCN = {
       securityHint:
         'Accessible uniquement sur le même réseau local, avec le code d’association. Désactivez-la lorsque vous ne l’utilisez pas.',
       certHint:
-        'Ouvrez sur le téléphone « Réglage initial : faire confiance à cet ordinateur » pour installer le certificat et l’approuver. Les anciennes versions exigent un réglage unique ; ensuite la confiance est conservée après redémarrage ou changement d’adresse IP.',
+        'Vérifiez l’empreinte du certificat racine avant de lui faire confiance la première fois. Les anciennes versions exigent un réglage unique ; ensuite la confiance est conservée après redémarrage ou changement d’adresse IP.',
+      certFingerprintLabel: 'SHA-256 de la CA racine de cet ordinateur',
+      certFingerprintCopy: 'Copier l’empreinte complète',
+      certFingerprintCopied: 'Empreinte copiée',
+      certFingerprintUnavailable:
+        'L’empreinte complète n’est pas disponible. N’installez et n’approuvez aucun certificat téléchargé.',
+      certVerifyHint:
+        'Avant d’activer la confiance complète, retrouvez le SHA-256 dans les détails du certificat du système du téléphone et comparez les 64 caractères avec cette valeur (espaces et deux-points ignorés). Une page web, le nom du profil ou un identifiant ne prouvent pas l’identité. Si l’empreinte diffère ou n’est pas entièrement visible, arrêtez et supprimez le profil téléchargé ou installé.',
+      certProfileHint:
+        'Il ne doit y avoir exactement qu’un certificat racine. N’installez pas un profil contenant des certificats supplémentaires, un VPN ou des réglages de gestion d’appareils.',
       certTrustWarning:
         'Le téléchargement initial du certificat ne permet pas de vérifier l’identité de l’ordinateur : un appareil malveillant du réseau local pourrait remplacer le certificat racine par une attaque de l’homme du milieu. N’installez le certificat que sur un réseau domestique ou privé de confiance, jamais sur un réseau public ou partagé. La CA racine peut émettre des certificats et sa clé privée reste sur cet ordinateur ; supprimez-la de votre téléphone lorsque vous ne l’utilisez plus.',
       certSetupLink: 'Copier le lien du certificat iPhone',

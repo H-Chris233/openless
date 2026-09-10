@@ -1000,6 +1000,9 @@ pub struct RemoteInputStatus {
     pub port: u16,
     pub urls: Vec<String>,
     pub urls_stale: bool,
+    /// 由宿主提供，取自正在运行的监听器所使用的公开根证书。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca_fingerprint_sha256: Option<String>,
     pub locale: String,
     pub connection_count: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1030,6 +1033,7 @@ pub struct RemoteInputServerBinding {
     pub port: u16,
     pub urls: Vec<String>,
     pub urls_stale: bool,
+    pub ca_fingerprint_sha256: Option<String>,
 }
 
 /// Native transport and shared-dictation bridge. TLS, sockets, H5 assets and
@@ -1065,6 +1069,27 @@ pub trait RemoteInputRuntimeAdapter: Send + Sync {
         &self,
         session_id: SessionId,
     ) -> BoxFuture<'static, Result<(), BackendError>>;
+    /// 只读取指定会话；由 Core 校验手机持有的恢复凭据。
+    fn read_audio_history(
+        &self,
+        _session_id: SessionId,
+    ) -> BoxFuture<'static, Result<Option<crate::types::DictationSession>, BackendError>> {
+        Box::pin(async { Ok(None) })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum RemoteInputRecovery {
+    Pending,
+    Completed {
+        text: String,
+    },
+    Failed {
+        #[serde(rename = "hasAudioRecording")]
+        has_audio_recording: bool,
+    },
+    Unavailable,
 }
 
 pub trait RemoteInputApi: Send + Sync {
@@ -1099,6 +1124,24 @@ pub trait RemoteInputApi: Send + Sync {
         _connection_id: SessionId,
     ) -> BoxFuture<'static, Result<(), BackendError>> {
         unsupported("remote input")
+    }
+    fn recover_stream(
+        &self,
+        _connection_id: SessionId,
+        _session_id: SessionId,
+        _recovery_key: crate::credentials::SecretValue,
+    ) -> BoxFuture<'static, Result<RemoteInputRecovery, BackendError>> {
+        unsupported("remote input")
+    }
+    fn recovery_key(
+        &self,
+        _connection_id: SessionId,
+        _session_id: SessionId,
+    ) -> Result<crate::credentials::SecretValue, BackendError> {
+        Err(BackendError::new(
+            BackendErrorCode::Unsupported,
+            "remote recovery is unavailable",
+        ))
     }
     fn start_stream(
         &self,
@@ -2032,6 +2075,7 @@ mod tests {
             port: 18989,
             urls: vec!["https://192.168.1.2:18989".into()],
             urls_stale: false,
+            ca_fingerprint_sha256: None,
             locale: "zh-CN".into(),
             connection_count: 1,
             active_session_id: Some(SessionId::new()),

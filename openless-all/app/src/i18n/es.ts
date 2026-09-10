@@ -1790,7 +1790,16 @@ export const es: typeof zhCN = {
       securityHint:
         'Solo es accesible desde la misma red local y requiere el código de vinculación. Desactívalo cuando no lo uses.',
       certHint:
-        'Abre en el móvil «Configuración inicial: confiar en este ordenador» para instalar el certificado y confiar en él. Las versiones anteriores requieren una configuración única; después la confianza se mantiene al reiniciar o cambiar de IP.',
+        'Verifica la huella del certificado raíz antes de confiar en él por primera vez. Las versiones anteriores requieren una configuración única; después la confianza se mantiene al reiniciar o cambiar de IP.',
+      certFingerprintLabel: 'SHA-256 de la CA raíz de este ordenador',
+      certFingerprintCopy: 'Copiar huella completa',
+      certFingerprintCopied: 'Huella copiada',
+      certFingerprintUnavailable:
+        'La huella completa no está disponible. No instales ni confíes en un certificado descargado.',
+      certVerifyHint:
+        'Antes de activar la confianza completa, busca el SHA-256 en los detalles del certificado del sistema del teléfono y compara los 64 caracteres con este valor (ignora espacios y dos puntos). Una página web, el nombre del perfil o un identificador no prueban la identidad. Si la huella difiere o no se puede ver completa, detente y elimina el perfil descargado o instalado.',
+      certProfileHint:
+        'Debe haber exactamente un certificado raíz. No instales un perfil con certificados adicionales, VPN o ajustes de gestión de dispositivos.',
       certTrustWarning:
         'La descarga inicial del certificado no puede verificar la identidad del ordenador: un dispositivo malicioso en la red local podría sustituir el certificado raíz en un ataque de intermediario. Instálalo solo en una red doméstica o privada de confianza, nunca en redes públicas o compartidas. La CA raíz puede emitir certificados y su clave privada permanece en este ordenador; elimínalo del teléfono cuando dejes de usarlo.',
       certSetupLink: 'Copiar enlace del certificado para iPhone',
