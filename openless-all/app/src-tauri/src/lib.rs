@@ -3332,16 +3332,16 @@ fn capsule_window_bounds(translation_active: bool) -> CapsuleWindowBounds {
 
 fn capsule_window_bounds_for_style(style: types::CapsuleStyle) -> CapsuleWindowBounds {
     CapsuleWindowBounds {
-        // typeless 窗口面积是旧尺寸（460×128）的 1/7；前端用 CSS zoom 同步缩放内容，
+        // typeless 窗口面积是原尺寸（460×128）的 1/5；前端用 CSS zoom 同步缩放内容，
         // 见 CapsuleStyles.css 与 src/lib/capsuleLayout.ts。
         width: match style {
-            types::CapsuleStyle::Typeless => 174.0,
+            types::CapsuleStyle::Typeless => 206.0,
             types::CapsuleStyle::Siri | types::CapsuleStyle::Classic => 460.0,
         },
         height: match style {
             types::CapsuleStyle::Siri => 180.0,
             types::CapsuleStyle::Classic => 100.0,
-            types::CapsuleStyle::Typeless => 48.0,
+            types::CapsuleStyle::Typeless => 57.0,
         },
         bottom_inset: 0.0,
     }
@@ -3599,9 +3599,9 @@ mod tests {
     }
 
     #[test]
-    fn typeless_capsule_window_is_one_seventh_of_the_old_area() {
+    fn typeless_capsule_window_is_one_fifth_of_the_old_area() {
         let bounds = capsule_window_bounds_for_style(CapsuleStyle::Typeless);
-        assert_eq!((bounds.width, bounds.height), (174.0, 48.0));
+        assert_eq!((bounds.width, bounds.height), (206.0, 57.0));
     }
 
     #[test]

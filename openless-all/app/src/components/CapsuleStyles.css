@@ -1,16 +1,21 @@
 .ol-typeless-capsule-wrap {
-  --ol-typeless-bg: #fafafa;
-  --ol-typeless-border: #d4d4d8;
-  --ol-typeless-ink: #18181b;
-  --ol-typeless-button-bg: #e4e4e7;
-  --ol-typeless-button-hover: #d4d4d8;
-  --ol-typeless-confirm-bg: #27272a;
-  --ol-typeless-confirm-ink: #ffffff;
+  --ol-typeless-bg: #18181b;
+  --ol-typeless-border: #52525b;
+  --ol-typeless-ink: #fafafa;
+  --ol-typeless-button-bg: #3f3f46;
+  --ol-typeless-button-hover: #52525b;
+  --ol-typeless-confirm-bg: #fafafa;
+  --ol-typeless-confirm-ink: #18181b;
   position: relative;
   font-family: var(--ol-font-sans);
-  /* 整体缩到 1/7 面积（线性 1/√7≈0.378），与 174×48 的胶囊窗口配套；
+  /* 整体缩放使药丸面积为原尺寸的 1/5（线性 1/√5≈0.447），与 206×57 的胶囊窗口配套；
      尺寸基准见 src-tauri/src/lib.rs 的 capsule_window_bounds_for_style。 */
-  zoom: 0.378;
+  zoom: 0.447;
+}
+
+/* 黑色胶囊配白色波纹。 */
+.ol-typeless-capsule .ol-capsule-waveform > span {
+  background: #ffffff;
 }
 
 .ol-typeless-capsule {
@@ -212,28 +217,22 @@
   width: 60px;
   transform: scale(0.7);
 }
-.ol-siri-capsule-preview .ol-capsule-waveform {
-  width: 160px;
-  gap: 5px;
-  filter: drop-shadow(0 0 6px #8b5cf680);
+/* Siri 预览 = 缩小的真实光效舞台（460×180 → ×0.5 = 230×90，正好放进 256×96 预览框）。 */
+.ol-siri-capsule-preview {
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
-.ol-siri-capsule-preview .ol-capsule-waveform > span {
-  width: 8px;
-  background: #a580ff;
-}
-.ol-siri-capsule-preview .ol-capsule-waveform > span:nth-child(-n + 4) {
-  background: #65a5ff;
-}
-.ol-siri-capsule-preview .ol-capsule-waveform > span:nth-child(n + 8) {
-  background: #fa84b3;
+.ol-siri-capsule-preview > div {
+  transform: scale(0.5);
 }
 
 [data-ol-theme='dark'] .ol-typeless-capsule-wrap {
-  --ol-typeless-bg: #202024;
-  --ol-typeless-border: #505056;
+  --ol-typeless-bg: #101014;
+  --ol-typeless-border: #3f3f46;
   --ol-typeless-ink: #fafafa;
-  --ol-typeless-button-bg: #414148;
-  --ol-typeless-button-hover: #55555e;
+  --ol-typeless-button-bg: #27272a;
+  --ol-typeless-button-hover: #3f3f46;
   --ol-typeless-confirm-bg: #fafafa;
   --ol-typeless-confirm-ink: #18181b;
 }

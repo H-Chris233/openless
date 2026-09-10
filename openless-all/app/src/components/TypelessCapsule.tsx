@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { cancelDictation, stopDictation } from '../lib/ipc/dictation';
 import type { CapsuleState, CapsuleStyle } from '../lib/types';
 import { Icon } from './Icon';
+import { VoiceOrbStage } from './VoiceOrbStage';
 import './CapsuleStyles.css';
 
 interface TypelessCapsuleProps {
@@ -122,7 +123,7 @@ export function CapsuleStylePreview({ style }: { style: CapsuleStyle }) {
         </div>
       ) : (
         <div className="ol-siri-capsule-preview">
-          <CapsuleWaveform level={0.2} />
+          <VoiceOrbStage os="mac" state="recording" level={0.2} />
         </div>
       )}
     </div>

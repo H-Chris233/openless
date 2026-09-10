@@ -86,8 +86,8 @@ for (const os of ['mac', 'win', 'linux'] as const) {
   const classic = getCapsuleHostMetrics(os, false, 'classic');
   const typeless = getCapsuleHostMetrics(os, true, 'typeless');
   assertEqual(classic.height, 100, `${os}: classic uses the compact native window`);
-  assertEqual(typeless.height, 48, `${os}: typeless window is 1/7 of the old 460x128 area`);
-  assertEqual(typeless.width, 174, `${os}: typeless window keeps the 1/7 stage width`);
+  assertEqual(typeless.height, 57, `${os}: typeless window is 1/5 of the old 460x128 area`);
+  assertEqual(typeless.width, 206, `${os}: typeless window keeps the 1/5 stage width`);
   assertEqual(
     typeless.bottomInset,
     0,
