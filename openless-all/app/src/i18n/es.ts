@@ -2202,6 +2202,15 @@ export const es: typeof zhCN = {
     downloading: 'Descargando',
     startDownload: 'Iniciar descarga',
     downloadNewModel: 'Descargar nuevo modelo',
+    activeModelLabel: 'Modelo en uso',
+    pickerNoModelDownloaded:
+      'Aún no hay modelos descargados; descarga primero uno en la página de modelos locales.',
+    partialDownloadsLabel: 'Descargas incompletas',
+    partialDownloadsDesc:
+      'Las descargas interrumpidas dejaron archivos temporales; límpialos sin afectar a los modelos instalados.',
+    cleanupIncomplete: 'Limpiar descarga incompleta',
+    languagesLabel: 'Idiomas',
+    partialBytesLabel: 'Archivos residuales',
     downloadDialogTitle: 'Descargar modelo',
     downloadDialogAlreadyHave:
       'Los archivos del modelo ya están descargados. Vuelve a su página para cargarlo y probarlo, o elige su proveedor en Transcripción ASR.',

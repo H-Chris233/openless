@@ -26,6 +26,7 @@ import {
 } from '../../lib/ipc';
 import { LlmProtocolFields } from './LlmProtocolFields';
 import { ProviderFormContext } from './ProviderForm';
+import { LocalModelPicker } from './models/LocalModelPicker';
 import { emitSaved } from '../../lib/savedEvent';
 import { useLayoutStack, useConservativeLayout } from '../../lib/useMobileLayout';
 import { useHotkeySettings } from '../../state/HotkeySettingsContext';
@@ -588,10 +589,15 @@ export function ChannelCredentialFields({
   // 本地引擎（qwen3 / sherpa / foundry / Apple 语音）没有 key 与地址；模型的下载与
   // 切换仍由「高级 → 本地模型」里的 <LocalAsr embedded /> 负责，这里只说明一句。
   if (descriptor?.authRequirement === 'none') {
+    // 本地引擎：模型即凭据。这里直接切换使用中的模型（全局生效），
+    // 下载 / 删除 / 镜像在「服务 → 本地模型」管理页。
     return (
-      <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.6 }}>
-        {t('settings.providers.localEngineNoCredentials')}
-      </div>
+      <>
+        <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.6 }}>
+          {t('settings.providers.localEngineNoCredentials')}
+        </div>
+        <LocalModelPicker providerType={providerType} />
+      </>
     );
   }
 

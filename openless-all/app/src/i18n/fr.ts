@@ -2231,6 +2231,15 @@ export const fr: typeof zhCN = {
     downloading: 'Téléchargement',
     startDownload: 'Démarrer le téléchargement',
     downloadNewModel: 'Télécharger un nouveau modèle',
+    activeModelLabel: 'Modèle utilisé',
+    pickerNoModelDownloaded:
+      'Aucun modèle téléchargé pour l’instant — commencez par la page des modèles locaux.',
+    partialDownloadsLabel: 'Téléchargements incomplets',
+    partialDownloadsDesc:
+      'Des téléchargements interrompus ont laissé des fichiers temporaires ; nettoyez-les sans toucher aux modèles installés.',
+    cleanupIncomplete: 'Nettoyer le téléchargement incomplet',
+    languagesLabel: 'Langues',
+    partialBytesLabel: 'Fichiers restants',
     downloadDialogTitle: 'Télécharger un modèle',
     downloadDialogAlreadyHave:
       'Les fichiers du modèle sont téléchargés. Revenez à sa page pour le charger et le tester, ou choisissez son fournisseur dans Transcription ASR.',
