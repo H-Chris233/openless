@@ -1063,6 +1063,27 @@ pub trait RemoteInputRuntimeAdapter: Send + Sync {
         &self,
         session_id: SessionId,
     ) -> BoxFuture<'static, Result<(), BackendError>>;
+    /// 只读取指定会话；由 Core 校验手机持有的恢复凭据。
+    fn read_audio_history(
+        &self,
+        _session_id: SessionId,
+    ) -> BoxFuture<'static, Result<Option<crate::types::DictationSession>, BackendError>> {
+        Box::pin(async { Ok(None) })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum RemoteInputRecovery {
+    Pending,
+    Completed {
+        text: String,
+    },
+    Failed {
+        #[serde(rename = "hasAudioRecording")]
+        has_audio_recording: bool,
+    },
+    Unavailable,
 }
 
 pub trait RemoteInputApi: Send + Sync {
@@ -1097,6 +1118,24 @@ pub trait RemoteInputApi: Send + Sync {
         _connection_id: SessionId,
     ) -> BoxFuture<'static, Result<(), BackendError>> {
         unsupported("remote input")
+    }
+    fn recover_stream(
+        &self,
+        _connection_id: SessionId,
+        _session_id: SessionId,
+        _recovery_key: crate::credentials::SecretValue,
+    ) -> BoxFuture<'static, Result<RemoteInputRecovery, BackendError>> {
+        unsupported("remote input")
+    }
+    fn recovery_key(
+        &self,
+        _connection_id: SessionId,
+        _session_id: SessionId,
+    ) -> Result<crate::credentials::SecretValue, BackendError> {
+        Err(BackendError::new(
+            BackendErrorCode::Unsupported,
+            "remote recovery is unavailable",
+        ))
     }
     fn start_stream(
         &self,
