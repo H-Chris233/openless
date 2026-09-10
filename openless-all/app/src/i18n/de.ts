@@ -1450,8 +1450,10 @@ export const de: typeof zhCN = {
       modelsLoaded: 'Abgerufene Modelle: {{count}}.',
       searchModels: 'Modelle suchen…',
       noMatchingModels: 'Keine passenden Modelle',
-      orcarouterCatalogHint: 'Geladen aus OrcaRouter /models. Wähle ein Katalog-Modell; manuelle Modell-IDs sind für diesen Anbieter deaktiviert.',
-      orcarouterAsrCatalogHint: 'Geladen aus OrcaRouter /models, begrenzt auf Gemini-Modelle mit Audio-Eingabe. Manuelle Modell-IDs sind deaktiviert.',
+      orcarouterCatalogHint:
+        'Geladen aus OrcaRouter /models. Wähle ein Katalog-Modell; manuelle Modell-IDs sind für diesen Anbieter deaktiviert.',
+      orcarouterAsrCatalogHint:
+        'Geladen aus OrcaRouter /models, begrenzt auf Gemini-Modelle mit Audio-Eingabe. Manuelle Modell-IDs sind deaktiviert.',
       selectModel: 'Wähle ein Modell, um das Feld oben auszufüllen',
       modelSaved: 'Modell {{model}} gespeichert.',
       validateSuccess: 'Verbindungsprüfung bestanden.',

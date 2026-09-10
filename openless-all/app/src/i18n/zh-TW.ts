@@ -1300,8 +1300,10 @@ export const zhTW: typeof zhCN = {
       presetListLabel: '返回預設清單',
       searchModels: '搜尋模型…',
       noMatchingModels: '沒有符合的模型',
-      orcarouterCatalogHint: '模型來自 OrcaRouter /models；此供應商只允許從目錄中選擇，不支援手動填寫模型 ID。',
-      orcarouterAsrCatalogHint: '模型來自 OrcaRouter /models，並僅顯示相容音訊輸入的 Gemini；不支援手動填寫模型 ID。',
+      orcarouterCatalogHint:
+        '模型來自 OrcaRouter /models；此供應商只允許從目錄中選擇，不支援手動填寫模型 ID。',
+      orcarouterAsrCatalogHint:
+        '模型來自 OrcaRouter /models，並僅顯示相容音訊輸入的 Gemini；不支援手動填寫模型 ID。',
       temperatureLabel: 'Temperature',
       temperaturePlaceholder: '留空則不發送；範圍 0～2（含邊界），例如 0.3',
       extraHeadersLabel: '額外 Headers',
@@ -1635,9 +1637,11 @@ export const zhTW: typeof zhCN = {
       portInUse: '連接埠 {{port}} 被佔用，請更換',
       startError: '遠端輸入服務啟動失敗：{{reason}}',
       securityHint: '僅同一區域網路可存取，需輸入配對碼；不用時建議關閉。',
-      certHint: "首次連線請在手機頁面展開「首次設定：信任這台電腦」，安裝並信任憑證。升級舊版需設定一次；之後重新啟動和更換 IP 會保留信任。",
-      certTrustWarning: "首次憑證下載無法驗證電腦身分，惡意區域網路裝置可能透過中間人攻擊替換根憑證。僅在可信任的家庭或私人網路中安裝，請勿在公共或共享網路操作。根憑證能簽發憑證，私密金鑰保存在這台電腦；不再使用時請從手機移除。",
-      certSetupLink: "複製 iPhone 憑證連結",
+      certHint:
+        '首次連線請在手機頁面展開「首次設定：信任這台電腦」，安裝並信任憑證。升級舊版需設定一次；之後重新啟動和更換 IP 會保留信任。',
+      certTrustWarning:
+        '首次憑證下載無法驗證電腦身分，惡意區域網路裝置可能透過中間人攻擊替換根憑證。僅在可信任的家庭或私人網路中安裝，請勿在公共或共享網路操作。根憑證能簽發憑證，私密金鑰保存在這台電腦；不再使用時請從手機移除。',
+      certSetupLink: '複製 iPhone 憑證連結',
       waitingStart: '服務尚未啟動。請關閉開關再打開一次，不要重啟軟體。',
       starting: '正在啟動遠端輸入服務…',
       urlsStale: '這些地址來自上次執行，可能已經過期。',
@@ -1956,8 +1960,7 @@ export const zhTW: typeof zhCN = {
     sherpaModelWhisperLargeV3Desc:
       '開源多語通用中效果最好的 Whisper 檔，品質高、體積大，適合高品質轉寫。',
     sherpaModelZipformer: 'Zipformer 串流（中英）',
-    sherpaModelZipformerDesc:
-      '邊說邊出的串流中英模型，延遲最低，適合即時聽寫。',
+    sherpaModelZipformerDesc: '邊說邊出的串流中英模型，延遲最低，適合即時聽寫。',
     sherpaModelQwen3: 'Qwen3-ASR 0.6B INT8',
     sherpaModelQwen3Desc:
       '轉換後的 sherpa-onnx Qwen3-ASR 模型，支援多語言識別與更強的長上下文能力。',

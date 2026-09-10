@@ -15,7 +15,9 @@ for (const [locale, messages] of Object.entries(locales)) {
     localAsrTitle: messages.settings.advanced.localAsrTitle,
   })) {
     if (title.includes(marker)) {
-      throw new Error(`${locale}.${key} must leave the experimental marker to the shared title component`);
+      throw new Error(
+        `${locale}.${key} must leave the experimental marker to the shared title component`,
+      );
     }
   }
 

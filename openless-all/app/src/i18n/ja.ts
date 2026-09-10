@@ -1350,8 +1350,10 @@ export const ja: typeof zhCN = {
       presetListLabel: 'プリセットに戻る',
       searchModels: 'モデルを検索…',
       noMatchingModels: '一致するモデルがありません',
-      orcarouterCatalogHint: 'OrcaRouter /models から取得します。このプロバイダーではカタログから選択し、モデル ID の手入力はできません。',
-      orcarouterAsrCatalogHint: 'OrcaRouter /models から取得し、音声入力に対応する Gemini のみ表示します。モデル ID の手入力はできません。',
+      orcarouterCatalogHint:
+        'OrcaRouter /models から取得します。このプロバイダーではカタログから選択し、モデル ID の手入力はできません。',
+      orcarouterAsrCatalogHint:
+        'OrcaRouter /models から取得し、音声入力に対応する Gemini のみ表示します。モデル ID の手入力はできません。',
       temperatureLabel: 'Temperature',
       temperaturePlaceholder: '空欄なら送信しません。範囲は 0〜2（両端を含む）。例: 0.3',
       extraHeadersLabel: '追加 Headers',

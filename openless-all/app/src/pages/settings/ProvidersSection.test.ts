@@ -7,10 +7,10 @@ const atlascloudPreset = LLM_LABELS.find((p) => p.id === 'atlascloud');
 if (LLM_LABELS.find((p) => p.id === 'opencode')?.nameKey !== 'opencode') {
   throw new Error('OpenCode LLM label is missing');
 }
-if (LLM_LABELS.find(p => p.id === 'tencentTokenHub')?.nameKey !== 'tencentTokenHub') {
+if (LLM_LABELS.find((p) => p.id === 'tencentTokenHub')?.nameKey !== 'tencentTokenHub') {
   throw new Error('Tencent Cloud TokenHub LLM label is missing');
 }
-if (ASR_LABELS.find(p => p.id === 'tencent-cloud')?.nameKey !== 'asrTencentCloud') {
+if (ASR_LABELS.find((p) => p.id === 'tencent-cloud')?.nameKey !== 'asrTencentCloud') {
   throw new Error('Tencent Cloud ASR label is missing');
 }
 
@@ -70,17 +70,29 @@ for (const [format, expected] of [
 }
 
 const asrCatalog = [
-  { id: 'google/gemini-audio', supported_endpoint_types: ['openai'], architecture: { input_modalities: ['text', 'audio'] } },
-  { id: 'google/gemini-text', supported_endpoint_types: ['openai'], architecture: { input_modalities: ['text'] } },
+  {
+    id: 'google/gemini-audio',
+    supported_endpoint_types: ['openai'],
+    architecture: { input_modalities: ['text', 'audio'] },
+  },
+  {
+    id: 'google/gemini-text',
+    supported_endpoint_types: ['openai'],
+    architecture: { input_modalities: ['text'] },
+  },
   { id: 'google/gemini-unknown', supported_endpoint_types: ['openai'] },
-  { id: 'meta/audio', supported_endpoint_types: ['openai'], architecture: { input_modalities: ['audio'] } },
+  {
+    id: 'meta/audio',
+    supported_endpoint_types: ['openai'],
+    architecture: { input_modalities: ['audio'] },
+  },
 ];
 if (filterOrcaRouterModels(asrCatalog, 'asr').join(',') !== 'google/gemini-audio') {
   throw new Error('OrcaRouter ASR catalog must require declared Gemini audio input');
 }
 
 for (const labels of [LLM_LABELS, ASR_LABELS]) {
-  if (!labels.some(label => label.id === 'orcarouter' && label.nameKey === 'orcarouter')) {
+  if (!labels.some((label) => label.id === 'orcarouter' && label.nameKey === 'orcarouter')) {
     throw new Error('OrcaRouter provider label is missing');
   }
 }

@@ -1337,7 +1337,7 @@ export const en: typeof zhCN = {
       tencentCloudNote:
         'Uses Tencent Cloud Speech Recognition API credentials. The default Hy-ASR-3.0-preview supports Chinese, English, and 20 dialects; Preview accepts only mono 16 kHz PCM up to 60 seconds and does not yet support context or hotword boosting.',
       tencentTokenHubNote:
-        'Only online language models are listed. Some models always use reasoning; turning reasoning off keeps that model\'s fixed behavior.',
+        "Only online language models are listed. Some models always use reasoning; turning reasoning off keeps that model's fixed behavior.",
       localAsrActiveNotice:
         'Local ASR ({{name}}) is currently active. Switch or disable it from the Advanced tab.',
       localAsrTakeoverHint: 'Once "{{name}}" is enabled, the ASR provider will be taken over.',
@@ -1363,8 +1363,10 @@ export const en: typeof zhCN = {
       presetListLabel: 'Back to presets',
       searchModels: 'Search models…',
       noMatchingModels: 'No matching models',
-      orcarouterCatalogHint: 'Loaded from OrcaRouter /models. Select a catalog model; manual model IDs are disabled for this provider.',
-      orcarouterAsrCatalogHint: 'Loaded from OrcaRouter /models and limited to Gemini models compatible with audio input. Manual model IDs are disabled.',
+      orcarouterCatalogHint:
+        'Loaded from OrcaRouter /models. Select a catalog model; manual model IDs are disabled for this provider.',
+      orcarouterAsrCatalogHint:
+        'Loaded from OrcaRouter /models and limited to Gemini models compatible with audio input. Manual model IDs are disabled.',
       temperatureLabel: 'Temperature',
       temperaturePlaceholder: 'Leave empty to omit; range 0–2 inclusive, e.g. 0.3',
       extraHeadersLabel: 'Extra headers',
@@ -1751,7 +1753,7 @@ export const en: typeof zhCN = {
       certHint:
         'Open “First-time setup: trust this computer” on the phone to install and trust the certificate. Older versions require one-time setup; subsequent restarts and IP changes preserve trust.',
       certTrustWarning:
-        'The initial certificate download cannot verify the computer\'s identity; a malicious device on the LAN could replace the root certificate in a man-in-the-middle attack. Install it only on a trusted home or private network, never on a public or shared network. The root CA can issue certificates and its private key stays on this computer; remove it from your phone when no longer needed.',
+        "The initial certificate download cannot verify the computer's identity; a malicious device on the LAN could replace the root certificate in a man-in-the-middle attack. Install it only on a trusted home or private network, never on a public or shared network. The root CA can issue certificates and its private key stays on this computer; remove it from your phone when no longer needed.",
       certSetupLink: 'Copy iPhone certificate link',
       waitingStart:
         'The service is not running yet. Turn the switch off, then on again. Do not restart the app.',

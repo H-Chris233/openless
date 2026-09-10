@@ -175,7 +175,6 @@ export function HotkeySettingsProvider({ children }: { children: ReactNode }) {
     [queueSetSettings],
   );
 
-
   const value = useMemo<HotkeySettingsContextValue>(
     () => ({
       prefs,
@@ -189,7 +188,8 @@ export function HotkeySettingsProvider({ children }: { children: ReactNode }) {
     [capability, error, loading, prefs, refresh, updatePrefs],
   );
 
-  return <HotkeySettingsContext.Provider value={value}>{children}</HotkeySettingsContext.Provider>;}
+  return <HotkeySettingsContext.Provider value={value}>{children}</HotkeySettingsContext.Provider>;
+}
 
 export function useHotkeySettings() {
   const value = useContext(HotkeySettingsContext);

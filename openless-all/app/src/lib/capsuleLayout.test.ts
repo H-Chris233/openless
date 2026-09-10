@@ -88,11 +88,7 @@ for (const os of ['mac', 'win', 'linux'] as const) {
   assertEqual(classic.height, 100, `${os}: classic uses the compact native window`);
   assertEqual(typeless.height, 57, `${os}: typeless window is 1/5 of the old 460x128 area`);
   assertEqual(typeless.width, 206, `${os}: typeless window keeps the 1/5 stage width`);
-  assertEqual(
-    typeless.bottomInset,
-    0,
-    `${os}: typeless pill hugs the work-area bottom edge`,
-  );
+  assertEqual(typeless.bottomInset, 0, `${os}: typeless pill hugs the work-area bottom edge`);
 }
 for (const style of ['siri', 'classic', 'typeless'] as const) {
   assertEqual(parseCapsuleStyle(style), style, `${style} is accepted from preferences and events`);

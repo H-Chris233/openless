@@ -24,7 +24,14 @@ export interface VoiceOrbStageProps {
  *   - error：冻结光效 + 浮一行发光红字说明原因（唯一保留的文字信息）。
  * 刻意没有任何垫底/暗晕（用户拍板）：白底界面上宁可对比度弱，也不要黑色遮挡。
  */
-export function VoiceOrbStage({ os, state, level, warming, warmupMs, message }: VoiceOrbStageProps) {
+export function VoiceOrbStage({
+  os,
+  state,
+  level,
+  warming,
+  warmupMs,
+  message,
+}: VoiceOrbStageProps) {
   const { t } = useTranslation();
   const metrics = useMemo(() => getCapsulePillMetrics(os), [os]);
 

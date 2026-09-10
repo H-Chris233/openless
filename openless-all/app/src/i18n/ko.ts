@@ -1341,8 +1341,10 @@ export const ko: typeof zhCN = {
       presetListLabel: '프리셋으로 돌아가기',
       searchModels: '모델 검색…',
       noMatchingModels: '일치하는 모델이 없습니다',
-      orcarouterCatalogHint: 'OrcaRouter /models에서 불러옵니다. 이 공급자는 카탈로그 모델만 선택할 수 있으며 모델 ID 직접 입력은 지원하지 않습니다.',
-      orcarouterAsrCatalogHint: 'OrcaRouter /models에서 불러오며 오디오 입력을 지원하는 Gemini 모델만 표시합니다. 모델 ID 직접 입력은 지원하지 않습니다.',
+      orcarouterCatalogHint:
+        'OrcaRouter /models에서 불러옵니다. 이 공급자는 카탈로그 모델만 선택할 수 있으며 모델 ID 직접 입력은 지원하지 않습니다.',
+      orcarouterAsrCatalogHint:
+        'OrcaRouter /models에서 불러오며 오디오 입력을 지원하는 Gemini 모델만 표시합니다. 모델 ID 직접 입력은 지원하지 않습니다.',
       temperatureLabel: 'Temperature',
       temperaturePlaceholder: '비워 두면 보내지 않음. 범위 0~2(양 끝 포함), 예: 0.3',
       extraHeadersLabel: '추가 Headers',

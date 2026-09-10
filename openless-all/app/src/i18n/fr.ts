@@ -1461,8 +1461,10 @@ export const fr: typeof zhCN = {
       modelsLoaded: '{{count}} modèles récupérés.',
       searchModels: 'Rechercher des modèles…',
       noMatchingModels: 'Aucun modèle correspondant',
-      orcarouterCatalogHint: 'Chargé depuis /models d’OrcaRouter. Sélectionnez un modèle du catalogue ; les IDs manuels sont désactivés pour ce fournisseur.',
-      orcarouterAsrCatalogHint: 'Chargé depuis /models d’OrcaRouter et limité aux modèles Gemini compatibles avec l’entrée audio. Les IDs manuels sont désactivés.',
+      orcarouterCatalogHint:
+        'Chargé depuis /models d’OrcaRouter. Sélectionnez un modèle du catalogue ; les IDs manuels sont désactivés pour ce fournisseur.',
+      orcarouterAsrCatalogHint:
+        'Chargé depuis /models d’OrcaRouter et limité aux modèles Gemini compatibles avec l’entrée audio. Les IDs manuels sont désactivés.',
       selectModel: 'Sélectionnez un modèle pour remplir le champ ci-dessus',
       modelSaved: 'Modèle {{model}} enregistré.',
       validateSuccess: 'Connexion vérifiée avec succès.',

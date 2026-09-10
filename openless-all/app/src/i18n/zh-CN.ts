@@ -1298,8 +1298,10 @@ export const zhCN = {
       presetListLabel: '返回预设列表',
       searchModels: '搜索模型…',
       noMatchingModels: '没有匹配的模型',
-      orcarouterCatalogHint: '模型来自 OrcaRouter /models；此供应商只允许从目录中选择，不支持手动填写模型 ID。',
-      orcarouterAsrCatalogHint: '模型来自 OrcaRouter /models，并仅显示兼容音频输入的 Gemini；不支持手动填写模型 ID。',
+      orcarouterCatalogHint:
+        '模型来自 OrcaRouter /models；此供应商只允许从目录中选择，不支持手动填写模型 ID。',
+      orcarouterAsrCatalogHint:
+        '模型来自 OrcaRouter /models，并仅显示兼容音频输入的 Gemini；不支持手动填写模型 ID。',
       temperatureLabel: 'Temperature',
       temperaturePlaceholder: '留空则不发送；范围 0～2（含边界），例如 0.3',
       extraHeadersLabel: '额外 Headers',
@@ -1649,9 +1651,11 @@ export const zhCN = {
       portInUse: '端口 {{port}} 被占用，请更换',
       startError: '远程输入服务启动失败：{{reason}}',
       securityHint: '仅同一局域网可访问，需输入配对码；不用时建议关闭。',
-      certHint: "首次连接请在手机页面展开“首次设置：信任此电脑”，安装并信任证书。升级旧版需设置一次；以后重启和换 IP 会保留信任。",
-      certTrustWarning: "首次证书下载无法验证电脑身份，恶意局域网设备可能通过中间人攻击替换根证书。仅在可信的家庭或私人网络中安装，勿在公共或共享网络操作。根证书具备签发能力，私钥保存在这台电脑；不再使用时请从手机移除。",
-      certSetupLink: "复制 iPhone 证书链接",
+      certHint:
+        '首次连接请在手机页面展开“首次设置：信任此电脑”，安装并信任证书。升级旧版需设置一次；以后重启和换 IP 会保留信任。',
+      certTrustWarning:
+        '首次证书下载无法验证电脑身份，恶意局域网设备可能通过中间人攻击替换根证书。仅在可信的家庭或私人网络中安装，勿在公共或共享网络操作。根证书具备签发能力，私钥保存在这台电脑；不再使用时请从手机移除。',
+      certSetupLink: '复制 iPhone 证书链接',
       waitingStart: '服务尚未启动。请关闭开关再打开一次，不要重启软件。',
       starting: '正在启动远程输入服务…',
       urlsStale: '这些地址来自上次运行，可能已经过期。',
@@ -1970,8 +1974,7 @@ export const zhCN = {
     sherpaModelWhisperLargeV3Desc:
       '开源多语通用里效果最好的 Whisper 档，质量高、体积大，适合高质量转写。',
     sherpaModelZipformer: 'Zipformer 流式（中英）',
-    sherpaModelZipformerDesc:
-      '边说边出的流式中英模型，延迟最低，适合实时听写。',
+    sherpaModelZipformerDesc: '边说边出的流式中英模型，延迟最低，适合实时听写。',
     sherpaModelQwen3: 'Qwen3-ASR 0.6B INT8',
     sherpaModelQwen3Desc:
       '转换后的 sherpa-onnx Qwen3-ASR 模型，支持多语言识别与更强的长上下文能力。',
