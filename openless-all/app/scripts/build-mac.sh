@@ -59,8 +59,8 @@ npm run tauri -- "${TAURI_BUILD_ARGS[@]}" || echo "⚠ tauri build 退出码非�
 APP_VERSION="$(node -p "require('./package.json').version")"
 DMG_PATH="$DMG_DIR/OpenLess_${APP_VERSION}_${MAC_BUNDLE_ARCH}.dmg"
 
-if [ ! -d "$APP" ]; then
-  echo "✗ 未生成 $APP —— 编译或打包失败，中止"
+if [ ! -d "$APP" ] || [ "$APP/Contents/MacOS/openless" -ot "src-tauri/target/release/openless" ]; then
+  echo "✗ $APP 缺失或早于刚编译的二进制（打包未完成），中止"
   exit 1
 fi
 
