@@ -1,20 +1,21 @@
-// 服务 → 本地模型：本地 ASR 模型的管理入口。含 Qwen3（macOS）/ Foundry Local +
-// sherpa-onnx（Windows）三条本地引擎。
+// 模型设置页（2.0）：本地 ASR 模型的下载与管理看板。
+// 含 Qwen3（macOS）/ Foundry Local + sherpa-onnx（Windows）三条本地引擎。
 //
-// 2026-08 重构：本地 ASR 不再有「启用开关」——本地 ASR 始终可用，是否激活由
-// 「服务 → AI 提供商」的 ASR 语音转写供应商决定：选到本地模型供应商即使用本地
-// 引擎（与 Apple 语音同理）。这里只保留模型下载 / 管理看板（<LocalAsr embedded />）。
+// 本地 ASR 不再有「启用开关」——是否激活由「服务 → AI 提供商」的 ASR
+// 语音转写供应商决定：选到本地模型供应商即使用本地引擎（与 Apple 语音同理）。
+// 这里是模型目录与管理（下载 / 删除 / 清理残留 / 测试 / 镜像源）；
+// 使用中的模型切换在渠道编辑器的 LocalModelPicker。
 
 import { useEffect, useState } from 'react';
-import type { PlatformCapabilities } from '../../lib/types';
+import type { PlatformCapabilities } from '../../../lib/types';
 import { useTranslation } from 'react-i18next';
-import { LocalAsr } from '../LocalAsr';
-import { detectOS } from '../../components/WindowChrome';
-import { getPlatformCapabilities } from '../../lib/platform';
-import { Card } from '../_atoms';
-import { ExperimentalSectionTitle } from './shared';
+import { LocalAsr } from '../../LocalAsr';
+import { detectOS } from '../../../components/WindowChrome';
+import { getPlatformCapabilities } from '../../../lib/platform';
+import { Card } from '../../_atoms';
+import { ExperimentalSectionTitle } from '../shared';
 
-export function LocalModelSection() {
+export function LocalModelsSection() {
   const { t } = useTranslation();
   const os = detectOS();
   const isWin = os === 'win';
@@ -68,8 +69,9 @@ export function LocalModelSection() {
           {t('settings.advanced.platformNotSupported')}
         </div>
       ) : (
-        /* 模型下载 / 管理看板（模型选择 · 下载 · 删除 · 测试 · 镜像源收纳）——
-           较大的内嵌框。启用入口在「AI 提供商 → ASR 语音转写」选择本地供应商。 */
+        /* 模型目录 / 管理看板（模型选择 · 下载 · 清理 · 删除 · 测试 · 镜像源）。
+           使用入口在「AI 提供商 → ASR 语音转写」选择本地供应商后，
+           由渠道编辑器内的 LocalModelPicker 切换使用中的模型。 */
         <div style={{ marginTop: 16, borderTop: '0.5px solid var(--ol-line)', paddingTop: 16 }}>
           <LocalAsr embedded />
         </div>

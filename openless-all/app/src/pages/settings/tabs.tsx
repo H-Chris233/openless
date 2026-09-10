@@ -16,7 +16,8 @@ import { MarketplaceSection } from './MarketplaceSection';
 import { PermissionsSection } from './PermissionsSection';
 import { DataStorageSection } from './DataStorageSection';
 import { CloudSyncSection } from './CloudSyncSection';
-import { LocalModelSection } from './LocalModelSection';
+import { LocalModelsSection } from './models/LocalModelsSection';
+import { LocalModelsNavContext } from './models/modelsNav';
 import { DebugToolsSection } from './DebugToolsSection';
 import { MultimodalPipelineSection } from './MultimodalPipelineSection';
 import { CodingAgentSection } from './CodingAgentSection';
@@ -163,16 +164,19 @@ export function ServicesTab() {
         })}
       </div>
       <div key={selectedView} ref={contentRef} className="ol-service-content">
-        {selectedView === 'llm' && <ProvidersSection kind="llm" />}
-        {selectedView === 'asr' && <ProvidersSection kind="asr" />}
-        {selectedView === 'omni' && <ProvidersSection />}
-        {selectedView === 'models' && <LocalModelSection />}
-        {selectedView === 'connections' && (
-          <>
-            <NetworkSection />
-            <MarketplaceSection />
-          </>
-        )}
+        {/* 渠道编辑器里的 LocalModelPicker 通过该上下文跳到本视图。 */}
+        <LocalModelsNavContext.Provider value={() => setView('models')}>
+          {selectedView === 'llm' && <ProvidersSection kind="llm" />}
+          {selectedView === 'asr' && <ProvidersSection kind="asr" />}
+          {selectedView === 'omni' && <ProvidersSection />}
+          {selectedView === 'models' && <LocalModelsSection />}
+          {selectedView === 'connections' && (
+            <>
+              <NetworkSection />
+              <MarketplaceSection />
+            </>
+          )}
+        </LocalModelsNavContext.Provider>
         {(selectedView === 'llm' || selectedView === 'asr') && (
           <p className="ol-service-storage-note">
             {t('settings.providers.credentialStorageNotice')}
