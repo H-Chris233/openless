@@ -102,7 +102,7 @@
   </tr>
   <tr>
     <td align="center" width="170">
-      <img src="https://github.com/jimmy54.png" width="80" height="80" alt="jimmy54" /><br/>
+      <img src="assets/people/jimmy54.png" width="80" height="80" alt="jimmy54" /><br/>
       <strong><a href="https://github.com/jimmy54" target="_blank" rel="noopener">jimmy54</a></strong><br/>
       <sub>macOS 打包与开发者账号</sub>
     </td>
