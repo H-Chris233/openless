@@ -87,7 +87,7 @@
     <td align="center" width="170">
       <img src="https://github.com/HKLHaoBin.png" width="80" height="80" alt="HKLHaoBin" /><br/>
       <strong><a href="https://github.com/HKLHaoBin" target="_blank" rel="noopener">HKLHaoBin</a></strong><br/>
-      <sub>安卓版作者</sub>
+      <sub>安卓版作者 / 安卓版维护者</sub>
     </td>
     <td align="center" width="170">
       <img src="assets/people/cooper.png" width="80" height="80" alt="Cooper" /><br/>
@@ -97,7 +97,14 @@
     <td align="center" width="170">
       <img src="https://github.com/aeoform.png" width="80" height="80" alt="aeoform" /><br/>
       <strong><a href="https://github.com/aeoform" target="_blank" rel="noopener">aeoform</a></strong><br/>
-      <sub>贡献者</sub>
+      <sub>贡献者 / Linux 维护者</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="170">
+      <img src="https://github.com/jimmy54.png" width="80" height="80" alt="jimmy54" /><br/>
+      <strong><a href="https://github.com/jimmy54" target="_blank" rel="noopener">jimmy54</a></strong><br/>
+      <sub>macOS 打包与开发者账号</sub>
     </td>
   </tr>
 </table>
