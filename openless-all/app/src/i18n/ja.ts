@@ -1256,6 +1256,7 @@ export const ja: typeof zhCN = {
         minimax: 'MiniMax（M3）',
         stepfun: 'StepFun（階躍星辰）',
         opencode: 'OpenCode Zen',
+        tencentTokenHub: 'Tencent Cloud TokenHub',
         customChatCompletions: 'カスタム · Chat Completions',
         customResponses: 'カスタム · Responses',
         customMessages: 'カスタム · Messages',
@@ -1274,6 +1275,7 @@ export const ja: typeof zhCN = {
         asrOpenAiCompatible: 'カスタム OpenAI 互換',
         asrXiaomiMimo: 'Xiaomi MiMo ASR',
         asrIflytek: 'iFlytek リアルタイム音声認識',
+        asrTencentCloud: 'Tencent Cloud Hunyuan リアルタイム ASR',
         asrElevenLabs: 'ElevenLabs Scribe',
         asrSherpaOnnxLocal: 'ローカル sherpa-onnx（実験的）',
         asrFoundryLocalWhisper: 'ローカル Whisper（Foundry Local）',
@@ -1316,6 +1318,13 @@ export const ja: typeof zhCN = {
       xfyunApiKeyLabel: 'API Key',
       xfyunNote:
         'iFlytek オープンプラットフォームの「リアルタイム音声認識」サービスページで AppID と API Key を取得します。音声は 16kHz / 16bit / モノラル PCM。標準版 API にホットワード引数はありません（iFlytek コンソールで個別ホットワードを設定）。言語はデフォルトで中国語（普通話）です。',
+      tencentCloudAppIdLabel: 'Tencent Cloud AppID',
+      tencentCloudSecretIdLabel: 'SecretID',
+      tencentCloudSecretKeyLabel: 'SecretKey',
+      tencentCloudNote:
+        'Tencent Cloud 音声認識 API の認証情報を使用します。既定の Hy-ASR-3.0-preview は中国語・英語・20 方言に対応します。Preview は 60 秒以内の 16kHz モノラル PCM のみ対応し、コンテキストとホットワード強化は未対応です。',
+      tencentTokenHubNote:
+        '現在オンラインの言語モデルのみを表示します。一部のモデルは常に思考を使用し、思考をオフにしてもモデル固有の動作を維持します。',
       localAsrActiveNotice:
         '現在「{{name}}」を使用中。「詳細設定」タブから切り替えまたは無効化できます。',
       localAsrTakeoverHint: '「{{name}}」を有効化すると ASR プロバイダーが引き継がれます。',
@@ -1709,9 +1718,10 @@ export const ja: typeof zhCN = {
       securityHint:
         '同一 LAN からのみアクセス可能で、ペアリングコードの入力が必要です。使わないときはオフにすることを推奨します。',
       certHint:
-        '初回アクセス時、ブラウザが証明書は信頼されていないと警告します。案内に従って「続行」を選択してください。',
+        'スマートフォンの「初回設定：このコンピュータを信頼」で証明書をインストールし信頼してください。旧バージョンからは一度設定が必要ですが、その後は再起動や IP 変更でも信頼が保持されます。',
       certTrustWarning:
-        'この証明書は本機のリモート入力サービス専用です（他の証明書を発行できません）。出所不明の証明書は信頼しないでください。不要になったらスマートフォンの設定から削除できます。',
+        '初回の証明書ダウンロードではコンピューターの身元を確認できず、LAN 上の悪意あるデバイスが中間者攻撃でルート証明書を置き換える可能性があります。信頼できる家庭内またはプライベートネットワークでのみインストールし、公共または共有ネットワークでは操作しないでください。ルート CA は証明書を発行でき、秘密鍵はこのコンピューターに保存されます。不要になったらスマートフォンから削除してください。',
+      certSetupLink: 'iPhone 証明書リンクをコピー',
       waitingStart:
         'サービスはまだ起動していません。スイッチを一度オフにしてからオンにしてください。アプリを再起動しないでください。',
       starting: 'リモート入力サービスを起動しています…',

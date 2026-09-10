@@ -21,6 +21,7 @@ const MIMO_PROVIDER_ID: &str = "xiaomi-mimo-asr";
 const DASHSCOPE_MULTIMODAL_PROVIDER_ID: &str = "bailian-fun-asr-flash";
 const ELEVENLABS_PROVIDER_ID: &str = "elevenlabs";
 const XFYUN_PROVIDER_ID: &str = "iflytek";
+const TENCENT_CLOUD_PROVIDER_ID: &str = "tencent-cloud";
 
 const ASR_PROVIDER_TYPES: &[(&str, &str)] = &[
     ("volcengine", "asrVolcengine"),
@@ -39,6 +40,7 @@ const ASR_PROVIDER_TYPES: &[(&str, &str)] = &[
     (OPENAI_COMPATIBLE_ASR_PROVIDER_ID, "asrOpenAiCompatible"),
     ("xiaomi-mimo-asr", "asrXiaomiMimo"),
     (XFYUN_PROVIDER_ID, "asrIflytek"),
+    (TENCENT_CLOUD_PROVIDER_ID, "asrTencentCloud"),
     ("foundry-local-whisper", "asrFoundryLocalWhisper"),
     ("local-whisper", "asrLocalWhisper"),
     ("sherpa-onnx-local", "asrSherpaOnnxLocal"),
@@ -65,6 +67,7 @@ const LLM_PROVIDER_TYPES: &[(&str, &str)] = &[
     ("minimax", "minimax"),
     ("stepfun", "stepfun"),
     ("opencode", "opencode"),
+    ("tencentTokenHub", "tencentTokenHub"),
     ("custom", "customChatCompletions"),
     ("custom_responses", "customResponses"),
     ("custom_messages", "customMessages"),
@@ -112,6 +115,7 @@ pub enum AuthRequirement {
     ApiKeyUnlessCustomEndpoint,
     Volcengine,
     Xfyun,
+    TencentCloud,
     OAuth,
 }
 
@@ -189,11 +193,14 @@ fn provider_descriptor_with_label(
             match id.as_str() {
                 "volcengine" => AuthRequirement::Volcengine,
                 XFYUN_PROVIDER_ID => AuthRequirement::Xfyun,
+                TENCENT_CLOUD_PROVIDER_ID => AuthRequirement::TencentCloud,
                 OPENAI_COMPATIBLE_ASR_PROVIDER_ID => AuthRequirement::EndpointModelOptionalApiKey,
                 _ => AuthRequirement::ApiKey,
             },
             match id.as_str() {
-                "volcengine" | XFYUN_PROVIDER_ID => ValidationProbe::AsrSilenceAllowsNoFinal,
+                "volcengine" | XFYUN_PROVIDER_ID | TENCENT_CLOUD_PROVIDER_ID => {
+                    ValidationProbe::AsrSilenceAllowsNoFinal
+                }
                 "stepfun" => ValidationProbe::StepfunNoSpeech,
                 DASHSCOPE_MULTIMODAL_PROVIDER_ID => ValidationProbe::AsrNonSilent,
                 _ => ValidationProbe::AsrSilence,
@@ -305,6 +312,7 @@ pub enum ActiveAsrProviderKind {
     WhisperCompatible,
     Volcengine,
     Xfyun,
+    TencentCloud,
 }
 
 /// Non-secret facts read by a platform credential adapter. Core evaluates
@@ -321,6 +329,9 @@ pub struct CredentialConfiguration {
     pub volcengine_resource_id: bool,
     pub xfyun_app_id: bool,
     pub xfyun_api_key: bool,
+    pub tencent_cloud_app_id: bool,
+    pub tencent_cloud_secret_id: bool,
+    pub tencent_cloud_secret_key: bool,
     pub llm_api_key: bool,
     pub llm_endpoint: bool,
     pub llm_endpoint_matches_default: bool,
@@ -404,6 +415,11 @@ pub fn auth_requirement_satisfied(
         }
         AuthRequirement::Volcengine => volcengine_configured(configuration),
         AuthRequirement::Xfyun => configuration.xfyun_app_id && configuration.xfyun_api_key,
+        AuthRequirement::TencentCloud => {
+            configuration.tencent_cloud_app_id
+                && configuration.tencent_cloud_secret_id
+                && configuration.tencent_cloud_secret_key
+        }
         AuthRequirement::OAuth => configuration.codex_oauth && model,
     }
 }
@@ -419,7 +435,8 @@ pub fn api_key_required(
     match descriptor.auth_requirement {
         AuthRequirement::None
         | AuthRequirement::EndpointModelOptionalApiKey
-        | AuthRequirement::OAuth => false,
+        | AuthRequirement::OAuth
+        | AuthRequirement::TencentCloud => false,
         AuthRequirement::ApiKeyUnlessCustomEndpoint => {
             let Some(endpoint) = configured_endpoint.filter(|value| !value.trim().is_empty())
             else {
@@ -481,6 +498,7 @@ pub fn default_asr_model(provider_type: &str) -> Option<&'static str> {
         "orcarouter" => Some(crate::asr::mimo::ORCAROUTER_DEFAULT_MODEL),
         "zenmux" => Some(crate::asr::whisper::ZENMUX_DEFAULT_MODEL),
         "xiaomi-mimo-asr" => Some(crate::asr::mimo::DEFAULT_MODEL),
+        TENCENT_CLOUD_PROVIDER_ID => Some(crate::asr::tencent_cloud::DEFAULT_MODEL),
         _ => None,
     }
 }
@@ -502,6 +520,7 @@ pub fn default_llm_endpoint(provider_type: &str) -> Option<&'static str> {
         "codingPlanX" => Some("https://api.codingplanx.ai/v1"),
         "minimax" => Some("https://api.minimaxi.com/v1"),
         "stepfun" => Some("https://api.stepfun.com/v1"),
+        "tencentTokenHub" => Some("https://tokenhub.tencentmaas.com/v1"),
         _ => None,
     }
 }
@@ -522,8 +541,75 @@ pub fn default_llm_model(provider_type: &str) -> Option<&'static str> {
         "codingPlanX" => Some("gpt-5-mini"),
         "minimax" => Some("MiniMax-M3"),
         "stepfun" => Some("step-1o-turbo-vision"),
+        "tencentTokenHub" => Some("hy3"),
         _ => None,
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TokenHubChatModelPolicy {
+    Hy3,
+    ToggleThinking,
+    QwenThinking,
+    AdaptiveThinking,
+    AlwaysThinking,
+    KimiK3,
+    Plain,
+}
+
+pub(crate) fn tokenhub_chat_model_policy(model: &str) -> Option<TokenHubChatModelPolicy> {
+    use TokenHubChatModelPolicy::*;
+
+    // ponytail: /models lacks capability metadata; keep this one family classifier until it does.
+    let model = model.trim().to_ascii_lowercase();
+    let policy = if matches!(model.as_str(), "hy3" | "hy3-preview") {
+        Hy3
+    } else if model.starts_with("qwen3.5-") {
+        QwenThinking
+    } else if model == "minimax-m3" {
+        AdaptiveThinking
+    } else if model == "kimi-k3" {
+        KimiK3
+    } else if matches!(
+        model.as_str(),
+        "glm-5.3" | "glm-5.3-flash" | "minimax-m2.7" | "minimax-m2.5"
+    ) || model.starts_with("kimi-k2.7-code")
+    {
+        AlwaysThinking
+    } else if model.starts_with("hy4-")
+        || model.starts_with("deepseek-")
+        || model.starts_with("deepseek/")
+        || matches!(
+            model.as_str(),
+            "glm-5.2"
+                | "glm-5.1"
+                | "glm-5"
+                | "glm-5-turbo"
+                | "glm-5v-turbo"
+                | "kimi-k2.6"
+                | "kimi-k2.5"
+        )
+    {
+        ToggleThinking
+    } else {
+        let minimax_language = model
+            .strip_prefix("minimax-m")
+            .and_then(|suffix| suffix.chars().next())
+            .is_some_and(|character| character.is_ascii_digit());
+        if model.starts_with("hy-mt2-")
+            || model.starts_with("hy-role")
+            || model.starts_with("hunyuan-role")
+            || model.starts_with("glm-")
+            || model.starts_with("kimi-")
+            || minimax_language
+            || model.starts_with("mimo-v")
+        {
+            Plain
+        } else {
+            return None;
+        }
+    };
+    Some(policy)
 }
 
 pub fn default_omni_endpoint(provider_type: &str) -> Option<&'static str> {
@@ -577,6 +663,7 @@ pub fn active_asr_provider_kind(id: &str) -> ActiveAsrProviderKind {
         DASHSCOPE_MULTIMODAL_PROVIDER_ID => ActiveAsrProviderKind::DashScopeMultimodal,
         ELEVENLABS_PROVIDER_ID => ActiveAsrProviderKind::ElevenLabs,
         XFYUN_PROVIDER_ID => ActiveAsrProviderKind::Xfyun,
+        TENCENT_CLOUD_PROVIDER_ID => ActiveAsrProviderKind::TencentCloud,
         value if is_whisper_compatible_provider(value) => ActiveAsrProviderKind::WhisperCompatible,
         _ => ActiveAsrProviderKind::Volcengine,
     }
@@ -608,6 +695,10 @@ pub fn is_elevenlabs_provider(id: &str) -> bool {
 
 pub fn is_xfyun_provider(id: &str) -> bool {
     id == XFYUN_PROVIDER_ID
+}
+
+pub fn is_tencent_cloud_provider(id: &str) -> bool {
+    id == TENCENT_CLOUD_PROVIDER_ID
 }
 
 pub fn is_whisper_compatible_provider(id: &str) -> bool {
@@ -1021,6 +1112,49 @@ mod tests {
     }
 
     #[test]
+    fn tencent_cloud_asr_and_tokenhub_supply_defaults_and_credentials() {
+        assert!(crate::cloud_providers::SHARED_CLOUD_ASR_PROVIDER_TYPES.contains(&"tencent-cloud"));
+        assert!(
+            crate::cloud_providers::SHARED_CLOUD_LLM_PROVIDER_TYPES.contains(&"tencentTokenHub")
+        );
+        let asr = provider_descriptor(ProviderKind::Asr, "tencent-cloud").unwrap();
+        assert_eq!(asr.label_key, "asrTencentCloud");
+        assert_eq!(
+            asr.default_model.as_deref(),
+            Some(crate::asr::tencent_cloud::DEFAULT_MODEL)
+        );
+        assert_eq!(asr.auth_requirement, AuthRequirement::TencentCloud);
+        assert_eq!(
+            asr.validation_probe,
+            ValidationProbe::AsrSilenceAllowsNoFinal
+        );
+        let mut configuration = CredentialConfiguration::default();
+        assert!(!auth_requirement_satisfied(&asr, &configuration));
+        configuration.tencent_cloud_app_id = true;
+        configuration.tencent_cloud_secret_id = true;
+        configuration.tencent_cloud_secret_key = true;
+        assert!(auth_requirement_satisfied(&asr, &configuration));
+        assert_eq!(
+            active_asr_provider_kind("tencent-cloud"),
+            ActiveAsrProviderKind::TencentCloud
+        );
+
+        let llm = provider_descriptor(ProviderKind::Llm, "tencentTokenHub").unwrap();
+        assert_eq!(llm.label_key, "tencentTokenHub");
+        assert_eq!(
+            llm.default_endpoint.as_deref(),
+            Some("https://tokenhub.tencentmaas.com/v1")
+        );
+        assert_eq!(llm.default_model.as_deref(), Some("hy3"));
+        assert_eq!(
+            llm.auth_requirement,
+            AuthRequirement::ApiKeyUnlessCustomEndpoint
+        );
+        assert_eq!(llm.default_request_format, None);
+        assert!(llm.supported_request_formats.is_empty());
+    }
+
+    #[test]
     fn descriptors_are_the_single_source_for_defaults_auth_and_probes() {
         let compatible = provider_descriptor(ProviderKind::Asr, "openai-compatible").unwrap();
         assert_eq!(
@@ -1082,6 +1216,19 @@ mod tests {
                 .collect::<std::collections::HashSet<_>>();
             assert_eq!(unique.len(), descriptors.len());
         }
+    }
+
+    #[test]
+    fn browser_provider_descriptor_fixture_matches_core() {
+        let fixture: Vec<ProviderDescriptor> = serde_json::from_str(include_str!(
+            "../../../src/lib/ipc/mock-provider-descriptors.json"
+        ))
+        .unwrap();
+        let actual = [ProviderKind::Llm, ProviderKind::Asr, ProviderKind::Omni]
+            .into_iter()
+            .flat_map(provider_descriptors)
+            .collect::<Vec<_>>();
+        assert_eq!(fixture, actual);
     }
 
     #[test]

@@ -37,6 +37,17 @@ export const de: typeof zhCN = {
     scope:
       'Synchronisiert Wörterbucheinträge, Korrekturen, Stilsymbole und allgemeine Einstellungen. API-Schlüssel, Zugangsdaten und Geräteeinstellungen bleiben auf diesem Gerät.',
   },
+  macDictationKey: {
+    Changed: 'Der Shortcut wurde während des Speicherns geändert. Bitte erneut versuchen.',
+    label: 'Mac-Diktat-Taste',
+    description:
+      'Ersetzt den aktuellen Diktat-Shortcut durch die Mikrofontaste. Beim Beenden von OpenLess wird die Taste an macOS zurückgegeben.',
+    Permission:
+      'Erlaube OpenLess unter macOS „Datenschutz & Sicherheit → Bedienungshilfen“ und versuche es erneut.',
+    Busy: 'Beende erst die aktuelle Diktat-Sitzung, bevor du den Shortcut änderst.',
+    Unavailable:
+      'Der Shortcut konnte nicht aktiviert werden; die gespeicherte Zuordnung ist unverändert. Versuche es erneut oder wähle eine andere Taste.',
+  },
   app: {
     name: 'OpenLess',
     tagline: 'Natürlich sprechen, klar schreiben',
@@ -1276,6 +1287,7 @@ export const de: typeof zhCN = {
         'Die beiden Modi speichern ihre Zugangsdaten vollständig getrennt. Beim Wechsel bleiben die Daten des anderen Modus gespeichert und werden beim Zurückwechseln wieder verwendet.',
       presets: {
         opencode: 'OpenCode Zen',
+        tencentTokenHub: 'Tencent Cloud TokenHub',
         customChatCompletions: 'Benutzerdefiniert · Chat Completions',
         customResponses: 'Benutzerdefiniert · Responses',
         customMessages: 'Benutzerdefiniert · Messages',
@@ -1296,6 +1308,7 @@ export const de: typeof zhCN = {
         stepfun: 'StepFun',
         custom: 'Benutzerdefiniert',
         asrVolcengine: 'Volcengine bigasr',
+        asrTencentCloud: 'Tencent Cloud Hunyuan Echtzeit-ASR',
         asrBailian: 'Alibaba Bailian Echtzeit-ASR',
         asrBailianQwen3: 'Bailian Qwen3 Realtime ASR',
         asrBailianFunAsrFlash: 'Bailian Fun-ASR-Flash (Aufnahmedatei)',
@@ -1351,6 +1364,13 @@ export const de: typeof zhCN = {
       xfyunApiKeyLabel: 'API-Schlüssel',
       xfyunNote:
         'AppID und API-Schlüssel findest du auf der Dienstseite „Realtime ASR“ der iFlytek Open Platform. Audioformat: 16 kHz / 16 Bit / Mono-PCM. Die Standard-API hat keinen Begriffsparameter; persönliche Begriffe werden in der iFlytek-Konsole eingerichtet. Standardsprache ist Mandarin-Chinesisch.',
+      tencentCloudAppIdLabel: 'Tencent Cloud AppID',
+      tencentCloudSecretIdLabel: 'SecretID',
+      tencentCloudSecretKeyLabel: 'SecretKey',
+      tencentCloudNote:
+        'Verwendet die Zugangsdaten der Tencent-Cloud-Spracherkennung. Das Standardmodell Hy-ASR-3.0-preview unterstützt Chinesisch, Englisch und 20 Dialekte; Preview nimmt nur Mono-PCM mit 16 kHz bis 60 Sekunden an und unterstützt noch keinen Kontext oder Hotword-Boosting.',
+      tencentTokenHubNote:
+        'Es werden nur aktuell verfügbare Sprachmodelle angezeigt. Einige Modelle nutzen immer Reasoning; das Ausschalten von Reasoning behält das feste Verhalten des jeweiligen Modells bei.',
       localAsrActiveNotice:
         'Lokale ASR ({{name}}) ist aktuell aktiv. Wechsle oder deaktiviere sie unter „Erweitert“.',
       localAsrTakeoverHint:
@@ -1784,9 +1804,10 @@ export const de: typeof zhCN = {
       securityHint:
         'Nur im selben lokalen Netzwerk erreichbar und durch den Kopplungscode geschützt. Bei Nichtgebrauch ausschalten.',
       certHint:
-        'Beim ersten Besuch warnt der Browser vor einem nicht vertrauenswürdigen Zertifikat. Wähle „Fortfahren“.',
+        'Öffne auf dem Smartphone „Erstmalige Einrichtung: diesem Computer vertrauen“, um das Zertifikat zu installieren und ihm zu vertrauen. Ältere Versionen erfordern eine einmalige Einrichtung; danach bleibt die Vertrauensstellung über Neustarts und IP-Wechsel hinweg erhalten.',
       certTrustWarning:
-        'Das Zertifikat wird nur vom Ferneingabedienst dieses Computers verwendet und kann keine anderen Zertifikate ausstellen. Vertraue nie Zertifikaten unbekannter Herkunft und entferne es aus den Smartphone-Einstellungen, sobald du es nicht mehr benötigst.',
+        'Beim ersten Zertifikatsdownload kann die Identität des Computers nicht geprüft werden: Ein bösartiges Gerät im lokalen Netzwerk könnte das Root-Zertifikat in einem Man-in-the-Middle-Angriff ersetzen. Installiere es nur in einem vertrauenswürdigen Heim- oder Privatnetzwerk, niemals in öffentlichen oder geteilten Netzwerken. Die Root-CA kann Zertifikate ausstellen, ihr privater Schlüssel bleibt auf diesem Computer; entferne sie vom Smartphone, wenn du sie nicht mehr brauchst.',
+      certSetupLink: 'iPhone-Zertifikatslink kopieren',
       waitingStart:
         'Der Dienst läuft noch nicht. Schalte die Funktion aus und wieder ein. Ein App-Neustart ist nicht erforderlich.',
       starting: 'Ferneingabedienst wird gestartet…',

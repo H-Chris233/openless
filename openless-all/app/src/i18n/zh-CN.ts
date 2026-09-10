@@ -33,6 +33,14 @@ export const zhCN = {
     confirmDelete: '删除备份',
     scope: '同步词典、纠正规则、风格图标与常用偏好。API 密钥、登录凭据及设备专属设置保留在本机。',
   },
+  macDictationKey: {
+    Changed: '保存期间快捷键已改变，请重试。',
+    label: 'Mac 听写键',
+    description: '用麦克风图标键替换当前听写快捷键。退出 OpenLess 后，此键交回 macOS。',
+    Permission: '请在 macOS「隐私与安全性 → 辅助功能」中允许 OpenLess 后重试。',
+    Busy: '请先结束当前听写，再更改快捷键。',
+    Unavailable: '无法启用此快捷键，已保存的绑定未改变。请重试或选择其他键。',
+  },
   app: {
     name: 'OpenLess',
     tagline: '自然说话，完美书写',
@@ -1200,6 +1208,7 @@ export const zhCN = {
         minimax: 'MiniMax（M3）',
         stepfun: 'StepFun（阶跃星辰）',
         opencode: 'OpenCode Zen',
+        tencentTokenHub: '腾讯云 TokenHub',
         customChatCompletions: '自定义 · Chat Completions',
         customResponses: '自定义 · Responses',
         customMessages: '自定义 · Messages',
@@ -1218,6 +1227,7 @@ export const zhCN = {
         asrOpenAiCompatible: '自定义 OpenAI 兼容',
         asrXiaomiMimo: '小米 MiMo ASR',
         asrIflytek: '讯飞实时语音转写',
+        asrTencentCloud: '腾讯云混元实时 ASR',
         asrElevenLabs: 'ElevenLabs Scribe',
         asrSherpaOnnxLocal: '本地 sherpa-onnx（实验性）',
         asrFoundryLocalWhisper: '本地 Whisper（Foundry Local）',
@@ -1259,6 +1269,13 @@ export const zhCN = {
       xfyunApiKeyLabel: 'API Key',
       xfyunNote:
         '在讯飞开放平台「实时语音转写」服务页获取 AppID 与 API Key。音频为 16kHz/16bit/单声道 PCM；标准版接口暂不支持热词参数（可在讯飞控制台配置个性化热词），语种默认中文普通话。',
+      tencentCloudAppIdLabel: '腾讯云 AppID',
+      tencentCloudSecretIdLabel: 'SecretID',
+      tencentCloudSecretKeyLabel: 'SecretKey',
+      tencentCloudNote:
+        '使用腾讯云「语音识别」服务的 API 密钥。默认 Hy-ASR-3.0-preview 支持中英与 20 种方言；Preview 仅支持 60 秒以内的 16kHz 单声道 PCM，暂不支持上下文或热词增强。',
+      tencentTokenHubNote:
+        '仅显示当前在线的语言模型。部分模型始终启用思考；关闭思考开关时将沿用该模型的固定行为。',
       localAsrActiveNotice: '当前已启用「{{name}}」，可在「高级」中切换或禁用。',
       localAsrTakeoverHint: '启动「{{name}}」后，ASR 提供商将被接管。',
       asrProviderTakenOver:
@@ -1632,9 +1649,9 @@ export const zhCN = {
       portInUse: '端口 {{port}} 被占用，请更换',
       startError: '远程输入服务启动失败：{{reason}}',
       securityHint: '仅同一局域网可访问，需输入配对码；不用时建议关闭。',
-      certHint: '首次访问浏览器会提示证书不受信任，按提示选择"继续访问"。',
-      certTrustWarning:
-        '该证书仅用于本机远程输入服务（不能签发其他证书），请勿信任来源不明的证书；不再使用时可在手机系统设置中移除。',
+      certHint: "首次连接请在手机页面展开“首次设置：信任此电脑”，安装并信任证书。升级旧版需设置一次；以后重启和换 IP 会保留信任。",
+      certTrustWarning: "首次证书下载无法验证电脑身份，恶意局域网设备可能通过中间人攻击替换根证书。仅在可信的家庭或私人网络中安装，勿在公共或共享网络操作。根证书具备签发能力，私钥保存在这台电脑；不再使用时请从手机移除。",
+      certSetupLink: "复制 iPhone 证书链接",
       waitingStart: '服务尚未启动。请关闭开关再打开一次，不要重启软件。',
       starting: '正在启动远程输入服务…',
       urlsStale: '这些地址来自上次运行，可能已经过期。',

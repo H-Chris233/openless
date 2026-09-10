@@ -32,6 +32,7 @@ import {
   type SettingsSectionId,
 } from '../pages/settings/navigation';
 import { ChannelEditorHostContext } from '../pages/settings/ChannelEditorHostContext';
+import { ProviderLeaveContext, useProviderForm } from '../pages/settings/ProviderForm';
 
 export type { SettingsSectionId } from '../pages/settings/navigation';
 
@@ -56,6 +57,8 @@ export function SettingsModal({
   closing = false,
 }: SettingsModalProps) {
   const { t, i18n } = useTranslation();
+  // 渠道表单的写入在关闭/切节前收敛（异步保存不丢草稿）；版本计数不含凭据内容。
+  const providerForm = useProviderForm();
   const mobile = useMobileLayout();
   const conservative = useConservativeLayout();
   const [section, setSection] = useState<SettingsSectionId>(initialSettingsSection ?? 'general');
@@ -74,8 +77,10 @@ export function SettingsModal({
   const [channelBackground, setChannelBackground] = useState<HTMLDivElement | null>(null);
   const channelCloseRef = useRef<(() => void) | null>(null);
   const closeSettings = () => {
-    channelCloseRef.current?.();
-    onClose();
+    void providerForm.finish(() => {
+      channelCloseRef.current?.();
+      onClose();
+    });
   };
   const supportsShortcuts = platformCaps?.supportsDesktopHotkey ?? os !== 'android';
   const sections = visibleSettingsSections(supportsShortcuts).map((item) => ({
@@ -186,11 +191,13 @@ export function SettingsModal({
   };
 
   const selectSection = (next: SettingsSectionId, fromSearch = false) => {
-    channelCloseRef.current?.();
-    setSection(next);
-    setAdvancedPage(null);
-    setQuery('');
-    if (fromSearch) window.requestAnimationFrame(() => headingRef.current?.focus());
+    void providerForm.finish(() => {
+      channelCloseRef.current?.();
+      setSection(next);
+      setAdvancedPage(null);
+      setQuery('');
+      if (fromSearch) window.requestAnimationFrame(() => headingRef.current?.focus());
+    });
   };
 
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -283,419 +290,421 @@ export function SettingsModal({
   );
 
   return (
-    <div
-      onClick={mobile ? undefined : closeSettings}
-      // 打开动画：遮罩淡入 + 面板弹入（global.css ol-modal-* keyframes，纯
-      // opacity/transform，合成器友好）。此前设置面板是瞬间出现的。
-      style={{
-        position: mobile ? 'fixed' : 'absolute',
-        inset: 0,
-        background: mobile ? 'var(--ol-surface)' : 'var(--ol-overlay-bg)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        padding: mobile ? 0 : '64px 28px 24px',
-        zIndex: mobile ? 70 : 50,
-        animation: mobile
-          ? undefined
-          : closing
-            ? 'ol-modal-backdrop-in 0.18s var(--ol-motion-soft) reverse both'
-            : 'ol-modal-backdrop-in 0.2s var(--ol-motion-soft) both',
-      }}
-    >
+    <ProviderLeaveContext.Provider value={providerForm.register}>
       <div
-        ref={surfaceRef}
-        role="dialog"
-        // Existing menus and child dialogs portal to document.body. Keep those
-        // accessible; FloatingShell makes the covered application inert.
-        aria-label={t('shell.footer.settings')}
-        className="ol-settings-surface"
-        data-ol-mobile={mobile ? 'true' : undefined}
-        onClick={(event) => event.stopPropagation()}
-        onKeyDown={handleKeyDown}
+        onClick={mobile ? undefined : closeSettings}
+        // 打开动画：遮罩淡入 + 面板弹入（global.css ol-modal-* keyframes，纯
+        // opacity/transform，合成器友好）。此前设置面板是瞬间出现的。
         style={{
-          width: '100%',
-          maxWidth: mobile ? undefined : 960,
-          height: '100%',
-          maxHeight: mobile ? undefined : 680,
-          minHeight: 0,
-          background: 'var(--ol-settings-content-bg)',
-          borderRadius: mobile ? 0 : 14,
-          border: mobile ? 'none' : '0.5px solid var(--ol-line)',
-          boxShadow: mobile ? 'none' : 'var(--ol-shadow-xl)',
+          position: mobile ? 'fixed' : 'absolute',
+          inset: 0,
+          background: mobile ? 'var(--ol-surface)' : 'var(--ol-overlay-bg)',
           display: 'flex',
-          flexDirection: 'column',
-          overflow: 'hidden',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: mobile ? 0 : '64px 28px 24px',
+          zIndex: mobile ? 70 : 50,
           animation: mobile
-            ? closing
-              ? 'ol-mobile-sheet-up 0.22s var(--ol-motion-soft) reverse both'
-              : 'ol-mobile-sheet-up 0.26s var(--ol-motion-spring) both'
+            ? undefined
             : closing
-              ? 'ol-modal-card-in 0.2s var(--ol-motion-soft) reverse both'
-              : 'ol-modal-card-in 0.28s var(--ol-motion-spring) both',
+              ? 'ol-modal-backdrop-in 0.18s var(--ol-motion-soft) reverse both'
+              : 'ol-modal-backdrop-in 0.2s var(--ol-motion-soft) both',
         }}
       >
-        {/* 桌面端不再有横跨两栏的标题栏；
-            左侧栏与右侧内容各自通到顶，标题/自动保存/关闭并入右栏顶部。
-            移动端保留整宽 header（标题 + 关闭 + 整行搜索）。 */}
-        {mobile && (
-          <header
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              flexWrap: 'wrap',
-              gap: 12,
-              padding: 'calc(12px + env(safe-area-inset-top, 0px)) 16px 12px',
-              borderBottom: '0.5px solid var(--ol-line-soft)',
-              flexShrink: 0,
-            }}
-          >
-            <div style={{ flex: 1, order: 0, fontSize: 17, fontWeight: 650 }}>
-              {t('shell.footer.settings')}
-            </div>
-            <button
-              ref={closeRef}
-              type="button"
-              onClick={closeSettings}
-              aria-label={t('common.close')}
-              style={{ ...iconButtonStyle, order: 1 }}
-            >
-              <Icon name="close" size={17} />
-            </button>
-            <div style={{ order: 2, flex: '1 0 100%', minWidth: 0 }}>{searchBox}</div>
-          </header>
-        )}
         <div
+          ref={surfaceRef}
+          role="dialog"
+          // Existing menus and child dialogs portal to document.body. Keep those
+          // accessible; FloatingShell makes the covered application inert.
+          aria-label={t('shell.footer.settings')}
+          className="ol-settings-surface"
+          data-ol-mobile={mobile ? 'true' : undefined}
+          onClick={(event) => event.stopPropagation()}
+          onKeyDown={handleKeyDown}
           style={{
-            flex: 1,
+            width: '100%',
+            maxWidth: mobile ? undefined : 960,
+            height: '100%',
+            maxHeight: mobile ? undefined : 680,
             minHeight: 0,
+            background: 'var(--ol-settings-content-bg)',
+            borderRadius: mobile ? 0 : 14,
+            border: mobile ? 'none' : '0.5px solid var(--ol-line)',
+            boxShadow: mobile ? 'none' : 'var(--ol-shadow-xl)',
             display: 'flex',
-            flexDirection: mobile ? 'column' : 'row',
+            flexDirection: 'column',
+            overflow: 'hidden',
+            animation: mobile
+              ? closing
+                ? 'ol-mobile-sheet-up 0.22s var(--ol-motion-soft) reverse both'
+                : 'ol-mobile-sheet-up 0.26s var(--ol-motion-spring) both'
+              : closing
+                ? 'ol-modal-card-in 0.2s var(--ol-motion-soft) reverse both'
+                : 'ol-modal-card-in 0.28s var(--ol-motion-spring) both',
           }}
         >
-          <aside
-            style={{
-              width: mobile ? undefined : 214,
-              flexShrink: 0,
-              minHeight: 0,
-              overflow: 'auto',
-              padding: mobile ? '8px 12px' : '16px 12px',
-              background: 'var(--ol-settings-rail-bg)',
-              borderRight: mobile ? undefined : '0.5px solid var(--ol-line-soft)',
-              borderBottom: mobile ? '0.5px solid var(--ol-line-soft)' : undefined,
-              display: 'flex',
-              flexDirection: 'column',
-              gap: 12,
-            }}
-          >
-            {!mobile && searchBox}
-            <nav
-              ref={railNavRef}
-              aria-label={t('modal.categoriesLabel')}
-              className="ol-thinscroll"
+          {/* 桌面端不再有横跨两栏的标题栏；
+            左侧栏与右侧内容各自通到顶，标题/自动保存/关闭并入右栏顶部。
+            移动端保留整宽 header（标题 + 关闭 + 整行搜索）。 */}
+          {mobile && (
+            <header
               style={{
-                position: 'relative',
                 display: 'flex',
-                flexDirection: mobile ? 'row' : 'column',
-                gap: 4,
-                overflowX: mobile ? 'auto' : undefined,
+                alignItems: 'center',
+                flexWrap: 'wrap',
+                gap: 12,
+                padding: 'calc(12px + env(safe-area-inset-top, 0px)) 16px 12px',
+                borderBottom: '0.5px solid var(--ol-line-soft)',
+                flexShrink: 0,
               }}
             >
-              {/* 滑动蓝框：top/height 跟随当前分类按钮，spring 曲线过渡。 */}
-              {!mobile && railThumb && (
-                <div
-                  aria-hidden="true"
-                  style={{
-                    position: 'absolute',
-                    left: 0,
-                    right: 0,
-                    top: railThumb.top,
-                    height: railThumb.height,
-                    borderRadius: 8,
-                    background: 'var(--ol-blue-soft)',
-                    pointerEvents: 'none',
-                    transition:
-                      'top 0.26s var(--ol-motion-spring), height 0.2s var(--ol-motion-soft)',
-                  }}
-                />
-              )}
-              {sections.map((item) => {
-                const active = !searching && section === item.id;
-                return (
-                  <button
-                    key={item.id}
-                    type="button"
-                    aria-current={active ? 'page' : undefined}
-                    ref={(el) => {
-                      if (el) railBtnRefs.current.set(item.id, el);
-                      else railBtnRefs.current.delete(item.id);
-                    }}
-                    onClick={() => selectSection(item.id)}
-                    className={
-                      mobile
-                        ? active
-                          ? 'ol-nav-btn ol-nav-btn-active'
-                          : 'ol-nav-btn'
-                        : 'ol-settings-rail-btn'
-                    }
-                    style={
-                      mobile
-                        ? {
-                            ...navButtonStyle,
-                            flexShrink: 0,
-                            padding: '8px 10px',
-                            whiteSpace: 'nowrap',
-                            background: active ? 'var(--ol-blue-soft)' : 'transparent',
-                            color: active ? 'var(--ol-blue)' : 'var(--ol-ink-2)',
-                            fontWeight: active ? 600 : 400,
-                          }
-                        : {
-                            ...navButtonStyle,
-                            position: 'relative',
-                            zIndex: 1,
-                            flexShrink: 0,
-                            padding: '10px',
-                            whiteSpace: 'normal',
-                          }
-                    }
-                  >
-                    {!mobile && <Icon name={item.icon} size={16} />}
-                    <span style={{ minWidth: 0, overflowWrap: mobile ? undefined : 'anywhere' }}>
-                      {item.title}
-                    </span>
-                  </button>
-                );
-              })}
-            </nav>
-            {!mobile && <HelpLinks />}
-          </aside>
+              <div style={{ flex: 1, order: 0, fontSize: 17, fontWeight: 650 }}>
+                {t('shell.footer.settings')}
+              </div>
+              <button
+                ref={closeRef}
+                type="button"
+                onClick={closeSettings}
+                aria-label={t('common.close')}
+                style={{ ...iconButtonStyle, order: 1 }}
+              >
+                <Icon name="close" size={17} />
+              </button>
+              <div style={{ order: 2, flex: '1 0 100%', minWidth: 0 }}>{searchBox}</div>
+            </header>
+          )}
           <div
-            ref={setChannelContainer}
-            className="ol-settings-content-pane"
-            data-ol-advanced={section === 'advanced' && !searching ? 'true' : undefined}
             style={{
               flex: 1,
-              minWidth: 0,
               minHeight: 0,
               display: 'flex',
-              flexDirection: 'column',
-              position: 'relative',
+              flexDirection: mobile ? 'column' : 'row',
             }}
           >
-            <ChannelEditorHostContext.Provider
-              value={{
-                container: channelContainer,
-                background: channelBackground,
-                registerClose: (close) => {
-                  channelCloseRef.current = close;
-                },
+            <aside
+              style={{
+                width: mobile ? undefined : 214,
+                flexShrink: 0,
+                minHeight: 0,
+                overflow: 'auto',
+                padding: mobile ? '8px 12px' : '16px 12px',
+                background: 'var(--ol-settings-rail-bg)',
+                borderRight: mobile ? undefined : '0.5px solid var(--ol-line-soft)',
+                borderBottom: mobile ? '0.5px solid var(--ol-line-soft)' : undefined,
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 12,
               }}
             >
-              <div
-                ref={setChannelBackground}
-                style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}
+              {!mobile && searchBox}
+              <nav
+                ref={railNavRef}
+                aria-label={t('modal.categoriesLabel')}
+                className="ol-thinscroll"
+                style={{
+                  position: 'relative',
+                  display: 'flex',
+                  flexDirection: mobile ? 'row' : 'column',
+                  gap: 4,
+                  overflowX: mobile ? 'auto' : undefined,
+                }}
               >
-                <SavedToast
-                  saveState={savedToast.state}
-                  message={savedToast.message}
-                  slideFrom="top"
-                  offsetStyle={{ position: 'absolute', top: 12, right: 16 }}
-                />
-                {/* 桌面端：分类标题 + 自动保存提示 + 关闭按钮组成右栏自己的顶栏
-                （仿系统设置：工具条只属于内容区，不再横跨左栏）。 */}
-                {(!mobile || activeAdvancedPage) && (
+                {/* 滑动蓝框：top/height 跟随当前分类按钮，spring 曲线过渡。 */}
+                {!mobile && railThumb && (
                   <div
+                    aria-hidden="true"
                     style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 12,
-                      padding: '18px 24px 0',
-                      flexShrink: 0,
+                      position: 'absolute',
+                      left: 0,
+                      right: 0,
+                      top: railThumb.top,
+                      height: railThumb.height,
+                      borderRadius: 8,
+                      background: 'var(--ol-blue-soft)',
+                      pointerEvents: 'none',
+                      transition:
+                        'top 0.26s var(--ol-motion-spring), height 0.2s var(--ol-motion-soft)',
                     }}
-                  >
-                    {activeAdvancedPage && (
-                      <button
-                        type="button"
-                        className="ol-settings-back"
-                        onClick={backToAdvanced}
-                        aria-label={t('modal.backToAdvanced')}
-                        title={t('modal.backToAdvanced')}
-                      >
-                        <Icon name="chevLeft" size={19} />
-                      </button>
-                    )}
-                    <h2
-                      ref={headingRef}
-                      tabIndex={-1}
-                      style={{
-                        margin: 0,
-                        flex: 1,
-                        minWidth: 0,
-                        fontSize: 21,
-                        fontWeight: 650,
-                        letterSpacing: '-0.025em',
-                        outline: 'none',
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap',
-                      }}
-                    >
-                      {contentTitle}
-                    </h2>
-                    {!mobile && (
-                      <>
-                        <span style={{ color: 'var(--ol-ink-3)', fontSize: 12, flexShrink: 0 }}>
-                          {t('modal.autoSaveHint')}
-                        </span>
-                        <button
-                          ref={closeRef}
-                          type="button"
-                          onClick={closeSettings}
-                          aria-label={t('common.close')}
-                          style={iconButtonStyle}
-                        >
-                          <Icon name="close" size={17} />
-                        </button>
-                      </>
-                    )}
-                  </div>
+                  />
                 )}
+                {sections.map((item) => {
+                  const active = !searching && section === item.id;
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      aria-current={active ? 'page' : undefined}
+                      ref={(el) => {
+                        if (el) railBtnRefs.current.set(item.id, el);
+                        else railBtnRefs.current.delete(item.id);
+                      }}
+                      onClick={() => selectSection(item.id)}
+                      className={
+                        mobile
+                          ? active
+                            ? 'ol-nav-btn ol-nav-btn-active'
+                            : 'ol-nav-btn'
+                          : 'ol-settings-rail-btn'
+                      }
+                      style={
+                        mobile
+                          ? {
+                              ...navButtonStyle,
+                              flexShrink: 0,
+                              padding: '8px 10px',
+                              whiteSpace: 'nowrap',
+                              background: active ? 'var(--ol-blue-soft)' : 'transparent',
+                              color: active ? 'var(--ol-blue)' : 'var(--ol-ink-2)',
+                              fontWeight: active ? 600 : 400,
+                            }
+                          : {
+                              ...navButtonStyle,
+                              position: 'relative',
+                              zIndex: 1,
+                              flexShrink: 0,
+                              padding: '10px',
+                              whiteSpace: 'normal',
+                            }
+                      }
+                    >
+                      {!mobile && <Icon name={item.icon} size={16} />}
+                      <span style={{ minWidth: 0, overflowWrap: mobile ? undefined : 'anywhere' }}>
+                        {item.title}
+                      </span>
+                    </button>
+                  );
+                })}
+              </nav>
+              {!mobile && <HelpLinks />}
+            </aside>
+            <div
+              ref={setChannelContainer}
+              className="ol-settings-content-pane"
+              data-ol-advanced={section === 'advanced' && !searching ? 'true' : undefined}
+              style={{
+                flex: 1,
+                minWidth: 0,
+                minHeight: 0,
+                display: 'flex',
+                flexDirection: 'column',
+                position: 'relative',
+              }}
+            >
+              <ChannelEditorHostContext.Provider
+                value={{
+                  container: channelContainer,
+                  background: channelBackground,
+                  registerClose: (close) => {
+                    channelCloseRef.current = close;
+                  },
+                }}
+              >
                 <div
-                  style={{ padding: mobile ? '18px 16px 12px' : '8px 28px 12px', flexShrink: 0 }}
+                  ref={setChannelBackground}
+                  style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}
                 >
-                  {mobile && !activeAdvancedPage && (
-                    <h2
-                      ref={headingRef}
-                      tabIndex={-1}
+                  <SavedToast
+                    saveState={savedToast.state}
+                    message={savedToast.message}
+                    slideFrom="top"
+                    offsetStyle={{ position: 'absolute', top: 12, right: 16 }}
+                  />
+                  {/* 桌面端：分类标题 + 自动保存提示 + 关闭按钮组成右栏自己的顶栏
+                （仿系统设置：工具条只属于内容区，不再横跨左栏）。 */}
+                  {(!mobile || activeAdvancedPage) && (
+                    <div
                       style={{
-                        margin: 0,
-                        fontSize: 20,
-                        fontWeight: 650,
-                        letterSpacing: '-0.025em',
-                        outline: 'none',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 12,
+                        padding: '18px 24px 0',
+                        flexShrink: 0,
                       }}
                     >
-                      {contentTitle}
-                    </h2>
-                  )}
-                  <p
-                    style={{
-                      margin: mobile && !activeAdvancedPage ? '7px 0 0' : 0,
-                      fontSize: 13,
-                      lineHeight: 1.6,
-                      color: 'var(--ol-ink-3)',
-                    }}
-                    aria-live="polite"
-                  >
-                    {contentDescription}
-                  </p>
-                </div>
-                <div
-                  ref={scrollRef}
-                  className={['ol-thinscroll', conservative ? 'ol-conservative-scope' : ''].join(
-                    ' ',
-                  )}
-                  style={{
-                    flex: 1,
-                    minHeight: 0,
-                    overflow: 'auto',
-                    padding: mobile
-                      ? '0 16px calc(20px + env(safe-area-inset-bottom, 0px))'
-                      : '0 28px 28px',
-                  }}
-                >
-                  {searching && (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                      {results.map((item) => (
+                      {activeAdvancedPage && (
                         <button
-                          key={item.id}
                           type="button"
-                          onClick={() => selectSection(item.id, true)}
-                          style={{
-                            ...navButtonStyle,
-                            border: '0.5px solid var(--ol-line)',
-                            padding: 16,
-                            alignItems: 'flex-start',
-                            background: 'var(--ol-surface)',
-                          }}
+                          className="ol-settings-back"
+                          onClick={backToAdvanced}
+                          aria-label={t('modal.backToAdvanced')}
+                          title={t('modal.backToAdvanced')}
                         >
-                          <Icon name={item.icon} size={18} />
-                          <span style={{ flex: 1, minWidth: 0 }}>
-                            <span style={{ display: 'block', fontWeight: 600, marginBottom: 5 }}>
-                              {item.title}
-                            </span>
-                            <span
-                              style={{ fontSize: 12, color: 'var(--ol-ink-3)', lineHeight: 1.6 }}
-                            >
-                              {item.description}
-                            </span>
-                          </span>
-                          <Icon name="chevRight" size={14} />
+                          <Icon name="chevLeft" size={19} />
                         </button>
-                      ))}
-                      {results.length === 0 && (
-                        <div
-                          style={{
-                            padding: '24px 16px',
-                            border: '0.5px solid var(--ol-line)',
-                            borderRadius: 10,
-                            textAlign: 'center',
-                          }}
-                        >
-                          <p style={{ fontSize: 13, color: 'var(--ol-ink-3)' }}>
-                            {t('modal.noResults')}
-                          </p>
+                      )}
+                      <h2
+                        ref={headingRef}
+                        tabIndex={-1}
+                        style={{
+                          margin: 0,
+                          flex: 1,
+                          minWidth: 0,
+                          fontSize: 21,
+                          fontWeight: 650,
+                          letterSpacing: '-0.025em',
+                          outline: 'none',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {contentTitle}
+                      </h2>
+                      {!mobile && (
+                        <>
+                          <span style={{ color: 'var(--ol-ink-3)', fontSize: 12, flexShrink: 0 }}>
+                            {t('modal.autoSaveHint')}
+                          </span>
                           <button
+                            ref={closeRef}
                             type="button"
-                            onClick={() => {
-                              setQuery('');
-                              searchRef.current?.focus();
-                            }}
-                            style={{
-                              ...navButtonStyle,
-                              margin: '12px auto 0',
-                              color: 'var(--ol-blue)',
-                            }}
+                            onClick={closeSettings}
+                            aria-label={t('common.close')}
+                            style={iconButtonStyle}
                           >
-                            {t('modal.clearSearch')}
+                            <Icon name="close" size={17} />
                           </button>
-                        </div>
+                        </>
                       )}
                     </div>
                   )}
-                  {/* key={section} 重挂载 → 每次切换分类播放轻微淡入（ol-tab-fade），
-                  与 tab 切换动画语言一致。 */}
                   <div
-                    key={section}
+                    style={{ padding: mobile ? '18px 16px 12px' : '8px 28px 12px', flexShrink: 0 }}
+                  >
+                    {mobile && !activeAdvancedPage && (
+                      <h2
+                        ref={headingRef}
+                        tabIndex={-1}
+                        style={{
+                          margin: 0,
+                          fontSize: 20,
+                          fontWeight: 650,
+                          letterSpacing: '-0.025em',
+                          outline: 'none',
+                        }}
+                      >
+                        {contentTitle}
+                      </h2>
+                    )}
+                    <p
+                      style={{
+                        margin: mobile && !activeAdvancedPage ? '7px 0 0' : 0,
+                        fontSize: 13,
+                        lineHeight: 1.6,
+                        color: 'var(--ol-ink-3)',
+                      }}
+                      aria-live="polite"
+                    >
+                      {contentDescription}
+                    </p>
+                  </div>
+                  <div
+                    ref={scrollRef}
+                    className={['ol-thinscroll', conservative ? 'ol-conservative-scope' : ''].join(
+                      ' ',
+                    )}
                     style={{
-                      display: searching ? 'none' : 'flex',
-                      flexDirection: 'column',
-                      gap: 16,
-                      animation: 'ol-tab-fade 0.22s var(--ol-motion-soft) both',
+                      flex: 1,
+                      minHeight: 0,
+                      overflow: 'auto',
+                      padding: mobile
+                        ? '0 16px calc(20px + env(safe-area-inset-bottom, 0px))'
+                        : '0 28px 28px',
                     }}
                   >
-                    {section === 'general' && <GeneralTab />}
-                    {section === 'shortcuts' && <ShortcutsTab />}
-                    {section === 'appearance' && <AppearanceTab />}
-                    {section === 'services' && <ServicesTab />}
-                    {section === 'privacy' && <PrivacyTab />}
-                    {section === 'advanced' && (
-                      <AdvancedTab
-                        pages={advancedPages}
-                        page={advancedPage}
-                        onOpenPage={openAdvancedPage}
-                      />
+                    {searching && (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                        {results.map((item) => (
+                          <button
+                            key={item.id}
+                            type="button"
+                            onClick={() => selectSection(item.id, true)}
+                            style={{
+                              ...navButtonStyle,
+                              border: '0.5px solid var(--ol-line)',
+                              padding: 16,
+                              alignItems: 'flex-start',
+                              background: 'var(--ol-surface)',
+                            }}
+                          >
+                            <Icon name={item.icon} size={18} />
+                            <span style={{ flex: 1, minWidth: 0 }}>
+                              <span style={{ display: 'block', fontWeight: 600, marginBottom: 5 }}>
+                                {item.title}
+                              </span>
+                              <span
+                                style={{ fontSize: 12, color: 'var(--ol-ink-3)', lineHeight: 1.6 }}
+                              >
+                                {item.description}
+                              </span>
+                            </span>
+                            <Icon name="chevRight" size={14} />
+                          </button>
+                        ))}
+                        {results.length === 0 && (
+                          <div
+                            style={{
+                              padding: '24px 16px',
+                              border: '0.5px solid var(--ol-line)',
+                              borderRadius: 10,
+                              textAlign: 'center',
+                            }}
+                          >
+                            <p style={{ fontSize: 13, color: 'var(--ol-ink-3)' }}>
+                              {t('modal.noResults')}
+                            </p>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setQuery('');
+                                searchRef.current?.focus();
+                              }}
+                              style={{
+                                ...navButtonStyle,
+                                margin: '12px auto 0',
+                                color: 'var(--ol-blue)',
+                              }}
+                            >
+                              {t('modal.clearSearch')}
+                            </button>
+                          </div>
+                        )}
+                      </div>
                     )}
-                    {section === 'about' && <AboutTab />}
+                    {/* key={section} 重挂载 → 每次切换分类播放轻微淡入（ol-tab-fade），
+                  与 tab 切换动画语言一致。 */}
+                    <div
+                      key={section}
+                      style={{
+                        display: searching ? 'none' : 'flex',
+                        flexDirection: 'column',
+                        gap: 16,
+                        animation: 'ol-tab-fade 0.22s var(--ol-motion-soft) both',
+                      }}
+                    >
+                      {section === 'general' && <GeneralTab />}
+                      {section === 'shortcuts' && <ShortcutsTab />}
+                      {section === 'appearance' && <AppearanceTab />}
+                      {section === 'services' && <ServicesTab />}
+                      {section === 'privacy' && <PrivacyTab />}
+                      {section === 'advanced' && (
+                        <AdvancedTab
+                          pages={advancedPages}
+                          page={advancedPage}
+                          onOpenPage={openAdvancedPage}
+                        />
+                      )}
+                      {section === 'about' && <AboutTab />}
+                    </div>
+                    {mobile && !searching && <HelpLinks />}
                   </div>
-                  {mobile && !searching && <HelpLinks />}
                 </div>
-              </div>
-            </ChannelEditorHostContext.Provider>
+              </ChannelEditorHostContext.Provider>
+            </div>
           </div>
         </div>
       </div>
-    </div>
+    </ProviderLeaveContext.Provider>
   );
 }
 

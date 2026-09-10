@@ -2,7 +2,7 @@ import type { CredentialsStatus } from '../types';
 import { invokeOrMock, isTauri } from './shared';
 import { mockCredentialsStatus, mockCredentialValues } from './mock-data';
 import { invalidateMockChannelTest } from './channels';
-import type { LlmRequestFormat } from './providers';
+import { listProviderDescriptors, type LlmRequestFormat } from './providers';
 
 export interface ProviderCheckResult {
   ok: boolean;
@@ -13,33 +13,36 @@ export interface ProviderModelsResult {
 }
 
 interface OrcaRouterCatalogModel {
-    id?: string
-    supported_endpoint_types?: string[]
-    architecture?: {
-        input_modalities?: string[]
-    }
+  id?: string;
+  supported_endpoint_types?: string[];
+  architecture?: {
+    input_modalities?: string[];
+  };
 }
 
 export function filterOrcaRouterModels(
-    models: OrcaRouterCatalogModel[],
-    kind: "llm" | "asr",
-    requestFormat: LlmRequestFormat = "chat_completions",
+  models: OrcaRouterCatalogModel[],
+  kind: 'llm' | 'asr',
+  requestFormat: LlmRequestFormat = 'chat_completions',
 ): string[] {
-    const endpointType = kind === "asr"
-        ? "openai"
-        : {
-            chat_completions: "openai",
-            responses: "openai-response",
-            messages: "anthropic",
-        }[requestFormat]
-    return models
-        .filter(model => model.supported_endpoint_types?.includes(endpointType) === true)
-        .filter(model => kind === "llm" || (
-            model.id?.toLowerCase().startsWith("google/gemini") === true
-            && model.architecture?.input_modalities?.includes("audio") === true
-        ))
-        .map(model => model.id?.trim() ?? "")
-        .filter(Boolean)
+  const endpointType =
+    kind === 'asr'
+      ? 'openai'
+      : {
+          chat_completions: 'openai',
+          responses: 'openai-response',
+          messages: 'anthropic',
+        }[requestFormat];
+  return models
+    .filter((model) => model.supported_endpoint_types?.includes(endpointType) === true)
+    .filter(
+      (model) =>
+        kind === 'llm' ||
+        (model.id?.toLowerCase().startsWith('google/gemini') === true &&
+          model.architecture?.input_modalities?.includes('audio') === true),
+    )
+    .map((model) => model.id?.trim() ?? '')
+    .filter(Boolean);
 }
 
 export function getCredentials(): Promise<CredentialsStatus> {
@@ -88,6 +91,12 @@ export async function listProviderModels(
   channelId?: string,
   providerType?: string,
 ): Promise<ProviderModelsResult> {
+  if (!isTauri) {
+    const descriptor = (await listProviderDescriptors(kind)).find(
+      (item) => item.providerType === providerType,
+    );
+    if (descriptor?.staticModels.length) return { models: descriptor.staticModels };
+  }
   if (!isTauri && providerType === 'orcarouter' && (kind === 'llm' || kind === 'asr')) {
     const endpointAccount = kind === 'llm' ? 'ark.endpoint' : 'asr.endpoint';
     const endpoint = mockCredentialValues.get(`${channelId ?? ''}:${endpointAccount}`);
@@ -96,15 +105,21 @@ export async function listProviderModels(
       if (!response.ok) {
         throw new Error(`OrcaRouter /models returned ${response.status}`);
       }
-      const payload = await response.json() as { data?: OrcaRouterCatalogModel[] };
+      const payload = (await response.json()) as { data?: OrcaRouterCatalogModel[] };
       const storedFormat = mockCredentialValues.get(`${channelId ?? ''}:ark.request_format`);
-      const requestFormat: LlmRequestFormat = storedFormat === 'responses' || storedFormat === 'messages'
-        ? storedFormat
-        : 'chat_completions';
+      const requestFormat: LlmRequestFormat =
+        storedFormat === 'responses' || storedFormat === 'messages'
+          ? storedFormat
+          : 'chat_completions';
       return { models: filterOrcaRouterModels(payload.data ?? [], kind, requestFormat) };
     }
   }
   return invokeOrMock('list_provider_models', { kind, channelId }, () => ({
-    models: kind === 'llm' ? ['gpt-4o', 'deepseek-v4-flash', 'deepseek-v4-pro'] : ['whisper-1'],
+    models:
+      kind === 'llm'
+        ? ['gpt-4o', 'deepseek-v4-flash', 'deepseek-v4-pro']
+        : kind === 'omni'
+          ? ['gpt-4o-audio-preview', 'qwen3-omni-flash']
+          : ['whisper-1'],
   }));
 }

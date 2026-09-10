@@ -80,6 +80,17 @@ for (const id of ['opencode', 'custom', 'custom_responses', 'custom_messages']) 
     `${id} must allow all three compatibility formats`,
   );
 }
+const tokenhub = presets.find((p) => p.id === 'tencentTokenHub');
+assert(
+  tokenhub &&
+    tokenhub.defaultRequestFormat == null &&
+    tokenhub.supportedRequestFormats?.length === 0,
+  'TokenHub preset must stay fixed to Chat Completions',
+);
+assert(
+  descriptors.find((item) => item.providerType === 'codex_oauth')?.staticModels?.length,
+  'OAuth static models must be available without an API key',
+);
 for (const id of ['gemini', 'codex_oauth']) {
   const descriptor = descriptors.find((item) => item.providerType === id);
   assert(descriptor?.supportedRequestFormats?.length === 0, `${id} retains its native protocol`);

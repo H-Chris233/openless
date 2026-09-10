@@ -65,6 +65,7 @@ const LLM_NAME_KEY_BY_ID: Record<string, string> = {
   minimax: 'minimax',
   stepfun: 'stepfun',
   opencode: 'opencode',
+  tencentTokenHub: 'tencentTokenHub',
   custom: 'custom',
 };
 

@@ -1,4 +1,4 @@
-import { LLM_LABELS, prioritizeOrcaRouterModels } from './ProvidersSection';
+import { LLM_LABELS } from './ProvidersSection';
 import { ASR_LABELS } from './shared';
 import { presetsFor } from './ChannelList';
 import { filterOrcaRouterModels } from '../../lib/ipc/asr-credentials';
@@ -6,6 +6,12 @@ import { filterOrcaRouterModels } from '../../lib/ipc/asr-credentials';
 const atlascloudPreset = LLM_LABELS.find((p) => p.id === 'atlascloud');
 if (LLM_LABELS.find((p) => p.id === 'opencode')?.nameKey !== 'opencode') {
   throw new Error('OpenCode LLM label is missing');
+}
+if (LLM_LABELS.find(p => p.id === 'tencentTokenHub')?.nameKey !== 'tencentTokenHub') {
+  throw new Error('Tencent Cloud TokenHub LLM label is missing');
+}
+if (ASR_LABELS.find(p => p.id === 'tencent-cloud')?.nameKey !== 'asrTencentCloud') {
+  throw new Error('Tencent Cloud ASR label is missing');
 }
 
 if (!atlascloudPreset) {
@@ -43,22 +49,6 @@ if (coreAsr.length !== 1 || coreAsr[0].authRequirement !== 'endpoint_model_optio
   throw new Error(
     'Core provider descriptor must replace the browser fallback in the channel picker',
   );
-}
-
-const prioritizedOrcaRouterModels = prioritizeOrcaRouterModels([
-  'openai/gpt-5-mini',
-  'orcarouter/fusion-mini',
-  'anthropic/claude-haiku-4.5',
-  'orcarouter/fusion-flash',
-]);
-
-if (prioritizedOrcaRouterModels.join(',') !== [
-  'orcarouter/fusion-flash',
-  'orcarouter/fusion-mini',
-  'anthropic/claude-haiku-4.5',
-  'openai/gpt-5-mini',
-].join(',')) {
-  throw new Error(`unexpected OrcaRouter model ordering: ${prioritizedOrcaRouterModels.join(',')}`);
 }
 
 const protocolCatalog = [

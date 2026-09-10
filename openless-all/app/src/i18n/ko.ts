@@ -1248,6 +1248,7 @@ export const ko: typeof zhCN = {
         minimax: 'MiniMax (M3)',
         stepfun: 'StepFun',
         opencode: 'OpenCode Zen',
+        tencentTokenHub: 'Tencent Cloud TokenHub',
         customChatCompletions: '사용자 지정 · Chat Completions',
         customResponses: '사용자 지정 · Responses',
         customMessages: '사용자 지정 · Messages',
@@ -1266,6 +1267,7 @@ export const ko: typeof zhCN = {
         asrOpenAiCompatible: '커스텀 OpenAI 호환',
         asrXiaomiMimo: 'Xiaomi MiMo ASR',
         asrIflytek: 'iFlytek 실시간 음성 인식',
+        asrTencentCloud: 'Tencent Cloud Hunyuan 실시간 ASR',
         asrElevenLabs: 'ElevenLabs Scribe',
         asrSherpaOnnxLocal: '로컬 sherpa-onnx(실험적)',
         asrFoundryLocalWhisper: '로컬 Whisper(Foundry Local)',
@@ -1308,6 +1310,13 @@ export const ko: typeof zhCN = {
       xfyunApiKeyLabel: 'API Key',
       xfyunNote:
         'iFlytek 오픈 플랫폼 "실시간 음성 인식" 서비스 페이지에서 AppID와 API Key를 가져옵니다. 오디오는 16kHz/16bit/모노 PCM입니다. 표준 API에는 핫워드 매개변수가 없으며(iFlytek 콘솔에서 개별 핫워드 설정), 언어는 기본적으로 중국어(보통화)입니다.',
+      tencentCloudAppIdLabel: 'Tencent Cloud AppID',
+      tencentCloudSecretIdLabel: 'SecretID',
+      tencentCloudSecretKeyLabel: 'SecretKey',
+      tencentCloudNote:
+        'Tencent Cloud 음성 인식 API 자격 증명을 사용합니다. 기본 Hy-ASR-3.0-preview는 중국어·영어·20개 방언을 지원합니다. Preview는 60초 이내의 16kHz 모노 PCM만 지원하며, 컨텍스트와 핫워드 강화는 아직 지원하지 않습니다.',
+      tencentTokenHubNote:
+        '현재 온라인인 언어 모델만 표시합니다. 일부 모델은 항상 추론을 사용하며, 추론을 꺼도 해당 모델의 고정 동작을 유지합니다.',
       localAsrActiveNotice:
         '현재 "{{name}}" 사용 중. "고급" 탭에서 전환 또는 비활성화할 수 있습니다.',
       localAsrTakeoverHint: '"{{name}}" 활성화 시 ASR 프로바이더가 인수됩니다.',
@@ -1697,9 +1706,10 @@ export const ko: typeof zhCN = {
       securityHint:
         '같은 LAN에서만 접속 가능하며 페어링 코드 입력이 필요합니다. 사용하지 않을 때는 끄는 것을 권장합니다.',
       certHint:
-        '첫 접속 시 브라우저가 인증서를 신뢰할 수 없다고 경고합니다. 안내에 따라 "계속 진행"을 선택하세요.',
+        '휴대폰에서 “최초 설정: 이 컴퓨터 신뢰”를 열고 인증서를 설치하고 신뢰하세요. 이전 버전에서는 한 번 설정해야 하며, 이후 재시작과 IP 변경 시 신뢰가 유지됩니다.',
       certTrustWarning:
-        '이 인증서는 이 PC의 원격 입력 서비스 전용입니다(다른 인증서를 발급할 수 없음). 출처를 알 수 없는 인증서는 신뢰하지 마세요. 더 이상 사용하지 않으면 휴대폰 설정에서 제거할 수 있습니다.',
+        '최초 인증서 다운로드에서는 컴퓨터의 신원을 확인할 수 없으며, LAN의 악성 기기가 중간자 공격으로 루트 인증서를 바꿀 수 있습니다. 신뢰할 수 있는 가정용 또는 사설 네트워크에서만 설치하고 공용 또는 공유 네트워크에서는 진행하지 마세요. 루트 CA는 인증서를 발급할 수 있고 개인 키는 이 컴퓨터에 저장됩니다. 더 이상 사용하지 않으면 휴대폰에서 제거하세요.',
+      certSetupLink: 'iPhone 인증서 링크 복사',
       waitingStart:
         '서비스가 아직 시작되지 않았습니다. 스위치를 끈 다음 다시 켜세요. 앱을 다시 시작하지 마세요.',
       starting: '원격 입력 서비스를 시작하는 중입니다…',

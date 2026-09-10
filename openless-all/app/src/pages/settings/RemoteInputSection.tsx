@@ -102,7 +102,7 @@ export function RemoteInputSection() {
   const mode = prefs.remoteInputDefaultMode ?? 'toggle';
   const viewState = getRemoteInputViewState(enabled, status, startError);
 
-  // 无效或非正数草稿还原显示；有效数值取整并限制在 [1024, 65535]。
+  // 提交端口草稿：非法（非有限数/越界离谱）则丢弃还原显示，合法则取整并 clamp 到 [1024, 65535]。
   const commitPort = () => {
     if (portDraft == null) return;
     const n = Math.round(Number(portDraft));
@@ -197,7 +197,10 @@ export function RemoteInputSection() {
                 }}
               >
                 {status.urls.map((u) => (
-                  <div key={u} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <div
+                    key={u}
+                    style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}
+                  >
                     <span
                       style={{
                         fontFamily: 'monospace',
@@ -214,6 +217,19 @@ export function RemoteInputSection() {
                       style={smallBtn}
                     >
                       {copied === u ? '✓' : '⧉'}
+                    </button>
+                    <button
+                      onClick={async () => {
+                        const link = `${u}/cert.mobileconfig`;
+                        await copyText(link);
+                        setCopied(link);
+                        window.setTimeout(() => setCopied((c) => (c === link ? null : c)), 1500);
+                      }}
+                      style={smallBtn}
+                    >
+                      {copied === `${u}/cert.mobileconfig`
+                        ? '✓'
+                        : t('settings.remoteInput.certSetupLink')}
                     </button>
                   </div>
                 ))}

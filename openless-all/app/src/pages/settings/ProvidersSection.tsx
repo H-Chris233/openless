@@ -3,6 +3,7 @@
 
 import {
   useCallback,
+  useContext,
   useEffect,
   useId,
   useMemo,
@@ -24,6 +25,7 @@ import {
   type ProviderDescriptor,
 } from '../../lib/ipc';
 import { LlmProtocolFields } from './LlmProtocolFields';
+import { ProviderFormContext } from './ProviderForm';
 import { emitSaved } from '../../lib/savedEvent';
 import { useLayoutStack, useConservativeLayout } from '../../lib/useMobileLayout';
 import { useHotkeySettings } from '../../state/HotkeySettingsContext';
@@ -255,7 +257,10 @@ export function ChannelCredentialFields({
             onUserMutation={onLlmMutation}
             onBlockedChange={trackField}
             onSaved={(changedAccounts) => {
-              if (providerType === 'orcarouter' && changedAccounts?.includes('ark.request_format')) {
+              if (
+                providerType === 'orcarouter' &&
+                changedAccounts?.includes('ark.request_format')
+              ) {
                 setOrcarouterCatalogRevision((value) => value + 1);
               }
               onTested?.();
@@ -336,23 +341,23 @@ export function ChannelCredentialFields({
             }
           />
         ) : (
-        <CredentialField
-          key={`${channelId}:model:${llmModelRevision}`}
-          label={t('settings.providers.modelLabel')}
-          account="ark.model_id"
-          provider={channelId}
-          placeholder={defaultModel || 'model-name'}
-          mono
-          defaultValue={defaultModel || undefined}
-          onUserMutation={onLlmMutation}
-          onBlockedChange={trackField}
-          trailing={
-            <LlmThinkingToggle
-              enabled={prefs?.llmThinkingEnabled ?? false}
-              onToggle={onLlmThinkingToggle}
-            />
-          }
-        />
+          <CredentialField
+            key={`${channelId}:model:${llmModelRevision}`}
+            label={t('settings.providers.modelLabel')}
+            account="ark.model_id"
+            provider={channelId}
+            placeholder={defaultModel || 'model-name'}
+            mono
+            defaultValue={defaultModel || undefined}
+            onUserMutation={onLlmMutation}
+            onBlockedChange={trackField}
+            trailing={
+              <LlmThinkingToggle
+                enabled={prefs?.llmThinkingEnabled ?? false}
+                onToggle={onLlmThinkingToggle}
+              />
+            }
+          />
         )}
         {['custom', 'custom_responses', 'custom_messages'].includes(providerType) && (
           <CredentialField
@@ -520,6 +525,65 @@ export function ChannelCredentialFields({
     );
   }
 
+  // 腾讯云实时语音：三段式密钥 + 固定模型档（Preview 仅 16kHz 单声道、60 秒内）。
+  if (descriptor?.authRequirement === 'tencent_cloud') {
+    return (
+      <>
+        <CredentialField
+          key={`${channelId}:app_id`}
+          label={t('settings.providers.tencentCloudAppIdLabel')}
+          account="tencent_cloud.app_id"
+          provider={channelId}
+          mono
+          onUserMutation={onUserMutation}
+        />
+        <CredentialField
+          key={`${channelId}:secret_id`}
+          label={t('settings.providers.tencentCloudSecretIdLabel')}
+          account="tencent_cloud.secret_id"
+          provider={channelId}
+          mono
+          mask
+          onUserMutation={onUserMutation}
+        />
+        <CredentialField
+          key={`${channelId}:secret_key`}
+          label={t('settings.providers.tencentCloudSecretKeyLabel')}
+          account="tencent_cloud.secret_key"
+          provider={channelId}
+          mono
+          mask
+          onUserMutation={onUserMutation}
+        />
+        <div style={channelSectionStyle}>
+          <ChannelSectionHeading icon="settings" title={t('settings.channels.modelTitle')} />
+        </div>
+        <CredentialField
+          key={`${channelId}:model`}
+          label={t('settings.providers.modelLabel')}
+          account="asr.model"
+          provider={channelId}
+          mono
+          placeholder={defaultModel || 'Hy-ASR-3.0-preview'}
+          defaultValue={defaultModel || 'Hy-ASR-3.0-preview'}
+          onUserMutation={onUserMutation}
+        />
+        <div style={{ marginTop: 2, fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.6 }}>
+          {t('settings.providers.tencentCloudNote')}
+        </div>
+        <ProviderTools
+          kind="asr"
+          modelAccount="asr.model"
+          provider={channelId}
+          showFetchModels={false}
+          onModelSelected={() => setAsrModelRevision((v) => v + 1)}
+          onTested={onTested}
+          onUserMutation={onUserMutation}
+        />
+      </>
+    );
+  }
+
   // 本地引擎（qwen3 / sherpa / foundry / Apple 语音）没有 key 与地址；模型的下载与
   // 切换仍由「高级 → 本地模型」里的 <LocalAsr embedded /> 负责，这里只说明一句。
   if (descriptor?.authRequirement === 'none') {
@@ -533,12 +597,24 @@ export function ChannelCredentialFields({
   if (providerType === 'orcarouter') {
     return (
       <>
-        <CredentialField key={`${channelId}:api_key`} label={t('settings.providers.apiKeyLabel')}
-          account="asr.api_key" provider={channelId} mono mask onUserMutation={onUserMutation} />
-        <CredentialField key={`${channelId}:endpoint`} label={t('settings.providers.baseUrlLabel')}
-          account="asr.endpoint" provider={channelId}
-          placeholder={defaultEndpoint ?? undefined} defaultValue={defaultEndpoint ?? undefined}
-          onUserMutation={onUserMutation} />
+        <CredentialField
+          key={`${channelId}:api_key`}
+          label={t('settings.providers.apiKeyLabel')}
+          account="asr.api_key"
+          provider={channelId}
+          mono
+          mask
+          onUserMutation={onUserMutation}
+        />
+        <CredentialField
+          key={`${channelId}:endpoint`}
+          label={t('settings.providers.baseUrlLabel')}
+          account="asr.endpoint"
+          provider={channelId}
+          placeholder={defaultEndpoint ?? undefined}
+          defaultValue={defaultEndpoint ?? undefined}
+          onUserMutation={onUserMutation}
+        />
         <CatalogModelField
           kind="asr"
           provider={channelId}
@@ -546,9 +622,15 @@ export function ChannelCredentialFields({
           defaultModel={defaultModel ?? ''}
           onUserMutation={onUserMutation}
         />
-        <ProviderTools kind="asr" modelAccount="asr.model" provider={channelId}
-          onModelSelected={() => setAsrModelRevision(v => v + 1)} onTested={onTested}
-          onUserMutation={onUserMutation} showFetchModels={false} />
+        <ProviderTools
+          kind="asr"
+          modelAccount="asr.model"
+          provider={channelId}
+          onModelSelected={() => setAsrModelRevision((v) => v + 1)}
+          onTested={onTested}
+          onUserMutation={onUserMutation}
+          showFetchModels={false}
+        />
       </>
     );
   }
@@ -978,15 +1060,33 @@ function CatalogModelField({
 
   return (
     <SettingRow label={t('settings.providers.modelLabel')}>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, width: '100%', maxWidth: layoutStack ? '100%' : 420 }}>
-        <div style={{ display: 'flex', gap: 6, alignItems: 'center', width: '100%', flexWrap: layoutStack ? 'wrap' : 'nowrap' }}>
+      <div
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 6,
+          width: '100%',
+          maxWidth: layoutStack ? '100%' : 420,
+        }}
+      >
+        <div
+          style={{
+            display: 'flex',
+            gap: 6,
+            alignItems: 'center',
+            width: '100%',
+            flexWrap: layoutStack ? 'wrap' : 'nowrap',
+          }}
+        >
           <SelectLite
             value={selectedModel}
             onChange={(model) => void applyModel(model)}
             options={models.map((model) => ({ value: model, label: model }))}
-            placeholder={status === 'loading'
-              ? t('settings.providers.loadingModels')
-              : t('settings.providers.selectModel')}
+            placeholder={
+              status === 'loading'
+                ? t('settings.providers.loadingModels')
+                : t('settings.providers.selectModel')
+            }
             disabled={status === 'loading' || models.length === 0}
             searchable
             searchPlaceholder={t('settings.providers.searchModels')}
@@ -1014,13 +1114,26 @@ function CatalogModelField({
           </button>
           {trailing}
         </div>
-        <span style={{ fontSize: 11, color: status === 'error' ? 'var(--ol-warn)' : status === 'success' ? 'var(--ol-ok)' : 'var(--ol-ink-4)', lineHeight: 1.4 }}>
+        <span
+          style={{
+            fontSize: 11,
+            color:
+              status === 'error'
+                ? 'var(--ol-warn)'
+                : status === 'success'
+                  ? 'var(--ol-ok)'
+                  : 'var(--ol-ink-4)',
+            lineHeight: 1.4,
+          }}
+        >
           {message}
         </span>
         <span style={{ fontSize: 11, color: 'var(--ol-ink-4)', lineHeight: 1.4 }}>
-          {t(kind === 'asr'
-            ? 'settings.providers.orcarouterAsrCatalogHint'
-            : 'settings.providers.orcarouterCatalogHint')}
+          {t(
+            kind === 'asr'
+              ? 'settings.providers.orcarouterAsrCatalogHint'
+              : 'settings.providers.orcarouterCatalogHint',
+          )}
         </span>
       </div>
     </SettingRow>
@@ -1332,6 +1445,8 @@ function CredentialField({
 }: CredentialFieldProps) {
   const fieldId = useId();
   const { t } = useTranslation();
+  // 宿主 ChannelModal 关闭/切换前收敛本字段未落盘的防抖写入（#1044 语义）。
+  const form = useContext(ProviderFormContext);
   const [value, setValue] = useState('');
   const [revealed, setRevealed] = useState(false);
   const [loaded, setLoaded] = useState(false);
@@ -1344,6 +1459,11 @@ function CredentialField({
       account,
       !loaded || dirty || status === 'saving' || status === 'readError' || status === 'saveError',
     );
+    form?.track(
+      account,
+      !loaded || dirty || status === 'saving' || status === 'readError' || status === 'saveError',
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- form?.track 与 onBlockedChange 同为稳定引用
   }, [account, loaded, dirty, status, onBlockedChange]);
 
   const debounceRef = useRef<number | null>(null);
@@ -1351,6 +1471,14 @@ function CredentialField({
   const mountedRef = useRef(true);
   const editRevision = useRef(0);
   const saveQueue = useRef<Promise<void>>(Promise.resolve());
+  const lastWriteOk = useRef(true);
+  const flushRef = useRef<() => Promise<boolean>>(() => Promise.resolve(true));
+  // 离开前 flush：冲掉防抖里未发的编辑并等待在途写完成；返回 false 阻止关闭。
+  useEffect(
+    () => form?.register(account, () => flushRef.current()),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- register 为稳定引用，account 变更即重挂
+    [account],
+  );
   const markMutation = () => {
     editRevision.current += 1;
     onUserMutation?.();
@@ -1429,13 +1557,24 @@ function CredentialField({
       saveQueue.current = write;
       await write;
       if (!mountedRef.current || revision !== editRevision.current) return;
+      lastWriteOk.current = true;
       setDirty(false);
       showTemporaryStatus('saved');
     } catch (error) {
       if (!mountedRef.current || revision !== editRevision.current) return;
+      lastWriteOk.current = false;
       console.error('[settings] failed to save credential', account, error);
       showTemporaryStatus('saveError');
     }
+  };
+  flushRef.current = async () => {
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current);
+      debounceRef.current = null;
+    }
+    if (loaded && dirty) await save(value, true);
+    await saveQueue.current.catch(() => undefined);
+    return lastWriteOk.current;
   };
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1482,7 +1621,7 @@ function CredentialField({
   };
 
   const inputType = mask && !revealed ? 'password' : 'text';
-  const disabled = !loaded;
+  const disabled = !loaded || form?.leaving;
   const showInsecureEndpointWarning =
     (account === 'ark.endpoint' || account === 'asr.endpoint' || account === 'omni.endpoint') &&
     value.trim().toLowerCase().startsWith('http://');

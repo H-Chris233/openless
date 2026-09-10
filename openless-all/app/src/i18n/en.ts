@@ -39,6 +39,16 @@ export const en: typeof zhCN = {
     scope:
       'Sync dictionary entries, corrections, style icons, and common preferences. API keys, credentials, and device settings stay on this device.',
   },
+  macDictationKey: {
+    Changed: 'The shortcut changed while saving. Please try again.',
+    label: 'Mac Dictation key',
+    description:
+      'Replaces the current dictation shortcut with the microphone key. Quitting OpenLess releases it to macOS.',
+    Permission: 'Allow OpenLess in macOS Privacy & Security → Accessibility, then retry.',
+    Busy: 'Finish the current dictation before changing its shortcut.',
+    Unavailable:
+      'Could not activate this shortcut. The saved binding is unchanged; retry or choose another key.',
+  },
   app: {
     name: 'OpenLess',
     tagline: 'Speak naturally, write perfectly',
@@ -1259,6 +1269,7 @@ export const en: typeof zhCN = {
         minimax: 'MiniMax (M3)',
         stepfun: 'StepFun',
         opencode: 'OpenCode Zen',
+        tencentTokenHub: 'Tencent Cloud TokenHub',
         customChatCompletions: 'Custom · Chat Completions',
         customResponses: 'Custom · Responses',
         customMessages: 'Custom · Messages',
@@ -1277,6 +1288,7 @@ export const en: typeof zhCN = {
         asrOpenAiCompatible: 'Custom OpenAI-compatible',
         asrXiaomiMimo: 'Xiaomi MiMo ASR',
         asrIflytek: 'iFlytek Realtime ASR',
+        asrTencentCloud: 'Tencent Cloud Hunyuan Realtime ASR',
         asrElevenLabs: 'ElevenLabs Scribe',
         asrSherpaOnnxLocal: 'Local sherpa-onnx (Experimental)',
         asrFoundryLocalWhisper: 'Local Whisper (Foundry Local)',
@@ -1319,6 +1331,13 @@ export const en: typeof zhCN = {
       xfyunApiKeyLabel: 'API Key',
       xfyunNote:
         'Get AppID and API Key from the iFlytek Open Platform "Realtime ASR" service page. Audio is 16 kHz / 16-bit / mono PCM; the standard API has no hotword parameter (configure personalized hotwords in the iFlytek console), and the language defaults to Mandarin Chinese.',
+      tencentCloudAppIdLabel: 'Tencent Cloud AppID',
+      tencentCloudSecretIdLabel: 'SecretID',
+      tencentCloudSecretKeyLabel: 'SecretKey',
+      tencentCloudNote:
+        'Uses Tencent Cloud Speech Recognition API credentials. The default Hy-ASR-3.0-preview supports Chinese, English, and 20 dialects; Preview accepts only mono 16 kHz PCM up to 60 seconds and does not yet support context or hotword boosting.',
+      tencentTokenHubNote:
+        'Only online language models are listed. Some models always use reasoning; turning reasoning off keeps that model\'s fixed behavior.',
       localAsrActiveNotice:
         'Local ASR ({{name}}) is currently active. Switch or disable it from the Advanced tab.',
       localAsrTakeoverHint: 'Once "{{name}}" is enabled, the ASR provider will be taken over.',
@@ -1729,9 +1748,11 @@ export const en: typeof zhCN = {
       startError: 'Failed to start the remote input service: {{reason}}',
       securityHint:
         'Reachable only on the same LAN and requires the pairing code; turn it off when not in use.',
-      certHint: 'On first visit the browser warns the certificate is untrusted — choose "Proceed".',
+      certHint:
+        'Open “First-time setup: trust this computer” on the phone to install and trust the certificate. Older versions require one-time setup; subsequent restarts and IP changes preserve trust.',
       certTrustWarning:
-        'The certificate is only used by this PC’s remote input service (it cannot issue other certificates). Never trust certificates from unknown sources; remove it from your phone’s settings when no longer needed.',
+        'The initial certificate download cannot verify the computer\'s identity; a malicious device on the LAN could replace the root certificate in a man-in-the-middle attack. Install it only on a trusted home or private network, never on a public or shared network. The root CA can issue certificates and its private key stays on this computer; remove it from your phone when no longer needed.',
+      certSetupLink: 'Copy iPhone certificate link',
       waitingStart:
         'The service is not running yet. Turn the switch off, then on again. Do not restart the app.',
       starting: 'Starting the remote input service…',

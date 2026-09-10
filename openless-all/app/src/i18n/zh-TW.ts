@@ -35,6 +35,14 @@ export const zhTW: typeof zhCN = {
     confirmDelete: '刪除備份',
     scope: '同步詞典、修正规則、風格圖示與常用偏好。API 金鑰、登入憑據與裝置專屬設定保留在本機。',
   },
+  macDictationKey: {
+    Changed: '儲存期間快捷鍵已變更，請重試。',
+    label: 'Mac 聽寫鍵',
+    description: '用麥克風圖示鍵替換目前的聽寫快捷鍵。結束 OpenLess 後，此鍵交回 macOS。',
+    Permission: '請在 macOS「隱私權與安全性 → 輔助使用」中允許 OpenLess 後重試。',
+    Busy: '請先結束目前的聽寫，再變更快捷鍵。',
+    Unavailable: '無法啟用此快捷鍵，已儲存的綁定未變更。請重試或選擇其他鍵。',
+  },
   app: {
     name: 'OpenLess',
     tagline: '自然說話，完美書寫',
@@ -1202,6 +1210,7 @@ export const zhTW: typeof zhCN = {
         minimax: 'MiniMax（M3）',
         stepfun: 'StepFun（階躍星辰）',
         opencode: 'OpenCode Zen',
+        tencentTokenHub: '騰訊雲 TokenHub',
         customChatCompletions: '自訂 · Chat Completions',
         customResponses: '自訂 · Responses',
         customMessages: '自訂 · Messages',
@@ -1220,6 +1229,7 @@ export const zhTW: typeof zhCN = {
         asrOpenAiCompatible: '自訂 OpenAI 相容',
         asrXiaomiMimo: '小米 MiMo ASR',
         asrIflytek: '訊飛即時語音轉寫',
+        asrTencentCloud: '騰訊雲混元即時 ASR',
         asrElevenLabs: 'ElevenLabs Scribe',
         asrSherpaOnnxLocal: '本地 sherpa-onnx（實驗性）',
         asrFoundryLocalWhisper: '本地 Whisper（Foundry Local）',
@@ -1261,6 +1271,13 @@ export const zhTW: typeof zhCN = {
       xfyunApiKeyLabel: 'API Key',
       xfyunNote:
         '在訊飛開放平台「即時語音轉寫」服務頁取得 AppID 與 API Key。音訊為 16kHz/16bit/單聲道 PCM；標準版介面暫不支援熱詞參數（可在訊飛控制台設定個人化熱詞），語種預設中文普通話。',
+      tencentCloudAppIdLabel: '騰訊雲 AppID',
+      tencentCloudSecretIdLabel: 'SecretID',
+      tencentCloudSecretKeyLabel: 'SecretKey',
+      tencentCloudNote:
+        '使用騰訊雲「語音辨識」服務的 API 金鑰。預設 Hy-ASR-3.0-preview 支援中英與 20 種方言；Preview 僅支援 60 秒內的 16kHz 單聲道 PCM，暫不支援上下文或熱詞增強。',
+      tencentTokenHubNote:
+        '僅顯示目前在線的語言模型。部分模型始終啟用思考；關閉思考開關時將沿用該模型的固定行為。',
       localAsrActiveNotice: '當前已啓用「{{name}}」，可在「高級」中切換或停用。',
       localAsrTakeoverHint: '啓動「{{name}}」後，ASR 提供商將被接管。',
       asrProviderTakenOver:
@@ -1618,9 +1635,9 @@ export const zhTW: typeof zhCN = {
       portInUse: '連接埠 {{port}} 被佔用，請更換',
       startError: '遠端輸入服務啟動失敗：{{reason}}',
       securityHint: '僅同一區域網路可存取，需輸入配對碼；不用時建議關閉。',
-      certHint: '首次存取瀏覽器會提示憑證不受信任，按提示選擇「繼續存取」。',
-      certTrustWarning:
-        '該憑證僅用於本機遠端輸入服務（無法簽發其他憑證），請勿信任來源不明的憑證；不再使用時可在手機系統設定中移除。',
+      certHint: "首次連線請在手機頁面展開「首次設定：信任這台電腦」，安裝並信任憑證。升級舊版需設定一次；之後重新啟動和更換 IP 會保留信任。",
+      certTrustWarning: "首次憑證下載無法驗證電腦身分，惡意區域網路裝置可能透過中間人攻擊替換根憑證。僅在可信任的家庭或私人網路中安裝，請勿在公共或共享網路操作。根憑證能簽發憑證，私密金鑰保存在這台電腦；不再使用時請從手機移除。",
+      certSetupLink: "複製 iPhone 憑證連結",
       waitingStart: '服務尚未啟動。請關閉開關再打開一次，不要重啟軟體。',
       starting: '正在啟動遠端輸入服務…',
       urlsStale: '這些地址來自上次執行，可能已經過期。',

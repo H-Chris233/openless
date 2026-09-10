@@ -37,6 +37,17 @@ export const fr: typeof zhCN = {
     scope:
       'Synchronise le dictionnaire, les corrections, les icônes de styles et les préférences communes. Les clés API, identifiants et réglages propres à l’appareil restent ici.',
   },
+  macDictationKey: {
+    Changed: "Le raccourci a changé pendant l'enregistrement. Réessayez.",
+    label: 'Touche de dictée Mac',
+    description:
+      'Remplace le raccourci de dictée actuel par la touche micro. En quittant OpenLess, la touche est rendue à macOS.',
+    Permission:
+      'Autorisez OpenLess dans « Confidentialité et sécurité → Accessibilité » de macOS, puis réessayez.',
+    Busy: 'Terminez la dictée en cours avant de modifier le raccourci.',
+    Unavailable:
+      "Impossible d'activer le raccourci ; l'association enregistrée est inchangée. Réessayez ou choisissez une autre touche.",
+  },
   app: {
     name: 'OpenLess',
     tagline: 'Parlez naturellement, écrivez avec précision',
@@ -1285,6 +1296,7 @@ export const fr: typeof zhCN = {
         'Les deux modes conservent des identifiants distincts. Changer de mode garde l’autre configuration sans l’utiliser ; elle est restaurée à votre retour.',
       presets: {
         opencode: 'OpenCode Zen',
+        tencentTokenHub: 'TokenHub Tencent Cloud',
         customChatCompletions: 'Personnalisé · Chat Completions',
         customResponses: 'Personnalisé · Responses',
         customMessages: 'Personnalisé · Messages',
@@ -1305,6 +1317,7 @@ export const fr: typeof zhCN = {
         stepfun: 'StepFun',
         custom: 'Personnalisé',
         asrVolcengine: 'Volcengine bigasr',
+        asrTencentCloud: 'ASR temps réel Hunyuan de Tencent Cloud',
         asrBailian: 'Alibaba Bailian ASR en temps réel',
         asrBailianQwen3: 'Bailian Qwen3 ASR en temps réel',
         asrBailianFunAsrFlash: 'Bailian Fun-ASR-Flash (fichier enregistré)',
@@ -1360,6 +1373,13 @@ export const fr: typeof zhCN = {
       xfyunApiKeyLabel: 'Clé API',
       xfyunNote:
         'Obtenez AppID et API Key sur la page du service ASR en temps réel d’iFlytek Open Platform. L’audio est en PCM mono 16 kHz / 16 bits. L’API standard n’accepte pas de paramètre de mots-clés ; configurez-les dans la console iFlytek. La langue par défaut est le chinois mandarin.',
+      tencentCloudAppIdLabel: 'AppID Tencent Cloud',
+      tencentCloudSecretIdLabel: 'SecretID',
+      tencentCloudSecretKeyLabel: 'SecretKey',
+      tencentCloudNote:
+        'Utilise les identifiants du service de reconnaissance vocale de Tencent Cloud. Le modèle par défaut Hy-ASR-3.0-preview prend en charge le chinois, l’anglais et 20 dialectes ; Preview n’accepte que le PCM mono 16 kHz jusqu’à 60 secondes et ne gère pas encore le contexte ni le renforcement de mots-clés.',
+      tencentTokenHubNote:
+        'Seuls les modèles de langage disponibles en ligne sont listés. Certains modèles raisonnent toujours ; désactiver le raisonnement conserve le comportement fixe du modèle.',
       localAsrActiveNotice:
         'L’ASR local ({{name}}) est actif. Changez-le ou désactivez-le dans l’onglet Avancé.',
       localAsrTakeoverHint: 'Une fois activé, « {{name}} » remplacera le fournisseur ASR.',
@@ -1791,9 +1811,10 @@ export const fr: typeof zhCN = {
       securityHint:
         'Accessible uniquement sur le même réseau local, avec le code d’association. Désactivez-la lorsque vous ne l’utilisez pas.',
       certHint:
-        'À la première visite, le navigateur signale un certificat non fiable. Choisissez « Continuer ».',
+        'Ouvrez sur le téléphone « Réglage initial : faire confiance à cet ordinateur » pour installer le certificat et l’approuver. Les anciennes versions exigent un réglage unique ; ensuite la confiance est conservée après redémarrage ou changement d’adresse IP.',
       certTrustWarning:
-        'Ce certificat sert uniquement à la saisie à distance de cet ordinateur et ne peut pas émettre d’autres certificats. N’approuvez pas de certificat d’origine inconnue ; supprimez-le des réglages du téléphone lorsqu’il n’est plus nécessaire.',
+        'Le téléchargement initial du certificat ne permet pas de vérifier l’identité de l’ordinateur : un appareil malveillant du réseau local pourrait remplacer le certificat racine par une attaque de l’homme du milieu. N’installez le certificat que sur un réseau domestique ou privé de confiance, jamais sur un réseau public ou partagé. La CA racine peut émettre des certificats et sa clé privée reste sur cet ordinateur ; supprimez-la de votre téléphone lorsque vous ne l’utilisez plus.',
+      certSetupLink: 'Copier le lien du certificat iPhone',
       waitingStart:
         'Le service ne fonctionne pas encore. Désactivez puis réactivez l’interrupteur, sans redémarrer l’application.',
       starting: 'Démarrage de la saisie à distance…',

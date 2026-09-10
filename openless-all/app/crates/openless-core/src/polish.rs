@@ -189,6 +189,7 @@ fn is_builtin_llm_provider(provider_id: &str) -> bool {
             | "minimax"
             | "stepfun"
             | "opencode"
+            | "tencentTokenHub"
     )
 }
 
@@ -1799,6 +1800,10 @@ pub(crate) fn apply_openai_compatible_thinking_control(
     model: &str,
     thinking_enabled: bool,
 ) {
+    if provider_id.trim() == "tencentTokenHub" {
+        apply_tokenhub_chat_thinking_control(body, model, thinking_enabled);
+        return;
+    }
     // 优先按 provider_id 预设分派；custom / 未声明 provider 时回退到 base_url 兜底,
     // 让用户用"自定义"preset 接入 MiniMax 也能正确下发 thinking 控制参数。
     // Zen 是多模型网关，仅 DeepSeek 模型使用 DeepSeek 的思考参数。
@@ -1858,6 +1863,31 @@ pub(crate) fn apply_openai_compatible_thinking_control(
             });
         }
         None => {}
+    }
+}
+
+fn apply_tokenhub_chat_thinking_control(body: &mut Value, model: &str, enabled: bool) {
+    use crate::provider_rules::TokenHubChatModelPolicy::*;
+
+    match crate::provider_rules::tokenhub_chat_model_policy(model) {
+        Some(Hy3) => {
+            body["thinking"] = json!({ "type": if enabled { "enabled" } else { "disabled" } });
+            if enabled {
+                body["reasoning_effort"] = json!("medium");
+            }
+        }
+        Some(ToggleThinking) => {
+            body["thinking"] = json!({ "type": if enabled { "enabled" } else { "disabled" } });
+        }
+        Some(QwenThinking) => body["enable_thinking"] = json!(enabled),
+        Some(AdaptiveThinking) => {
+            body["thinking"] = json!({ "type": if enabled { "adaptive" } else { "disabled" } });
+        }
+        Some(AlwaysThinking) if enabled => {
+            body["thinking"] = json!({ "type": "enabled" });
+        }
+        Some(KimiK3) if enabled => body["reasoning_effort"] = json!("max"),
+        Some(AlwaysThinking | KimiK3 | Plain) | None => {}
     }
 }
 
@@ -3415,6 +3445,88 @@ mod tests {
         let body = provider.chat_body(true, vec![json!({ "role": "user", "content": "hi" })]);
 
         assert_eq!(body["thinking"]["type"], "adaptive");
+    }
+
+    #[test]
+    fn tokenhub_chat_thinking_matches_model_capabilities() {
+        let body = |model: &str, enabled: bool| {
+            OpenAICompatibleLLMProvider::new(
+                OpenAICompatibleConfig::new(
+                    "tencentTokenHub",
+                    "Tencent TokenHub",
+                    "https://tokenhub.tencentmaas.com/v1",
+                    "k",
+                    model,
+                )
+                .with_thinking_enabled(enabled),
+            )
+            .chat_body(false, vec![json!({ "role": "user", "content": "hi" })])
+        };
+
+        for model in [
+            "hy3",
+            "hy4-preview",
+            "deepseek-v4-pro",
+            "deepseek/deepseek-v4-flash",
+            "glm-5.2",
+            "glm-5v-turbo",
+            "kimi-k2.6",
+            "kimi-k2.5",
+        ] {
+            assert_eq!(body(model, true)["thinking"]["type"], "enabled", "{model}");
+            assert_eq!(
+                body(model, false)["thinking"]["type"],
+                "disabled",
+                "{model}"
+            );
+        }
+        assert_eq!(body("hy3", true)["reasoning_effort"], "medium");
+
+        assert_eq!(body("qwen3.5-plus", true)["enable_thinking"], true);
+        assert_eq!(body("qwen3.5-plus", false)["enable_thinking"], false);
+
+        assert_eq!(body("minimax-m3", true)["thinking"]["type"], "adaptive");
+        assert_eq!(body("minimax-m3", false)["thinking"]["type"], "disabled");
+
+        for model in ["glm-5.3", "kimi-k2.7-code", "minimax-m2.7"] {
+            assert!(body(model, false).get("thinking").is_none(), "{model}");
+            assert_eq!(body(model, true)["thinking"]["type"], "enabled");
+        }
+        let kimi_k3 = body("kimi-k3", true);
+        assert_eq!(kimi_k3["reasoning_effort"], "max");
+        assert!(kimi_k3.get("thinking").is_none());
+        assert!(body("kimi-k3", false).get("reasoning_effort").is_none());
+
+        for model in [
+            "hy-mt2-pro",
+            "hy-role",
+            "hunyuan-role-latest",
+            "mimo-v2.5-pro",
+            "future-model",
+        ] {
+            let body = body(model, true);
+            assert!(body.get("thinking").is_none(), "{model}");
+            assert!(body.get("enable_thinking").is_none(), "{model}");
+            assert!(body.get("reasoning_effort").is_none(), "{model}");
+        }
+    }
+
+    #[test]
+    fn custom_tokenhub_endpoint_does_not_invent_model_policy() {
+        for base_url in [
+            "https://tokenhub.tencentmaas.com/v1/",
+            "https://api.lkeap.cloud.tencent.com/plan/v3",
+        ] {
+            let provider = OpenAICompatibleLLMProvider::new(
+                OpenAICompatibleConfig::new("custom", "Custom", base_url, "k", "hy3")
+                    .with_thinking_enabled(false),
+            );
+
+            let body = provider.chat_body(false, vec![json!({ "role": "user", "content": "hi" })]);
+
+            assert!(body.get("thinking").is_none());
+            assert!(body.get("reasoning_effort").is_none());
+        }
     }
 
     #[test]
