@@ -154,7 +154,7 @@ impl CloudSyncService {
         body: Option<Vec<u8>>,
         token: &SecretValue,
     ) -> Result<CloudSyncSnapshot, BackendError> {
-        let url = self.marketplace.public_url("me/sync")?;
+        let url = self.marketplace.cloud_sync_url("me/sync")?;
         let loopback = url.host_str().is_some_and(|host| {
             host == "localhost"
                 || host

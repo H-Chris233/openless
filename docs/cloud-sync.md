@@ -1,10 +1,10 @@
 # 官方云同步
 
-状态：手动快照同步，HTTP 合同版本 1。客户端需要官方服务同时提供 `/me/sync`；旧版服务返回 404/405/501 时显示暂不支持，不能将其当成空备份。
+状态：手动快照同步，HTTP 合同版本 1。客户端需要官方服务同时提供 `/me/sync`；旧版服务返回 404/405/501 时显示暂不支持，不能将其当成空备份。生产同步地址为 `https://apic.openless.top:9443`（与市场后端同一服务器、独立端口），服务端连接细节见 [云同步服务端交接](cloud-sync-server-handoff.md)。
 
 ## 入口与数据边界
 
-[`cloud_sync.rs`](../openless-all/app/crates/openless-core/src/cloud_sync.rs) 从共享 Core 仓储生成快照，使用现有 `MarketplaceConfig` 的官方地址和同一个 Marketplace 登录实例。GitHub OAuth token 只从 `CredentialStore` 读取，不经过 React，不包含在状态、事件或错误中；注销标记同样对云同步生效。带凭据的请求不跟随重定向，正式地址要求 HTTPS，本机 HTTP 仅用于回环测试。
+[`cloud_sync.rs`](../openless-all/app/crates/openless-core/src/cloud_sync.rs) 从共享 Core 仓储生成快照，使用 `MarketplaceConfig` 的专用云同步地址（生产为 `https://apic.openless.top:9443`，测试与 `new()` 构造默认同源）和同一个 Marketplace 登录实例。GitHub OAuth token 只从 `CredentialStore` 读取，不经过 React，不包含在状态、事件或错误中；注销标记同样对云同步生效。带凭据的请求不跟随重定向，正式地址要求 HTTPS，本机 HTTP 仅用于回环测试。
 
 | 同步内容 | 保持在本机的内容 |
 | --- | --- |

@@ -20,10 +20,14 @@ use crate::{PreferencesStore, StylePack, StylePackStore};
 
 pub const MARKETPLACE_GITHUB_TOKEN_ACCOUNT: &str = "github.oauth_token";
 pub const MARKETPLACE_BASE_URL: &str = "https://apic.openless.top";
+/// Cloud sync shares the marketplace host but runs on its own listener port;
+/// the sync service owner deploys TLS on this port.
+pub const CLOUD_SYNC_BASE_URL: &str = "https://apic.openless.top:9443";
 
 #[derive(Debug, Clone)]
 pub struct MarketplaceConfig {
     pub base_url: reqwest::Url,
+    pub cloud_sync_base_url: reqwest::Url,
     pub github_client_id: String,
     pub github_device_code_url: reqwest::Url,
     pub github_access_token_url: reqwest::Url,
@@ -31,7 +35,17 @@ pub struct MarketplaceConfig {
 }
 
 impl MarketplaceConfig {
+    /// The cloud sync endpoint defaults to the given base URL so contract tests
+    /// can point both services at one local mock; production pairs the
+    /// marketplace host with the dedicated [`CLOUD_SYNC_BASE_URL`].
     pub fn new(base_url: impl AsRef<str>) -> Result<Self, BackendError> {
+        Self::with_cloud_sync_base_url(base_url, None)
+    }
+
+    pub fn with_cloud_sync_base_url(
+        base_url: impl AsRef<str>,
+        cloud_sync_base_url: Option<&str>,
+    ) -> Result<Self, BackendError> {
         let parse = |value: &str, name: &str| {
             reqwest::Url::parse(value).map_err(|_| {
                 BackendError::new(
@@ -46,6 +60,10 @@ impl MarketplaceConfig {
             .unwrap_or_else(|| "Ov23liyv3nEucG7oMHNE".into());
         Ok(Self {
             base_url: parse(base_url.as_ref(), "marketplace")?,
+            cloud_sync_base_url: match cloud_sync_base_url {
+                Some(value) => parse(value, "cloud sync")?,
+                None => parse(base_url.as_ref(), "marketplace")?,
+            },
             github_client_id,
             github_device_code_url: parse(
                 "https://github.com/login/device/code",
@@ -60,7 +78,8 @@ impl MarketplaceConfig {
     }
 
     pub fn production() -> Self {
-        Self::new(MARKETPLACE_BASE_URL).expect("built-in Marketplace URLs are valid")
+        Self::with_cloud_sync_base_url(MARKETPLACE_BASE_URL, Some(CLOUD_SYNC_BASE_URL))
+            .expect("built-in Marketplace URLs are valid")
     }
 }
 
@@ -260,6 +279,15 @@ impl MarketplaceService {
             BackendError::new(
                 BackendErrorCode::InvalidArgument,
                 "invalid Marketplace request URL",
+            )
+        })
+    }
+
+    pub(crate) fn cloud_sync_url(&self, path: &str) -> Result<reqwest::Url, BackendError> {
+        self.config.cloud_sync_base_url.join(path).map_err(|_| {
+            BackendError::new(
+                BackendErrorCode::InvalidArgument,
+                "invalid cloud sync request URL",
             )
         })
     }
