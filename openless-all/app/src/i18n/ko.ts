@@ -2025,6 +2025,9 @@ export const ko: typeof zhCN = {
     sherpaModelWhisperLargeV3: 'Whisper Large V3 (다국어)',
     sherpaModelWhisperLargeV3Desc:
       '오픈소스 다국어 모델 중 품질이 가장 좋은 Whisper 계열. 고품질이지만 용량이 큽니다.',
+    sherpaModelZipformer: 'Zipformer 스트리밍(중·영)',
+    sherpaModelZipformerDesc:
+      '말하는 동안 텍스트가 나오는 스트리밍 중·영어 모델로, 지연이 가장 낮아 실시간 받아쓰기에 적합합니다.',
     sherpaModelQwen3: 'Qwen3-ASR 0.6B INT8',
     sherpaModelQwen3Desc:
       '변환된 sherpa-onnx Qwen3-ASR 모델로 다국어 인식과 더 강한 긴 문맥 처리를 지원합니다.',

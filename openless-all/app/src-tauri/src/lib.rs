@@ -351,6 +351,7 @@ macro_rules! app_invoke_handler_desktop {
             commands::local_asr_download_model,
             commands::local_asr_cancel_download,
             commands::local_asr_delete_model,
+            commands::local_asr_cleanup_incomplete,
             commands::local_asr_model_dir,
             commands::local_asr_reveal_model_dir,
             commands::local_asr_reveal_models_root,

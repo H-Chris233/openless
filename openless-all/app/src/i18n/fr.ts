@@ -2139,6 +2139,9 @@ export const fr: typeof zhCN = {
     sherpaModelWhisperLargeV3: 'Whisper Large V3 (multilingue)',
     sherpaModelWhisperLargeV3Desc:
       'La version multilingue open source la plus avancée de Whisper : grande qualité et téléchargement volumineux.',
+    sherpaModelZipformer: 'Zipformer streaming (zh/en)',
+    sherpaModelZipformerDesc:
+      'Modèle streaming chinois-anglais à la latence la plus faible — le texte apparaît pendant que vous parlez.',
     sherpaModelQwen3: 'Qwen3-ASR 0.6B INT8',
     sherpaModelQwen3Desc:
       'Modèle Qwen3-ASR converti pour sherpa-onnx, avec reconnaissance multilingue et meilleure gestion du contexte long.',

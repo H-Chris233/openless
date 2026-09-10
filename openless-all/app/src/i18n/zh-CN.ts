@@ -1952,6 +1952,9 @@ export const zhCN = {
     sherpaModelWhisperLargeV3: 'Whisper Large V3（多语）',
     sherpaModelWhisperLargeV3Desc:
       '开源多语通用里效果最好的 Whisper 档，质量高、体积大，适合高质量转写。',
+    sherpaModelZipformer: 'Zipformer 流式（中英）',
+    sherpaModelZipformerDesc:
+      '边说边出的流式中英模型，延迟最低，适合实时听写。',
     sherpaModelQwen3: 'Qwen3-ASR 0.6B INT8',
     sherpaModelQwen3Desc:
       '转换后的 sherpa-onnx Qwen3-ASR 模型，支持多语言识别与更强的长上下文能力。',

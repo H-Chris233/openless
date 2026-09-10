@@ -1938,6 +1938,9 @@ export const zhTW: typeof zhCN = {
     sherpaModelWhisperLargeV3: 'Whisper Large V3（多語）',
     sherpaModelWhisperLargeV3Desc:
       '開源多語通用中效果最好的 Whisper 檔，品質高、體積大，適合高品質轉寫。',
+    sherpaModelZipformer: 'Zipformer 串流（中英）',
+    sherpaModelZipformerDesc:
+      '邊說邊出的串流中英模型，延遲最低，適合即時聽寫。',
     sherpaModelQwen3: 'Qwen3-ASR 0.6B INT8',
     sherpaModelQwen3Desc:
       '轉換後的 sherpa-onnx Qwen3-ASR 模型，支援多語言識別與更強的長上下文能力。',

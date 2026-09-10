@@ -37,7 +37,12 @@ export interface LocalAsrStorageSettings {
 export interface LocalAsrModelStatus {
   id: string;
   hfRepo: string;
+  displayName: string;
+  family: string;
+  mode: string | null;
+  languages: string[];
   downloadedBytes: number;
+  sizeBytes: number | null;
   isDownloaded: boolean;
 }
 
@@ -212,13 +217,23 @@ const MOCK_MODELS: LocalAsrModelStatus[] = [
   {
     id: 'qwen3-asr-0.6b',
     hfRepo: 'Qwen/Qwen3-ASR-0.6B',
+    displayName: 'Qwen3 ASR 0.6B',
+    family: 'qwen3_asr',
+    mode: null,
+    languages: ['zh', 'en', 'ja', 'ko', 'yue'],
     downloadedBytes: 0,
+    sizeBytes: null,
     isDownloaded: false,
   },
   {
     id: 'qwen3-asr-1.7b',
     hfRepo: 'Qwen/Qwen3-ASR-1.7B',
+    displayName: 'Qwen3 ASR 1.7B',
+    family: 'qwen3_asr',
+    mode: null,
+    languages: ['zh', 'en', 'ja', 'ko', 'yue'],
     downloadedBytes: 0,
+    sizeBytes: null,
     isDownloaded: false,
   },
 ];
@@ -300,6 +315,11 @@ export function cancelLocalAsrDownload(modelId: string): Promise<void> {
 
 export function deleteLocalAsrModel(modelId: string): Promise<void> {
   return invokeOrMock('local_asr_delete_model', { modelId }, () => undefined);
+}
+
+/** 清理中断下载遗留的 staging 目录，不触碰已安装模型。 */
+export function cleanupIncompleteLocalAsrModel(modelId: string): Promise<void> {
+  return invokeOrMock('local_asr_cleanup_incomplete', { modelId }, () => undefined);
 }
 
 export function getLocalAsrModelDir(modelId: string): Promise<string> {
@@ -422,6 +442,7 @@ export type SherpaOnnxModelAlias =
   | 'paraformer-zh'
   | 'whisper-small-multi'
   | 'whisper-large-v3-multi'
+  | 'zipformer-bilingual-zh-en-streaming'
   | 'qwen3-asr-0.6b-int8';
 
 export type SherpaOnnxMirror = 'huggingface' | 'hf-mirror' | 'github-release';
@@ -471,6 +492,11 @@ export const SHERPA_ONNX_ASR_MODELS: SherpaOnnxModelOption[] = [
     descKey: 'localAsr.sherpaModelWhisperLargeV3Desc',
   },
   {
+    alias: 'zipformer-bilingual-zh-en-streaming',
+    labelKey: 'localAsr.sherpaModelZipformer',
+    descKey: 'localAsr.sherpaModelZipformerDesc',
+  },
+  {
     alias: 'qwen3-asr-0.6b-int8',
     labelKey: 'localAsr.sherpaModelQwen3',
     descKey: 'localAsr.sherpaModelQwen3Desc',
@@ -517,6 +543,13 @@ export function getSherpaOnnxAsrCatalog(): Promise<SherpaOnnxCatalogModel[]> {
       cached: false,
       downloadedBytes: 0,
       fileSizeMb: 1700,
+    },
+    {
+      alias: 'zipformer-bilingual-zh-en-streaming' as const,
+      displayName: 'Zipformer Streaming (zh/en)',
+      cached: false,
+      downloadedBytes: 0,
+      fileSizeMb: 260,
     },
     {
       alias: 'qwen3-asr-0.6b-int8' as const,
