@@ -184,6 +184,9 @@ pub(crate) fn backend_dependencies(
     }
     let polisher: Arc<dyn TextPolisher> = polisher;
     let auxiliary_transcription: Arc<dyn TranscriptionEngine> = transcription.clone();
+    // Provider validation for local engines (Apple Speech) probes through the
+    // same router dictation uses, so the check exercises the real engine.
+    let provider_native_transcription: Arc<dyn TranscriptionEngine> = transcription.clone();
     let auxiliary_polisher: Arc<dyn TextPolisher> =
         Arc::new(openless_core::SharedAuxiliaryTextPolisher::new(
             Arc::clone(&credential_store),
@@ -227,10 +230,13 @@ pub(crate) fn backend_dependencies(
     dependencies
         .services
         .configure_auxiliary_runtime(auxiliary_polisher, auxiliary_transcription);
-    dependencies.services.provider = Arc::new(openless_core::ProviderService::new(
-        Arc::clone(&credential_store),
-        Arc::clone(&task_spawner),
-    ));
+    dependencies.services.provider = Arc::new(
+        openless_core::ProviderService::new(
+            Arc::clone(&credential_store),
+            Arc::clone(&task_spawner),
+        )
+        .with_native_transcription(provider_native_transcription),
+    );
     dependencies
         .services
         .configure_coding_agent_process(Arc::new(
