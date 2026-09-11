@@ -62,10 +62,20 @@ export function searchSettingsSections<T extends SearchableSettingsSection>(
 
 export type ServiceViewId = 'llm' | 'asr' | 'omni' | 'models' | 'connections';
 
-export function availableServiceViews(multimodal: boolean, localModels: boolean): ServiceViewId[] {
+/**
+ * 多模态总开关（multimodalPipelineEnabled）打开即展示 omni 视图——
+ * 管线模式（传统 / 多模态）的切换器就在该视图里，否则开关打开后没有任何入口
+ * 进入多模态配置。只有真正切到多模态模式后才隐藏传统 llm/asr 页。
+ */
+export function availableServiceViews(
+  multimodalPipelineEnabled: boolean,
+  multimodalMode: boolean,
+  localModels: boolean,
+): ServiceViewId[] {
   return [
-    ...(multimodal ? ['omni' as const] : ['llm' as const, 'asr' as const]),
-    ...(localModels ? ['models' as const] : []),
+    ...(multimodalPipelineEnabled ? (['omni'] as const) : []),
+    ...(!multimodalMode ? (['llm', 'asr'] as const) : []),
+    ...(localModels ? (['models'] as const) : []),
     'connections',
   ];
 }
