@@ -125,6 +125,10 @@ pub enum ValidationProbe {
     Unsupported,
     AsrSilence,
     AsrSilenceAllowsNoFinal,
+    /// Local engine probe (Apple Speech): the host injects its native
+    /// transcription engine and validation runs the same silence WAV through it,
+    /// exercising authorization and recognizer availability for real.
+    AsrNativeSilence,
     AsrNonSilent,
     StepfunNoSpeech,
     LlmText,
@@ -185,7 +189,14 @@ fn provider_descriptor_with_label(
             None,
             None,
             AuthRequirement::None,
-            ValidationProbe::Unsupported,
+            // Apple Speech starts instantly and needs no download, so its card
+            // can run a real validation probe; download-based local engines stay
+            // unverifiable here and report readiness from the local model page.
+            if id == "apple-speech" {
+                ValidationProbe::AsrNativeSilence
+            } else {
+                ValidationProbe::Unsupported
+            },
         ),
         ProviderKind::Asr => (
             default_asr_endpoint(&id),
@@ -1185,6 +1196,21 @@ mod tests {
             provider_descriptor(ProviderKind::Asr, DASHSCOPE_MULTIMODAL_PROVIDER_ID).unwrap();
         assert_eq!(dashscope.validation_probe, ValidationProbe::AsrNonSilent);
         assert!(!dashscope.static_models.is_empty());
+    }
+
+    #[test]
+    fn apple_speech_probes_natively_while_download_engines_stay_unsupported() {
+        let apple = provider_descriptor(ProviderKind::Asr, "apple-speech").unwrap();
+        assert_eq!(apple.validation_probe, ValidationProbe::AsrNativeSilence);
+        assert_eq!(apple.auth_requirement, AuthRequirement::None);
+        for provider in ["local-whisper", "local-qwen3", "sherpa-onnx-local"] {
+            assert_eq!(
+                provider_descriptor(ProviderKind::Asr, provider)
+                    .unwrap()
+                    .validation_probe,
+                ValidationProbe::Unsupported
+            );
+        }
     }
 
     #[test]

@@ -87,10 +87,10 @@ export function ServicesTab() {
   const { prefs } = useHotkeySettings();
   const platformCaps = usePlatformCaps();
   const showLocalModel = platformCaps?.supportsLocalAsr === true;
-  const multimodal =
-    prefs?.multimodalPipelineEnabled === true && prefs.pipelineMode === 'multimodal';
+  const multimodalEnabled = prefs?.multimodalPipelineEnabled === true;
+  const multimodal = multimodalEnabled && prefs.pipelineMode === 'multimodal';
   const [view, setView] = useState<ServiceViewId>('llm');
-  const views = availableServiceViews(multimodal, showLocalModel);
+  const views = availableServiceViews(multimodalEnabled, multimodal, showLocalModel);
   const selectedView = resolveServiceView(view, views);
   const contentRef = useRef<HTMLDivElement>(null);
 

@@ -85,7 +85,7 @@ assert.deepEqual(
 );
 console.log('settings navigation tests passed');
 
-const omniViews = availableServiceViews(true, true);
+const omniViews = availableServiceViews(true, true, true);
 assert.deepEqual(
   omniViews,
   ['omni', 'models', 'connections'],
@@ -101,11 +101,27 @@ assert.equal(
   'models',
   'pipeline changes do not redirect a user managing local models',
 );
-const phoneViews = availableServiceViews(false, false);
+const enabledTraditionalViews = availableServiceViews(true, false, true);
+assert.deepEqual(
+  enabledTraditionalViews,
+  ['omni', 'llm', 'asr', 'models', 'connections'],
+  'enabling the experiment must surface the Omni view while traditional pages remain',
+);
+assert.equal(
+  resolveServiceView('omni', enabledTraditionalViews),
+  'omni',
+  'the Omni view hosts the pipeline mode switcher',
+);
+const phoneViews = availableServiceViews(false, false, false);
 assert.equal(
   phoneViews.includes('models'),
   false,
   'unsupported local model management is not exposed',
+);
+assert.equal(
+  phoneViews.includes('omni'),
+  false,
+  'a disabled multimodal pipeline hides the Omni view',
 );
 assert.equal(
   resolveServiceView('models', phoneViews),
@@ -117,3 +133,4 @@ assert.equal(
   'llm',
   'leaving Omni returns to a traditional service',
 );
+console.log('settings service view tests passed');
