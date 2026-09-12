@@ -166,6 +166,8 @@ pub trait ModelRuntimeAdapter: Send + Sync {
         unsupported("model test")
     }
 
+    fn invalidate_scheduled_release(&self, _runtime: LocalAsrRuntime) {}
+
     fn invalidate_route(&self, _runtime: LocalAsrRuntime) {}
 }
 
@@ -1139,6 +1141,12 @@ impl LocalAsrApi for LocalAsrService {
             LocalAsrRuntime::Foundry => preferences.foundry_local_asr_keep_loaded_secs = seconds,
             LocalAsrRuntime::SherpaOnnx => preferences.sherpa_onnx_keep_loaded_secs = seconds,
         });
+        if result.is_ok()
+            && runtime == LocalAsrRuntime::Foundry
+            && seconds == crate::LOCAL_ASR_KEEP_LOADED_FOREVER_SECS
+        {
+            self.runtime.invalidate_scheduled_release(runtime);
+        }
         let preferences = Arc::clone(&self.preferences);
         let adapter = Arc::clone(&self.runtime);
         let model_store = Arc::clone(&self.model_store);

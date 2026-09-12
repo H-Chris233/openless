@@ -301,16 +301,6 @@ impl TauriLocalAsrRuntimeAdapter {
             foundry_rebind_pending: Arc::new(AtomicBool::new(false)),
         }
     }
-
-    #[cfg(target_os = "windows")]
-    fn invalidate_release(&self, runtime: openless_core::LocalAsrRuntime) {
-        match runtime {
-            openless_core::LocalAsrRuntime::Foundry => &self.native.foundry_generation,
-            openless_core::LocalAsrRuntime::SherpaOnnx => &self.native.sherpa_generation,
-            openless_core::LocalAsrRuntime::Generic => return,
-        }
-        .fetch_add(1, Ordering::AcqRel);
-    }
 }
 
 impl openless_core::ModelRuntimeAdapter for TauriLocalAsrRuntimeAdapter {
@@ -544,7 +534,7 @@ impl openless_core::ModelRuntimeAdapter for TauriLocalAsrRuntimeAdapter {
         progress: openless_core::ModelPrepareProgressSink,
     ) -> BoxFuture<'static, Result<String, BackendError>> {
         #[cfg(target_os = "windows")]
-        self.invalidate_release(target.runtime);
+        self.invalidate_scheduled_release(target.runtime);
         let foundry = Arc::clone(&self.native.foundry);
         let sherpa = Arc::clone(&self.native.sherpa);
         let foundry_rebind_pending = Arc::clone(&self.foundry_rebind_pending);
@@ -686,7 +676,7 @@ impl openless_core::ModelRuntimeAdapter for TauriLocalAsrRuntimeAdapter {
         runtime: openless_core::LocalAsrRuntime,
     ) -> BoxFuture<'static, Result<(), BackendError>> {
         #[cfg(target_os = "windows")]
-        self.invalidate_release(runtime);
+        self.invalidate_scheduled_release(runtime);
         let foundry = Arc::clone(&self.native.foundry);
         let sherpa = Arc::clone(&self.native.sherpa);
         #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -822,6 +812,16 @@ impl openless_core::ModelRuntimeAdapter for TauriLocalAsrRuntimeAdapter {
         if runtime == openless_core::LocalAsrRuntime::Foundry {
             self.native.foundry.invalidate_route();
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn invalidate_scheduled_release(&self, runtime: openless_core::LocalAsrRuntime) {
+        match runtime {
+            openless_core::LocalAsrRuntime::Foundry => &self.native.foundry_generation,
+            openless_core::LocalAsrRuntime::SherpaOnnx => &self.native.sherpa_generation,
+            openless_core::LocalAsrRuntime::Generic => return,
+        }
+        .fetch_add(1, Ordering::AcqRel);
     }
 }
 
@@ -3408,10 +3408,34 @@ mod tests {
                 .unwrap_err();
             assert_eq!(error.code, BackendErrorCode::InvalidState);
         }
-        adapter.invalidate_release(LocalAsrRuntime::Foundry);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn windows_scheduled_release_invalidation_is_runtime_scoped() {
+        use openless_core::{LocalAsrRuntime, ModelRuntimeAdapter};
+
+        let adapter = TauriLocalAsrRuntimeAdapter::new(
+            TauriNativeAsrDependencies::new(
+                Arc::new(crate::asr::local::FoundryLocalRuntime::new()),
+                Arc::new(crate::asr::local::SherpaOnnxRuntime::new()),
+            ),
+            Arc::new(openless_core::PreferencesStore::in_memory()),
+        );
+        let stale_foundry_generation = adapter.native.foundry_generation.load(Ordering::Acquire);
+        adapter.invalidate_scheduled_release(LocalAsrRuntime::Foundry);
         assert_eq!(adapter.native.foundry_generation.load(Ordering::Acquire), 1);
         assert_eq!(adapter.native.sherpa_generation.load(Ordering::Acquire), 0);
-        adapter.invalidate_release(LocalAsrRuntime::SherpaOnnx);
+        assert!(!adapter
+            .native
+            .foundry
+            .release_if_generation(
+                adapter.native.foundry_generation.as_ref(),
+                stale_foundry_generation,
+            )
+            .await
+            .unwrap());
+        adapter.invalidate_scheduled_release(LocalAsrRuntime::SherpaOnnx);
         assert_eq!(adapter.native.foundry_generation.load(Ordering::Acquire), 1);
         assert_eq!(adapter.native.sherpa_generation.load(Ordering::Acquire), 1);
     }

@@ -1866,7 +1866,7 @@ mod imp {
         }
 
         #[tokio::test]
-        async fn foundry_streaming_transcription_preserves_ordered_unicode_chunks() {
+        async fn foundry_streaming_transcription_concatenates_ordered_responses() {
             let stream = futures_util::stream::iter([
                 Ok::<_, &'static str>(transcription_response("中文")),
                 Ok(transcription_response("")),

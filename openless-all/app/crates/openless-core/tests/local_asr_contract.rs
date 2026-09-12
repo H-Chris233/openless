@@ -69,6 +69,7 @@ fn public_local_asr_preferences_keep_legacy_normalization_semantics() {
 #[derive(Default)]
 struct RecordingLocalAsrRuntime {
     invalidated: Mutex<Vec<LocalAsrRuntime>>,
+    invalidated_release_schedules: Mutex<Vec<LocalAsrRuntime>>,
     fail_release: std::sync::atomic::AtomicBool,
     fail_prepare: std::sync::atomic::AtomicBool,
     fail_preload: std::sync::atomic::AtomicBool,
@@ -331,6 +332,13 @@ impl ModelRuntimeAdapter for RecordingLocalAsrRuntime {
 
     fn invalidate_route(&self, runtime: LocalAsrRuntime) {
         self.invalidated.lock().unwrap().push(runtime);
+    }
+
+    fn invalidate_scheduled_release(&self, runtime: LocalAsrRuntime) {
+        self.invalidated_release_schedules
+            .lock()
+            .unwrap()
+            .push(runtime);
     }
 }
 
@@ -1470,6 +1478,53 @@ async fn backend_local_asr_service_owns_preferences_and_change_events() {
         event.kind,
         BackendEventKind::PreferencesChanged(_)
     ));
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
+async fn foundry_never_release_invalidates_only_the_pending_finite_schedule() {
+    let (data_dir, runtime, backend) = local_asr_backend();
+
+    for seconds in [0, 60, 300, 1_800] {
+        backend
+            .services()
+            .local_asr
+            .set_keep_loaded_secs(LocalAsrRuntime::Foundry, seconds)
+            .await
+            .unwrap();
+    }
+    assert!(runtime
+        .invalidated_release_schedules
+        .lock()
+        .unwrap()
+        .is_empty());
+
+    backend
+        .services()
+        .local_asr
+        .set_keep_loaded_secs(
+            LocalAsrRuntime::Foundry,
+            openless_core::LOCAL_ASR_KEEP_LOADED_FOREVER_SECS,
+        )
+        .await
+        .unwrap();
+
+    let preferences = backend.get_preferences();
+    assert_eq!(
+        preferences.foundry_local_asr_keep_loaded_secs,
+        openless_core::LOCAL_ASR_KEEP_LOADED_FOREVER_SECS
+    );
+    assert_eq!(preferences.local_asr_keep_loaded_secs, 300);
+    assert_eq!(preferences.sherpa_onnx_keep_loaded_secs, 300);
+    assert_eq!(
+        runtime
+            .invalidated_release_schedules
+            .lock()
+            .unwrap()
+            .as_slice(),
+        [LocalAsrRuntime::Foundry]
+    );
+
     let _ = std::fs::remove_dir_all(data_dir);
 }
 
