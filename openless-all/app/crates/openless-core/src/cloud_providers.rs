@@ -559,6 +559,17 @@ async fn build_cloud_transcription_session(
             )
         }
         ActiveAsrProviderKind::Volcengine => {
+            let service = read_channel_credential(
+                credentials,
+                CredentialNamespace::Asr,
+                channel_id,
+                crate::credentials::VOLCENGINE_SERVICE_ACCOUNT,
+            )
+            .await?;
+            let service = crate::asr::volcengine::VolcengineService::parse(
+                service.as_deref().unwrap_or_default(),
+            )
+            .map_err(|message| BackendError::new(BackendErrorCode::InvalidArgument, message))?;
             let auth_mode = read_channel_credential(
                 credentials,
                 CredentialNamespace::Asr,
@@ -568,6 +579,7 @@ async fn build_cloud_transcription_session(
             .await?
             .map(|value| VolcengineAuthMode::parse(&value))
             .unwrap_or(VolcengineAuthMode::AppIdToken);
+            let auth_mode = service.auth_mode(auth_mode);
             let app_id = read_channel_credential(
                 credentials,
                 CredentialNamespace::Asr,
@@ -599,6 +611,7 @@ async fn build_cloud_transcription_session(
             )
             .await?;
             let credentials = VolcengineCredentials {
+                service,
                 auth_mode,
                 app_id,
                 access_token,
@@ -2477,6 +2490,76 @@ mod tests {
             )
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn ark_polisher_builder_requires_keys_only_for_official_endpoints() {
+        for endpoint in [
+            "https://ark.cn-beijing.volces.com/api/v3",
+            "https://ark.cn-beijing.volces.com/api/plan/v3",
+            "https://ark.cn-beijing.volces.com/api/coding/v3",
+            "http://127.0.0.1:8080/v1",
+        ] {
+            // Key rejection is independent of protocol; exercise each key state once,
+            // then retain successful construction coverage for all three protocols.
+            for (format, key) in [
+                ("chat_completions", None),
+                ("chat_completions", Some("")),
+                ("chat_completions", Some(" \t\n")),
+                ("chat_completions", Some("fixture-key")),
+                ("responses", Some("fixture-key")),
+                ("messages", Some("fixture-key")),
+            ] {
+                let store = InMemoryCredentialStore::default();
+                write_channel_secret(
+                    &store,
+                    CredentialNamespace::Llm,
+                    "ark-channel",
+                    LLM_ENDPOINT_ACCOUNT,
+                    endpoint,
+                )
+                .await;
+                write_channel_secret(
+                    &store,
+                    CredentialNamespace::Llm,
+                    "ark-channel",
+                    crate::llm_protocol::REQUEST_FORMAT_ACCOUNT,
+                    format,
+                )
+                .await;
+                if let Some(key) = key {
+                    write_channel_secret(
+                        &store,
+                        CredentialNamespace::Llm,
+                        "ark-channel",
+                        LLM_API_KEY_ACCOUNT,
+                        key,
+                    )
+                    .await;
+                }
+                let mut llm = ProviderInvocation::new("ark-channel", "ark");
+                llm.model = Some("fixture-model".to_string());
+                let context = DictationContext {
+                    llm,
+                    ..DictationContext::default()
+                };
+                let result = build_cloud_polisher_provider(&store, &context).await;
+                if !endpoint.starts_with("http://127.0.0.1")
+                    && key.is_none_or(|value| value.trim().is_empty())
+                {
+                    let error = match result {
+                        Err(error) => error,
+                        Ok(_) => {
+                            panic!("official endpoint must require an API key: {endpoint}")
+                        }
+                    };
+                    assert_eq!(error.code, BackendErrorCode::Provider);
+                    assert_eq!(error.message, "LLM API key is not configured");
+                } else {
+                    assert!(result.is_ok(), "{endpoint}");
+                }
+            }
+        }
     }
 
     #[tokio::test]

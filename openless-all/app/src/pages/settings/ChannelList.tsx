@@ -62,6 +62,7 @@ interface PresetOption {
   id: string;
   nameKey: string;
   defaultEndpoint?: string;
+  endpointPresets?: ProviderDescriptor['endpointPresets'];
   defaultModel?: string;
   authRequirement?: ProviderDescriptor['authRequirement'];
   staticModels?: string[];
@@ -82,6 +83,7 @@ export function presetsFor(
     id: descriptor.providerType,
     nameKey: descriptor.labelKey,
     defaultEndpoint: descriptor.defaultEndpoint ?? undefined,
+    endpointPresets: descriptor.endpointPresets,
     defaultModel: descriptor.defaultModel ?? undefined,
     authRequirement: descriptor.authRequirement,
     staticModels: descriptor.staticModels,

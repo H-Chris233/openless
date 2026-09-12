@@ -1354,6 +1354,12 @@ export const de: typeof zhCN = {
       volcengineAccessKeyLabel: 'Access Token',
       volcengineApiKeyLabel: 'API-Schlüssel',
       volcengineResourceIdLabel: 'Ressourcen-ID',
+      volcengineServiceLabel: 'Dienst',
+      volcengineServiceStandard: 'Standarddienst',
+      volcengineAgentPlanNote:
+        'Verwende einen eigenen Agent-Plan-API-Schlüssel für Doubao Streaming-ASR. Standard-Resource-ID: volc.seedasr.sauc.duration. Standard- und Planschlüssel unterscheiden sich; verwende getrennte Kanäle.',
+      volcengineServiceInvalid:
+        'Ungültige Dienstkonfiguration. Wähle Standarddienst oder Agent Plan erneut.',
       volcengineAuthModeLabel: 'Anmeldemethode',
       volcengineAuthModeAppIdToken: 'Bisherige App-Anmeldung (APP ID + Access Token)',
       volcengineAuthModeApiKey: 'API-Schlüssel (neue Konsole)',
@@ -1444,6 +1450,9 @@ export const de: typeof zhCN = {
         'Speichere die Felder oben und prüfe anschließend das gewählte Modell oder rufe Modelle ab. Falls das Abrufen fehlschlägt, bleibt die manuelle Eingabe möglich.',
       validate: 'Prüfen',
       validating: 'Wird geprüft…',
+      planModelsHint:
+        'Öffnen Sie die Tarifkonsole, kopieren Sie eine unterstützte Textmodell-ID und tragen Sie sie im Modellfeld ein.',
+      viewModels: 'Unterstützte Modelle ansehen',
       fetchModels: 'Modelle abrufen',
       loadingModels: 'Modelle werden abgerufen…',
       modelMissing: 'Kein Modell eingerichtet. Gib zuerst eine Modell-ID ein.',

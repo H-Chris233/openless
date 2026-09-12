@@ -170,6 +170,13 @@ pub fn openai_compatible_temperature_for_provider(
     }
 }
 
+/// Preserve the configured f32's shortest decimal representation on the wire.
+/// Widening directly into a JSON Value sends 0.30000001192092896 for 0.3;
+/// non-finite values retain serde_json's null representation.
+pub(crate) fn temperature_json(temperature: f32) -> Value {
+    serde_json::from_str::<f64>(&temperature.to_string()).map_or(Value::Null, |value| json!(value))
+}
+
 fn is_builtin_llm_provider(provider_id: &str) -> bool {
     matches!(
         provider_id,
@@ -786,7 +793,7 @@ impl OpenAICompatibleLLMProvider {
             if !(self.config.provider_id.trim() == "openai"
                 && openai_model_is_gpt5_family(&self.config.model))
             {
-                body["temperature"] = json!(temperature);
+                body["temperature"] = temperature_json(temperature);
             }
         }
         apply_openai_compatible_thinking_control(
@@ -2341,6 +2348,11 @@ mod tests {
                     let split = request.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
                     let headers = String::from_utf8_lossy(&request[..split]).to_ascii_lowercase();
                     let body: Value = serde_json::from_slice(&request[split + 4..]).unwrap();
+                    if format == LlmRequestFormat::Responses {
+                        assert!(body.get("temperature").is_none());
+                    } else {
+                        assert_eq!(body["temperature"].to_string(), "0.7");
+                    }
                     let path = match format {
                         LlmRequestFormat::ChatCompletions => "chat/completions",
                         LlmRequestFormat::Responses => "responses",
@@ -2401,6 +2413,7 @@ mod tests {
                 "fixture-key",
                 "test",
             )
+            .with_temperature(Some(0.7))
             .with_protocol(LlmProtocolConfig {
                 format,
                 ..Default::default()
@@ -2920,53 +2933,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn polish_request_omits_temperature_for_unconfigured_custom_provider() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let request = read_http_request(&mut stream);
-            let header_end = request
-                .windows(4)
-                .position(|window| window == b"\r\n\r\n")
-                .expect("request must contain headers");
-            let body: serde_json::Value = serde_json::from_slice(&request[header_end + 4..])
-                .expect("request body must be JSON");
-            assert!(body.get("temperature").is_none());
+    async fn polish_request_sends_default_temperature_only_for_builtin_provider() {
+        for (provider_id, expected_temperature) in [("custom", None), ("ark", Some("0.3"))] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let request = read_http_request(&mut stream);
+                let header_end = request
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .expect("request must contain headers");
+                let body: Value = serde_json::from_slice(&request[header_end + 4..]).unwrap();
+                let response_body = r#"{"choices":[{"message":{"content":"polished"}}]}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                    response_body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+                body
+            });
 
-            let body = r#"{"choices":[{"message":{"content":"polished"}}]}"#;
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            stream.write_all(response.as_bytes()).unwrap();
-        });
-
-        let provider = OpenAICompatibleLLMProvider::new(OpenAICompatibleConfig::new(
-            "custom",
-            "Custom",
-            format!("http://{addr}"),
-            "",
-            "test-model",
-        ));
-        let output = provider
-            .polish(
-                "raw text",
-                PolishMode::Raw,
-                &[],
+            let provider = OpenAICompatibleLLMProvider::new(OpenAICompatibleConfig::new(
+                provider_id,
+                provider_id,
+                format!("http://{addr}"),
                 "",
-                &[],
-                ChineseScriptPreference::Auto,
-                OutputLanguagePreference::Auto,
-                None,
-                None,
-                &[],
-            )
-            .await
-            .unwrap();
+                "test-model",
+            ));
+            let output = provider
+                .polish(
+                    "raw text",
+                    PolishMode::Raw,
+                    &[],
+                    "",
+                    &[],
+                    ChineseScriptPreference::Auto,
+                    OutputLanguagePreference::Auto,
+                    None,
+                    None,
+                    &[],
+                )
+                .await
+                .unwrap();
 
-        assert_eq!(output, "polished");
-        server.join().unwrap();
+            assert_eq!(output, "polished");
+            let request = server.join().unwrap();
+            assert_eq!(
+                request.get("temperature").map(Value::to_string).as_deref(),
+                expected_temperature,
+                "{provider_id} default temperature"
+            );
+        }
     }
 
     // ──────────────── 对话感知 polish 的 chat 消息构造 ────────────────
@@ -3158,7 +3176,7 @@ mod tests {
 
     #[test]
     fn chat_body_sends_configured_temperature() {
-        for temperature in [0.0, 0.3, 1.0] {
+        for (temperature, expected) in [(0.0, "0.0"), (0.3, "0.3"), (1.0, "1.0")] {
             let provider = OpenAICompatibleLLMProvider::new(
                 OpenAICompatibleConfig::new(
                     "custom",
@@ -3172,7 +3190,7 @@ mod tests {
 
             let body = provider.chat_body(true, vec![json!({ "role": "user", "content": "hi" })]);
 
-            assert_eq!(body["temperature"], json!(temperature));
+            assert_eq!(body["temperature"].to_string(), expected);
         }
     }
 
@@ -3188,7 +3206,7 @@ mod tests {
 
         let body = provider.chat_body(true, vec![json!({ "role": "user", "content": "hi" })]);
 
-        assert_eq!(body["temperature"], json!(DEFAULT_TEMPERATURE));
+        assert_eq!(body["temperature"].to_string(), "0.3");
     }
 
     #[test]
@@ -3230,7 +3248,7 @@ mod tests {
 
             let body = provider.chat_body(false, vec![json!({ "role": "user", "content": "hi" })]);
 
-            assert_eq!(body["temperature"], json!(DEFAULT_TEMPERATURE));
+            assert_eq!(body["temperature"].to_string(), "0.3");
         }
     }
 

@@ -1346,6 +1346,12 @@ export const es: typeof zhCN = {
       volcengineAccessKeyLabel: 'Access Token',
       volcengineApiKeyLabel: 'Clave API',
       volcengineResourceIdLabel: 'Resource ID',
+      volcengineServiceLabel: 'Servicio',
+      volcengineServiceStandard: 'Servicio estándar',
+      volcengineAgentPlanNote:
+        'Usa una clave API exclusiva de Agent Plan para ASR en streaming de Doubao. Resource ID predeterminado: volc.seedasr.sauc.duration. Las claves son distintas; usa canales separados para cada servicio.',
+      volcengineServiceInvalid:
+        'Configuración de servicio no válida. Selecciona de nuevo el servicio estándar o Agent Plan.',
       volcengineAuthModeLabel: 'Modo de autenticación',
       volcengineAuthModeAppIdToken: 'Aplicación anterior (APP ID + Access Token)',
       volcengineAuthModeApiKey: 'Clave API (consola nueva)',
@@ -1435,6 +1441,9 @@ export const es: typeof zhCN = {
         'Guarda los campos de arriba y después comprueba el modelo o consulta los modelos disponibles. Si la consulta falla, puedes escribir el modelo manualmente.',
       validate: 'Comprobar',
       validating: 'Comprobando…',
+      planModelsHint:
+        'Abra la consola del plan, copie un ID de modelo de texto compatible e introdúzcalo en el campo del modelo.',
+      viewModels: 'Ver modelos compatibles',
       fetchModels: 'Obtener modelos',
       loadingModels: 'Obteniendo modelos…',
       modelMissing: 'No hay ningún modelo configurado. Introduce primero su ID.',

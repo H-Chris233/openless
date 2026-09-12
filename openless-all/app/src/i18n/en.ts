@@ -1321,6 +1321,12 @@ export const en: typeof zhCN = {
       volcengineAccessKeyLabel: 'Access Token',
       volcengineApiKeyLabel: 'API Key',
       volcengineResourceIdLabel: 'Resource ID',
+      volcengineServiceLabel: 'Service',
+      volcengineServiceStandard: 'Standard service',
+      volcengineAgentPlanNote:
+        'Use a dedicated Agent Plan API key for Doubao streaming ASR. Default Resource ID: volc.seedasr.sauc.duration. Standard and plan keys differ; use separate channels for each service.',
+      volcengineServiceInvalid:
+        'Invalid service configuration. Select Standard service or Agent Plan again.',
       volcengineAuthModeLabel: 'Auth mode',
       volcengineAuthModeAppIdToken: 'Legacy app (APP ID + Access Token)',
       volcengineAuthModeApiKey: 'API Key (new console)',
@@ -1414,6 +1420,9 @@ export const en: typeof zhCN = {
         'Save the fields above, then validate the selected model or fetch models. Manual model input remains available if fetching fails.',
       validate: 'Validate',
       validating: 'Validating…',
+      planModelsHint:
+        'Open the plan console, copy a supported text model ID, and enter it in the model field.',
+      viewModels: 'View supported models',
       fetchModels: 'Fetch models',
       loadingModels: 'Fetching models…',
       modelMissing: 'No model is configured. Please enter a model ID first.',

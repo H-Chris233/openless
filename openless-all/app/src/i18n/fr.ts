@@ -1363,6 +1363,12 @@ export const fr: typeof zhCN = {
       volcengineAccessKeyLabel: 'Access Token',
       volcengineApiKeyLabel: 'Clé API',
       volcengineResourceIdLabel: 'Resource ID',
+      volcengineServiceLabel: 'Service',
+      volcengineServiceStandard: 'Service standard',
+      volcengineAgentPlanNote:
+        'Utilisez une clé API dédiée à Agent Plan pour la reconnaissance vocale en streaming Doubao. Resource ID par défaut : volc.seedasr.sauc.duration. Les clés sont différentes ; utilisez des canaux séparés.',
+      volcengineServiceInvalid:
+        'Configuration du service invalide. Sélectionnez à nouveau le service standard ou Agent Plan.',
       volcengineAuthModeLabel: 'Mode d’authentification',
       volcengineAuthModeAppIdToken: 'Ancienne application (APP ID + Access Token)',
       volcengineAuthModeApiKey: 'Clé API (nouvelle console)',
@@ -1455,6 +1461,9 @@ export const fr: typeof zhCN = {
         'Enregistrez les champs ci-dessus, puis vérifiez le modèle choisi ou récupérez les modèles disponibles. Vous pouvez saisir un modèle manuellement si la récupération échoue.',
       validate: 'Vérifier',
       validating: 'Vérification…',
+      planModelsHint:
+        'Ouvrez la console du forfait, copiez un ID de modèle de texte pris en charge et collez-le dans le champ du modèle.',
+      viewModels: 'Voir les modèles pris en charge',
       fetchModels: 'Récupérer les modèles',
       loadingModels: 'Récupération des modèles…',
       modelMissing: 'Aucun modèle configuré. Saisissez d’abord un ID de modèle.',

@@ -1300,6 +1300,12 @@ export const ko: typeof zhCN = {
       volcengineAccessKeyLabel: 'Access Token',
       volcengineApiKeyLabel: 'API Key',
       volcengineResourceIdLabel: 'Resource ID',
+      volcengineServiceLabel: '서비스',
+      volcengineServiceStandard: '일반 서비스',
+      volcengineAgentPlanNote:
+        'Doubao 스트리밍 ASR용 Agent Plan 전용 API 키를 사용하세요. 기본 Resource ID: volc.seedasr.sauc.duration. 일반 서비스와 키가 다르므로 별도 채널을 사용하세요.',
+      volcengineServiceInvalid:
+        '잘못된 서비스 설정입니다. 일반 서비스 또는 Agent Plan을 다시 선택하세요.',
       volcengineAuthModeLabel: '인증 모드',
       volcengineAuthModeAppIdToken: '레거시 앱 (APP ID + Access Token)',
       volcengineAuthModeApiKey: '새 콘솔 API Key',
@@ -1391,6 +1397,8 @@ export const ko: typeof zhCN = {
         '위 설정을 먼저 저장한 후 현재 모델 연결성을 검증하거나 모델을 가져오세요. 실패해도 모델 ID 를 수동 입력할 수 있습니다.',
       validate: '검증',
       validating: '검증 중…',
+      planModelsHint: '요금제 콘솔에서 지원되는 텍스트 모델 ID를 복사해 모델 필드에 입력하세요.',
+      viewModels: '지원 모델 보기',
       fetchModels: '모델 가져오기',
       loadingModels: '모델 가져오는 중…',
       modelMissing: '모델이 설정되지 않았습니다. 먼저 모델 ID 를 입력해 주세요.',

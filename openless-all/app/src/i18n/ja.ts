@@ -1308,6 +1308,12 @@ export const ja: typeof zhCN = {
       volcengineAccessKeyLabel: 'Access Token',
       volcengineApiKeyLabel: 'API Key',
       volcengineResourceIdLabel: 'Resource ID',
+      volcengineServiceLabel: 'サービス',
+      volcengineServiceStandard: '通常サービス',
+      volcengineAgentPlanNote:
+        '豆包ストリーミング ASR 用の Agent Plan 専用 API キーを使用します。既定の Resource ID: volc.seedasr.sauc.duration。通常サービスとはキーが異なるため、別のチャネルを作成してください。',
+      volcengineServiceInvalid:
+        'サービス設定が無効です。通常サービスまたは Agent Plan を選択してください。',
       volcengineAuthModeLabel: '認証モード',
       volcengineAuthModeAppIdToken: 'レガシーアプリ（APP ID + Access Token）',
       volcengineAuthModeApiKey: '新版コンソール API Key',
@@ -1399,6 +1405,9 @@ export const ja: typeof zhCN = {
         '上記の設定を保存してから、現在のモデル接続性を検証またはモデル一覧を取得します。失敗してもモデル ID を手動入力できます。',
       validate: '検証',
       validating: '検証中…',
+      planModelsHint:
+        'プランのコンソールで対応するテキストモデル ID をコピーし、モデル欄に入力してください。',
+      viewModels: '対応モデルを確認',
       fetchModels: 'モデル一覧',
       loadingModels: 'モデル取得中…',
       modelMissing: 'モデルが未設定です。先にモデル ID を入力してください。',

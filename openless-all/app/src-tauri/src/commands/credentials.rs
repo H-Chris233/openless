@@ -563,6 +563,7 @@ fn credential_configuration(
         asr_api_key: configured(&snap.asr_api_key),
         asr_endpoint: configured(&snap.asr_endpoint),
         asr_model: configured(&snap.asr_model),
+        volcengine_service: snap.volcengine_service.clone(),
         volcengine_auth_mode: snap.volcengine_auth_mode.clone(),
         volcengine_app_key: configured(&snap.volcengine_app_key),
         volcengine_access_key: configured(&snap.volcengine_access_key),
@@ -575,11 +576,11 @@ fn credential_configuration(
         tencent_cloud_secret_key: configured(&snap.tencent_cloud_secret_key),
         llm_api_key: configured(&snap.ark_api_key),
         llm_endpoint: llm_endpoint.is_some(),
-        llm_endpoint_matches_default: llm_endpoint.is_some_and(|endpoint| {
-            openless_core::provider_rules::default_llm_endpoint(llm_provider).is_some_and(
-                |default| openless_core::provider_rules::equivalent_endpoint(endpoint, default),
-            )
-        }),
+        llm_api_key_required: openless_core::provider_rules::api_key_required(
+            openless_core::ProviderKind::Llm,
+            llm_provider,
+            llm_endpoint,
+        ),
         llm_model: configured(&snap.ark_model_id),
         codex_oauth,
         omni_api_key: configured(&snap.omni_api_key),
@@ -829,6 +830,7 @@ fn account_provider_kind(account: CredentialAccount) -> CredentialProviderKind {
         CredentialAccount::VolcengineAppKey
         | CredentialAccount::VolcengineAccessKey
         | CredentialAccount::VolcengineResourceId
+        | CredentialAccount::VolcengineService
         | CredentialAccount::VolcengineAuthMode
         | CredentialAccount::VolcengineApiKey
         | CredentialAccount::AsrApiKey
@@ -860,6 +862,7 @@ fn parse_account(s: &str) -> Result<CredentialAccount, String> {
         "volcengine.app_key" => Ok(CredentialAccount::VolcengineAppKey),
         "volcengine.access_key" => Ok(CredentialAccount::VolcengineAccessKey),
         "volcengine.resource_id" => Ok(CredentialAccount::VolcengineResourceId),
+        "volcengine.service" => Ok(CredentialAccount::VolcengineService),
         "volcengine.auth_mode" => Ok(CredentialAccount::VolcengineAuthMode),
         "volcengine.api_key" => Ok(CredentialAccount::VolcengineApiKey),
         "ark.api_key" => Ok(CredentialAccount::ArkApiKey),
