@@ -1645,7 +1645,9 @@ mod linux_app {
                                 ui.ctx().copy_text(display);
                             }
                         }
-                        None => ui.label("完整指纹不可用。请勿安装或信任下载的证书。"),
+                        None => {
+                            ui.label("完整指纹不可用。请勿安装或信任下载的证书。");
+                        }
                     }
                     ui.label("安装或开启完全信任前，在手机系统的证书详情中核对全部 SHA-256 字符，必须与此处一致。网页、描述文件名称和标识不能证明证书身份。若不一致或无法查看，请停止并移除已下载或安装的描述文件。");
                     ui.label("描述文件应只包含一张根证书。若有其他证书、VPN 或设备管理配置，请勿安装。首次下载仍可能被局域网攻击者替换；核验后再信任。根证书可签发其他证书，不再使用时请移除。");
@@ -3002,6 +3004,7 @@ mod linux_app {
                         port: 8443,
                         urls: vec!["https://old.example.invalid".into()],
                         urls_stale,
+                        ca_fingerprint_sha256: None,
                         locale: "en".into(),
                         connection_count: 0,
                         active_session_id: None,
@@ -3013,6 +3016,38 @@ mod linux_app {
                 assert!(!text.contains("https://old.example.invalid"), "{text}");
                 assert!(text.contains("当前连接数：0"), "{text}");
             }
+        }
+
+        #[test]
+        fn running_remote_status_shows_ca_fingerprint_or_unavailable_warning() {
+            let mut app = disconnected_app();
+            let fingerprint = "ab".repeat(32);
+            app.remote_access = Some((
+                openless_core::RemoteInputStatus {
+                    enabled: true,
+                    running: true,
+                    starting: false,
+                    port: 8443,
+                    urls: vec!["https://phone.example.invalid".into()],
+                    urls_stale: false,
+                    ca_fingerprint_sha256: Some(fingerprint.clone()),
+                    locale: "zh-CN".into(),
+                    connection_count: 0,
+                    active_session_id: None,
+                },
+                "fixture-pin".into(),
+            ));
+            let text = rendered_text(|ui| app.remote_ui(ui));
+            assert!(text.contains("本机根证书 SHA-256"), "{text}");
+            assert!(
+                text.contains("AB AB AB AB AB AB AB AB AB AB AB AB AB AB AB AB AB AB AB AB AB AB AB AB AB AB AB AB AB AB AB AB"),
+                "{text}"
+            );
+            assert!(!text.contains("完整指纹不可用"), "{text}");
+
+            app.remote_access.as_mut().unwrap().0.ca_fingerprint_sha256 = None;
+            let text = rendered_text(|ui| app.remote_ui(ui));
+            assert!(text.contains("完整指纹不可用。请勿安装或信任下载的证书。"), "{text}");
         }
 
         #[test]

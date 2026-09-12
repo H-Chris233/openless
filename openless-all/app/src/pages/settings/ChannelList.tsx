@@ -141,6 +141,12 @@ function modelAccountFor(kind: ChannelKind): string {
   return kind === 'llm' ? 'ark.model_id' : 'asr.model';
 }
 
+function failedOpMessage(error: unknown, fallback: string): string {
+  const detail = error instanceof Error ? error.message : String(error);
+  const trimmed = detail.trim();
+  return trimmed || fallback;
+}
+
 /**
  * 把后端的错误串压成按钮上放得下的短标签，且要**能指导行动**：
  * 401 是 key 不对、429 是被限流等会儿再说、超时是网络——用户看到才知道该改什么。
@@ -290,7 +296,8 @@ export function ChannelList({
       await refresh();
     } catch (error) {
       console.error('[channels] create failed', error);
-      emitSaved('failed', t('common.operationFailed'));
+      const message = failedOpMessage(error, t('common.operationFailed'));
+      emitSaved('failed', message);
     } finally {
       setCreatingBusy(false);
     }

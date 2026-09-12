@@ -3037,11 +3037,23 @@ impl OpenLessBackend {
     }
 
     pub async fn start(&self) -> Result<StartupSnapshot, BackendError> {
-        let credentials = self
-            .deps
-            .credential_store
-            .status(self.get_preferences())
-            .await?;
+        let preferences = self.get_preferences();
+        let credentials = match self.deps.credential_store.status(preferences.clone()).await {
+            Ok(credentials) => credentials,
+            Err(error) if error.code == BackendErrorCode::Persistence => {
+                // Vault unreadable (e.g. Android Keystore temporarily unavailable)
+                // must not fail the 2.0 handshake. Dictation still gates on read().
+                log::warn!("[core] startup credential status unavailable: {error}");
+                CredentialsStatus {
+                    pipeline_mode: crate::shared_types::effective_pipeline_mode(
+                        preferences.multimodal_pipeline_enabled,
+                        preferences.pipeline_mode,
+                    ),
+                    ..CredentialsStatus::default()
+                }
+            }
+            Err(error) => return Err(error),
+        };
         let mut state = self.state.write().expect("backend state lock poisoned");
         state.credentials = credentials;
         if state.running {
@@ -8586,6 +8598,75 @@ mod tests {
             events.recv().await.unwrap().kind,
             BackendEventKind::BackendStopping
         );
+    }
+
+    struct PersistenceOnlyCredentialStore;
+
+    impl crate::credentials::CredentialStore for PersistenceOnlyCredentialStore {
+        fn status(
+            &self,
+            _preferences: crate::shared_types::UserPreferences,
+        ) -> BoxFuture<'static, Result<CredentialsStatus, BackendError>> {
+            Box::pin(async {
+                Err(BackendError::new(
+                    BackendErrorCode::Persistence,
+                    "无法读取已保存的凭据：temporarily unavailable",
+                ))
+            })
+        }
+
+        fn read(
+            &self,
+            _key: crate::credentials::CredentialKey,
+        ) -> BoxFuture<'static, Result<Option<crate::credentials::SecretValue>, BackendError>>
+        {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn write(
+            &self,
+            _key: crate::credentials::CredentialKey,
+            _value: crate::credentials::SecretValue,
+        ) -> BoxFuture<'static, Result<(), BackendError>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn remove(
+            &self,
+            _key: crate::credentials::CredentialKey,
+        ) -> BoxFuture<'static, Result<(), BackendError>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[tokio::test]
+    async fn start_survives_persistent_vault_read_failure() {
+        let data_dir = TestDataDir::new("vault-persistence-start");
+        let backend = OpenLessBackend::new(
+            BackendConfig {
+                data_dir: data_dir.path().to_path_buf(),
+                ..BackendConfig::default()
+            },
+            BackendDependencies {
+                host_actions: Arc::new(FakeHost::default()),
+                text_inserter: Arc::new(FakeInserter),
+                dictation_engine: Arc::new(FakeEngine),
+                task_spawner: Arc::new(TokioTaskSpawner),
+                credential_store: Arc::new(PersistenceOnlyCredentialStore),
+                services: crate::domains::BackendServices::unsupported(),
+                local_asr_runtime: None,
+                marketplace_config: None,
+                selection_runtime: None,
+                selection_polisher: None,
+                qa_runtime: None,
+            },
+        )
+        .unwrap();
+        let first = backend.start().await.expect("first start must not fail");
+        let second = backend.start().await.expect("handshake start must not fail");
+        assert!(first.backend.running);
+        assert!(second.backend.running);
+        let _ = data_dir;
     }
 
     #[tokio::test]
