@@ -1179,6 +1179,7 @@ export const en: typeof zhCN = {
       lastCheck: 'Last check',
       verifying: 'Checking…',
       notVerified: 'Not checked yet',
+      verificationUnavailable: 'Verification is not supported for this channel',
       passed: 'Check passed',
       failed: 'Check failed · {{reason}}',
       elapsed: 'Took {{ms}} ms',
@@ -1320,6 +1321,12 @@ export const en: typeof zhCN = {
       volcengineAccessKeyLabel: 'Access Token',
       volcengineApiKeyLabel: 'API Key',
       volcengineResourceIdLabel: 'Resource ID',
+      volcengineServiceLabel: 'Service',
+      volcengineServiceStandard: 'Standard service',
+      volcengineAgentPlanNote:
+        'Use a dedicated Agent Plan API key for Doubao streaming ASR. Default Resource ID: volc.seedasr.sauc.duration. Standard and plan keys differ; use separate channels for each service.',
+      volcengineServiceInvalid:
+        'Invalid service configuration. Select Standard service or Agent Plan again.',
       volcengineAuthModeLabel: 'Auth mode',
       volcengineAuthModeAppIdToken: 'Legacy app (APP ID + Access Token)',
       volcengineAuthModeApiKey: 'API Key (new console)',
@@ -1413,6 +1420,9 @@ export const en: typeof zhCN = {
         'Save the fields above, then validate the selected model or fetch models. Manual model input remains available if fetching fails.',
       validate: 'Validate',
       validating: 'Validating…',
+      planModelsHint:
+        'Open the plan console, copy a supported text model ID, and enter it in the model field.',
+      viewModels: 'View supported models',
       fetchModels: 'Fetch models',
       loadingModels: 'Fetching models…',
       modelMissing: 'No model is configured. Please enter a model ID first.',
@@ -1748,17 +1758,24 @@ export const en: typeof zhCN = {
       regeneratePin: 'Regenerate',
       portInUse: 'Port {{port}} is in use, please change it',
       startError: 'Failed to start the remote input service: {{reason}}',
-      securityHint: 'Reachable only on the same LAN and requires the pairing code; turn it off when not in use.',
-      certHint: "Verify the root certificate fingerprint before trusting it on first use. Older versions require one-time setup; subsequent restarts and IP changes preserve trust.",
+      securityHint:
+        'Reachable only on the same LAN and requires the pairing code; turn it off when not in use.',
+      certHint:
+        'Verify the root certificate fingerprint before trusting it on first use. Older versions require one-time setup; subsequent restarts and IP changes preserve trust.',
       certFingerprintLabel: "This computer's root CA SHA-256",
-      certFingerprintCopy: "Copy full fingerprint",
-      certFingerprintCopied: "Fingerprint copied",
-      certFingerprintUnavailable: "The full fingerprint is unavailable. Do not install or trust a downloaded certificate.",
-      certVerifyHint: "Find SHA-256 in the phone's system certificate details and compare all 64 characters with this value (ignore spaces and colons) before enabling full trust. A web page, profile name or identifier cannot prove identity. If the fingerprint differs or cannot be viewed in full, stop and remove the downloaded or installed profile.",
-      certProfileHint: "Expect exactly one root certificate. Do not install a profile containing additional certificates, VPN or device management settings.",
-      certTrustWarning: "The initial certificate download cannot verify the computer's identity; a malicious device on the LAN could replace the root certificate in a man-in-the-middle attack. Install it only on a trusted home or private network, never on a public or shared network. The root CA can issue certificates and its private key stays on this computer; remove it from your phone when no longer needed.",
-      certSetupLink: "Copy iPhone certificate link",
-      waitingStart: 'The service is not running yet. Turn the switch off, then on again. Do not restart the app.',
+      certFingerprintCopy: 'Copy full fingerprint',
+      certFingerprintCopied: 'Fingerprint copied',
+      certFingerprintUnavailable:
+        'The full fingerprint is unavailable. Do not install or trust a downloaded certificate.',
+      certVerifyHint:
+        "Find SHA-256 in the phone's system certificate details and compare all 64 characters with this value (ignore spaces and colons) before enabling full trust. A web page, profile name or identifier cannot prove identity. If the fingerprint differs or cannot be viewed in full, stop and remove the downloaded or installed profile.",
+      certProfileHint:
+        'Expect exactly one root certificate. Do not install a profile containing additional certificates, VPN or device management settings.',
+      certTrustWarning:
+        "The initial certificate download cannot verify the computer's identity; a malicious device on the LAN could replace the root certificate in a man-in-the-middle attack. Install it only on a trusted home or private network, never on a public or shared network. The root CA can issue certificates and its private key stays on this computer; remove it from your phone when no longer needed.",
+      certSetupLink: 'Copy iPhone certificate link',
+      waitingStart:
+        'The service is not running yet. Turn the switch off, then on again. Do not restart the app.',
       starting: 'Starting the remote input service…',
       urlsStale: 'These addresses come from the previous run and may be out of date.',
     },
@@ -2147,6 +2164,15 @@ export const en: typeof zhCN = {
     downloading: 'Downloading',
     startDownload: 'Start download',
     downloadNewModel: 'Download new model',
+    activeModelLabel: 'Model in use',
+    pickerNoModelDownloaded:
+      'No downloaded models yet — download one on the Local models page first.',
+    partialDownloadsLabel: 'Incomplete downloads',
+    partialDownloadsDesc:
+      'Interrupted downloads left staging files behind; clean them up without affecting installed models.',
+    cleanupIncomplete: 'Clean up incomplete download',
+    languagesLabel: 'Languages',
+    partialBytesLabel: 'Leftover files',
     downloadDialogTitle: 'Download Model',
     downloadDialogAlreadyHave:
       'The model files are downloaded. Return to the model page to load and test, or choose its provider in ASR transcription.',

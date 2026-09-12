@@ -474,6 +474,14 @@ export interface SidebarModelEntry {
   id: string;
   /** 展示名（如 qwen3-asr-0.6b / whisper-small）。 */
   name: string;
+  /** 目录快照的正式展示名（Core descriptor）；无则回退 name。 */
+  displayName?: string;
+  /** 目录快照的支持语言短码（zh / en / ja…）。 */
+  languages?: string[];
+  /** 目录快照的远端完整尺寸；无需实时访问 HuggingFace 即可展示。 */
+  sizeBytes?: number;
+  /** 有已下载字节但未装好 = 中断残留，可一键清理 staging 目录。 */
+  partialBytes?: number;
   /** HF 仓库标识（Qwen3 有；sherpa/foundry 可能为空）。 */
   repo?: string;
   /** 已下载字节数（HF 拉取的真实尺寸）。 */
@@ -532,11 +540,14 @@ function ModelChoice({
   const { t } = useTranslation();
   return (
     <button type="button" className="ol-model-choice" aria-pressed={selected} onClick={onSelect}>
-      <span className="ol-model-choice-name">{entry.name}</span>
+      <span className="ol-model-choice-name">{entry.displayName || entry.name}</span>
       <span className="ol-model-choice-meta">
         <span>{ENGINE_LABELS[entry.engine]}</span>
+        {entry.languages?.length ? <span>{entry.languages.join(' / ')}</span> : null}
         <span>
-          {entry.remoteBytes ? formatBytes(entry.remoteBytes) : t('localAsr.sizeUnknown')}
+          {entry.remoteBytes || entry.sizeBytes
+            ? formatBytes(entry.remoteBytes ?? entry.sizeBytes!)
+            : t('localAsr.sizeUnknown')}
         </span>
       </span>
       <span className="ol-model-choice-state">
@@ -605,8 +616,24 @@ function ModelFacts({
       </div>
       <div>
         <dt>{t('localAsr.sizeLabel')}</dt>
-        <dd>{entry.remoteBytes ? formatBytes(entry.remoteBytes) : t('localAsr.sizeUnknown')}</dd>
+        <dd>
+          {entry.remoteBytes || entry.sizeBytes
+            ? formatBytes(entry.remoteBytes ?? entry.sizeBytes!)
+            : t('localAsr.sizeUnknown')}
+        </dd>
       </div>
+      {entry.languages?.length ? (
+        <div>
+          <dt>{t('localAsr.languagesLabel')}</dt>
+          <dd>{entry.languages.join(' / ')}</dd>
+        </div>
+      ) : null}
+      {entry.partialBytes ? (
+        <div>
+          <dt>{t('localAsr.partialBytesLabel')}</dt>
+          <dd>{formatBytes(entry.partialBytes)}</dd>
+        </div>
+      ) : null}
       {fileCount != null && fileCount > 0 && (
         <div>
           <dt>{t('localAsr.files')}</dt>
@@ -641,6 +668,7 @@ export function ModelDetailPanel({
   onDelete,
   onReveal,
   onTest,
+  onCleanup,
   showTest,
   testResult,
   testing,
@@ -655,6 +683,8 @@ export function ModelDetailPanel({
   onDelete: () => void;
   onReveal: () => void;
   onTest: () => void;
+  /** 清理中断下载的 staging 目录（仅存在残留且未在下载时出现）。 */
+  onCleanup?: () => void;
   showTest: boolean;
   testResult: LocalAsrTestResult | { error: string } | null;
   testing: boolean;
@@ -665,7 +695,7 @@ export function ModelDetailPanel({
     <div className="ol-model-detail">
       <div className="ol-model-detail-heading">
         <span className="ol-model-eyebrow">{t('localAsr.detailsTitle')}</span>
-        <h3>{entry.name}</h3>
+        <h3>{entry.displayName || entry.name}</h3>
         <ModelStatus entry={entry} />
       </div>
       <ModelFacts entry={entry} fileCount={fileCount} mirrorLabel={mirrorLabel} />
@@ -683,6 +713,11 @@ export function ModelDetailPanel({
         {!entry.isDownloaded && !entry.isDownloading && (
           <Btn variant="blue" disabled={busy} onClick={onDownload}>
             {entry.downloadError ? t('common.retry') : t('localAsr.download')}
+          </Btn>
+        )}
+        {!entry.isDownloaded && !entry.isDownloading && entry.partialBytes && onCleanup && (
+          <Btn variant="ghost" disabled={busy} onClick={onCleanup}>
+            {t('localAsr.cleanupIncomplete')}
           </Btn>
         )}
         {entry.isDownloading && (

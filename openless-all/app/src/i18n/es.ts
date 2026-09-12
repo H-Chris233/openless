@@ -1203,6 +1203,7 @@ export const es: typeof zhCN = {
       lastCheck: 'Última comprobación',
       verifying: 'Comprobando…',
       notVerified: 'Sin comprobar',
+      verificationUnavailable: 'La comprobación no está disponible para este canal',
       passed: 'Comprobación correcta',
       failed: 'Comprobación fallida · {{reason}}',
       elapsed: 'Duración: {{ms}} ms',
@@ -1345,6 +1346,12 @@ export const es: typeof zhCN = {
       volcengineAccessKeyLabel: 'Access Token',
       volcengineApiKeyLabel: 'Clave API',
       volcengineResourceIdLabel: 'Resource ID',
+      volcengineServiceLabel: 'Servicio',
+      volcengineServiceStandard: 'Servicio estándar',
+      volcengineAgentPlanNote:
+        'Usa una clave API exclusiva de Agent Plan para ASR en streaming de Doubao. Resource ID predeterminado: volc.seedasr.sauc.duration. Las claves son distintas; usa canales separados para cada servicio.',
+      volcengineServiceInvalid:
+        'Configuración de servicio no válida. Selecciona de nuevo el servicio estándar o Agent Plan.',
       volcengineAuthModeLabel: 'Modo de autenticación',
       volcengineAuthModeAppIdToken: 'Aplicación anterior (APP ID + Access Token)',
       volcengineAuthModeApiKey: 'Clave API (consola nueva)',
@@ -1434,6 +1441,9 @@ export const es: typeof zhCN = {
         'Guarda los campos de arriba y después comprueba el modelo o consulta los modelos disponibles. Si la consulta falla, puedes escribir el modelo manualmente.',
       validate: 'Comprobar',
       validating: 'Comprobando…',
+      planModelsHint:
+        'Abra la consola del plan, copie un ID de modelo de texto compatible e introdúzcalo en el campo del modelo.',
+      viewModels: 'Ver modelos compatibles',
       fetchModels: 'Obtener modelos',
       loadingModels: 'Obteniendo modelos…',
       modelMissing: 'No hay ningún modelo configurado. Introduce primero su ID.',
@@ -2202,6 +2212,15 @@ export const es: typeof zhCN = {
     downloading: 'Descargando',
     startDownload: 'Iniciar descarga',
     downloadNewModel: 'Descargar nuevo modelo',
+    activeModelLabel: 'Modelo en uso',
+    pickerNoModelDownloaded:
+      'Aún no hay modelos descargados; descarga primero uno en la página de modelos locales.',
+    partialDownloadsLabel: 'Descargas incompletas',
+    partialDownloadsDesc:
+      'Las descargas interrumpidas dejaron archivos temporales; límpialos sin afectar a los modelos instalados.',
+    cleanupIncomplete: 'Limpiar descarga incompleta',
+    languagesLabel: 'Idiomas',
+    partialBytesLabel: 'Archivos residuales',
     downloadDialogTitle: 'Descargar modelo',
     downloadDialogAlreadyHave:
       'Los archivos del modelo ya están descargados. Vuelve a su página para cargarlo y probarlo, o elige su proveedor en Transcripción ASR.',

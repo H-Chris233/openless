@@ -1159,6 +1159,7 @@ export const ko: typeof zhCN = {
       lastCheck: '마지막 확인',
       verifying: '확인 중…',
       notVerified: '아직 확인하지 않음',
+      verificationUnavailable: '이 채널은 확인을 지원하지 않습니다',
       passed: '확인 성공',
       failed: '확인 실패 · {{reason}}',
       elapsed: '소요 시간 {{ms}} ms',
@@ -1299,6 +1300,12 @@ export const ko: typeof zhCN = {
       volcengineAccessKeyLabel: 'Access Token',
       volcengineApiKeyLabel: 'API Key',
       volcengineResourceIdLabel: 'Resource ID',
+      volcengineServiceLabel: '서비스',
+      volcengineServiceStandard: '일반 서비스',
+      volcengineAgentPlanNote:
+        'Doubao 스트리밍 ASR용 Agent Plan 전용 API 키를 사용하세요. 기본 Resource ID: volc.seedasr.sauc.duration. 일반 서비스와 키가 다르므로 별도 채널을 사용하세요.',
+      volcengineServiceInvalid:
+        '잘못된 서비스 설정입니다. 일반 서비스 또는 Agent Plan을 다시 선택하세요.',
       volcengineAuthModeLabel: '인증 모드',
       volcengineAuthModeAppIdToken: '레거시 앱 (APP ID + Access Token)',
       volcengineAuthModeApiKey: '새 콘솔 API Key',
@@ -1390,6 +1397,8 @@ export const ko: typeof zhCN = {
         '위 설정을 먼저 저장한 후 현재 모델 연결성을 검증하거나 모델을 가져오세요. 실패해도 모델 ID 를 수동 입력할 수 있습니다.',
       validate: '검증',
       validating: '검증 중…',
+      planModelsHint: '요금제 콘솔에서 지원되는 텍스트 모델 ID를 복사해 모델 필드에 입력하세요.',
+      viewModels: '지원 모델 보기',
       fetchModels: '모델 가져오기',
       loadingModels: '모델 가져오는 중…',
       modelMissing: '모델이 설정되지 않았습니다. 먼저 모델 ID 를 입력해 주세요.',
@@ -1705,17 +1714,24 @@ export const ko: typeof zhCN = {
       regeneratePin: '재생성',
       portInUse: '포트 {{port}}이(가) 사용 중입니다. 변경하세요',
       startError: '원격 입력 서비스 시작에 실패했습니다: {{reason}}',
-      securityHint: '같은 LAN에서만 접속 가능하며 페어링 코드 입력이 필요합니다. 사용하지 않을 때는 끄는 것을 권장합니다.',
-      certHint: "처음 연결할 때 루트 인증서 지문을 확인한 후 신뢰하세요. 이전 버전에서는 한 번 설정해야 하며, 이후 재시작과 IP 변경 시 신뢰가 유지됩니다.",
-      certFingerprintLabel: "이 컴퓨터의 루트 CA SHA-256",
-      certFingerprintCopy: "전체 지문 복사",
-      certFingerprintCopied: "지문 복사됨",
-      certFingerprintUnavailable: "전체 지문을 확인할 수 없습니다. 다운로드한 인증서를 설치하거나 신뢰하지 마세요.",
-      certVerifyHint: "휴대폰 시스템의 인증서 상세 정보에서 SHA-256을 찾아, 완전한 신뢰를 켜기 전에 공백과 콜론을 제외한 64자 전체를 이 값과 비교하세요. 웹 페이지, 프로파일 이름이나 식별자는 신원 증명이 아닙니다. 일치하지 않거나 전체 지문을 볼 수 없으면 중단하고 다운로드했거나 설치한 프로파일을 제거하세요.",
-      certProfileHint: "프로파일에는 루트 인증서 한 개만 있어야 합니다. 추가 인증서, VPN 또는 기기 관리 설정이 있으면 설치하지 마세요.",
-      certTrustWarning: "최초 인증서 다운로드에서는 컴퓨터의 신원을 확인할 수 없으며, LAN의 악성 기기가 중간자 공격으로 루트 인증서를 바꿀 수 있습니다. 신뢰할 수 있는 가정용 또는 사설 네트워크에서만 설치하고 공용 또는 공유 네트워크에서는 진행하지 마세요. 루트 CA는 인증서를 발급할 수 있고 개인 키는 이 컴퓨터에 저장됩니다. 더 이상 사용하지 않으면 휴대폰에서 제거하세요.",
-      certSetupLink: "iPhone 인증서 링크 복사",
-      waitingStart: '서비스가 아직 시작되지 않았습니다. 스위치를 끈 다음 다시 켜세요. 앱을 다시 시작하지 마세요.',
+      securityHint:
+        '같은 LAN에서만 접속 가능하며 페어링 코드 입력이 필요합니다. 사용하지 않을 때는 끄는 것을 권장합니다.',
+      certHint:
+        '처음 연결할 때 루트 인증서 지문을 확인한 후 신뢰하세요. 이전 버전에서는 한 번 설정해야 하며, 이후 재시작과 IP 변경 시 신뢰가 유지됩니다.',
+      certFingerprintLabel: '이 컴퓨터의 루트 CA SHA-256',
+      certFingerprintCopy: '전체 지문 복사',
+      certFingerprintCopied: '지문 복사됨',
+      certFingerprintUnavailable:
+        '전체 지문을 확인할 수 없습니다. 다운로드한 인증서를 설치하거나 신뢰하지 마세요.',
+      certVerifyHint:
+        '휴대폰 시스템의 인증서 상세 정보에서 SHA-256을 찾아, 완전한 신뢰를 켜기 전에 공백과 콜론을 제외한 64자 전체를 이 값과 비교하세요. 웹 페이지, 프로파일 이름이나 식별자는 신원 증명이 아닙니다. 일치하지 않거나 전체 지문을 볼 수 없으면 중단하고 다운로드했거나 설치한 프로파일을 제거하세요.',
+      certProfileHint:
+        '프로파일에는 루트 인증서 한 개만 있어야 합니다. 추가 인증서, VPN 또는 기기 관리 설정이 있으면 설치하지 마세요.',
+      certTrustWarning:
+        '최초 인증서 다운로드에서는 컴퓨터의 신원을 확인할 수 없으며, LAN의 악성 기기가 중간자 공격으로 루트 인증서를 바꿀 수 있습니다. 신뢰할 수 있는 가정용 또는 사설 네트워크에서만 설치하고 공용 또는 공유 네트워크에서는 진행하지 마세요. 루트 CA는 인증서를 발급할 수 있고 개인 키는 이 컴퓨터에 저장됩니다. 더 이상 사용하지 않으면 휴대폰에서 제거하세요.',
+      certSetupLink: 'iPhone 인증서 링크 복사',
+      waitingStart:
+        '서비스가 아직 시작되지 않았습니다. 스위치를 끈 다음 다시 켜세요. 앱을 다시 시작하지 마세요.',
       starting: '원격 입력 서비스를 시작하는 중입니다…',
       urlsStale: '이 주소는 이전 실행에서 가져온 것으로 최신이 아닐 수 있습니다.',
     },
@@ -2098,6 +2114,15 @@ export const ko: typeof zhCN = {
     downloading: '다운로드 중',
     startDownload: '다운로드 시작',
     downloadNewModel: '새 모델 다운로드',
+    activeModelLabel: '사용 중인 모델',
+    pickerNoModelDownloaded:
+      '다운로드된 모델이 아직 없습니다. 로컬 모델 페이지에서 먼저 내려받으세요.',
+    partialDownloadsLabel: '완료되지 않은 다운로드',
+    partialDownloadsDesc:
+      '중단된 다운로드의 임시 파일이 남아 있습니다. 설치된 모델에 영향 없이 정리할 수 있습니다.',
+    cleanupIncomplete: '미완료 다운로드 정리',
+    languagesLabel: '언어',
+    partialBytesLabel: '남은 파일',
     downloadDialogTitle: '모델 다운로드',
     downloadDialogAlreadyHave:
       '모델 파일이 다운로드되었습니다. 모델 페이지에서 불러와 테스트하거나 ASR 음성 전사에서 해당 제공업체를 선택하세요.',

@@ -11,6 +11,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode }
 import { useTranslation } from 'react-i18next';
 import { restartApp } from '../../lib/ipc/permissions';
 import { isTauri } from '../../lib/ipc';
+import { emitSaved } from '../../lib/savedEvent';
 import { useLayoutStack } from '../../lib/useMobileLayout';
 import {
   FOUNDRY_LOCAL_ASR_MODELS,
@@ -21,6 +22,7 @@ import {
   cancelSherpaOnnxAsrDownload,
   cancelSherpaOnnxAsrPrepare,
   cancelLocalAsrDownload,
+  cleanupIncompleteLocalAsrModel,
   deleteFoundryLocalAsrModel,
   deleteSherpaOnnxAsrModel,
   deleteLocalAsrModel,
@@ -1385,6 +1387,21 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
     }
   };
 
+  // 清理中断下载的 staging 目录；已安装模型不受影响（后端保证）。
+  const handleCleanupIncomplete = async (modelId: string) => {
+    setBusyModelId(modelId);
+    try {
+      setError(null);
+      await cleanupIncompleteLocalAsrModel(modelId);
+      emitSaved('saved', t('common.saved'));
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusyModelId(null);
+    }
+  };
+
   const handleKeepLoadedChange = async (seconds: number) => {
     try {
       await setLocalAsrKeepLoadedSecs(seconds);
@@ -1638,6 +1655,14 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
       entries.push({
         id: m.id,
         name: m.id.replace(/^qwen3-asr-/, 'Qwen3-ASR ').replace(/^whisper-/, 'Whisper '),
+        // 目录元数据来自 Core descriptor 快照，展示不再依赖实时 HuggingFace。
+        displayName: m.displayName || undefined,
+        languages: m.languages?.length ? m.languages : undefined,
+        sizeBytes: m.sizeBytes ?? undefined,
+        partialBytes:
+          !m.isDownloaded && !isDownloading && m.downloadedBytes > 0
+            ? m.downloadedBytes
+            : undefined,
         repo: m.hfRepo,
         remoteBytes:
           remoteSizes[m.id]?.totalBytes || (m.isDownloaded ? m.downloadedBytes : undefined),
@@ -1669,6 +1694,8 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
       entries.push({
         id: c.alias,
         name: c.displayName || c.alias,
+        displayName: c.displayName || undefined,
+        sizeBytes: c.fileSizeMb != null ? c.fileSizeMb * 1024 * 1024 : undefined,
         remoteBytes:
           sherpaRemoteSizes[c.alias]?.totalBytes ||
           (c.fileSizeMb != null ? c.fileSizeMb * 1024 * 1024 : undefined),
@@ -1701,6 +1728,8 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
       entries.push({
         id: c.alias,
         name: c.displayName || c.alias,
+        displayName: c.displayName || undefined,
+        sizeBytes: c.fileSizeMb != null ? c.fileSizeMb * 1024 * 1024 : undefined,
         remoteBytes: c.fileSizeMb != null ? c.fileSizeMb * 1024 * 1024 : undefined,
         isDownloaded: c.cached,
         isDownloading,
@@ -1947,6 +1976,13 @@ export function LocalAsr({ embedded = false }: LocalAsrProps = {}) {
                     }}
                     onDelete={() => selectedEntry && dispatchEntryAction(selectedEntry, 'delete')}
                     onReveal={() => selectedEntry && dispatchEntryAction(selectedEntry, 'reveal')}
+                    onCleanup={
+                      selectedEntry &&
+                      (selectedEntry.engine === 'qwen3' || selectedEntry.engine === 'whisper') &&
+                      selectedEntry.partialBytes
+                        ? () => void handleCleanupIncomplete(selectedEntry.id)
+                        : undefined
+                    }
                     onTest={() => {
                       if (
                         selectedEntry?.engine === 'qwen3' ||

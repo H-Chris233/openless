@@ -47,6 +47,9 @@ pub struct ProviderService {
     credentials: Arc<dyn CredentialStore>,
     task_spawner: Arc<dyn TaskSpawner>,
     transport: Arc<dyn ProviderTransport>,
+    /// Host-owned native engines (e.g. Apple Speech). Only consulted by the
+    /// [`ValidationProbe::AsrNativeSilence`] probe; cloud probes ignore it.
+    native_transcription: Option<Arc<dyn TranscriptionEngine>>,
 }
 
 impl ProviderService {
@@ -72,7 +75,20 @@ impl ProviderService {
             credentials,
             task_spawner,
             transport,
+            native_transcription: None,
         }
+    }
+
+    /// Inject the host's native transcription engine so local providers whose
+    /// descriptor probes [`ValidationProbe::AsrNativeSilence`] (Apple Speech)
+    /// validate through the real engine — exercising authorization and
+    /// recognizer availability — instead of reporting unavailable.
+    pub fn with_native_transcription(
+        mut self,
+        native_transcription: Arc<dyn TranscriptionEngine>,
+    ) -> Self {
+        self.native_transcription = Some(native_transcription);
+        self
     }
 
     async fn resolve(&self, request: ProviderRequest) -> Result<ResolvedProvider, BackendError> {
@@ -227,10 +243,24 @@ impl ProviderService {
         let session_id = SessionId::new();
         match resolved.kind {
             ProviderKind::Asr => {
-                let engine = SharedCloudTranscriptionEngine::with_task_spawner(
-                    Arc::clone(&self.credentials),
-                    Arc::clone(&self.task_spawner),
-                );
+                // Native probes run through the host-registered engine so the
+                // check exercises the same engine dictation uses (Apple Speech
+                // authorization + recognizer availability); silence probes for
+                // cloud providers keep using the shared cloud engine.
+                let engine: Arc<dyn TranscriptionEngine> = match probe {
+                    ValidationProbe::AsrNativeSilence => {
+                        self.native_transcription.clone().ok_or_else(|| {
+                            BackendError::new(
+                                BackendErrorCode::Unsupported,
+                                "host native transcription engine is not configured",
+                            )
+                        })?
+                    }
+                    _ => Arc::new(SharedCloudTranscriptionEngine::with_task_spawner(
+                        Arc::clone(&self.credentials),
+                        Arc::clone(&self.task_spawner),
+                    )),
+                };
                 let session = tokio::select! {
                     _ = wait_for_cancellation(cancellation.clone()) => return Err(cancelled_request()),
                     result = engine.start(session_id, context, Arc::new(DiscardTextStream)) => {
@@ -965,6 +995,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ark_endpoint_key_validation_runs_before_network_probes() {
+        for endpoint in [
+            "https://ark.cn-beijing.volces.com/api/v3",
+            "https://ark.cn-beijing.volces.com/api/plan/v3",
+            "https://ark.cn-beijing.volces.com/api/coding/v3",
+            "http://127.0.0.1:8080/v1",
+        ] {
+            for key in [None, Some(""), Some(" \t\n"), Some("fixture-key")] {
+                let credentials = Arc::new(InMemoryCredentialStore::default());
+                let mut values = vec![
+                    (LLM_ENDPOINT_ACCOUNT, endpoint),
+                    (LLM_MODEL_ACCOUNT, "fixture-model"),
+                ];
+                if let Some(key) = key {
+                    values.push((LLM_API_KEY_ACCOUNT, key));
+                }
+                let channel =
+                    create_channel_with_values(&credentials, ChannelKind::Llm, "ark", &values)
+                        .await;
+                let service = ProviderService::new(credentials, Arc::new(crate::TokioTaskSpawner));
+                let resolved = service
+                    .resolve(ProviderRequest {
+                        kind: ProviderKind::Llm,
+                        channel_id: Some(channel),
+                        thinking_enabled: false,
+                    })
+                    .await
+                    .unwrap();
+                let result = validate_configuration(&resolved);
+                if !endpoint.starts_with("http://127.0.0.1")
+                    && key.is_none_or(|value| value.trim().is_empty())
+                {
+                    let error = result.unwrap_err();
+                    assert_eq!(error.code, BackendErrorCode::Provider);
+                    assert_eq!(error.message, "LLM API key is not configured");
+                } else {
+                    result.unwrap();
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn validation_and_model_lists_use_channel_protocol_and_thinking() {
         use crate::llm_protocol::*;
         for (format, preset, sse, path) in [
@@ -1035,6 +1108,70 @@ mod tests {
         let request = String::from_utf8_lossy(&request.recv().unwrap()).to_ascii_lowercase();
         assert!(request.starts_with("post /v1/audio/transcriptions "));
         assert!(!request.contains("authorization:"));
+    }
+
+    /// Minimal host-engine fixture: accepts any PCM and finishes successfully,
+    /// mirroring what the Apple Speech engine returns for a silence probe.
+    struct FixtureNativeEngine;
+
+    struct FixtureNativeSession;
+
+    impl crate::ports::AudioConsumer for FixtureNativeSession {
+        fn consume_pcm_chunk(&self, _pcm: &[u8]) {}
+    }
+
+    impl crate::ports::TranscriptionSession for FixtureNativeSession {
+        fn finish(
+            &self,
+        ) -> BoxFuture<'static, Result<crate::ports::TranscriptOutput, BackendError>> {
+            Box::pin(async {
+                Ok(crate::ports::TranscriptOutput {
+                    text: String::new(),
+                    duration_ms: 500,
+                })
+            })
+        }
+
+        fn cancel(&self) -> BoxFuture<'static, Result<(), BackendError>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    impl TranscriptionEngine for FixtureNativeEngine {
+        fn start(
+            &self,
+            _session_id: SessionId,
+            context: Arc<DictationContext>,
+            _partials: Arc<dyn TextStreamSink>,
+        ) -> BoxFuture<'static, Result<Arc<dyn crate::ports::TranscriptionSession>, BackendError>>
+        {
+            assert_eq!(context.asr.provider_type, "apple-speech");
+            Box::pin(async {
+                Ok(Arc::new(FixtureNativeSession) as Arc<dyn crate::ports::TranscriptionSession>)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn apple_speech_validates_through_the_injected_native_engine() {
+        let credentials = Arc::new(InMemoryCredentialStore::default());
+        let channel =
+            create_channel_with_values(&credentials, ChannelKind::Asr, "apple-speech", &[]).await;
+        let request = ProviderRequest {
+            thinking_enabled: false,
+            kind: ProviderKind::Asr,
+            channel_id: Some(channel),
+        };
+
+        // Without the host engine the native probe stays explicitly unsupported.
+        let without = ProviderService::new(credentials.clone(), Arc::new(crate::TokioTaskSpawner));
+        let error = without.validate(request.clone()).await.unwrap_err();
+        assert_eq!(error.code, BackendErrorCode::Unsupported);
+
+        // With the engine injected the probe runs against the real engine port.
+        let with = ProviderService::new(credentials, Arc::new(crate::TokioTaskSpawner))
+            .with_native_transcription(Arc::new(FixtureNativeEngine));
+        with.validate(request).await.unwrap();
     }
 
     #[tokio::test]

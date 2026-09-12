@@ -1167,6 +1167,7 @@ export const ja: typeof zhCN = {
       lastCheck: '前回の接続確認',
       verifying: '確認中…',
       notVerified: '未確認',
+      verificationUnavailable: 'このチャンネルは確認に対応していません',
       passed: '確認に成功',
       failed: '確認に失敗 · {{reason}}',
       elapsed: '所要時間 {{ms}} ms',
@@ -1307,6 +1308,12 @@ export const ja: typeof zhCN = {
       volcengineAccessKeyLabel: 'Access Token',
       volcengineApiKeyLabel: 'API Key',
       volcengineResourceIdLabel: 'Resource ID',
+      volcengineServiceLabel: 'サービス',
+      volcengineServiceStandard: '通常サービス',
+      volcengineAgentPlanNote:
+        '豆包ストリーミング ASR 用の Agent Plan 専用 API キーを使用します。既定の Resource ID: volc.seedasr.sauc.duration。通常サービスとはキーが異なるため、別のチャネルを作成してください。',
+      volcengineServiceInvalid:
+        'サービス設定が無効です。通常サービスまたは Agent Plan を選択してください。',
       volcengineAuthModeLabel: '認証モード',
       volcengineAuthModeAppIdToken: 'レガシーアプリ（APP ID + Access Token）',
       volcengineAuthModeApiKey: '新版コンソール API Key',
@@ -1398,6 +1405,9 @@ export const ja: typeof zhCN = {
         '上記の設定を保存してから、現在のモデル接続性を検証またはモデル一覧を取得します。失敗してもモデル ID を手動入力できます。',
       validate: '検証',
       validating: '検証中…',
+      planModelsHint:
+        'プランのコンソールで対応するテキストモデル ID をコピーし、モデル欄に入力してください。',
+      viewModels: '対応モデルを確認',
       fetchModels: 'モデル一覧',
       loadingModels: 'モデル取得中…',
       modelMissing: 'モデルが未設定です。先にモデル ID を入力してください。',
@@ -1717,17 +1727,24 @@ export const ja: typeof zhCN = {
       regeneratePin: '再生成',
       portInUse: 'ポート {{port}} は使用中です。変更してください',
       startError: 'リモート入力サービスの起動に失敗しました：{{reason}}',
-      securityHint: '同一 LAN からのみアクセス可能で、ペアリングコードの入力が必要です。使わないときはオフにすることを推奨します。',
-      certHint: "初回接続ではルート証明書の指紋を確認してから信頼してください。旧バージョンからは一度設定が必要ですが、その後は再起動や IP 変更でも信頼が保持されます。",
-      certFingerprintLabel: "このコンピューターのルート CA SHA-256",
-      certFingerprintCopy: "指紋全体をコピー",
-      certFingerprintCopied: "指紋をコピーしました",
-      certFingerprintUnavailable: "完全な指紋を取得できません。ダウンロードした証明書をインストールしたり信頼したりしないでください。",
-      certVerifyHint: "スマートフォンのシステム証明書詳細にある SHA-256 の全 64 文字を、空白とコロンを除いてこの値と照合し、完全に信頼する前に確認してください。Web ページ、プロファイル名や識別子は身元の証明にはなりません。一致しない場合や全体を表示できない場合は中止し、ダウンロード済みまたはインストール済みのプロファイルを削除してください。",
-      certProfileHint: "プロファイルにはルート証明書が 1 枚だけ含まれるはずです。追加の証明書、VPN、デバイス管理の設定がある場合はインストールしないでください。",
-      certTrustWarning: "初回の証明書ダウンロードではコンピューターの身元を確認できず、LAN 上の悪意あるデバイスが中間者攻撃でルート証明書を置き換える可能性があります。信頼できる家庭内またはプライベートネットワークでのみインストールし、公共または共有ネットワークでは操作しないでください。ルート CA は証明書を発行でき、秘密鍵はこのコンピューターに保存されます。不要になったらスマートフォンから削除してください。",
-      certSetupLink: "iPhone 証明書リンクをコピー",
-      waitingStart: 'サービスはまだ起動していません。スイッチを一度オフにしてからオンにしてください。アプリを再起動しないでください。',
+      securityHint:
+        '同一 LAN からのみアクセス可能で、ペアリングコードの入力が必要です。使わないときはオフにすることを推奨します。',
+      certHint:
+        '初回接続ではルート証明書の指紋を確認してから信頼してください。旧バージョンからは一度設定が必要ですが、その後は再起動や IP 変更でも信頼が保持されます。',
+      certFingerprintLabel: 'このコンピューターのルート CA SHA-256',
+      certFingerprintCopy: '指紋全体をコピー',
+      certFingerprintCopied: '指紋をコピーしました',
+      certFingerprintUnavailable:
+        '完全な指紋を取得できません。ダウンロードした証明書をインストールしたり信頼したりしないでください。',
+      certVerifyHint:
+        'スマートフォンのシステム証明書詳細にある SHA-256 の全 64 文字を、空白とコロンを除いてこの値と照合し、完全に信頼する前に確認してください。Web ページ、プロファイル名や識別子は身元の証明にはなりません。一致しない場合や全体を表示できない場合は中止し、ダウンロード済みまたはインストール済みのプロファイルを削除してください。',
+      certProfileHint:
+        'プロファイルにはルート証明書が 1 枚だけ含まれるはずです。追加の証明書、VPN、デバイス管理の設定がある場合はインストールしないでください。',
+      certTrustWarning:
+        '初回の証明書ダウンロードではコンピューターの身元を確認できず、LAN 上の悪意あるデバイスが中間者攻撃でルート証明書を置き換える可能性があります。信頼できる家庭内またはプライベートネットワークでのみインストールし、公共または共有ネットワークでは操作しないでください。ルート CA は証明書を発行でき、秘密鍵はこのコンピューターに保存されます。不要になったらスマートフォンから削除してください。',
+      certSetupLink: 'iPhone 証明書リンクをコピー',
+      waitingStart:
+        'サービスはまだ起動していません。スイッチを一度オフにしてからオンにしてください。アプリを再起動しないでください。',
       starting: 'リモート入力サービスを起動しています…',
       urlsStale: 'これらのアドレスは前回の起動時のもので、古くなっている可能性があります。',
     },
@@ -2115,6 +2132,15 @@ export const ja: typeof zhCN = {
     downloading: 'ダウンロード中',
     startDownload: 'ダウンロード開始',
     downloadNewModel: '新しいモデルをダウンロード',
+    activeModelLabel: '使用中のモデル',
+    pickerNoModelDownloaded:
+      'ダウンロード済みのモデルがありません。先にローカルモデルページで取得してください。',
+    partialDownloadsLabel: '未完了のダウンロード',
+    partialDownloadsDesc:
+      '中断されたダウンロードの一時ファイルが残っています。インストール済みモデルに影響せず一括削除できます。',
+    cleanupIncomplete: '未完了ダウンロードを削除',
+    languagesLabel: '言語',
+    partialBytesLabel: '残存ファイル',
     downloadDialogTitle: 'モデルをダウンロード',
     downloadDialogAlreadyHave:
       'モデルファイルはダウンロード済みです。モデルページで読み込みとテストを行うか、「ASR 音声文字起こし」で対応するプロバイダーを選択してください。',

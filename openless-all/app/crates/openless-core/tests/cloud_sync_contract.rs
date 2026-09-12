@@ -456,3 +456,26 @@ async fn unsupported_server_auth_failures_and_logout_do_not_invent_success() {
     );
     assert_eq!(server.state.lock().unwrap().requests.len(), count);
 }
+
+#[test]
+fn production_cloud_sync_targets_the_dedicated_port_on_the_marketplace_host() {
+    let config = MarketplaceConfig::production();
+    assert_eq!(
+        config.cloud_sync_base_url,
+        reqwest::Url::parse(openless_core::CLOUD_SYNC_BASE_URL).unwrap()
+    );
+    assert_eq!(
+        config.cloud_sync_base_url.host_str(),
+        config.base_url.host_str(),
+        "cloud sync must stay on the marketplace host"
+    );
+    assert_eq!(config.cloud_sync_base_url.port(), Some(9443));
+    assert_eq!(
+        config.cloud_sync_base_url.scheme(),
+        "https",
+        "the production sync endpoint must be HTTPS"
+    );
+    // Contract tests point both services at one local mock through `new`.
+    let local = MarketplaceConfig::new("http://127.0.0.1:8080/").unwrap();
+    assert_eq!(local.cloud_sync_base_url.as_str(), "http://127.0.0.1:8080/");
+}

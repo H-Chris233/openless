@@ -184,6 +184,9 @@ pub(crate) fn backend_dependencies(
     }
     let polisher: Arc<dyn TextPolisher> = polisher;
     let auxiliary_transcription: Arc<dyn TranscriptionEngine> = transcription.clone();
+    // Provider validation for local engines (Apple Speech) probes through the
+    // same router dictation uses, so the check exercises the real engine.
+    let provider_native_transcription: Arc<dyn TranscriptionEngine> = transcription.clone();
     let auxiliary_polisher: Arc<dyn TextPolisher> =
         Arc::new(openless_core::SharedAuxiliaryTextPolisher::new(
             Arc::clone(&credential_store),
@@ -227,10 +230,13 @@ pub(crate) fn backend_dependencies(
     dependencies
         .services
         .configure_auxiliary_runtime(auxiliary_polisher, auxiliary_transcription);
-    dependencies.services.provider = Arc::new(openless_core::ProviderService::new(
-        Arc::clone(&credential_store),
-        Arc::clone(&task_spawner),
-    ));
+    dependencies.services.provider = Arc::new(
+        openless_core::ProviderService::new(
+            Arc::clone(&credential_store),
+            Arc::clone(&task_spawner),
+        )
+        .with_native_transcription(provider_native_transcription),
+    );
     dependencies
         .services
         .configure_coding_agent_process(Arc::new(
@@ -778,34 +784,18 @@ impl openless_core::ModelRuntimeAdapter for TauriLocalAsrRuntimeAdapter {
     ) -> BoxFuture<'static, Result<openless_core::LocalAsrTestResult, BackendError>> {
         let preferences = Arc::clone(&self.preferences);
         Box::pin(async move {
-            if target.runtime != openless_core::LocalAsrRuntime::Generic {
-                return Err(BackendError::new(
-                    BackendErrorCode::Unsupported,
-                    "native model smoke test is only available for generic local ASR",
-                ));
-            }
-            let backend = crate::asr::local::qwen_backend_for_provider(
-                &preferences.get().active_asr_provider,
-            );
-            let result = crate::asr::local::test_run::run_test(
-                native_local_asr_model(&target)?,
-                backend,
-                model_dir,
-            )
-            .await
-            .map_err(|error| {
-                local_asr_backend_error(BackendErrorCode::Platform, format!("{error:#}"))
-            })?;
-            Ok(openless_core::LocalAsrTestResult {
-                target,
-                backend: result.backend,
-                expected_text: result.expected_text,
-                transcribed_text: result.transcribed_text,
-                audio_ms: result.audio_ms,
-                load_ms: result.load_ms,
-                transcribe_ms: result.transcribe_ms,
-            })
+            let provider_type = preferences.get().active_asr_provider.clone();
+            test_model_with_provider(target, model_dir, provider_type).await
         })
+    }
+
+    fn test_model_for_provider(
+        &self,
+        target: openless_core::LocalAsrTarget,
+        model_dir: PathBuf,
+        provider_type: String,
+    ) -> BoxFuture<'static, Result<openless_core::LocalAsrTestResult, BackendError>> {
+        Box::pin(test_model_with_provider(target, model_dir, provider_type))
     }
 
     fn invalidate_route(&self, runtime: openless_core::LocalAsrRuntime) {
@@ -823,6 +813,35 @@ impl openless_core::ModelRuntimeAdapter for TauriLocalAsrRuntimeAdapter {
         }
         .fetch_add(1, Ordering::AcqRel);
     }
+}
+
+async fn test_model_with_provider(
+    target: openless_core::LocalAsrTarget,
+    model_dir: PathBuf,
+    provider_type: String,
+) -> Result<openless_core::LocalAsrTestResult, BackendError> {
+    if target.runtime != openless_core::LocalAsrRuntime::Generic {
+        return Err(BackendError::new(
+            BackendErrorCode::Unsupported,
+            "native model smoke test is only available for generic local ASR",
+        ));
+    }
+    let backend = crate::asr::local::qwen_backend_for_provider(&provider_type);
+    let result =
+        crate::asr::local::test_run::run_test(native_local_asr_model(&target)?, backend, model_dir)
+            .await
+            .map_err(|error| {
+                local_asr_backend_error(BackendErrorCode::Platform, format!("{error:#}"))
+            })?;
+    Ok(openless_core::LocalAsrTestResult {
+        target,
+        backend: result.backend,
+        expected_text: result.expected_text,
+        transcribed_text: result.transcribed_text,
+        audio_ms: result.audio_ms,
+        load_ms: result.load_ms,
+        transcribe_ms: result.transcribe_ms,
+    })
 }
 
 impl TauriLocalAsrRuntimeAdapter {

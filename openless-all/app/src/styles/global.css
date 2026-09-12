@@ -1549,7 +1549,7 @@ html:lang(de) {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: 12px;
 }
 .ol-cloud-sync .ol-cloud-sync-error {
   color: var(--ol-err);

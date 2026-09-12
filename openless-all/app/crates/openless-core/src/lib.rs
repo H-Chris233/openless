@@ -267,7 +267,9 @@ pub use local_asr_service::{
     LocalAsrRuntimeLease, ModelPrepareProgressSink, ModelRuntimeAdapter, NativeModelState,
     StorageRebind,
 };
-pub use marketplace::{MarketplaceConfig, MARKETPLACE_BASE_URL, MARKETPLACE_GITHUB_TOKEN_ACCOUNT};
+pub use marketplace::{
+    MarketplaceConfig, CLOUD_SYNC_BASE_URL, MARKETPLACE_BASE_URL, MARKETPLACE_GITHUB_TOKEN_ACCOUNT,
+};
 pub use model_store::{
     extract_archive_safely, merge_hf_tree_pages, merge_hf_tree_pages_with_base, model_mirror_base,
     parse_hf_tree_page, validate_model_path, validate_model_url, DownloadProgressSink,

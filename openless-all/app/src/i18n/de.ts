@@ -1208,6 +1208,7 @@ export const de: typeof zhCN = {
       lastCheck: 'Letzte Prüfung',
       verifying: 'Wird geprüft…',
       notVerified: 'Noch nicht geprüft',
+      verificationUnavailable: 'Die Prüfung wird für diesen Kanal nicht unterstützt',
       passed: 'Prüfung bestanden',
       failed: 'Prüfung fehlgeschlagen · {{reason}}',
       elapsed: 'Dauer: {{ms}} ms',
@@ -1353,6 +1354,12 @@ export const de: typeof zhCN = {
       volcengineAccessKeyLabel: 'Access Token',
       volcengineApiKeyLabel: 'API-Schlüssel',
       volcengineResourceIdLabel: 'Ressourcen-ID',
+      volcengineServiceLabel: 'Dienst',
+      volcengineServiceStandard: 'Standarddienst',
+      volcengineAgentPlanNote:
+        'Verwende einen eigenen Agent-Plan-API-Schlüssel für Doubao Streaming-ASR. Standard-Resource-ID: volc.seedasr.sauc.duration. Standard- und Planschlüssel unterscheiden sich; verwende getrennte Kanäle.',
+      volcengineServiceInvalid:
+        'Ungültige Dienstkonfiguration. Wähle Standarddienst oder Agent Plan erneut.',
       volcengineAuthModeLabel: 'Anmeldemethode',
       volcengineAuthModeAppIdToken: 'Bisherige App-Anmeldung (APP ID + Access Token)',
       volcengineAuthModeApiKey: 'API-Schlüssel (neue Konsole)',
@@ -1443,6 +1450,9 @@ export const de: typeof zhCN = {
         'Speichere die Felder oben und prüfe anschließend das gewählte Modell oder rufe Modelle ab. Falls das Abrufen fehlschlägt, bleibt die manuelle Eingabe möglich.',
       validate: 'Prüfen',
       validating: 'Wird geprüft…',
+      planModelsHint:
+        'Öffnen Sie die Tarifkonsole, kopieren Sie eine unterstützte Textmodell-ID und tragen Sie sie im Modellfeld ein.',
+      viewModels: 'Unterstützte Modelle ansehen',
       fetchModels: 'Modelle abrufen',
       loadingModels: 'Modelle werden abgerufen…',
       modelMissing: 'Kein Modell eingerichtet. Gib zuerst eine Modell-ID ein.',
@@ -2221,6 +2231,15 @@ export const de: typeof zhCN = {
     downloading: 'Wird heruntergeladen',
     startDownload: 'Download starten',
     downloadNewModel: 'Neues Modell herunterladen',
+    activeModelLabel: 'Aktives Modell',
+    pickerNoModelDownloaded:
+      'Noch keine Modelle heruntergeladen — lade sie zuerst auf der Seite „Lokale Modelle“.',
+    partialDownloadsLabel: 'Unvollständige Downloads',
+    partialDownloadsDesc:
+      'Abgebrochene Downloads haben temporäre Dateien hinterlassen; bereinige sie ohne die installierten Modelle zu beeinflussen.',
+    cleanupIncomplete: 'Unvollständigen Download bereinigen',
+    languagesLabel: 'Sprachen',
+    partialBytesLabel: 'Restdateien',
     downloadDialogTitle: 'Modell herunterladen',
     downloadDialogAlreadyHave:
       'Die Modelldateien sind heruntergeladen. Kehre zur Modellseite zurück, um es zu laden und zu testen, oder wähle seinen Anbieter unter „ASR-Transkription“.',

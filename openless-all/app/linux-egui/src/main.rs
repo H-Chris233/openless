@@ -77,6 +77,7 @@ mod linux_app {
         name: String,
         endpoint: String,
         model: String,
+        volcengine_service: String,
         auth_mode: String,
         resource_id: String,
         app_id: String,
@@ -1466,7 +1467,21 @@ mod linux_app {
                                 });
                             }
                         }
-                        if ui.button("列出模型").clicked() {
+                        if let Some(url) = editor
+                            .descriptor
+                            .endpoint_presets
+                            .iter()
+                            .find(|preset| {
+                                openless_core::provider_rules::matches_endpoint_preset(
+                                    &editor.endpoint,
+                                    &preset.endpoint,
+                                )
+                            })
+                            .and_then(|preset| preset.models_url.as_deref())
+                        {
+                            self.provider_models.clear();
+                            ui.hyperlink_to("查看支持的模型", url);
+                        } else if ui.button("列出模型").clicked() {
                             self.provider_models.clear();
                             self.request_provider_models(editor.kind, editor.channel.id.clone());
                         }
@@ -1645,7 +1660,9 @@ mod linux_app {
                                 ui.ctx().copy_text(display);
                             }
                         }
-                        None => ui.label("完整指纹不可用。请勿安装或信任下载的证书。"),
+                        None => {
+                            ui.label("完整指纹不可用。请勿安装或信任下载的证书。");
+                        }
                     }
                     ui.label("安装或开启完全信任前，在手机系统的证书详情中核对全部 SHA-256 字符，必须与此处一致。网页、描述文件名称和标识不能证明证书身份。若不一致或无法查看，请停止并移除已下载或安装的描述文件。");
                     ui.label("描述文件应只包含一张根证书。若有其他证书、VPN 或设备管理配置，请勿安装。首次下载仍可能被局域网攻击者替换；核验后再信任。根证书可签发其他证书，不再使用时请移除。");
@@ -2230,6 +2247,19 @@ mod linux_app {
             .await?
             .or_else(|| descriptor.default_model.clone())
             .unwrap_or_default();
+        let volcengine_service =
+            if descriptor.auth_requirement == openless_core::AuthRequirement::Volcengine {
+                read_provider_value(
+                    &backend,
+                    kind,
+                    &channel.id,
+                    openless_core::credentials::VOLCENGINE_SERVICE_ACCOUNT,
+                )
+                .await?
+                .unwrap_or_else(|| "standard".to_string())
+            } else {
+                String::new()
+            };
         let (auth_mode, resource_id) =
             if descriptor.auth_requirement == openless_core::AuthRequirement::Volcengine {
                 (
@@ -2273,6 +2303,7 @@ mod linux_app {
             descriptor,
             endpoint,
             model,
+            volcengine_service,
             auth_mode,
             resource_id,
             app_id,
@@ -2300,21 +2331,53 @@ mod linux_app {
                 ui.label("此 Provider 使用 OAuth；Linux egui 不读取或显示 OAuth token。");
             }
             openless_core::AuthRequirement::Volcengine => {
-                egui::ComboBox::from_id_salt("volcengine-auth-mode")
-                    .selected_text(&editor.auth_mode)
+                let previous_api_key =
+                    editor.volcengine_service == "agent_plan" || editor.auth_mode == "api_key";
+                egui::ComboBox::from_id_salt("volcengine-service")
+                    .selected_text(if editor.volcengine_service == "agent_plan" {
+                        "Agent Plan"
+                    } else {
+                        "普通服务"
+                    })
                     .show_ui(ui, |ui| {
                         ui.selectable_value(
-                            &mut editor.auth_mode,
-                            "app_id_token".to_string(),
-                            "APP ID + Access Token",
+                            &mut editor.volcengine_service,
+                            "standard".to_string(),
+                            "普通服务",
                         );
                         ui.selectable_value(
-                            &mut editor.auth_mode,
-                            "api_key".to_string(),
-                            "API Key",
+                            &mut editor.volcengine_service,
+                            "agent_plan".to_string(),
+                            "Agent Plan",
                         );
                     });
-                if editor.auth_mode == "api_key" {
+                if editor.volcengine_service != "agent_plan" {
+                    egui::ComboBox::from_id_salt("volcengine-auth-mode")
+                        .selected_text(&editor.auth_mode)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut editor.auth_mode,
+                                "app_id_token".to_string(),
+                                "APP ID + Access Token",
+                            );
+                            ui.selectable_value(
+                                &mut editor.auth_mode,
+                                "api_key".to_string(),
+                                "API Key",
+                            );
+                        });
+                }
+                let api_key =
+                    editor.volcengine_service == "agent_plan" || editor.auth_mode == "api_key";
+                if api_key != previous_api_key {
+                    // Input buffers change meaning; persisted credential slots remain untouched.
+                    editor.primary_secret.clear();
+                    editor.secondary_secret.clear();
+                }
+                if editor.volcengine_service == "agent_plan" {
+                    ui.label("使用 Agent Plan 专属 API Key；普通服务请使用单独渠道。");
+                }
+                if editor.volcengine_service == "agent_plan" || editor.auth_mode == "api_key" {
                     secret_edit(ui, "API Key", &mut editor.primary_secret);
                 } else {
                     secret_edit(ui, "APP ID", &mut editor.primary_secret);
@@ -2347,9 +2410,54 @@ mod linux_app {
             }
             _ => {
                 secret_edit(ui, "API Key（留空表示不修改）", &mut editor.primary_secret);
+                let mut endpoint_read_only = false;
+                if editor.kind == openless_core::ChannelKind::Llm
+                    && editor.channel.provider_type == "ark"
+                {
+                    let presets = editor
+                        .descriptor
+                        .default_endpoint
+                        .as_deref()
+                        .map(|endpoint| ("火山方舟", endpoint))
+                        .into_iter()
+                        .chain(
+                            editor
+                                .descriptor
+                                .endpoint_presets
+                                .iter()
+                                .map(|preset| (preset.name.as_str(), preset.endpoint.as_str())),
+                        )
+                        .collect::<Vec<_>>();
+                    let selected = presets
+                        .iter()
+                        .find(|(_, endpoint)| {
+                            openless_core::provider_rules::matches_endpoint_preset(
+                                &editor.endpoint,
+                                endpoint,
+                            )
+                        })
+                        .map(|(label, _)| *label);
+                    endpoint_read_only = selected.is_some();
+                    egui::ComboBox::from_id_salt("ark-service")
+                        .selected_text(selected.unwrap_or("自定义"))
+                        .show_ui(ui, |ui| {
+                            for (label, endpoint) in presets {
+                                if ui
+                                    .selectable_label(selected == Some(label), label)
+                                    .clicked()
+                                {
+                                    editor.endpoint = endpoint.to_string();
+                                    endpoint_read_only = true;
+                                }
+                            }
+                        });
+                }
                 ui.horizontal(|ui| {
                     ui.label("Endpoint");
-                    ui.text_edit_singleline(&mut editor.endpoint);
+                    ui.add(
+                        egui::TextEdit::singleline(&mut editor.endpoint)
+                            .interactive(!endpoint_read_only),
+                    );
                 });
                 ui.horizontal(|ui| {
                     ui.label("Model");
@@ -2415,6 +2523,14 @@ mod linux_app {
                     &backend,
                     editor.kind,
                     channel_id,
+                    openless_core::credentials::VOLCENGINE_SERVICE_ACCOUNT,
+                    &editor.volcengine_service,
+                )
+                .await?;
+                write_or_remove_provider_value(
+                    &backend,
+                    editor.kind,
+                    channel_id,
                     openless_core::credentials::VOLCENGINE_AUTH_MODE_ACCOUNT,
                     &editor.auth_mode,
                 )
@@ -2435,7 +2551,7 @@ mod linux_app {
                     &editor.model,
                 )
                 .await?;
-                if editor.auth_mode == "api_key" {
+                if editor.volcengine_service == "agent_plan" || editor.auth_mode == "api_key" {
                     write_secret_if_entered(
                         &backend,
                         editor.kind,
@@ -3002,6 +3118,7 @@ mod linux_app {
                         port: 8443,
                         urls: vec!["https://old.example.invalid".into()],
                         urls_stale,
+                        ca_fingerprint_sha256: None,
                         locale: "en".into(),
                         connection_count: 0,
                         active_session_id: None,
@@ -3013,6 +3130,38 @@ mod linux_app {
                 assert!(!text.contains("https://old.example.invalid"), "{text}");
                 assert!(text.contains("当前连接数：0"), "{text}");
             }
+        }
+
+        #[test]
+        fn running_remote_status_shows_ca_fingerprint_or_unavailable_warning() {
+            let mut app = disconnected_app();
+            let fingerprint = "ab".repeat(32);
+            app.remote_access = Some((
+                openless_core::RemoteInputStatus {
+                    enabled: true,
+                    running: true,
+                    starting: false,
+                    port: 8443,
+                    urls: vec!["https://phone.example.invalid".into()],
+                    urls_stale: false,
+                    ca_fingerprint_sha256: Some(fingerprint.clone()),
+                    locale: "zh-CN".into(),
+                    connection_count: 0,
+                    active_session_id: None,
+                },
+                "fixture-pin".into(),
+            ));
+            let text = rendered_text(|ui| app.remote_ui(ui));
+            assert!(text.contains("本机根证书 SHA-256"), "{text}");
+            assert!(
+                text.contains("AB AB AB AB AB AB AB AB AB AB AB AB AB AB AB AB AB AB AB AB AB AB AB AB AB AB AB AB AB AB AB AB"),
+                "{text}"
+            );
+            assert!(!text.contains("完整指纹不可用"), "{text}");
+
+            app.remote_access.as_mut().unwrap().0.ca_fingerprint_sha256 = None;
+            let text = rendered_text(|ui| app.remote_ui(ui));
+            assert!(text.contains("完整指纹不可用。请勿安装或信任下载的证书。"), "{text}");
         }
 
         #[test]
