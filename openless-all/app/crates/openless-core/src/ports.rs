@@ -194,6 +194,7 @@ pub enum EngineStage {
 #[derive(Debug, Clone, PartialEq)]
 pub enum EngineProgress {
     RecordingLevel { elapsed_ms: u64, level: f32 },
+    RecordingLimitReached,
     RecordingFault(BackendError),
     Notification(crate::types::NotificationPayload),
     Stage(EngineStage),
@@ -350,6 +351,7 @@ pub trait AudioConsumer: Send + Sync {
 #[derive(Debug, Clone)]
 pub enum RecordingEvent {
     Level { elapsed_ms: u64, level: f32 },
+    LimitReached,
     Fatal(BackendError),
 }
 
@@ -359,6 +361,10 @@ pub trait RecordingProgressSink: Send + Sync {
     fn publish(&self, event: RecordingEvent) -> Result<(), BackendError> {
         match event {
             RecordingEvent::Level { elapsed_ms, level } => self.publish_level(elapsed_ms, level),
+            RecordingEvent::LimitReached => Err(BackendError::new(
+                BackendErrorCode::Unsupported,
+                "recording limit stop is not supported",
+            )),
             RecordingEvent::Fatal(error) => Err(error),
         }
     }

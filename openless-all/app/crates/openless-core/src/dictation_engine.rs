@@ -20,6 +20,13 @@ use crate::ports::{
 };
 use crate::types::{PolishDelta, SessionId, TranscriptDelta};
 
+// Keep one MiB for PCM callbacks that arrive while the host handles the stop request.
+const MAX_BUFFERED_TRANSCRIPTION_PCM_BYTES: usize = 128 * 1024 * 1024;
+const BUFFERED_TRANSCRIPTION_STOP_HEADROOM_BYTES: usize = 1024 * 1024;
+const BUFFERED_TRANSCRIPTION_STOP_THRESHOLD_BYTES: usize =
+    MAX_BUFFERED_TRANSCRIPTION_PCM_BYTES - BUFFERED_TRANSCRIPTION_STOP_HEADROOM_BYTES;
+const BUFFERED_TRANSCRIPTION_FORWARD_CHUNK_BYTES: usize = 64 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PolishFailurePolicy {
     Fail,
@@ -143,11 +150,18 @@ impl DictationEngine for PipelineDictationEngine {
                     progress: Arc::clone(&progress),
                 })
             };
+            let recording_progress: Arc<dyn RecordingProgressSink> =
+                Arc::new(RecordingProgressForwarder {
+                    session_id,
+                    session: Arc::downgrade(&session),
+                    progress: Arc::clone(&progress),
+                });
             let buffered = Arc::new(BufferedTranscriptionSession::new(
                 transcription_engine,
                 session_id,
                 Arc::clone(&context),
                 transcript_partials,
+                Arc::clone(&recording_progress),
             ));
             let transcription: Arc<dyn TranscriptionSession> = buffered.clone();
             let registered = {
@@ -171,12 +185,6 @@ impl DictationEngine for PipelineDictationEngine {
             }
 
             let audio_consumer: Arc<dyn AudioConsumer> = buffered.clone();
-            let recording_progress: Arc<dyn RecordingProgressSink> =
-                Arc::new(RecordingProgressForwarder {
-                    session_id,
-                    session: Arc::clone(&session),
-                    progress,
-                });
             let recording = match recorder
                 .start(session_id, context, audio_consumer, recording_progress)
                 .await
@@ -280,6 +288,7 @@ impl DictationEngine for PipelineDictationEngine {
                 session_id,
                 Arc::clone(&context),
                 partials,
+                Arc::clone(&progress),
             ));
             let consumer: Arc<dyn AudioConsumer> = buffered.clone();
             let recording = recorder
@@ -955,6 +964,9 @@ struct BufferedTranscriptionInner {
     session_id: SessionId,
     context: Arc<DictationContext>,
     partials: Arc<dyn TextStreamSink>,
+    progress: Arc<dyn RecordingProgressSink>,
+    limit_notified: AtomicBool,
+    limit_threshold_bytes: usize,
     state: Mutex<BufferedTranscriptionState>,
 }
 
@@ -972,6 +984,25 @@ impl BufferedTranscriptionSession {
         session_id: SessionId,
         context: Arc<DictationContext>,
         partials: Arc<dyn TextStreamSink>,
+        progress: Arc<dyn RecordingProgressSink>,
+    ) -> Self {
+        Self::new_with_limit(
+            engine,
+            session_id,
+            context,
+            partials,
+            progress,
+            BUFFERED_TRANSCRIPTION_STOP_THRESHOLD_BYTES,
+        )
+    }
+
+    fn new_with_limit(
+        engine: Arc<dyn TranscriptionEngine>,
+        session_id: SessionId,
+        context: Arc<DictationContext>,
+        partials: Arc<dyn TextStreamSink>,
+        progress: Arc<dyn RecordingProgressSink>,
+        limit_threshold_bytes: usize,
     ) -> Self {
         Self {
             inner: Arc::new(BufferedTranscriptionInner {
@@ -979,6 +1010,9 @@ impl BufferedTranscriptionSession {
                 session_id,
                 context,
                 partials,
+                progress,
+                limit_notified: AtomicBool::new(false),
+                limit_threshold_bytes,
                 state: Mutex::new(BufferedTranscriptionState::Buffering(Vec::new())),
             }),
         }
@@ -1077,7 +1111,11 @@ fn attach_buffered_transcription(
                 }
             };
             match chunk {
-                Ok(chunk) => downstream.consume_pcm_chunk(&chunk),
+                Ok(chunk) => {
+                    for chunk in chunk.chunks(BUFFERED_TRANSCRIPTION_FORWARD_CHUNK_BYTES) {
+                        downstream.consume_pcm_chunk(chunk);
+                    }
+                }
                 Err(error) => {
                     let _ = downstream.cancel().await;
                     return Err(error);
@@ -1089,7 +1127,7 @@ fn attach_buffered_transcription(
 
 impl AudioConsumer for BufferedTranscriptionSession {
     fn consume_pcm_chunk(&self, pcm: &[u8]) {
-        let downstream = {
+        let (downstream, buffer_limit_reached) = {
             let mut state = self
                 .inner
                 .state
@@ -1099,16 +1137,33 @@ impl AudioConsumer for BufferedTranscriptionSession {
                 BufferedTranscriptionState::Buffering(buffer)
                 | BufferedTranscriptionState::Attaching(buffer) => {
                     buffer.extend_from_slice(pcm);
-                    None
+                    (None, buffer.len() >= self.inner.limit_threshold_bytes)
                 }
-                BufferedTranscriptionState::Direct(session) => Some(Arc::clone(session)),
+                BufferedTranscriptionState::Direct(session) => (Some(Arc::clone(session)), false),
                 BufferedTranscriptionState::Failed(_) | BufferedTranscriptionState::Cancelled => {
-                    None
+                    (None, false)
                 }
             }
         };
         if let Some(downstream) = downstream {
             downstream.consume_pcm_chunk(pcm);
+        }
+        if buffer_limit_reached
+            && self
+                .inner
+                .limit_notified
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
+            // ponytail: the limit is a stop-trigger threshold; retain the small
+            // in-flight tail until the host closes the recorder so PCM is not dropped.
+            if let Err(error) = self
+                .inner
+                .progress
+                .publish(crate::ports::RecordingEvent::LimitReached)
+            {
+                log::warn!("failed to request recording stop at PCM limit: {error}");
+            }
         }
     }
 }
@@ -1163,7 +1218,7 @@ impl TextStreamSink for DiscardTextStream {
 
 struct RecordingProgressForwarder {
     session_id: SessionId,
-    session: Arc<PipelineSession>,
+    session: std::sync::Weak<PipelineSession>,
     progress: Arc<dyn EngineProgressSink>,
 }
 
@@ -1183,12 +1238,16 @@ impl RecordingProgressSink for RecordingProgressForwarder {
             crate::ports::RecordingEvent::Level { elapsed_ms, level } => {
                 self.publish_level(elapsed_ms, level)
             }
+            crate::ports::RecordingEvent::LimitReached => self
+                .progress
+                .publish(self.session_id, EngineProgress::RecordingLimitReached),
             crate::ports::RecordingEvent::Fatal(error) => {
-                *self
-                    .session
-                    .recording_fault
-                    .lock()
-                    .expect("recording fault lock poisoned") = Some(error.clone());
+                if let Some(session) = self.session.upgrade() {
+                    *session
+                        .recording_fault
+                        .lock()
+                        .expect("recording fault lock poisoned") = Some(error.clone());
+                }
                 self.progress
                     .publish(self.session_id, EngineProgress::RecordingFault(error))
             }
@@ -1262,6 +1321,38 @@ mod tests {
         fn publish_level(&self, _elapsed_ms: u64, _level: f32) -> Result<(), BackendError> {
             Ok(())
         }
+    }
+
+    #[derive(Default)]
+    struct LimitRecordingProgress {
+        limits: AtomicUsize,
+    }
+
+    impl RecordingProgressSink for LimitRecordingProgress {
+        fn publish_level(&self, _elapsed_ms: u64, _level: f32) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn publish(&self, event: crate::ports::RecordingEvent) -> Result<(), BackendError> {
+            if matches!(event, crate::ports::RecordingEvent::LimitReached) {
+                self.limits.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn recording_progress_forwarder_does_not_keep_pipeline_session_alive() {
+        let session = Arc::new(PipelineSession::new(raw_dictation_context()));
+        let weak = Arc::downgrade(&session);
+        let _forwarder = RecordingProgressForwarder {
+            session: Arc::downgrade(&session),
+            session_id: SessionId::new(),
+            progress: Arc::new(RecordingProgress::default()),
+        };
+
+        drop(session);
+        assert!(weak.upgrade().is_none());
     }
 
     struct FixtureRecording {
@@ -1775,6 +1866,38 @@ mod tests {
         assert_eq!(output.text, "raw text");
         assert_eq!(fixture.transcription_starts.load(Ordering::Acquire), 1);
         assert_eq!(&*fixture.pcm.lock().unwrap(), &[1, 0, 2, 0]);
+    }
+
+    #[tokio::test]
+    async fn buffered_pcm_limit_requests_one_stop_and_preserves_the_tail() {
+        let pcm = Arc::new(Mutex::new(Vec::new()));
+        let starts = Arc::new(AtomicUsize::new(0));
+        let progress = Arc::new(LimitRecordingProgress::default());
+        let buffered = BufferedTranscriptionSession::new_with_limit(
+            Arc::new(FixtureTranscriber {
+                session: Arc::new(FixtureTranscriptionSession {
+                    pcm: Arc::clone(&pcm),
+                    cancels: Arc::new(AtomicUsize::new(0)),
+                    finish_entered: None,
+                    finish_release: None,
+                }),
+                starts: Arc::clone(&starts),
+            }),
+            SessionId::new(),
+            raw_dictation_context(),
+            Arc::new(DiscardTextStream),
+            progress.clone(),
+            4,
+        );
+
+        buffered.consume_pcm_chunk(&[1, 0]);
+        buffered.consume_pcm_chunk(&[2, 0, 3, 0]);
+        buffered.consume_pcm_chunk(&[4, 0]);
+
+        assert_eq!(progress.limits.load(Ordering::SeqCst), 1);
+        buffered.attach().await.unwrap().finish().await.unwrap();
+        assert_eq!(&*pcm.lock().unwrap(), &[1, 0, 2, 0, 3, 0, 4, 0]);
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
