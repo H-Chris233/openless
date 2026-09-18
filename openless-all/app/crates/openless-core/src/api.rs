@@ -131,7 +131,6 @@ pub struct LessComputerVoiceSession {
     less_computer: Arc<dyn crate::domains::LessComputerApi>,
     request: crate::domains::LessComputerRunRequest,
     partials: Arc<VoiceTranscriptSink>,
-    received_bytes: AtomicU64,
     archive_successful_recording: bool,
 }
 
@@ -945,19 +944,6 @@ impl LessComputerVoiceSession {
             return Err(BackendError::new(
                 BackendErrorCode::InvalidArgument,
                 "Less Computer PCM must be non-empty and contain complete 16-bit samples",
-            ));
-        }
-        const MAX_PCM_BYTES: u64 = 128 * 1024 * 1024;
-        let next = self
-            .received_bytes
-            .fetch_add(pcm.len() as u64, Ordering::AcqRel)
-            .saturating_add(pcm.len() as u64);
-        if next > MAX_PCM_BYTES {
-            self.received_bytes
-                .fetch_sub(pcm.len() as u64, Ordering::AcqRel);
-            return Err(BackendError::new(
-                BackendErrorCode::InvalidArgument,
-                "Less Computer PCM exceeds the provider limit",
             ));
         }
         self.control.transcription.consume_pcm_chunk(pcm);
@@ -2542,7 +2528,7 @@ impl OpenLessBackend {
                     session_id,
                     Arc::clone(&context),
                     Arc::clone(&partials) as Arc<dyn TextStreamSink>,
-                    recording_progress,
+                    Arc::clone(&recording_progress) as Arc<dyn crate::ports::RecordingProgressSink>,
                     resources.cancel.clone(),
                 ),
                 discard_voice_capture,
@@ -2555,10 +2541,12 @@ impl OpenLessBackend {
                     match own_voice_start(
                         &self.deps.task_spawner,
                         Arc::clone(&resources),
-                        self.deps.dictation_engine.start_transcription(
+                        Arc::clone(&self.deps.dictation_engine).start_transcription_with_progress(
                             session_id,
                             Arc::clone(&context),
                             Arc::clone(&partials) as Arc<dyn TextStreamSink>,
+                            Arc::clone(&recording_progress)
+                                as Arc<dyn crate::ports::RecordingProgressSink>,
                         ),
                         |transcription| transcription.cancel(),
                     )
@@ -2631,7 +2619,6 @@ impl OpenLessBackend {
                 less_computer: Arc::clone(&self.deps.services.less_computer),
                 request,
                 partials,
-                received_bytes: AtomicU64::new(0),
                 archive_successful_recording: context.recording.archive_successful_recording,
             })
         }
@@ -6672,6 +6659,7 @@ mod tests {
     struct VoiceTranscription {
         pcm: Mutex<Vec<u8>>,
         cancelled: std::sync::atomic::AtomicBool,
+        starts: AtomicU64,
     }
 
     impl crate::ports::AudioConsumer for VoiceTranscription {
@@ -6715,6 +6703,7 @@ mod tests {
             _context: Arc<DictationContext>,
             _partials: Arc<dyn TextStreamSink>,
         ) -> BoxFuture<'static, Result<Arc<dyn TranscriptionSession>, BackendError>> {
+            self.0.starts.fetch_add(1, Ordering::AcqRel);
             let session: Arc<dyn TranscriptionSession> = self.0.clone();
             boxed(async move { Ok(session) })
         }
@@ -6914,6 +6903,7 @@ mod tests {
         .unwrap();
         let mut preferences = backend.get_preferences();
         preferences.coding_agent_enabled = true;
+        preferences.stable_transcription_enabled = true;
         backend.set_preferences(preferences).unwrap();
         let mut events = backend.subscribe();
 
@@ -6922,6 +6912,7 @@ mod tests {
             .start_less_computer_voice(session_id, Arc::new(FakeRecordingControl::default()))
             .await
             .unwrap();
+        assert_eq!(transcription.starts.load(Ordering::Acquire), 0);
         assert_eq!(host.actions(), vec![HostAction::ShowLessComputer]);
         assert_eq!(
             session.feed_pcm(&[]).unwrap_err().code,
@@ -6936,6 +6927,7 @@ mod tests {
 
         assert_eq!(result.session_id, session_id);
         assert_eq!(*transcription.pcm.lock().unwrap(), vec![1, 0, 2, 0]);
+        assert_eq!(transcription.starts.load(Ordering::Acquire), 1);
         assert!(runtime.request.lock().unwrap().is_some());
         let transcript_events = std::iter::from_fn(|| events.try_recv().ok())
             .filter(|event| matches!(event.kind, BackendEventKind::TranscriptDelta(_)))
@@ -6945,6 +6937,13 @@ mod tests {
             transcript_events[0].kind,
             BackendEventKind::TranscriptDelta(crate::TranscriptDelta { is_final: true, .. })
         ));
+
+        let cancelled = backend
+            .start_less_computer_voice(SessionId::new(), Arc::new(FakeRecordingControl::default()))
+            .await
+            .unwrap();
+        cancelled.cancel().await.unwrap();
+        assert_eq!(transcription.starts.load(Ordering::Acquire), 1);
     }
 
     #[tokio::test]

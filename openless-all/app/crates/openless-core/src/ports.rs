@@ -206,7 +206,7 @@ pub trait EngineProgressSink: Send + Sync {
     fn publish(&self, session_id: SessionId, progress: EngineProgress) -> Result<(), BackendError>;
 }
 
-pub trait DictationEngine: Send + Sync {
+pub trait DictationEngine: Send + Sync + 'static {
     fn start(
         &self,
         session_id: SessionId,
@@ -252,6 +252,41 @@ pub trait DictationEngine: Send + Sync {
             Err(BackendError::new(
                 BackendErrorCode::Unsupported,
                 "dictation engine does not expose a standalone transcription session",
+            ))
+        })
+    }
+
+    /// Resolve the provider-facing side before the host starts recording.
+    /// Legacy implementations defer their existing provider-only start until
+    /// the returned prepared session is actually started.
+    fn prepare_transcription(
+        self: Arc<Self>,
+        session_id: SessionId,
+        context: Arc<DictationContext>,
+    ) -> BoxFuture<'static, Result<Arc<dyn PreparedTranscription>, BackendError>> {
+        Box::pin(async move {
+            Ok(Arc::new(DeferredDictationPrepared {
+                engine: self,
+                session_id,
+                context,
+            }) as Arc<dyn PreparedTranscription>)
+        })
+    }
+
+    /// Provider-only capture variant used by hosts that own the microphone.
+    /// It uses the same buffered lifecycle as normal voice capture.
+    fn start_transcription_with_progress(
+        self: Arc<Self>,
+        session_id: SessionId,
+        context: Arc<DictationContext>,
+        partials: Arc<dyn TextStreamSink>,
+        progress: Arc<dyn RecordingProgressSink>,
+    ) -> BoxFuture<'static, Result<Arc<dyn TranscriptionSession>, BackendError>> {
+        let preparation = self.prepare_transcription(session_id, Arc::clone(&context));
+        Box::pin(async move {
+            let prepared = preparation.await?;
+            Ok(crate::dictation_engine::buffered_transcription_session(
+                prepared, context, partials, progress,
             ))
         })
     }
@@ -469,13 +504,69 @@ pub trait TranscriptionSession: AudioConsumer {
     fn cancel(&self) -> BoxFuture<'static, Result<(), BackendError>>;
 }
 
-pub trait TranscriptionEngine: Send + Sync {
+/// Provider/channel configuration fixed before recording starts. Creating this
+/// object must not open a network connection; [`Self::start`] is the delayed
+/// provider startup point.
+pub trait PreparedTranscription: Send + Sync {
+    fn start(
+        &self,
+        partials: Arc<dyn TextStreamSink>,
+    ) -> BoxFuture<'static, Result<Arc<dyn TranscriptionSession>, BackendError>>;
+}
+
+pub trait TranscriptionEngine: Send + Sync + 'static {
+    fn prepare(
+        self: Arc<Self>,
+        session_id: SessionId,
+        context: Arc<DictationContext>,
+    ) -> BoxFuture<'static, Result<Arc<dyn PreparedTranscription>, BackendError>> {
+        Box::pin(async move {
+            Ok(Arc::new(DeferredPreparedTranscription {
+                engine: self,
+                session_id,
+                context,
+            }) as Arc<dyn PreparedTranscription>)
+        })
+    }
+
     fn start(
         &self,
         session_id: SessionId,
         context: Arc<DictationContext>,
         partials: Arc<dyn TextStreamSink>,
     ) -> BoxFuture<'static, Result<Arc<dyn TranscriptionSession>, BackendError>>;
+}
+
+struct DeferredPreparedTranscription<T: TranscriptionEngine + ?Sized> {
+    engine: Arc<T>,
+    session_id: SessionId,
+    context: Arc<DictationContext>,
+}
+
+impl<T: TranscriptionEngine + ?Sized> PreparedTranscription for DeferredPreparedTranscription<T> {
+    fn start(
+        &self,
+        partials: Arc<dyn TextStreamSink>,
+    ) -> BoxFuture<'static, Result<Arc<dyn TranscriptionSession>, BackendError>> {
+        self.engine
+            .start(self.session_id, Arc::clone(&self.context), partials)
+    }
+}
+
+struct DeferredDictationPrepared<T: DictationEngine + ?Sized> {
+    engine: Arc<T>,
+    session_id: SessionId,
+    context: Arc<DictationContext>,
+}
+
+impl<T: DictationEngine + ?Sized> PreparedTranscription for DeferredDictationPrepared<T> {
+    fn start(
+        &self,
+        partials: Arc<dyn TextStreamSink>,
+    ) -> BoxFuture<'static, Result<Arc<dyn TranscriptionSession>, BackendError>> {
+        self.engine
+            .start_transcription(self.session_id, Arc::clone(&self.context), partials)
+    }
 }
 
 pub trait TextPolisher: Send + Sync {

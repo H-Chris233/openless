@@ -15,8 +15,8 @@ use crate::errors::{BackendError, BackendErrorCode};
 use crate::ports::{
     ActiveRecording, AudioCapture, AudioConsumer, AudioRecorder, CapturedPcm, DictationEngine,
     EngineFailure, EngineFailureStage, EngineProgress, EngineProgressSink, EngineResult,
-    EngineStage, RecordingProgressSink, TextPolisher, TextStreamChunk, TextStreamSink,
-    TranscriptionEngine, TranscriptionSession, VoiceCapture,
+    EngineStage, PreparedTranscription, RecordingProgressSink, TextPolisher, TextStreamChunk,
+    TextStreamSink, TranscriptionEngine, TranscriptionSession, VoiceCapture,
 };
 use crate::types::{PolishDelta, SessionId, TranscriptDelta};
 
@@ -57,6 +57,8 @@ struct PipelineSession {
 struct PipelineResources {
     recording: Option<Box<dyn ActiveRecording>>,
     transcription: Option<Arc<dyn TranscriptionSession>>,
+    buffered: Option<Arc<BufferedTranscriptionSession>>,
+    prepared: Option<Arc<dyn PreparedTranscription>>,
 }
 
 impl PipelineSession {
@@ -141,6 +143,26 @@ impl DictationEngine for PipelineDictationEngine {
                 }
             }
 
+            let prepared = match transcription_engine
+                .prepare(session_id, Arc::clone(&context))
+                .await
+            {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    remove_session(&sessions, session_id, &session);
+                    return Err(if session.cancelled.load(Ordering::Acquire) {
+                        cancelled_error("dictation cancelled while preparing the provider")
+                    } else {
+                        error
+                    });
+                }
+            };
+            if session.cancelled.load(Ordering::Acquire) {
+                remove_session(&sessions, session_id, &session);
+                return Err(cancelled_error(
+                    "dictation cancelled while preparing the provider",
+                ));
+            }
             let stable = context.recording.transcribe_after_stop;
             let transcript_partials: Arc<dyn TextStreamSink> = if stable {
                 Arc::new(DiscardTextStream)
@@ -157,13 +179,10 @@ impl DictationEngine for PipelineDictationEngine {
                     progress: Arc::clone(&progress),
                 });
             let buffered = Arc::new(BufferedTranscriptionSession::new(
-                transcription_engine,
-                session_id,
-                Arc::clone(&context),
+                prepared,
                 transcript_partials,
                 Arc::clone(&recording_progress),
             ));
-            let transcription: Arc<dyn TranscriptionSession> = buffered.clone();
             let registered = {
                 let mut resources = session
                     .resources
@@ -172,12 +191,15 @@ impl DictationEngine for PipelineDictationEngine {
                 if session.cancelled.load(Ordering::Acquire) {
                     false
                 } else {
-                    resources.transcription = Some(Arc::clone(&transcription));
+                    let transcription: Arc<dyn TranscriptionSession> = buffered.clone();
+                    resources.transcription = Some(transcription);
+                    resources.buffered = Some(Arc::clone(&buffered));
+                    resources.prepared = Some(buffered.prepared());
                     true
                 }
             };
             if !registered {
-                let _ = transcription.cancel().await;
+                let _ = buffered.cancel().await;
                 remove_session(&sessions, session_id, &session);
                 return Err(cancelled_error(
                     "dictation cancelled before the recorder started",
@@ -191,7 +213,7 @@ impl DictationEngine for PipelineDictationEngine {
             {
                 Ok(recording) => recording,
                 Err(error) => {
-                    let _ = cancel_transcription_once(&session, Arc::clone(&transcription)).await;
+                    let _ = cancel_transcription_once(&session, Arc::clone(&buffered)).await;
                     remove_session(&sessions, session_id, &session);
                     return Err(error);
                 }
@@ -210,7 +232,7 @@ impl DictationEngine for PipelineDictationEngine {
             if let Some(recording) = recording {
                 let stop_result = recording.stop().await;
                 let cancel_result =
-                    cancel_transcription_once(&session, Arc::clone(&transcription)).await;
+                    cancel_transcription_once(&session, Arc::clone(&buffered)).await;
                 remove_session(&sessions, session_id, &session);
                 stop_result?;
                 cancel_result?;
@@ -229,7 +251,7 @@ impl DictationEngine for PipelineDictationEngine {
                     if let Some(recording) = recording {
                         let _ = recording.stop().await;
                     }
-                    let _ = cancel_transcription_once(&session, transcription).await;
+                    let _ = cancel_transcription_once(&session, Arc::clone(&buffered)).await;
                     remove_session(&sessions, session_id, &session);
                     return Err(error);
                 }
@@ -244,7 +266,7 @@ impl DictationEngine for PipelineDictationEngine {
                 if let Some(recording) = recording {
                     let _ = recording.stop().await;
                 }
-                let _ = cancel_transcription_once(&session, transcription).await;
+                let _ = cancel_transcription_once(&session, Arc::clone(&buffered)).await;
                 remove_session(&sessions, session_id, &session);
                 return Err(cancelled_error("dictation cancelled while starting"));
             }
@@ -259,6 +281,14 @@ impl DictationEngine for PipelineDictationEngine {
         partials: Arc<dyn TextStreamSink>,
     ) -> BoxFuture<'static, Result<Arc<dyn TranscriptionSession>, BackendError>> {
         self.transcription.start(session_id, context, partials)
+    }
+
+    fn prepare_transcription(
+        self: Arc<Self>,
+        session_id: SessionId,
+        context: Arc<DictationContext>,
+    ) -> BoxFuture<'static, Result<Arc<dyn PreparedTranscription>, BackendError>> {
+        Arc::clone(&self.transcription).prepare(session_id, context)
     }
 
     fn start_voice_capture(
@@ -277,6 +307,14 @@ impl DictationEngine for PipelineDictationEngine {
                     "voice capture cancelled before recorder startup",
                 ));
             }
+            let prepared = transcription_engine
+                .prepare(session_id, Arc::clone(&context))
+                .await?;
+            if cancel.is_cancelled() {
+                return Err(cancelled_error(
+                    "voice capture cancelled while preparing the provider",
+                ));
+            }
             let stable = context.recording.transcribe_after_stop;
             let partials = if stable {
                 Arc::new(DiscardTextStream) as Arc<dyn TextStreamSink>
@@ -284,9 +322,7 @@ impl DictationEngine for PipelineDictationEngine {
                 partials
             };
             let buffered = Arc::new(BufferedTranscriptionSession::new(
-                transcription_engine,
-                session_id,
-                Arc::clone(&context),
+                prepared,
                 partials,
                 Arc::clone(&progress),
             ));
@@ -319,13 +355,11 @@ impl DictationEngine for PipelineDictationEngine {
                         }
                     }
                     _ = cancel.cancelled() => {
-                        let (stop_result, cancel_result) = futures_util::future::join(
+                        let (stop_result, cancel_result, _) = tokio::join!(
                             recording.stop(),
                             transcription.cancel(),
-                        ).await;
-                        // Keep polling provider startup so a late handle is cancelled
-                        // by the buffering session before the resource hold is released.
-                        let _ = attaching.await;
+                            &mut attaching,
+                        );
                         stop_result?;
                         cancel_result?;
                         return Err(cancelled_error(
@@ -383,7 +417,6 @@ impl DictationEngine for PipelineDictationEngine {
         progress: Arc<dyn EngineProgressSink>,
     ) -> BoxFuture<'static, Result<EngineResult, EngineFailure>> {
         let sessions = Arc::clone(&self.sessions);
-        let transcription_engine = Arc::clone(&self.transcription);
         let polisher = Arc::clone(&self.polisher);
         let policy = self.polish_failure_policy;
         Box::pin(async move {
@@ -401,12 +434,16 @@ impl DictationEngine for PipelineDictationEngine {
             }
             let context = session.context();
 
-            let (recording, transcription) = {
+            let (recording, transcription, prepared) = {
                 let mut resources = session
                     .resources
                     .lock()
                     .expect("pipeline resource lock poisoned");
-                (resources.recording.take(), resources.transcription.clone())
+                (
+                    resources.recording.take(),
+                    resources.transcription.clone(),
+                    resources.prepared.clone(),
+                )
             };
             let recording = recording.ok_or_else(|| {
                 BackendError::new(
@@ -466,6 +503,12 @@ impl DictationEngine for PipelineDictationEngine {
                 }
                 Err(first_error) => {
                     let cancelled = session.cancelled.load(Ordering::Acquire);
+                    let prepared = prepared.ok_or_else(|| {
+                        BackendError::new(
+                            BackendErrorCode::Internal,
+                            "transcription provider preparation is unavailable",
+                        )
+                    })?;
                     let retry_pcm = if !cancelled && first_error.retryable {
                         match archive.as_ref().filter(|archive| archive.is_available()) {
                             Some(archive) => {
@@ -479,10 +522,9 @@ impl DictationEngine for PipelineDictationEngine {
                     let _ = cancel_transcription_once(&session, Arc::clone(&transcription)).await;
                     match retry_pcm {
                         Some(pcm) => match retry_transcription(
-                            transcription_engine,
+                            prepared,
                             Arc::clone(&session),
                             session_id,
-                            Arc::clone(&context),
                             Arc::clone(&progress),
                             pcm,
                         )
@@ -708,18 +750,27 @@ impl DictationEngine for PipelineDictationEngine {
                 return Ok(());
             }
 
-            let (recording, transcription) = {
+            let (recording, transcription, buffered) = {
                 let mut resources = session
                     .resources
                     .lock()
                     .expect("pipeline resource lock poisoned");
-                (resources.recording.take(), resources.transcription.clone())
+                (
+                    resources.recording.take(),
+                    resources.transcription.clone(),
+                    resources.buffered.take(),
+                )
             };
             let mut first_error = None;
             if let Some(recording) = recording {
                 retain_first_error(&mut first_error, recording.stop().await);
             }
-            if let Some(transcription) = transcription {
+            if let Some(buffered) = buffered {
+                retain_first_error(
+                    &mut first_error,
+                    buffered.cancel_without_waiting_for_start().await,
+                );
+            } else if let Some(transcription) = transcription {
                 retain_first_error(
                     &mut first_error,
                     cancel_transcription_once(&session, transcription).await,
@@ -772,10 +823,9 @@ fn remove_session(
 }
 
 async fn retry_transcription(
-    engine: Arc<dyn TranscriptionEngine>,
+    prepared: Arc<dyn PreparedTranscription>,
     session: Arc<PipelineSession>,
     session_id: SessionId,
-    context: Arc<DictationContext>,
     progress: Arc<dyn EngineProgressSink>,
     pcm: Vec<u8>,
 ) -> Result<
@@ -796,10 +846,7 @@ async fn retry_transcription(
             session_id,
             progress: Arc::clone(&progress),
         });
-        let transcription = match engine
-            .start(session_id, Arc::clone(&context), partials)
-            .await
-        {
+        let transcription = match prepared.start(partials).await {
             Ok(transcription) => transcription,
             Err(_) if session.cancelled.load(Ordering::Acquire) => {
                 return Err((
@@ -830,6 +877,7 @@ async fn retry_transcription(
                     .transcription_finished
                     .store(false, Ordering::Release);
                 resources.transcription = Some(Arc::clone(&transcription));
+                resources.buffered = None;
                 true
             }
         };
@@ -898,10 +946,13 @@ async fn cancellable_backoff(
     }
 }
 
-async fn cancel_transcription_once(
+async fn cancel_transcription_once<T>(
     session: &Arc<PipelineSession>,
-    transcription: Arc<dyn TranscriptionSession>,
-) -> Result<(), BackendError> {
+    transcription: Arc<T>,
+) -> Result<(), BackendError>
+where
+    T: TranscriptionSession + ?Sized,
+{
     if session.transcription_finished.load(Ordering::Acquire)
         || session.transcription_cancelled.swap(true, Ordering::AcqRel)
     {
@@ -955,14 +1006,32 @@ fn retain_first_error(first_error: &mut Option<BackendError>, result: Result<(),
     }
 }
 
+pub(crate) fn buffered_transcription_session(
+    prepared: Arc<dyn PreparedTranscription>,
+    context: Arc<DictationContext>,
+    partials: Arc<dyn TextStreamSink>,
+    progress: Arc<dyn RecordingProgressSink>,
+) -> Arc<dyn TranscriptionSession> {
+    let partials = if context.recording.transcribe_after_stop {
+        Arc::new(DiscardTextStream) as Arc<dyn TextStreamSink>
+    } else {
+        partials
+    };
+    let buffered = Arc::new(BufferedTranscriptionSession::new(
+        prepared, partials, progress,
+    ));
+    if !context.recording.transcribe_after_stop {
+        buffered.attach_in_background();
+    }
+    buffered
+}
+
 struct BufferedTranscriptionSession {
     inner: Arc<BufferedTranscriptionInner>,
 }
 
 struct BufferedTranscriptionInner {
-    engine: Arc<dyn TranscriptionEngine>,
-    session_id: SessionId,
-    context: Arc<DictationContext>,
+    prepared: Arc<dyn PreparedTranscription>,
     partials: Arc<dyn TextStreamSink>,
     progress: Arc<dyn RecordingProgressSink>,
     limit_notified: AtomicBool,
@@ -972,7 +1041,10 @@ struct BufferedTranscriptionInner {
 
 enum BufferedTranscriptionState {
     Buffering(Vec<u8>),
-    Attaching(Vec<u8>),
+    Attaching {
+        pcm: Vec<u8>,
+        waiter: Arc<tokio::sync::Notify>,
+    },
     Direct(Arc<dyn TranscriptionSession>),
     Failed(BackendError),
     Cancelled,
@@ -980,16 +1052,12 @@ enum BufferedTranscriptionState {
 
 impl BufferedTranscriptionSession {
     fn new(
-        engine: Arc<dyn TranscriptionEngine>,
-        session_id: SessionId,
-        context: Arc<DictationContext>,
+        prepared: Arc<dyn PreparedTranscription>,
         partials: Arc<dyn TextStreamSink>,
         progress: Arc<dyn RecordingProgressSink>,
     ) -> Self {
         Self::new_with_limit(
-            engine,
-            session_id,
-            context,
+            prepared,
             partials,
             progress,
             BUFFERED_TRANSCRIPTION_STOP_THRESHOLD_BYTES,
@@ -997,18 +1065,14 @@ impl BufferedTranscriptionSession {
     }
 
     fn new_with_limit(
-        engine: Arc<dyn TranscriptionEngine>,
-        session_id: SessionId,
-        context: Arc<DictationContext>,
+        prepared: Arc<dyn PreparedTranscription>,
         partials: Arc<dyn TextStreamSink>,
         progress: Arc<dyn RecordingProgressSink>,
         limit_threshold_bytes: usize,
     ) -> Self {
         Self {
             inner: Arc::new(BufferedTranscriptionInner {
-                engine,
-                session_id,
-                context,
+                prepared,
                 partials,
                 progress,
                 limit_notified: AtomicBool::new(false),
@@ -1019,7 +1083,83 @@ impl BufferedTranscriptionSession {
     }
 
     fn attach(&self) -> BoxFuture<'static, Result<Arc<dyn TranscriptionSession>, BackendError>> {
-        attach_buffered_transcription(Arc::clone(&self.inner))
+        let waiter = Arc::new(tokio::sync::Notify::new());
+        let start = {
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .expect("buffered transcription lock poisoned");
+            match &mut *state {
+                BufferedTranscriptionState::Buffering(pcm) => {
+                    let pcm = std::mem::take(pcm);
+                    *state = BufferedTranscriptionState::Attaching {
+                        pcm: Vec::new(),
+                        waiter: Arc::clone(&waiter),
+                    };
+                    Some(pcm)
+                }
+                BufferedTranscriptionState::Direct(session) => {
+                    let session = Arc::clone(session);
+                    return Box::pin(async move { Ok(session) });
+                }
+                BufferedTranscriptionState::Failed(error) => {
+                    let error = error.clone();
+                    return Box::pin(async move { Err(error) });
+                }
+                BufferedTranscriptionState::Cancelled => {
+                    return Box::pin(async {
+                        Err(cancelled_error("transcription buffer was cancelled"))
+                    });
+                }
+                BufferedTranscriptionState::Attaching { .. } => {
+                    let waiter = match &*state {
+                        BufferedTranscriptionState::Attaching { waiter, .. } => Arc::clone(waiter),
+                        _ => unreachable!("buffer state changed while it was locked"),
+                    };
+                    let inner = Arc::clone(&self.inner);
+                    return Box::pin(async move {
+                        waiter.notified().await;
+                        match &*inner
+                            .state
+                            .lock()
+                            .expect("buffered transcription lock poisoned")
+                        {
+                            BufferedTranscriptionState::Direct(session) => Ok(Arc::clone(session)),
+                            BufferedTranscriptionState::Failed(error) => Err(error.clone()),
+                            BufferedTranscriptionState::Cancelled => {
+                                Err(cancelled_error("transcription buffer was cancelled"))
+                            }
+                            BufferedTranscriptionState::Buffering(_)
+                            | BufferedTranscriptionState::Attaching { .. } => {
+                                Err(BackendError::new(
+                                    BackendErrorCode::Internal,
+                                    "transcription attachment did not settle",
+                                ))
+                            }
+                        }
+                    });
+                }
+            }
+        };
+        let inner = Arc::clone(&self.inner);
+        Box::pin(async move {
+            attach_buffered_transcription(inner, start.expect("buffer attach must start"), waiter)
+                .await
+        })
+    }
+
+    fn attach_in_background(&self) {
+        let attaching = self.attach();
+        tokio::spawn(async move {
+            if let Err(error) = attaching.await {
+                log::warn!("provider-only transcription startup failed: {error}");
+            }
+        });
+    }
+
+    fn prepared(&self) -> Arc<dyn PreparedTranscription> {
+        Arc::clone(&self.inner.prepared)
     }
 
     fn downstream(&self) -> Option<Arc<dyn TranscriptionSession>> {
@@ -1037,41 +1177,12 @@ impl BufferedTranscriptionSession {
 
 fn attach_buffered_transcription(
     inner: Arc<BufferedTranscriptionInner>,
+    pcm: Vec<u8>,
+    waiter: Arc<tokio::sync::Notify>,
 ) -> BoxFuture<'static, Result<Arc<dyn TranscriptionSession>, BackendError>> {
     Box::pin(async move {
-        {
-            let mut state = inner
-                .state
-                .lock()
-                .expect("buffered transcription lock poisoned");
-            match &mut *state {
-                BufferedTranscriptionState::Buffering(pcm) => {
-                    let pcm = std::mem::take(pcm);
-                    *state = BufferedTranscriptionState::Attaching(pcm);
-                }
-                BufferedTranscriptionState::Direct(session) => return Ok(Arc::clone(session)),
-                BufferedTranscriptionState::Failed(error) => return Err(error.clone()),
-                BufferedTranscriptionState::Cancelled => {
-                    return Err(cancelled_error("transcription buffer was cancelled"));
-                }
-                BufferedTranscriptionState::Attaching(_) => {
-                    return Err(BackendError::new(
-                        BackendErrorCode::Busy,
-                        "transcription session is already starting",
-                    ));
-                }
-            }
-        }
-
-        let downstream = match inner
-            .engine
-            .start(
-                inner.session_id,
-                Arc::clone(&inner.context),
-                Arc::clone(&inner.partials),
-            )
-            .await
-        {
+        let _notify = NotifyOnDrop { waiter };
+        let downstream = match inner.prepared.start(Arc::clone(&inner.partials)).await {
             Ok(session) => session,
             Err(error) => {
                 let mut state = inner
@@ -1088,18 +1199,34 @@ fn attach_buffered_transcription(
             }
         };
 
+        let mut first_chunk = Some(pcm);
+
         loop {
-            let chunk = {
+            let chunk = if let Some(chunk) = first_chunk.take().filter(|chunk| !chunk.is_empty()) {
+                if matches!(
+                    &*inner
+                        .state
+                        .lock()
+                        .expect("buffered transcription lock poisoned"),
+                    BufferedTranscriptionState::Cancelled
+                ) {
+                    Err(cancelled_error(
+                        "transcription buffer was cancelled while ASR was starting",
+                    ))
+                } else {
+                    Ok(chunk)
+                }
+            } else {
                 let mut state = inner
                     .state
                     .lock()
                     .expect("buffered transcription lock poisoned");
                 match &mut *state {
-                    BufferedTranscriptionState::Attaching(pcm) if pcm.is_empty() => {
+                    BufferedTranscriptionState::Attaching { pcm, .. } if pcm.is_empty() => {
                         *state = BufferedTranscriptionState::Direct(Arc::clone(&downstream));
                         return Ok(downstream);
                     }
-                    BufferedTranscriptionState::Attaching(pcm) => Ok(std::mem::take(pcm)),
+                    BufferedTranscriptionState::Attaching { pcm, .. } => Ok(std::mem::take(pcm)),
                     BufferedTranscriptionState::Cancelled => Err(cancelled_error(
                         "transcription buffer was cancelled while ASR was starting",
                     )),
@@ -1125,6 +1252,17 @@ fn attach_buffered_transcription(
     })
 }
 
+struct NotifyOnDrop {
+    waiter: Arc<tokio::sync::Notify>,
+}
+
+impl Drop for NotifyOnDrop {
+    fn drop(&mut self) {
+        self.waiter.notify_waiters();
+        self.waiter.notify_one();
+    }
+}
+
 impl AudioConsumer for BufferedTranscriptionSession {
     fn consume_pcm_chunk(&self, pcm: &[u8]) {
         let (downstream, buffer_limit_reached) = {
@@ -1135,7 +1273,7 @@ impl AudioConsumer for BufferedTranscriptionSession {
                 .expect("buffered transcription lock poisoned");
             match &mut *state {
                 BufferedTranscriptionState::Buffering(buffer)
-                | BufferedTranscriptionState::Attaching(buffer) => {
+                | BufferedTranscriptionState::Attaching { pcm: buffer, .. } => {
                     buffer.extend_from_slice(pcm);
                     (None, buffer.len() >= self.inner.limit_threshold_bytes)
                 }
@@ -1155,8 +1293,9 @@ impl AudioConsumer for BufferedTranscriptionSession {
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
         {
-            // ponytail: the limit is a stop-trigger threshold; retain the small
-            // in-flight tail until the host closes the recorder so PCM is not dropped.
+            // ponytail: one stop request only; if the host cannot honor it, PCM
+            // may exceed 128 MiB until the caller stops. Never truncate the tail;
+            // add a hard cap only with a product-level overflow policy.
             if let Err(error) = self
                 .inner
                 .progress
@@ -1180,25 +1319,53 @@ impl TranscriptionSession for BufferedTranscriptionSession {
     }
 
     fn finish(&self) -> BoxFuture<'static, Result<crate::ports::TranscriptOutput, BackendError>> {
-        let inner = Arc::clone(&self.inner);
+        let attaching = self.attach();
         Box::pin(async move {
-            let downstream = attach_buffered_transcription(inner).await?;
+            let downstream = attaching.await?;
             downstream.finish().await
         })
     }
 
     fn cancel(&self) -> BoxFuture<'static, Result<(), BackendError>> {
-        let downstream = {
-            let mut state = self
-                .inner
-                .state
-                .lock()
-                .expect("buffered transcription lock poisoned");
-            match std::mem::replace(&mut *state, BufferedTranscriptionState::Cancelled) {
-                BufferedTranscriptionState::Direct(session) => Some(session),
-                _ => None,
+        let (downstream, waiter) = self.take_cancel_state();
+        Box::pin(async move {
+            if let Some(waiter) = waiter {
+                waiter.notified().await;
             }
+            match downstream {
+                Some(session) => session.cancel().await,
+                None => Ok(()),
+            }
+        })
+    }
+}
+
+impl BufferedTranscriptionSession {
+    fn take_cancel_state(
+        &self,
+    ) -> (
+        Option<Arc<dyn TranscriptionSession>>,
+        Option<Arc<tokio::sync::Notify>>,
+    ) {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .expect("buffered transcription lock poisoned");
+        let waiter = match &*state {
+            BufferedTranscriptionState::Attaching { waiter, .. } => Some(Arc::clone(waiter)),
+            _ => None,
         };
+        let downstream = match std::mem::replace(&mut *state, BufferedTranscriptionState::Cancelled)
+        {
+            BufferedTranscriptionState::Direct(session) => Some(session),
+            _ => None,
+        };
+        (downstream, waiter)
+    }
+
+    fn cancel_without_waiting_for_start(&self) -> BoxFuture<'static, Result<(), BackendError>> {
+        let (downstream, _) = self.take_cancel_state();
         Box::pin(async move {
             match downstream {
                 Some(session) => session.cancel().await,
@@ -1557,6 +1724,33 @@ mod tests {
         }
     }
 
+    struct FailingPreparationTranscriber;
+
+    impl TranscriptionEngine for FailingPreparationTranscriber {
+        fn prepare(
+            self: Arc<Self>,
+            _session_id: SessionId,
+            _context: Arc<DictationContext>,
+        ) -> BoxFuture<'static, Result<Arc<dyn crate::ports::PreparedTranscription>, BackendError>>
+        {
+            Box::pin(async {
+                Err(BackendError::new(
+                    BackendErrorCode::Provider,
+                    "fixture ASR preparation failed",
+                ))
+            })
+        }
+
+        fn start(
+            &self,
+            _session_id: SessionId,
+            _context: Arc<DictationContext>,
+            _partials: Arc<dyn TextStreamSink>,
+        ) -> BoxFuture<'static, Result<Arc<dyn TranscriptionSession>, BackendError>> {
+            Box::pin(async { unreachable!("preparation failure must precede provider start") })
+        }
+    }
+
     struct RetryTranscriber {
         outputs: Arc<Mutex<VecDeque<Result<TranscriptOutput, BackendError>>>>,
         starts: Arc<AtomicUsize>,
@@ -1873,18 +2067,21 @@ mod tests {
         let pcm = Arc::new(Mutex::new(Vec::new()));
         let starts = Arc::new(AtomicUsize::new(0));
         let progress = Arc::new(LimitRecordingProgress::default());
-        let buffered = BufferedTranscriptionSession::new_with_limit(
-            Arc::new(FixtureTranscriber {
-                session: Arc::new(FixtureTranscriptionSession {
-                    pcm: Arc::clone(&pcm),
-                    cancels: Arc::new(AtomicUsize::new(0)),
-                    finish_entered: None,
-                    finish_release: None,
-                }),
-                starts: Arc::clone(&starts),
+        let transcriber = Arc::new(FixtureTranscriber {
+            session: Arc::new(FixtureTranscriptionSession {
+                pcm: Arc::clone(&pcm),
+                cancels: Arc::new(AtomicUsize::new(0)),
+                finish_entered: None,
+                finish_release: None,
             }),
-            SessionId::new(),
-            raw_dictation_context(),
+            starts: Arc::clone(&starts),
+        });
+        let prepared = transcriber
+            .prepare(SessionId::new(), raw_dictation_context())
+            .await
+            .unwrap();
+        let buffered = BufferedTranscriptionSession::new_with_limit(
+            prepared,
             Arc::new(DiscardTextStream),
             progress.clone(),
             4,
@@ -2136,6 +2333,31 @@ mod tests {
 
         assert_eq!(error.code, BackendErrorCode::Provider);
         assert_eq!(stops.load(Ordering::Acquire), 1);
+        assert!(engine.sessions.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn provider_preparation_failure_does_not_start_the_recorder() {
+        let stops = Arc::new(AtomicUsize::new(0));
+        let engine = PipelineDictationEngine::new(
+            Arc::new(ExposedRecorder {
+                consumer: Arc::new(Mutex::new(None)),
+                stops: Arc::clone(&stops),
+            }),
+            Arc::new(FailingPreparationTranscriber),
+            noop_polisher(),
+        );
+        let error = engine
+            .start(
+                SessionId::new(),
+                raw_dictation_context(),
+                Arc::new(RecordingProgress::default()),
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code, BackendErrorCode::Provider);
+        assert_eq!(stops.load(Ordering::Acquire), 0);
         assert!(engine.sessions.lock().unwrap().is_empty());
     }
 
@@ -2525,12 +2747,14 @@ mod tests {
 
     #[tokio::test]
     async fn cancellation_while_retry_asr_starts_cancels_the_late_resource_without_feeding_it() {
-        struct DelayedRetryStart {
+        struct RetryThenDelayedStart {
+            starts: Arc<AtomicUsize>,
             entered: Arc<tokio::sync::Notify>,
             release: Arc<tokio::sync::Notify>,
             session: Arc<FixtureTranscriptionSession>,
+            pcm: Arc<Mutex<Vec<Vec<u8>>>>,
         }
-        impl TranscriptionEngine for DelayedRetryStart {
+        impl TranscriptionEngine for RetryThenDelayedStart {
             fn start(
                 &self,
                 _: SessionId,
@@ -2538,6 +2762,16 @@ mod tests {
                 _: Arc<dyn TextStreamSink>,
             ) -> BoxFuture<'static, Result<Arc<dyn TranscriptionSession>, BackendError>>
             {
+                if self.starts.fetch_add(1, Ordering::AcqRel) == 0 {
+                    let pcm = Arc::clone(&self.pcm);
+                    return Box::pin(async move {
+                        Ok(Arc::new(RetryTranscriptionSession {
+                            output: Err(BackendError::new(BackendErrorCode::Provider, "temporary")
+                                .retryable(true)),
+                            pcm,
+                        }) as Arc<dyn TranscriptionSession>)
+                    });
+                }
                 let entered = self.entered.clone();
                 let release = self.release.clone();
                 let session = self.session.clone();
@@ -2548,19 +2782,6 @@ mod tests {
                 })
             }
         }
-        let (mut engine, progress, _) = retry_test_engine(
-            vec![Err(BackendError::new(
-                BackendErrorCode::Provider,
-                "temporary",
-            )
-            .retryable(true))],
-            true,
-        );
-        let session_id = SessionId::new();
-        engine
-            .start(session_id, raw_dictation_context(), progress.clone())
-            .await
-            .unwrap();
         let entered = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
         let late = Arc::new(FixtureTranscriptionSession {
@@ -2569,12 +2790,20 @@ mod tests {
             finish_entered: None,
             finish_release: None,
         });
-        // The first session is already registered; only the retry start blocks.
-        engine.transcription = Arc::new(DelayedRetryStart {
+        let (mut engine, progress, _) = retry_test_engine(Vec::new(), true);
+        let pcm = Arc::new(Mutex::new(Vec::new()));
+        engine.transcription = Arc::new(RetryThenDelayedStart {
+            starts: Arc::new(AtomicUsize::new(0)),
             entered: entered.clone(),
             release: release.clone(),
             session: late.clone(),
+            pcm,
         });
+        let session_id = SessionId::new();
+        engine
+            .start(session_id, raw_dictation_context(), progress.clone())
+            .await
+            .unwrap();
         let engine = Arc::new(engine);
         let finishing = tokio::spawn({
             let engine = engine.clone();
